@@ -85,6 +85,9 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 		}
 		transcriptPath, err := sessionTranscriptPath(ctx, raw.SessionID)
 		if err != nil {
+			if paths.IsUnroutableRuntimePath(err) {
+				return nil, nil //nolint:nilnil // invisible runtime failure skips the hook without failing the agent turn
+			}
 			return nil, err
 		}
 		return &agent.Event{
@@ -104,6 +107,9 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 		// Export is deferred to PrepareTranscript; we just compute the path here.
 		transcriptPath, err := sessionTranscriptPath(ctx, raw.SessionID)
 		if err != nil {
+			if paths.IsUnroutableRuntimePath(err) {
+				return nil, nil //nolint:nilnil // invisible runtime failure skips the hook without failing the agent turn
+			}
 			return nil, err
 		}
 		return &agent.Event{
@@ -167,6 +173,9 @@ func (a *OpenCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string
 	// from a previous turn. Unlike turn-end (which always runs export), mid-turn commits
 	// need to refresh the transcript to capture agent activity since the last export.
 	_, err := a.fetchAndCacheExport(ctx, sessionID)
+	if paths.IsUnroutableRuntimePath(err) {
+		return nil
+	}
 	return err
 }
 
@@ -183,14 +192,18 @@ func sessionTranscriptPath(ctx context.Context, sessionID string) (string, error
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return "", fmt.Errorf("invalid session ID for transcript path: %w", err)
 	}
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "."
+	// AbsPath (not a bare WorktreeRoot join) so globally tracked repos keep
+	// this cache out of the worktree (invisible-mode routing in paths).
+	tmpFile, err := paths.AbsPath(ctx, paths.EntireTmpDir+"/"+sessionID+".json")
+	if paths.IsUnroutableRuntimePath(err) {
+		// Tier-owned repo, git-side location unresolvable: the relative
+		// fallback would place the cache in the worktree — refuse instead.
+		return "", fmt.Errorf("resolving transcript cache path: %w", err)
 	}
-	// Absolute on purpose: this value is handed to callers that pass it to other
-	// processes and to agent-facing APIs. Reads and writes still go through the
-	// shared root (see fetchAndCacheExport).
-	return filepath.Join(repoRoot, paths.EntireTmpDir, sessionID+".json"), nil
+	if err != nil {
+		tmpFile = filepath.Join(".", paths.EntireTmpDir, sessionID+".json") // entire-join-ok: sentinel-guarded no-repo fallback
+	}
+	return tmpFile, nil
 }
 
 // entireTmpName is .entire/tmp relative to the .entire root.
@@ -208,23 +221,31 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		return "", fmt.Errorf("invalid session ID for export: %w", err)
 	}
 
-	// Get worktree root for the temp directory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	// Resolve the temp directory via AbsPath so globally tracked repos keep
+	// this cache out of the worktree (invisible-mode routing in paths).
+	tmpDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	if paths.IsUnroutableRuntimePath(err) {
+		// Tier-owned repo, git-side location unresolvable: the relative
+		// fallback would place the cache in the worktree — refuse instead.
+		return "", fmt.Errorf("resolving transcript cache dir: %w", err)
+	}
 	if err != nil {
-		repoRoot = "."
+		tmpDir = filepath.Join(".", paths.EntireTmpDir) // entire-join-ok: sentinel-guarded no-repo fallback
 	}
 
-	// Every read, write, and rename below goes through the shared .entire root.
-	// The absolute paths are still needed alongside it, because `opencode export`
-	// is a separate process that takes a path, and the transcript path is handed
-	// back to callers that pass it across the same boundary.
-	root, err := entiredir.OpenAt(repoRoot)
+	// Every read, write, and rename below goes through the shared root — the
+	// ROUTED runtime base, so a globally tracked repo keeps this cache under
+	// the git common dir. The absolute path is still needed alongside it,
+	// because `opencode export` is a separate process that takes a path, and
+	// the transcript path is handed back to callers that pass it across the
+	// same boundary.
+	root, err := entiredir.Open(ctx)
 	if err != nil {
 		return "", fmt.Errorf("open %s for export cache: %w", paths.EntireDir, err)
 	}
-	entireDirAbs := filepath.Join(repoRoot, paths.EntireDir)
 	tmpName := entireTmpName + "/" + sessionID + ".json"
-	tmpFile := filepath.Join(entireDirAbs, filepath.FromSlash(tmpName))
+	entireDirAbs := filepath.Dir(tmpDir) // the routed base tmpDir lives under
+	tmpFile := filepath.Join(tmpDir, sessionID+".json")
 
 	// Integration test mode: use pre-written mock file without calling opencode export
 	if os.Getenv("ENTIRE_TEST_OPENCODE_MOCK_EXPORT") != "" {

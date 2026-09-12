@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,6 +123,41 @@ func TestParseHookEvent_TurnEnd(t *testing.T) {
 	// SessionRef is computed from session_id, should end with .json (same pattern as TurnStart)
 	if !strings.HasSuffix(event.SessionRef, "sess-2.json") {
 		t.Errorf("expected session ref to end with 'sess-2.json', got %q", event.SessionRef)
+	}
+}
+
+func TestHookRuntimePathUnroutableSkipsTurn(t *testing.T) {
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "--quiet"},
+		{"config", "user.name", "Entire Test"},
+		{"config", "user.email", "test@entire.io"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	t.Chdir(repo)
+	paths.ClearWorktreeRootCache()
+	paths.SetInvisibleProbeFailureForTesting(true)
+	t.Cleanup(func() {
+		paths.SetInvisibleProbeFailureForTesting(false)
+		paths.ClearWorktreeRootCache()
+	})
+
+	ag := &OpenCodeAgent{}
+	for _, hookName := range []string{HookNameTurnStart, HookNameTurnEnd} {
+		event, err := ag.ParseHookEvent(t.Context(), hookName, strings.NewReader(`{"session_id":"sess-unroutable"}`))
+		if err != nil || event != nil {
+			t.Fatalf("ParseHookEvent(%s) = %+v, %v; want skipped event", hookName, event, err)
+		}
+	}
+
+	if err := ag.PrepareTranscript(t.Context(), filepath.Join(repo, "sess-unroutable.json")); err != nil {
+		t.Fatalf("PrepareTranscript() = %v; unroutable hook runtime must skip", err)
 	}
 }
 

@@ -171,11 +171,7 @@ func TestPersistOPFPromptDefaultAlways_CreatesFileFromScratch(t *testing.T) {
 // PrePush still emits the non-interactive OPF progress notice in production,
 // but tests can redirect it away from process stderr.
 func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
+	tmpDir, _, _ := setupV1RepoInDir(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, paths.EntireDir), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, paths.EntireDir, "settings.json"), []byte(`{
   "enabled": true,

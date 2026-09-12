@@ -136,6 +136,7 @@ func discoverAgentPackages(t *testing.T, agentDir string) []string {
 		"external":       true, // external agent adapter, not a self-registering agent
 		"skilldiscovery": true, // shared capability helper (registries, match), not an agent
 		"spawn":          true, // shared Spawner interface for review/investigate, not an agent
+		"globalhooks":    true, // shared user-hook enrollment and launcher support, not an agent
 	}
 
 	entries, err := os.ReadDir(agentDir)

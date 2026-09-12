@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +14,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -193,7 +198,19 @@ func hooksRootForInstall(hooksDir string) (*os.Root, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s: %w", abs, osroot.ErrSymlinkedPath)
 	}
-	return osroot.Shared(abs) //nolint:wrapcheck // preserve os.IsNotExist classification, as the doc comment promises
+	root, err := os.OpenRoot(abs)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve os.IsNotExist classification
+	}
+	openedInfo, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, openedInfo) {
+		_ = root.Close()
+		if err != nil {
+			return nil, err //nolint:wrapcheck // preserve original classification
+		}
+		return nil, fmt.Errorf("%s changed while it was being opened: %w", abs, osroot.ErrSymlinkedPath)
+	}
+	return root, nil
 }
 
 // hooksRootForRemoval anchors a root at the directory a symlinked hooks path
@@ -226,7 +243,7 @@ func hooksRootForRemoval(hooksDir string) (*os.Root, error) {
 	if err != nil {
 		return nil, err //nolint:wrapcheck // preserve os.IsNotExist classification
 	}
-	return osroot.Shared(resolved) //nolint:wrapcheck // preserve os.IsNotExist classification
+	return os.OpenRoot(resolved) //nolint:wrapcheck // preserve os.IsNotExist classification
 }
 
 // HooksDirLinkTarget resolves a symlinked hooks directory to the absolute
@@ -501,6 +518,7 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	if err != nil {
 		return GitHooksAbsent
 	}
+	defer root.Close()
 	outdated := false
 	for _, hook := range gitHookNames {
 		// NoFollow: a hook that is a symlink is not one Entire wrote, whatever
@@ -667,7 +685,11 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 
 // InstallGitHook installs generic git hooks that delegate to `entire hook` commands.
 // These hooks work with any strategy - the strategy is determined at runtime.
-// If silent is true, no output is printed (except backup notifications, which always print).
+// If silent is true, no output is printed (except backup notifications, which always
+// print — every user-initiated install passes silent=true and prints its own summary,
+// so the backup notice is the only channel telling the user a pre-existing hook was
+// moved aside). The lazy global setup uses installGitHooks with a discarded notice
+// writer instead, so agent stderr stays clean.
 // absolutePath embeds the full binary path in hooks for GUI git clients.
 // Returns the number of hooks that were installed (0 if all already up to date).
 //
@@ -677,6 +699,13 @@ func isWindowsAbsoluteHookCommand(cmdPrefix string) bool {
 // binary form on the next install rather than leaving them pointed at repo
 // content.
 func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error) {
+	return installGitHooks(ctx, silent, absolutePath, os.Stderr)
+}
+
+// installGitHooks is InstallGitHook with an explicit destination for the
+// backup notices ("[entire] Backed up existing ..."). Pass io.Discard to
+// suppress them (lazy invisible setup); InstallGitHook passes os.Stderr.
+func installGitHooks(ctx context.Context, silent, absolutePath bool, backupNoticeW io.Writer) (int, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return 0, err
@@ -699,6 +728,19 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 		return 0, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
+	// Serialize installs across processes: with global mode, first-ever
+	// installation runs from hook processes that can fire concurrently, and
+	// the unsynchronized read→rename→write below can otherwise rename a
+	// half-installed wrapper over the user's hook backup — destroying the
+	// user's hook and leaving a wrapper that chains to itself. The lock lives
+	// in the git common dir, never the hooks dir, which can be
+	// worktree-resident (core.hooksPath).
+	unlock, err := lockHookInstall(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+
 	root, err := hooksRootForInstall(hooksDir)
 	if err != nil {
 		if errors.Is(err, osroot.ErrSymlinkedPath) {
@@ -706,6 +748,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 		}
 		return 0, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
 	}
+	defer root.Close()
 
 	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
@@ -716,8 +759,18 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 
 	for _, spec := range specs {
 		backupName := spec.name + backupSuffix
+		backupPath := filepath.Join(hooksDir, backupName)
 		backupExists := hookFileExists(root, backupName)
 
+		// Back up existing non-Entire hooks. A user hook is never overwritten
+		// without a copy: when the chained backup slot is already taken (the
+		// user replaced our hook after an earlier install), the current file
+		// goes to a timestamped sibling instead. The notice writer is stderr
+		// for foreground installs and discarded for the lazy hook-context
+		// install, so the event is also logged where a hook run can be
+		// diagnosed later.
+		// A symlinked hook is foreign too: Entire never installs one, and the
+		// rooted rename preserves the link itself without following it.
 		// Back up existing non-Entire hooks. A symlinked hook is one of those:
 		// Entire never installs a link, so it belongs to the user or another
 		// tool. Refusing to read through it must not mean quietly replacing it,
@@ -735,9 +788,18 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 				if err := root.Rename(spec.name, backupName); err != nil {
 					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
 				}
-				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
+				fmt.Fprintf(backupNoticeW, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
+				logging.Info(ctx, "backed up existing git hook before install",
+					slog.String("hook", spec.name), slog.String("backup", backupPath))
 			} else {
-				fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
+				extraBackupName := fmt.Sprintf("%s.%d", backupName, time.Now().Unix())
+				extraBackup := filepath.Join(hooksDir, extraBackupName)
+				if err := root.Rename(spec.name, extraBackupName); err != nil {
+					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
+				}
+				fmt.Fprintf(backupNoticeW, "[entire] Warning: %s was modified since the last install; saved it as %s (the chained %s%s is kept)\n", spec.name, filepath.Base(extraBackup), spec.name, backupSuffix)
+				logging.Warn(ctx, "git hook modified since install; saved aside before reinstall",
+					slog.String("hook", spec.name), slog.String("saved_as", extraBackup))
 			}
 			backupExists = true
 		}
@@ -788,6 +850,23 @@ func writeHookFile(root *os.Root, name, content string) (bool, error) {
 	return true, nil
 }
 
+// lockHookInstall takes the cross-process lock serializing every hook
+// install/remove for this clone (shared across worktrees via the common dir).
+func lockHookInstall(ctx context.Context) (func(), error) {
+	commonDir, err := GetGitCommonDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir for hook-install lock: %w", err)
+	}
+	// Context-aware on purpose: the lazy global setup runs this inside agent
+	// hook processes that may carry a session-end deadline (Codex's 3s cap),
+	// and a lock race there must fail fast rather than block past the budget.
+	release, err := flock.AcquireContext(ctx, filepath.Join(commonDir, "entire-hook-install.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("lock hook installation: %w", err)
+	}
+	return release, nil
+}
+
 // RemoveGitHook removes all Entire CLI git hooks from the repository.
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
@@ -796,6 +875,14 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	// Same lock as installGitHooks: a disable racing a lazy hook-process
+	// install performs the same rename dance over the same paths.
+	unlock, err := lockHookInstall(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 
 	// ForRemoval: uninstall must be able to finish on a repo install refused.
 	// See hooksRootForRemoval for why following the link is safe here and not
@@ -807,6 +894,7 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 		}
 		return 0, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
 	}
+	defer root.Close()
 
 	removed := 0
 	var removeErrors []string

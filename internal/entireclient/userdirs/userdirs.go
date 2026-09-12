@@ -84,24 +84,37 @@ func Config() string {
 	return dir
 }
 
-// ConfigDirChecked is Config for a caller that can report a rejected override.
-// It returns the directory in both cases, so a caller building a path for a
-// message still has one.
-func ConfigDirChecked() (string, error) {
-	return configDir()
+// ResolveConfig returns the per-user config directory, or an error when no
+// explicit override exists and the user's home directory cannot be resolved.
+// Security-sensitive readers should use this form so an unavailable home
+// fails closed instead of turning the config path into a repository-relative
+// path.
+func ResolveConfig() (string, error) {
+	testDir, testDirOK := testdirs.Dir("config")
+	return resolveConfig(os.Getenv(EnvConfigDir), testDir, testDirOK, os.UserHomeDir)
 }
+
+func resolveConfig(override, testDir string, testDirOK bool, homeDir func() (string, error)) (string, error) {
+	if override != "" {
+		return override, RequireAbsoluteOverride(EnvConfigDir, override)
+	}
+	if testDirOK {
+		return testDir, nil
+	}
+	home, err := homeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home: %w", err)
+	}
+	return filepath.Join(home, ".config", "entire"), nil
+}
+
+// ConfigDirChecked is Config for a caller that can report a rejected override.
+func ConfigDirChecked() (string, error) { return configDir() }
 
 // CacheDirChecked is Cache for a caller that can report a rejected override.
-//
-// Needed for the same reason as its config twin: a consumer that creates a
-// directory or takes a lock before handing the path to something that opens a
-// root has to learn about a bad override BEFORE it creates anything, and the
-// string form cannot tell it. plugin_index was the consumer that needed it.
-func CacheDirChecked() (string, error) {
-	return cacheDir()
-}
+func CacheDirChecked() (string, error) { return cacheDir() }
 
-// configDir is Config with the override check, for the callers that can report.
+// configDir is Config with override validation and a usable home fallback.
 func configDir() (string, error) {
 	if dir := os.Getenv(EnvConfigDir); dir != "" {
 		return dir, RequireAbsoluteOverride(EnvConfigDir, dir)
@@ -111,9 +124,7 @@ func configDir() (string, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		// nil error deliberately: a machine with no resolvable home is not a
-		// user error to report, and ownFallbackDir returns something usable.
-		return ownFallbackDir(".config", "entire"), nil //nolint:nilerr // see ownFallbackDir
+		return ownFallbackDir(".config", "entire"), nil //nolint:nilerr // fallback is usable
 	}
 	return filepath.Join(home, ".config", "entire"), nil
 }
@@ -123,6 +134,27 @@ func configDir() (string, error) {
 func Cache() string {
 	dir, _ := cacheDir() //nolint:errcheck // see Config's doc comment
 	return dir
+}
+
+// ResolveCache returns the per-user cache directory, or an error when neither
+// XDG_CACHE_HOME nor a resolvable user home is available.
+func ResolveCache() (string, error) {
+	testDir, testDirOK := testdirs.Dir("cache")
+	return resolveCache(os.Getenv(EnvCacheHome), testDir, testDirOK, os.UserHomeDir)
+}
+
+func resolveCache(xdg, testDir string, testDirOK bool, homeDir func() (string, error)) (string, error) {
+	if xdg != "" {
+		return filepath.Join(xdg, "entire"), RequireAbsoluteOverride(EnvCacheHome, xdg)
+	}
+	if testDirOK {
+		return filepath.Join(testDir, "entire"), nil
+	}
+	home, err := homeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home: %w", err)
+	}
+	return filepath.Join(home, ".cache", "entire"), nil
 }
 
 // cacheDir is Cache with the override check, for the callers that can report.

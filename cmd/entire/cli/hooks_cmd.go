@@ -58,6 +58,7 @@ func newHooksCmd() *cobra.Command {
 
 	// Git hooks are strategy-level (not agent-specific)
 	cmd.AddCommand(newHooksGitCmd())
+	cmd.AddCommand(newGlobalAgentHooksCmd())
 
 	// Only built-in agents are registered eagerly (no process spawning).
 	// External agents are discovered lazily via the RunE fallback above.

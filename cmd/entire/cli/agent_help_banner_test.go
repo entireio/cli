@@ -46,12 +46,12 @@ func TestFinalizeSessionStartBanner(t *testing.T) {
 	t.Parallel()
 
 	// Factory + assembled message: pointer appended to the base.
-	if out := finalizeSessionStartBanner("base message", "", agent.AgentNameFactoryAIDroid); !strings.Contains(out, "base message") || !strings.Contains(out, agentHelpCommand) {
+	if out := finalizeSessionStartBanner("base message", "", "", agent.AgentNameFactoryAIDroid); !strings.Contains(out, "base message") || !strings.Contains(out, agentHelpCommand) {
 		t.Errorf("Factory banner should append the pointer to the base message, got %q", out)
 	}
 
 	// Factory + ResponseMessage override: override wins, but the pointer survives.
-	out := finalizeSessionStartBanner("base message", "custom override", agent.AgentNameFactoryAIDroid)
+	out := finalizeSessionStartBanner("base message", "custom override", " trust notice", agent.AgentNameFactoryAIDroid)
 	if !strings.Contains(out, "custom override") {
 		t.Errorf("ResponseMessage override should replace the assembled message, got %q", out)
 	}
@@ -61,9 +61,12 @@ func TestFinalizeSessionStartBanner(t *testing.T) {
 	if !strings.Contains(out, agentHelpCommand) {
 		t.Errorf("Factory pointer must survive the ResponseMessage override, got %q", out)
 	}
+	if !strings.Contains(out, "trust notice") {
+		t.Errorf("global trust notice must survive the ResponseMessage override, got %q", out)
+	}
 
 	// Non-Factory: no pointer; an override is respected verbatim.
-	if out := finalizeSessionStartBanner("base", "custom", agent.AgentNameClaudeCode); out != "custom" {
+	if out := finalizeSessionStartBanner("base", "custom", "", agent.AgentNameClaudeCode); out != "custom" {
 		t.Errorf("non-banner agent should get the override verbatim with no pointer, got %q", out)
 	}
 }

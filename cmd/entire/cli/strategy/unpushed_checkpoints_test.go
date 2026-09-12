@@ -87,6 +87,20 @@ func TestCountUnpushedCheckpoints_GitBranch_TrackingRefAbsentCountsAll(t *testin
 }
 
 // Not parallel: uses t.Chdir()
+func TestCountUnpushedCheckpoints_GitBranch_ExcludesMetadataRefInitCommit(t *testing.T) {
+	dir, _, _ := initCountTestRepo(t)
+	testutil.WriteFile(t, dir, "f.txt", "three")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, metadataRefInitSubject)
+	testutil.GitUpdateRef(t, dir, v1LocalRef, testutil.GetHeadHash(t, dir))
+	t.Chdir(dir)
+
+	got, err := CountUnpushedCheckpoints(context.Background(), "origin")
+	require.NoError(t, err)
+	assert.Equal(t, 2, got, "the orphan init commit seeds the branch but is not a checkpoint")
+}
+
+// Not parallel: uses t.Chdir()
 func TestCountUnpushedCheckpoints_GitRefs_EmptyQueue(t *testing.T) {
 	dir, _, _ := initCountTestRepo(t)
 	writeGitRefsBackendSetting(t, dir)

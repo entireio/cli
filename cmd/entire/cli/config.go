@@ -130,15 +130,14 @@ func ensureLogger(cmd *cobra.Command) {
 }
 
 // newLogger builds the logger for .entire/logs/entire.log in the current
-// worktree. Nothing is created on disk here — the directory and file arrive with
-// the first line actually written — so the caller's remaining obligation is
-// narrower than it once was but has not gone away: `enable` still calls this
-// only after every check that can still reject the invocation, so a rejected
-// enable that goes on to log leaves an untouched repo untouched.
+// worktree. Nothing is created on disk here — the directory and file arrive
+// with the first line actually written. In a globally tracked repo AbsPath
+// routes those writes under the git common dir, preserving the invisible
+// worktree contract.
 func newLogger(ctx context.Context) (*logging.Logger, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("resolve worktree root: %w", err)
+		return nil, fmt.Errorf("resolve log directory: %w", err)
 	}
 	// The log sink lives under .entire, so it is a write through that path like
 	// any other. The root pre-run has already refused a guarded command by the
@@ -149,7 +148,11 @@ func newLogger(ctx context.Context) (*logging.Logger, error) {
 		return nil, fmt.Errorf("refusing to open log sink: %w", err)
 	}
 	l, err := logging.New(logging.Config{
-		Root:  entiredir.OpenerAt(worktreeRoot),
+		// The routed base is resolved when the opener is built (see
+		// entiredir.Opener): in a globally tracked repo the log sink lives
+		// under the git common dir, so logging never creates a worktree
+		// .entire directory, and any routing failure means no logger at all.
+		Root:  entiredir.Opener(ctx),
 		Dir:   logging.LogsName,
 		Level: resolveLogLevel(ctx),
 	})

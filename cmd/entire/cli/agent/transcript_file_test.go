@@ -3,12 +3,14 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,6 +29,24 @@ func TestReadTranscriptFile_RejectsLeafSymlinkInEntire(t *testing.T) {
 	}
 
 	_, err = agent.ReadTranscriptFile(link)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+}
+
+func TestReadTranscriptFile_RejectsLeafSymlinkInRoutedRuntime(t *testing.T) {
+	t.Parallel()
+
+	runtimeDir := filepath.Join(t.TempDir(), "entire", "worktree", strings.Repeat("a", repopolicy.RuntimeKeyLength))
+	require.NoError(t, os.MkdirAll(filepath.Join(runtimeDir, "tmp"), 0o750))
+	target := filepath.Join(runtimeDir, "tmp", "target.jsonl")
+	require.NoError(t, os.WriteFile(target, []byte("secret"), 0o600))
+	link := filepath.Join(runtimeDir, "tmp", "transcript.jsonl")
+	if err := os.Symlink("target.jsonl", link); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := agent.ReadTranscriptFile(link)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	_, err = agent.StatTranscriptFile(link)
 	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
 }
 

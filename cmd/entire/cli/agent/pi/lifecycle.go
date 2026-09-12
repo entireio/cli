@@ -278,36 +278,21 @@ const piHookCacheSubdir = "pi"
 // firing; the framework records the cached path as SessionRef in
 // checkpoint metadata, so subsequent operations on hooked sessions go
 // through the recorded path rather than re-resolving via GetSessionDir.
-func resolveSessionDir(ctx context.Context) (worktreeRoot string, ok bool) {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		//nolint:forbidigo // fallback when no git repo (tests run outside repos)
-		wd, wdErr := os.Getwd()
-		if wdErr != nil {
-			return "", false
-		}
-		root = wd
-	}
-	return root, true
-}
-
 // sessionCacheDir is .entire/tmp/pi relative to the .entire root.
 var sessionCacheDir = entiredir.MustName(paths.EntireTmpDir) + "/" + piHookCacheSubdir
 
-// openSessionCache returns the shared .entire root for the repo this hook is
-// running in, with the pi/ cache directory created under it when create is set.
-// A repo that cannot be resolved yields ok=false and every caller degrades: the
-// cache is an optimization, never the only copy of anything.
+// openSessionCache returns the shared root for the repo this hook is running
+// in — the ROUTED runtime base, so a globally tracked repo keeps this cache
+// under the git common dir — with the pi/ cache directory created under it
+// when create is set. A repo that cannot be resolved (or an unroutable
+// tier-owned repo) yields ok=false and every caller degrades: the cache is an
+// optimization, never the only copy of anything.
 func openSessionCache(ctx context.Context, create bool) (root *os.Root, ok bool) {
-	worktreeRoot, ok := resolveSessionDir(ctx)
-	if !ok {
-		return nil, false
-	}
-	open := entiredir.OpenAtForRead
+	open := entiredir.OpenForRead
 	if create {
-		open = entiredir.OpenAt
+		open = entiredir.Open
 	}
-	root, err := open(worktreeRoot)
+	root, err := open(ctx)
 	if err != nil {
 		return nil, false
 	}
@@ -387,10 +372,6 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("session_id", sessionID), slog.String("err", err.Error()))
 		return ""
 	}
-	worktreeRoot, ok := resolveSessionDir(ctx)
-	if !ok {
-		return ""
-	}
 	root, ok := openSessionCache(ctx, true)
 	if !ok {
 		return ""
@@ -410,8 +391,13 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	}
 	// Absolute on purpose: the framework records this as the session's
 	// SessionRef, which travels into checkpoint metadata and back out to
-	// callers that resolve it from anywhere in the repo.
-	return filepath.Join(worktreeRoot, paths.EntireDir, filepath.FromSlash(name))
+	// callers that resolve it from anywhere in the repo. entiredir.Path is
+	// the same ROUTED base the root above writes through.
+	base, err := entiredir.Path(ctx)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, filepath.FromSlash(name))
 }
 
 // extractSessionIDFromPath extracts the UUID from a Pi session filename.

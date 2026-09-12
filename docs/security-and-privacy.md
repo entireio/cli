@@ -201,6 +201,8 @@ Entire therefore honors `command` only when it is genuinely developer-owned:
 
 - it must come from `.entire/settings.local.json`, not `.entire/settings.json`
 - that file must be **untracked** — absent from both the git index and `HEAD`
+- that file must not sit inside a **submodule or nested repository** mounted at `.entire` (an index/`HEAD` entry named `.entire`, or an `.entire/.git` on disk) — `git clone --recurse-submodules` delivers such a file exactly like a committed one
+- the command must **not resolve inside the repository worktree** (no `./…`, no absolute path under the repo root): an executable that ships with the repo is what this rule exists to keep out, so install the binary elsewhere or use a bare `$PATH` name
 
 The second check matters because the filename alone proves nothing: `.gitignore` does not apply to a path that is already tracked, so `git add -f .entire/settings.local.json` commits it and a fresh clone materializes it with the committed content.
 
@@ -532,6 +534,33 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 - **My rule doesn't redact anything.** Warnings about invalid patterns or sample mismatches are emitted by the redaction layer when Entire initializes it. In the hook path (where checkpoints are actually written) these go to `.entire/logs/entire.log` — `grep component=redaction` and look for lines mentioning your label or pack path. When a hard pack-discovery failure happens during an interactive command, Entire also prints a one-line breadcrumb on stderr pointing back at the log.
 - **My pack file is silently ignored.** Filenames must end in `.yaml`, `.yml`, or `.json`. Other extensions are skipped.
 - **I want to disable a rule temporarily.** Comment it out (prefix the YAML key with `#`) or remove the entry from `custom_redactions`. The rule reloads on the next CLI invocation.
+
+## Global tracking and checkpoint-sync trust
+
+Global tracking (`"global": {"enabled": true}` in `~/.config/entire/settings.json`)
+captures agent sessions in every git repository you touch with Claude Code or
+Gemini CLI, without `entire enable` in each one. In a repo you never enabled,
+all runtime data lives under `.git/` (`entire/worktree/<hash>/`), so the
+worktree stays byte-clean; `exclude_paths`, `exclude_paths_exact`, and
+`exclude_origins` carve repos out and fail closed on unusable patterns.
+
+Capture and sync are separate consents. While global tracking is on, a repo's
+checkpoints leave this machine only after you trust it — whether the repo is
+tracked globally or was enabled with `entire enable`. Trust is recorded in the
+same settings file (`trust_all`, `trusted_origins`, `trusted_paths`) by:
+
+- `entire enable` in a repo (the explicit enable is the consent);
+- the pre-push prompt — **Yes** (this repo, or every clone of its origin),
+  **Not now** (keep capturing locally, ask again next push), **Always**
+  (`trust_all`). It reads the terminal, never Git's stdin, and never grants
+  implicitly (accessible mode holds);
+- `entire trust`, and `entire trust --revoke` to withdraw it.
+
+A held repo never blocks your own `git push`: the branch lands, checkpoint data
+stays local, one stderr line explains, and the first trusted push syncs the
+backlog. Non-interactive pushes hold silently apart from that line. With the
+tier off or unconfigured nothing changes from today. See
+`docs/architecture/global-tracking.md` for the activation and layout rules.
 
 ## Limitations
 

@@ -57,9 +57,9 @@ func sanitizeTrailWorktreeName(branch string) string {
 
 // gitCommonDirForTrailWorktree returns the absolute git common dir, which is
 // the main repo's .git directory even when run from a linked worktree.
-// session.GetGitCommonDir is not reused here because it returns relative
-// rev-parse results as-is; this feature needs an absolute path for the
-// worktree location and the printed cd hint.
+// session.GetGitCommonDir now returns absolute paths too; this copy is kept
+// only to stay off session's per-cwd cache (trail checkout changes cwd
+// mid-command) and to keep its own error wording for the printed cd hint.
 func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	output, err := cmd.Output()

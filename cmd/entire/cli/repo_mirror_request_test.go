@@ -282,7 +282,7 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			timeout: 10 * time.Millisecond,
+			timeout: time.Second,
 		})
 		require.ErrorContains(t, err, "timed out waiting for initial clone")
 	})
@@ -300,7 +300,7 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			timeout: 10 * time.Millisecond,
+			timeout: time.Second,
 		})
 		require.ErrorContains(t, err, "timed out waiting for mirror placement")
 	})

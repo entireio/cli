@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,9 +28,35 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
+
+type removeAgentHooksMock struct {
+	*mockLifecycleAgent
+
+	repoInstalled      bool
+	repoUninstallCalls int
+}
+
+func (m *removeAgentHooksMock) HookNames() []string { return nil }
+
+func (m *removeAgentHooksMock) ParseHookEvent(context.Context, string, io.Reader) (*agent.Event, error) {
+	return nil, nil //nolint:nilnil // this hook-management mock never parses events
+}
+
+func (m *removeAgentHooksMock) InstallHooks(context.Context, bool) (int, error) { return 0, nil }
+
+func (m *removeAgentHooksMock) UninstallHooks(context.Context) error {
+	m.repoUninstallCalls++
+	m.repoInstalled = false
+	return nil
+}
+
+func (m *removeAgentHooksMock) AreHooksInstalled(context.Context) (bool, error) {
+	return m.repoInstalled, nil
+}
 
 // Note: Tests for hook manipulation functions (addHookToMatcher, hookCommandExists, etc.)
 // have been moved to the agent/claudecode package where these functions now reside.
@@ -72,6 +99,22 @@ func writeSettings(t *testing.T, content string) {
 	}
 	if err := os.WriteFile(EntireSettingsFile, []byte(content), 0o644); err != nil {
 		t.Fatalf("Failed to write settings file: %v", err)
+	}
+}
+
+func TestRemoveRepoAgentHooksIsRepoScoped(t *testing.T) {
+	name := types.AgentName("remove-agent-scope-test")
+	mock := &removeAgentHooksMock{
+		mockLifecycleAgent: &mockLifecycleAgent{name: name, agentType: types.AgentType(name)},
+		repoInstalled:      true,
+	}
+
+	var out bytes.Buffer
+	if err := removeRepoAgentHooks(t.Context(), &out, mock, mock); err != nil {
+		t.Fatal(err)
+	}
+	if mock.repoUninstallCalls != 1 {
+		t.Fatalf("repo uninstall calls = %d, want 1", mock.repoUninstallCalls)
 	}
 }
 
@@ -240,7 +283,7 @@ esac
 }
 
 func TestRunEnable(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
 
 	var stdout bytes.Buffer
@@ -262,7 +305,7 @@ func TestRunEnable(t *testing.T) {
 }
 
 func TestRunEnable_AlreadyEnabled(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
 	var stdout bytes.Buffer
@@ -364,7 +407,7 @@ func TestRunEnableOnConfiguredRepo_AlreadyEnabled_NoSplit(t *testing.T) {
 // scenario is genuinely exercised — the local-sync in setEnabledFlag's project
 // branch is what makes the re-enable stick.
 func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	// A real local disable override with a local-only field to prove the sync
 	// touches only the enabled key.
@@ -414,7 +457,7 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 // for setEnabledFlag's project-branch local sync: skipping the sync leaves the
 // local override at enabled:false, which would win and keep IsEnabled false.
 func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
 	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
@@ -454,7 +497,7 @@ func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 // TestRunEnable_DefaultFlag_ClearsLocalDisable verifies that `entire enable`
 // (default/local scope) clears an explicitly-seeded local disable override.
 func TestRunEnable_DefaultFlag_ClearsLocalDisable(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
@@ -791,7 +834,7 @@ func setupCodexAgentWithUnresolvedDiscovery(t *testing.T) (agent.Agent, string) 
 }
 
 func TestRunDisable(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
 	var stdout bytes.Buffer
@@ -813,7 +856,7 @@ func TestRunDisable(t *testing.T) {
 }
 
 func TestRunDisable_AlreadyDisabled(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
 
 	var stdout bytes.Buffer
@@ -873,7 +916,7 @@ func writeLocalSettings(t *testing.T, content string) {
 }
 
 func TestRunDisable_WithLocalSettings(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	// Create both settings files with enabled: true
 	writeSettings(t, testSettingsEnabled)
 	writeLocalSettings(t, `{"enabled": true}`)
@@ -903,7 +946,7 @@ func TestRunDisable_WithLocalSettings(t *testing.T) {
 }
 
 func TestRunDisable_WithProjectFlag(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	// Create both settings files with enabled: true
 	writeSettings(t, testSettingsEnabled)
 	writeLocalSettings(t, `{"enabled": true}`)
@@ -942,7 +985,7 @@ func TestRunDisable_WithProjectFlag(t *testing.T) {
 // team config. Restores origin/main behavior; regression test for the bare
 // disable scope-resolution finding.
 func TestRunDisable_BareCommand_WritesLocalOverrideWhenProjectOnly(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	// Only create project settings (no local settings)
 	writeSettings(t, testSettingsEnabled)
 
@@ -984,7 +1027,7 @@ func TestRunDisable_BareCommand_WritesLocalOverrideWhenProjectOnly(t *testing.T)
 // creating settings.local.json (with its parent dir) rather than hard-failing.
 // End-to-end regression test for the saveRaw MkdirAll fix.
 func TestRunDisable_CreatesSettingsDirWhenMissing(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	// No .entire/ directory or settings files at all.
 
 	var stdout bytes.Buffer
@@ -1015,7 +1058,7 @@ func TestRunDisable_CreatesSettingsDirWhenMissing(t *testing.T) {
 // settings.json untouched (no field leakage between scopes). Regression test
 // for the bare disable scope-resolution finding.
 func TestRunDisable_BareCommand_WritesLocalWhenBothExist(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
 	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
@@ -1065,7 +1108,7 @@ func TestRunDisable_BareCommand_WritesLocalWhenBothExist(t *testing.T) {
 // --project` flips the committed settings.json and syncs the local override so
 // a stale local file can't leave the repo enabled.
 func TestRunDisable_ProjectFlag_WritesCommittedFile(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "log_level": "warn"}`)
 	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
@@ -1101,7 +1144,7 @@ func TestRunDisable_ProjectFlag_WritesCommittedFile(t *testing.T) {
 // change there (runEnable must not round-trip the merged settings view
 // through the project file).
 func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsDisabled)
 	writeLocalSettings(t, `{"enabled": true, "absolute_git_hook_path": true}`)
 
@@ -1147,7 +1190,7 @@ func TestRunEnable_ProjectFlag_DoesNotLeakLocalOverrides(t *testing.T) {
 // flips the enabled flag in settings.local.json and leaves the rest of that
 // file's own content (like absolute_git_hook_path) intact.
 func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	writeLocalSettings(t, `{"enabled": false, "absolute_git_hook_path": true}`)
 
@@ -1264,6 +1307,17 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 
 	// Create .entire directory with settings
 	writeSettings(t, testSettingsEnabled)
+	commonDir, err := strategy.GetGitCommonDir(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockDir := filepath.Join(commonDir, "entire-session-locks")
+	if err := os.MkdirAll(lockDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockDir, "stale.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Verify directory exists
 	entireDir := paths.EntireDir
@@ -1272,7 +1326,7 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	err = runUninstall(context.Background(), &stdout, &stderr, true)
 	if err != nil {
 		t.Fatalf("runUninstall() error = %v", err)
 	}
@@ -1280,6 +1334,9 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	// Verify directory is removed
 	if _, err := os.Stat(entireDir); !os.IsNotExist(err) {
 		t.Error(".entire directory should be removed after uninstall")
+	}
+	if _, err := os.Stat(lockDir); !os.IsNotExist(err) {
+		t.Error("session lock directory should be removed after uninstall")
 	}
 
 	output := stdout.String()
@@ -5095,6 +5152,185 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 			t.Errorf("Checkpoints = %+v, want none added on a pre-existing setup", cfg)
 		}
 	})
+}
+
+// TestRunEnable_RecordsTrust: with global tracking on, an explicit enable is
+// the user's consent, so it records the repo's trust identity in the user
+// settings file; a configured-but-disabled tier, trust_all, and an
+// unconfigured tier record nothing.
+func TestRunEnable_RecordsTrust(t *testing.T) {
+	tests := []struct {
+		name         string
+		userSettings string // "" means no file
+		wantOrigin   bool
+		wantNotice   bool
+	}{
+		{name: "global on records origin", userSettings: `{"global":{"enabled":true}}`, wantOrigin: true, wantNotice: true},
+		{name: "trust_all records nothing", userSettings: `{"global":{"enabled":true,"trust_all":true}}`},
+		{name: "tier disabled records nothing", userSettings: `{"global":{"enabled":false}}`},
+		{name: "tier unconfigured records nothing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestDir(t)
+			testutil.InitRepo(t, dir)
+			testutil.AddRemote(t, dir, "origin", "https://github.com/acme/widgets.git")
+			writeSettings(t, `{"enabled": false}`)
+			cfg := t.TempDir()
+			t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+			settingsPath := filepath.Join(cfg, "settings.json")
+			if tc.userSettings != "" {
+				if err := os.WriteFile(settingsPath, []byte(tc.userSettings), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, readErr := os.ReadFile(settingsPath)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatal(readErr)
+			}
+
+			var out bytes.Buffer
+			if err := runEnable(t.Context(), &out, false); err != nil {
+				t.Fatalf("runEnable: %v", err)
+			}
+
+			after, readErr := os.ReadFile(settingsPath)
+			if tc.userSettings == "" {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("enable created a user settings file in an unconfigured tier: %q", after)
+				}
+				return
+			}
+			us, err := settings.LoadUserSettings(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotOrigin := slices.Contains(us.Global.TrustedOrigins, "github.com/acme/widgets")
+			if gotOrigin != tc.wantOrigin {
+				t.Errorf("trusted_origins contains repo = %v, want %v (file: %s)", gotOrigin, tc.wantOrigin, after)
+			}
+			if !tc.wantOrigin && string(before) != string(after) {
+				t.Errorf("user settings changed although nothing should be recorded:\nbefore: %s\nafter:  %s", before, after)
+			}
+			if got := strings.Contains(out.String(), "✓ Trusted github.com/acme/widgets"); got != tc.wantNotice {
+				t.Errorf("trust notice printed = %v, want %v; output:\n%s", got, tc.wantNotice, out.String())
+			}
+		})
+	}
+}
+
+// TestRunDisable_GloballyTrackedRepoWritesNothing: a repo tracked only by the
+// global tier has no repo-level setup to disable; disable points at
+// exclude_paths and leaves the worktree untouched.
+func TestRunDisable_GloballyTrackedRepoWritesNothing(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	writeUserSettings(t, `{"global":{"enabled":true}}`)
+
+	var out bytes.Buffer
+	if err := runDisable(t.Context(), &out, false); err != nil {
+		t.Fatalf("runDisable: %v", err)
+	}
+	if !strings.Contains(out.String(), "exclude_paths") || !strings.Contains(out.String(), "Nothing was written") {
+		t.Fatalf("expected the exclude_paths pointer, got:\n%s", out.String())
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
+		t.Fatalf("disable must not create a worktree .entire directory in a globally tracked repo (err=%v)", err)
+	}
+	if !settings.IsActiveForRepo(t.Context()) {
+		t.Fatal("repo stays globally tracked until the user edits the settings file")
+	}
+
+	// --project is the team-wide opt-out and must still write the committed veto.
+	out.Reset()
+	if err := runDisable(t.Context(), &out, true); err != nil {
+		t.Fatalf("runDisable --project: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".entire", "settings.json")); err != nil || settings.IsActiveForRepo(t.Context()) {
+		t.Fatalf("disable --project must write the committed veto (err=%v):\n%s", err, out.String())
+	}
+
+	// A repo-enabled repo keeps today's behavior.
+	out.Reset()
+	writeSettings(t, `{"enabled": true}`)
+	if err := runDisable(t.Context(), &out, false); err != nil {
+		t.Fatalf("runDisable: %v", err)
+	}
+	if !strings.Contains(out.String(), "Entire is now disabled") || settings.IsActiveForRepo(t.Context()) {
+		t.Fatalf("repo-enabled disable must write the veto, got:\n%s", out.String())
+	}
+}
+
+// TestRunUninstall_RemovesGlobalRuntimeAfterTierOff: runtime data a globally
+// tracked period left under .git must be removed by --uninstall even after the
+// tier was turned off (the repo no longer classifies as ActivationGlobal).
+func TestRunUninstall_RemovesGlobalRuntimeAfterTierOff(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	repository, err := repopolicy.ResolveRepository(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftover := repository.GlobalRuntimeRoot()
+	if err := os.MkdirAll(filepath.Join(leftover, "metadata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leftover, "metadata", "x"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeUserSettings(t, `{"global":{"enabled":false}}`)
+
+	var out, errOut bytes.Buffer
+	if err := runUninstall(context.Background(), &out, &errOut, true); err != nil {
+		t.Fatalf("runUninstall: %v\n%s", err, errOut.String())
+	}
+	if _, statErr := os.Stat(leftover); !os.IsNotExist(statErr) {
+		t.Fatalf("global runtime data still present after uninstall with the tier off: %s\n%s", leftover, out.String())
+	}
+	if !strings.Contains(out.String(), "Removed global-mode runtime data") {
+		t.Errorf("uninstall should report the removal:\n%s", out.String())
+	}
+}
+
+// `entire enable` records checkpoint-sync consent for the repo it enables, but
+// only when the tier actually captures it: in a repo the user's exclude lists
+// keep inactive, the enable must not pre-consent a machine-wide trust entry
+// that would sync the repo the moment the exclusion is lifted.
+func TestRunEnable_ExcludedRepoRecordsNoTrust(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.AddRemote(t, dir, "origin", "https://github.com/acme/widgets.git")
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeUserSettings(t, `{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`)
+
+	// --project: a bare enable writes settings.local.json, whose enabled:true is
+	// this developer's own override and legitimately lifts the exclusion.
+	var stdout bytes.Buffer
+	if err := runEnable(context.Background(), &stdout, true); err != nil {
+		t.Fatalf("runEnable() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "matches an exclude list") {
+		t.Errorf("want the exclusion note after enable, got:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Trusted") {
+		t.Errorf("enable must not report trust for an excluded repo:\n%s", stdout.String())
+	}
+	us, err := settings.LoadUserSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(us.Global.TrustedOrigins) != 0 || len(us.Global.TrustedPaths) != 0 {
+		t.Fatalf("excluded repo must not gain a trust entry: origins=%v paths=%v", us.Global.TrustedOrigins, us.Global.TrustedPaths)
+	}
 }
 
 // TestPluginUninstallCommand_QuotesRepoRoot pins that the recovery command

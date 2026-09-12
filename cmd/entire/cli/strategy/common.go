@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -92,8 +93,17 @@ func IsEmptyRepository(repo *git.Repository) bool {
 	return errors.Is(err, plumbing.ErrReferenceNotFound)
 }
 
-// EnsureSetup ensures the strategy is properly set up.
+// EnsureSetup ensures the strategy is properly set up, writing ref-bootstrap
+// notices to os.Stderr. Interactive flows (enable, agent setup) call this;
+// hook-context paths go through EnsureSetupForHook, which discards the
+// notices so they cannot leak into an agent's hook output.
 func EnsureSetup(ctx context.Context) error {
+	return ensureSetup(ctx, os.Stderr)
+}
+
+// ensureSetup is EnsureSetup with an explicit destination for user-facing
+// bootstrap notices.
+func ensureSetup(ctx context.Context, out io.Writer) error {
 	if err := EnsureEntireGitignore(ctx); err != nil {
 		return err
 	}
@@ -107,13 +117,14 @@ func EnsureSetup(ctx context.Context) error {
 	if err := vercelconfig.InitSettings(ctx); err != nil {
 		return fmt.Errorf("failed to initialize vercel settings: %w", err)
 	}
-	if err := EnsurePrimaryRef(ctx, repo); err != nil {
+	if err := EnsurePrimaryRefTo(ctx, repo, out); err != nil {
 		return fmt.Errorf("failed to ensure primary metadata ref: %w", err)
 	}
 
-	// Install generic hooks (they delegate to strategy at runtime)
+	// Install generic hooks (they delegate to strategy at runtime). Backup
+	// notices follow out too: hook-context callers pass io.Discard.
 	if !IsGitHookInstalled(ctx) {
-		if _, err := ReinstallGitHooks(ctx); err != nil {
+		if _, err := installGitHooks(ctx, true, hookSettingsFromConfig(ctx), out); err != nil {
 			return fmt.Errorf("failed to install git hooks: %w", err)
 		}
 	}
@@ -509,11 +520,17 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 		}
 		var packs []*redact.Pack
 		var lerr error
-		if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
-			packs, lerr = redact.LoadPacks(root.FS(), redact.RedactorsDirName, logger)
-		} else if !errors.Is(rerr, fs.ErrNotExist) {
-			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to open .entire for redactor packs", slog.String("error", rerr.Error()))
+		// Packs are discovered at the WORKTREE anchor, not the routed runtime
+		// base: a committed .entire/redactors/ is repo content the user put
+		// there — a globally tracked repo can carry one without pinning
+		// routing to the worktree — and the runtime root never holds packs.
+		if worktreeRoot, werr := paths.WorktreeRoot(ctx); werr == nil {
+			if root, rerr := entiredir.OpenAtForRead(worktreeRoot); rerr == nil {
+				packs, lerr = redact.LoadPacks(root.FS(), redact.RedactorsDirName, logger)
+			} else if !errors.Is(rerr, fs.ErrNotExist) {
+				logCtx := logging.WithComponent(ctx, "redaction")
+				logging.Warn(logCtx, "failed to open .entire for redactor packs", slog.String("error", rerr.Error()))
+			}
 		}
 		if lerr != nil {
 			warnUser(ctx, "redaction",
@@ -648,7 +665,19 @@ func primaryIsGitRefs(ctx context.Context) bool {
 	return checkpoint.PrimaryIsRefs(cfg)
 }
 
+// EnsurePrimaryRef runs EnsurePrimaryRefTo with notices going to os.Stderr —
+// for interactive, user-initiated flows only. Hook-context callers must use
+// EnsurePrimaryRefTo with io.Discard: the ✓ bootstrap notices below would
+// otherwise leak into an agent's hook output (the same reason
+// MaybeEnsureGlobalSetup installs git hooks with a discarded notice writer).
 func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
+	return EnsurePrimaryRefTo(ctx, repo, os.Stderr)
+}
+
+// EnsurePrimaryRefTo is EnsurePrimaryRef with an explicit destination for the
+// user-facing bootstrap notices (ref created/updated from origin or the
+// checkpoint remote).
+func EnsurePrimaryRefTo(ctx context.Context, repo *git.Repository, out io.Writer) error {
 	// Rebind settings/remote resolution to the repository being modified rather
 	// than the ambient working directory, so the "is a checkpoint_remote
 	// configured" decision (and any fetch below) targets repo even when a caller
@@ -698,7 +727,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 				return err
 			}
 			if healed {
-				fmt.Fprintf(os.Stderr, "✓ Updated local ref '%s' from checkpoint remote\n", primaryName)
+				fmt.Fprintf(out, "✓ Updated local ref '%s' from checkpoint remote\n", primaryName)
 			}
 			return nil
 		}
@@ -706,7 +735,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		// orphan: an orphan would diverge from it, hide existing checkpoints, and
 		// be rejected non-fast-forward on later syncs.
 		if bootstrapPrimaryFromCheckpointRemote(ctx, repo, refs.Primary, skipEmptyOrphan) {
-			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from checkpoint remote\n", primaryName)
+			fmt.Fprintf(out, "✓ Created local ref '%s' from checkpoint remote\n", primaryName)
 			return nil
 		}
 		// Nothing usable on the checkpoint remote (fetch skipped/failed or the
@@ -715,7 +744,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		if skipEmptyOrphan {
 			return nil
 		}
-		return createOrphanMetadataRef(ctx, repo, refs)
+		return createOrphanMetadataRef(ctx, repo, refs, out)
 	}
 
 	// No checkpoint_remote configured — the elected checkpoint sync remote
@@ -767,7 +796,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 				if setErr := setRefHash(repo, refs.Primary, remoteRef.Hash()); setErr != nil {
 					return fmt.Errorf("failed to update metadata ref from remote: %w", setErr)
 				}
-				fmt.Fprintf(os.Stderr, "[entire] Updated local ref '%s' from %s\n", primaryName, electedName)
+				fmt.Fprintf(out, "[entire] Updated local ref '%s' from %s\n", primaryName, electedName)
 			} else {
 				// Local has real data and differs from remote — if disconnected
 				// (no common ancestor), reconciliation happens at pre-push time
@@ -786,7 +815,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 		if err := setRefHash(repo, refs.Primary, remoteRef.Hash()); err != nil {
 			return fmt.Errorf("failed to create metadata ref from remote: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from %s\n", primaryName, electedName)
+		fmt.Fprintf(out, "✓ Created local ref '%s' from %s\n", primaryName, electedName)
 		return nil
 	}
 
@@ -798,7 +827,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 			if err := setRefHash(repo, refs.Primary, originRef.Hash()); err != nil {
 				return fmt.Errorf("failed to create metadata ref from origin under failed election: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin (checkpoint sync remote election failed; fix checkpoint_push_remote to resume syncing)\n", primaryName)
+			fmt.Fprintf(out, "✓ Created local ref '%s' from origin (checkpoint sync remote election failed; fix checkpoint_push_remote to resume syncing)\n", primaryName)
 			return nil
 		}
 	}
@@ -807,13 +836,13 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	if skipEmptyOrphan {
 		return nil
 	}
-	return createOrphanMetadataRef(ctx, repo, refs)
+	return createOrphanMetadataRef(ctx, repo, refs, out)
 }
 
 // createOrphanMetadataRef creates the local primary metadata ref as a fresh empty
 // orphan commit (plus any merged vercel config). Used when no metadata ref can be
 // sourced from origin or a checkpoint_remote.
-func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs checkpoint.PersistentRefs) error {
+func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs checkpoint.PersistentRefs, out io.Writer) error {
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
 	obj := repo.Storer.NewEncodedObject()
 	if err := emptyTree.Encode(obj); err != nil {
@@ -841,7 +870,7 @@ func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs che
 		TreeHash:  emptyTreeHash,
 		Author:    sig,
 		Committer: sig,
-		Message:   "Initialize metadata ref\n\nThis ref stores session metadata.\n",
+		Message:   metadataRefInitSubject + "\n\nThis ref stores session metadata.\n",
 	}
 	// Note: No ParentHashes - this is an orphan commit
 
@@ -866,7 +895,7 @@ func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs che
 		return fmt.Errorf("failed to create metadata ref: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "  ✓ Created orphan ref %s for session metadata\n", refs.Primary.Short())
+	fmt.Fprintf(out, "  ✓ Created orphan ref %s for session metadata\n", refs.Primary.Short())
 	return nil
 }
 
@@ -1391,10 +1420,16 @@ func GetGitCommonDir(ctx context.Context) (string, error) {
 
 	commonDir := strings.TrimSpace(string(output))
 
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
+	// git rev-parse --git-common-dir returns relative paths from the working
+	// directory, so absolutize against the cwd. (filepath.Join(".", dir) — the
+	// previous code — left the result relative, which every consumer then
+	// silently resolved against its own cwd.)
 	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
+		abs, absErr := filepath.Abs(commonDir)
+		if absErr != nil {
+			return "", fmt.Errorf("failed to absolutize git common dir: %w", absErr)
+		}
+		commonDir = abs
 	}
 
 	return filepath.Clean(commonDir), nil

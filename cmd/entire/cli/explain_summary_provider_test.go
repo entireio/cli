@@ -863,8 +863,12 @@ func TestPersistSummaryProviderSelection_ExternalFlipsFlagAndReturnsSignal(t *te
 	writeExternalSummaryAgentBinary(t, externalDir, providerName)
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// Discover so getSummaryAgent returns a wrapped external (the type IsExternal recognizes).
-	discoverSummaryProvidersAlways(ctx)
+	// Discover the named provider so getSummaryAgent returns a wrapped external
+	// (the type IsExternal recognizes). A full PATH sweep makes this test's
+	// setup depend on unrelated installed plugins and their shared timeout.
+	if err := discoverNamedSummaryProvider(ctx, types.AgentName(providerName)); err != nil {
+		t.Fatalf("discoverNamedSummaryProvider() error = %v", err)
+	}
 
 	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionByUser)
 	if err != nil {

@@ -27,6 +27,9 @@ const (
 	SyncRemoteSourceObserved CheckpointSyncRemoteSource = "observed"
 	// SyncRemoteSourceDefault: "origin" exists.
 	SyncRemoteSourceDefault CheckpointSyncRemoteSource = "default"
+	// SyncRemoteSourceOverride: named by the caller for this operation only
+	// (`entire trust --remote <name>`), never persisted and never elected.
+	SyncRemoteSourceOverride CheckpointSyncRemoteSource = "override"
 	// SyncRemoteSourceSole: exactly one remote configured.
 	SyncRemoteSourceSole CheckpointSyncRemoteSource = "sole"
 	// SyncRemoteSourceFirst: first remote in .git/config order.

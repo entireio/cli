@@ -69,7 +69,7 @@ var (
 // that the invariant is violated, but neither is it evidence that it holds, and
 // the caller's next move is to write there.
 func ValidateEntireDirAt(worktreeRoot string) error {
-	path := filepath.Join(worktreeRoot, EntireDir)
+	path := filepath.Join(worktreeRoot, EntireDir) // entire-join-ok: validation probes the literal worktree dir by design
 
 	info, err := os.Lstat(path)
 	switch {

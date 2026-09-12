@@ -208,6 +208,7 @@ func enqueueRefs(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceNa
 
 func TestPushQueuedCheckpointRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 
@@ -226,6 +227,26 @@ func TestPushQueuedCheckpointRefs(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.Empty(t, remaining, "pushed refs are removed from the queue")
+}
+
+// The second egress entry point (bypasses prePush) must hold too, refs queued.
+func TestPushQueuedCheckpointRefs_EgressGateHoldsUntrustedRepo(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	_, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.ErrorContains(t, err, "entire trust")
+	assert.False(t, pushDisabled, "a trust hold is not push_sessions=false")
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "a held push leaves refs queued")
 }
 
 func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
@@ -258,6 +279,7 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 
 func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 
@@ -279,6 +301,7 @@ func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	workDir, _, refs := setupRepoWithCheckpointRefs(t)
+	writeEnabledRepoSettings(t, workDir)
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()
 
@@ -325,6 +348,42 @@ func remoteRefHash(t *testing.T, bareDir string, ref plumbing.ReferenceName) str
 	fields := strings.Fields(strings.TrimSpace(string(out)))
 	require.NotEmpty(t, fields, "ref %s not found on remote", ref)
 	return fields[0]
+}
+
+// Consent is evaluated for the remote the refs are actually pushed to. With
+// origin elected and trusted, a push aimed at a different configured remote
+// (doctor migrate --remote) must hold until THAT remote is trusted.
+// Not parallel: uses t.Chdir()
+func TestPushQueuedCheckpointRefs_ConsentFollowsPushTarget(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	testutil.AddRemote(t, workDir, "origin", "https://github.com/acme/widgets.git")
+	testutil.AddRemote(t, workDir, "fork", bareDir)
+	t.Chdir(workDir)
+	enrollRepoGlobally(t, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+
+	_, _, err = PushQueuedCheckpointRefs(context.Background(), repo, "fork")
+	require.ErrorContains(t, err, "trusted for fork", "origin's consent must not cover a push to fork")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held push leaves refs queued")
+	queue = enqueueRefs(t, repo, refs)
+
+	// fork's URL is a bare path, so its consent key is the worktree path.
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	require.NoError(t, err)
+	enrollRepoGlobally(t, `{"global":{"enabled":true,"trusted_paths":["`+filepath.ToSlash(resolvedWorkDir)+`"]}}`)
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, "fork")
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, len(refs), pushed, "trusting the push target releases the refs")
+	remaining, err = queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "a delivered push leaves nothing queued")
 }
 
 // TestPushQueuedCheckpointRefs_OPFAppliedBeforePush pins the gate this path was
