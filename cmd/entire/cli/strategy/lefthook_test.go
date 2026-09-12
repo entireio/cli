@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
@@ -27,14 +28,18 @@ func newLefthookRepo(t *testing.T, mainConfig string) string {
 	// Both caches are process-global and keyed by the directory this test just
 	// left, so a stale entry would point the hooks-dir and common-dir lookups
 	// at another test's repository.
-	paths.ClearWorktreeRootCache()
-	ClearHooksDirCache()
-	clearGitCommonDirCache()
-	t.Cleanup(func() {
+	reset := func() {
 		paths.ClearWorktreeRootCache()
 		ClearHooksDirCache()
 		clearGitCommonDirCache()
-	})
+		// osroot.Shared memoizes a *os.Root per directory, and an open handle
+		// keeps Windows from deleting the directory under it — t.TempDir's
+		// own cleanup then fails with "used by another process" on .git.
+		// Registered after t.TempDir, so LIFO runs this first.
+		osroot.ResetShared()
+	}
+	reset()
+	t.Cleanup(reset)
 	return dir
 }
 
