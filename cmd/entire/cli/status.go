@@ -440,8 +440,8 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
-		// Fail-closed: checkpoint_push_remote names a remote that does not
-		// exist. The pre-push gate is silently skipping checkpoint sync, so
+		// Fail-closed: election could not confirm a usable checkpoint sync
+		// remote. The pre-push gate is silently skipping checkpoint sync, so
 		// status is the user's signal.
 		// Accepted divergence: if a structured checkpoint_remote is also
 		// configured, the gate's dedicated exemption may still sync checkpoint
