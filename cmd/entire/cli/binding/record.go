@@ -73,6 +73,15 @@ type SessionMeta struct {
 	LaunchRoot     string
 }
 
+// recordSuffix and lockSuffix name the two files a session owns in the store.
+// Retention scans the directory by these suffixes, so they are constants rather
+// than literals at each site: a renamed record file that outran the scan would
+// silently turn pruning into a no-op.
+const (
+	recordSuffix = ".json"
+	lockSuffix   = ".lock"
+)
+
 func recordName(sessionID string) (string, error) {
 	// Session IDs are already filename-safe per validation.ValidateSessionID,
 	// but the record store is a new attack surface for path traversal —
@@ -80,7 +89,7 @@ func recordName(sessionID string) (string, error) {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return "", fmt.Errorf("session record: %w", err)
 	}
-	return sessionID + ".json", nil
+	return sessionID + recordSuffix, nil
 }
 
 func recordPath(sessionID string) (string, error) {
@@ -301,7 +310,7 @@ func mutateRecord(ctx context.Context, sessionID string, fn func(now time.Time, 
 	}
 	lockCtx, cancel := context.WithTimeout(ctx, recordLockTimeout)
 	defer cancel()
-	release, err := flock.AcquireContextIn(lockCtx, root, name+".lock")
+	release, err := flock.AcquireContextIn(lockCtx, root, name+lockSuffix)
 	if err != nil {
 		return fmt.Errorf("lock session record: %w", err)
 	}

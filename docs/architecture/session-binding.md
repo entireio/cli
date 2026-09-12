@@ -94,6 +94,28 @@ lock for each already-adopted repo — correct, but no longer free.
 Commit linking is unchanged: a commit in the target links to the session
 through the identity-first matcher in `strategy/session_identity.go`.
 
+## Retention
+
+The record store is machine-level, so nothing repo-scoped reclaims it: `entire
+clean` and the strategy's cleanup only reach shadow branches and session state.
+Every session with a turn-end writes a record, including one that never touches
+a repo — the no-repo scan advances its cursor on success to keep repeat scans
+cheap, which leaves a cursor-only record behind.
+
+`binding.PruneStaleRecords` removes a record (and the lock file beside it)
+whose `updated_at` is more than `binding.RecordRetention` (30 days) old. The
+window is generous on purpose: sessions run for days, and a record removed
+under a live session loses its cross-repo evidence and rescans its transcript
+from zero, while the space it reclaims is kilobytes. A file that does not parse
+as a record is left alone — this directory is in the user's config dir.
+
+It runs in the detached session sweep (`__sweep_sessions`), which is also the
+thing that nominates it: the sweep is spawned when a session-state file looks
+like a zombie, and the machines whose store grows are exactly the ones with no
+zombies, so `binding.RetentionDue` nominates a spawn of its own once a day. The
+`last-prune` marker in the sessions directory is written by the prune, not by
+the check, so a nomination whose sweep never runs does not consume the window.
+
 ## Failure policy and logging
 
 Everything here is best-effort: a panic in the tap is swallowed, every error

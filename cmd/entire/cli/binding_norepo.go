@@ -183,8 +183,9 @@ type transcriptScan struct {
 // successful scan the cursor advances even when no paths were found, to keep
 // repeat scans cheap for chatty no-repo sessions — consequence: every no-repo
 // session with a turn-end creates a cursor-only record on its first Stop,
-// even if it never touches a repo (retention for these is part of slice 2's
-// parked retention story).
+// even if it never touches a repo. Those are what binding.RecordRetention
+// exists for — the sweep prunes a record RecordRetention past its last
+// update.
 func scanTranscriptForeign(logCtx context.Context, ag agent.Agent, event *agent.Event) (transcriptScan, bool) {
 	cursor := 0
 	rec, err := binding.LoadRecord(logCtx, event.SessionID)
