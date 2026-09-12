@@ -2,10 +2,10 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -210,9 +211,9 @@ func listShadowBranchHeads(ctx context.Context) (map[string]plumbing.Hash, error
 // so the caller knows any condensed checkpoint data already reached
 // the remote.
 //
-// Returns the count of branches deleted. Failures (e.g., one branch
-// fails to delete due to a stale lock) are logged but don't abort
-// the operation — remaining branches are still attempted.
+// Returns the count of branches deleted. Expected compare-and-swap or deletion
+// failures are logged without aborting the operation. Failures to establish
+// whether current session state protects a branch are returned to the caller.
 //
 // Safety properties:
 //   - Skips any shadow branch referenced by a session with EndedAt
@@ -234,7 +235,7 @@ func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	states, err := ListSessionStates(ctx)
+	states, err := ListSessionStatesStrict(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list session states: %w", err)
 	}
@@ -268,12 +269,15 @@ func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	deleted, failed := DeleteShadowBranchesIfUnchanged(ctx, toDelete)
+	deleted, failed, safetyErr := DeleteShadowBranchesIfUnchanged(ctx, toDelete)
 	if len(failed) > 0 {
 		logging.Warn(ctx, "some shadow branches failed to delete during post-push cleanup",
 			slog.Int("failed_count", len(failed)),
 			slog.Int("deleted_count", len(deleted)),
 		)
+	}
+	if safetyErr != nil {
+		return len(deleted), safetyErr
 	}
 	return len(deleted), nil
 }
@@ -286,39 +290,63 @@ func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
 // already have filtered to isAutoDeletableShadowBranch before calling this --
 // the same check is repeated here as a second, independent gate rather than
 // relying solely on the caller's filtering, since this function is the one
-// place that actually deletes a ref with no human confirmation.
-func DeleteShadowBranchesIfUnchanged(ctx context.Context, branches map[string]plumbing.Hash) (deleted []string, failed []string) {
+// place that actually deletes a ref with no human confirmation. The returned
+// error is reserved for failures to establish that deletion is safe; expected
+// compare-and-swap and deletion failures are reported only in failed.
+func DeleteShadowBranchesIfUnchanged(ctx context.Context, branches map[string]plumbing.Hash) (deleted []string, failed []string, safetyErr error) {
 	if len(branches) == 0 {
-		return []string{}, []string{}
+		return []string{}, []string{}, nil
 	}
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		for branch := range branches {
+			failed = append(failed, branch)
+		}
+		return []string{}, failed, fmt.Errorf("resolve worktree root for shadow branch cleanup: %w", err)
+	}
+	var safetyErrors []error
 	for branch, expected := range branches {
 		if !isAutoDeletableShadowBranch(branch) || expected.IsZero() {
 			failed = append(failed, branch)
 			continue
 		}
-		protected, err := shadowBranchProtectedByCurrentState(ctx, branch)
-		if err != nil {
+
+		var protectionErr error
+		refName := plumbing.NewBranchReferenceName(branch)
+		runErr := gitrepo.CompareAndSwapRefGuarded(ctx, repoRoot, refName, plumbing.ZeroHash, expected, func() error {
+			protected, err := shadowBranchProtectedByCurrentState(ctx, branch)
+			if err != nil {
+				protectionErr = fmt.Errorf("recheck protection for shadow branch %s: %w", branch, err)
+				return protectionErr
+			}
+			if protected {
+				return errShadowBranchProtected
+			}
+			return nil
+		})
+		if protectionErr != nil {
 			logging.Debug(ctx, "shadow branch unchanged-delete skipped after protection recheck failed",
 				slog.String("branch", branch),
-				slog.String("error", err.Error()),
+				slog.String("error", runErr.Error()),
 			)
+			safetyErrors = append(safetyErrors, runErr)
 			failed = append(failed, branch)
 			continue
 		}
-		if protected {
+		if errors.Is(runErr, errShadowBranchProtected) {
 			logging.Debug(ctx, "shadow branch unchanged-delete skipped because current session state protects it",
 				slog.String("branch", branch),
 			)
+			if errors.Is(runErr, gitrepo.ErrRefCASAbort) {
+				safetyErrors = append(safetyErrors, fmt.Errorf("abort protected shadow branch deletion: %w", runErr))
+			}
 			failed = append(failed, branch)
 			continue
 		}
-		ref := "refs/heads/" + branch
-		cmd := exec.CommandContext(ctx, "git", "update-ref", "-d", ref, expected.String())
-		if output, runErr := cmd.CombinedOutput(); runErr != nil {
+		if runErr != nil {
 			logging.Debug(ctx, "shadow branch unchanged-delete skipped",
 				slog.String("branch", branch),
 				slog.String("expected", expected.String()),
-				slog.String("output", strings.TrimSpace(string(output))),
 				slog.String("error", runErr.Error()),
 			)
 			failed = append(failed, branch)
@@ -326,8 +354,10 @@ func DeleteShadowBranchesIfUnchanged(ctx context.Context, branches map[string]pl
 		}
 		deleted = append(deleted, branch)
 	}
-	return deleted, failed
+	return deleted, failed, errors.Join(safetyErrors...)
 }
+
+var errShadowBranchProtected = errors.New("shadow branch is protected by current session state")
 
 func protectedShadowBranchForSession(s *SessionState) (string, bool) {
 	if s.Phase == session.PhaseEnded && s.FullyCondensed && len(s.TurnCheckpointIDs) == 0 {
@@ -336,8 +366,28 @@ func protectedShadowBranchForSession(s *SessionState) (string, bool) {
 	return getShadowBranchNameForCommit(s.BaseCommit, s.WorktreeID), true
 }
 
+// CanDeleteShadowBranch reports whether any other session still pins the branch.
+func CanDeleteShadowBranch(ctx context.Context, shadowBranch, excludeSessionID string) (bool, error) {
+	states, err := ListSessionStatesStrict(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to list session states: %w", err)
+	}
+	for _, state := range states {
+		if state.SessionID == excludeSessionID {
+			continue
+		}
+		// Task records never live on the shadow branch, so only SaveStep
+		// checkpoints pin it alive.
+		otherShadow := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+		if otherShadow == shadowBranch && state.StepCount > 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func shadowBranchProtectedByCurrentState(ctx context.Context, branch string) (bool, error) {
-	states, err := ListSessionStates(ctx)
+	states, err := ListSessionStatesStrict(ctx)
 	if err != nil {
 		return false, err
 	}

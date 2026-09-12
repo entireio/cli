@@ -173,6 +173,20 @@ func ListSessionStates(ctx context.Context) ([]*SessionState, error) {
 	return states, nil
 }
 
+// ListSessionStatesStrict returns a complete inventory or an error.
+// Use it when an absent session would permit deleting checkpoint data.
+func ListSessionStatesStrict(ctx context.Context) ([]*SessionState, error) {
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create state store: %w", err)
+	}
+	states, err := store.ListStrict(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list session states: %w", err)
+	}
+	return states, nil
+}
+
 // FindMostRecentSessionInCurrentWorktree returns the most recently interacted
 // session from the current worktree only, never falling back to another
 // worktree's.

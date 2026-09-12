@@ -2,6 +2,7 @@ package gitrepo
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +86,42 @@ func TestCompareAndSwapRef_RejectsSymbolicRef(t *testing.T) {
 				plumbing.NewHash(initial),
 			)
 			require.NoError(t, err)
+			require.Equal(t, replacement, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", refName.String())))
+		})
+	}
+}
+
+func TestCompareAndSwapRefGuarded_RejectsBeforeCommit(t *testing.T) {
+	t.Parallel()
+	for _, tt := range refCASBackends() {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repoDir, initial, replacement := tt.init(t)
+			refName := plumbing.ReferenceName("refs/entire/guarded-delete")
+			gitenv.Run(t, repoDir, "update-ref", refName.String(), initial)
+			unsafe := errors.New("ref is still protected")
+
+			err := CompareAndSwapRefGuarded(
+				t.Context(),
+				repoDir,
+				refName,
+				plumbing.ZeroHash,
+				plumbing.NewHash(initial),
+				func() error {
+					cmd := exec.Command("git", "update-ref", refName.String(), replacement, initial) //nolint:noctx // must run while the guarded transaction is open
+					cmd.Dir = repoDir
+					cmd.Env = gitenv.Isolated()
+					output, updateErr := cmd.CombinedOutput()
+					require.Error(t, updateErr, "the guard must run after Git locks the ref")
+					require.Contains(t, strings.ToLower(string(output)), "lock")
+					return unsafe
+				},
+			)
+
+			require.ErrorIs(t, err, unsafe)
+			require.Equal(t, initial, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", refName.String())))
+
+			gitenv.Run(t, repoDir, "update-ref", refName.String(), replacement, initial)
 			require.Equal(t, replacement, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", refName.String())))
 		})
 	}

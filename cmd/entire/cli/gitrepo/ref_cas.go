@@ -7,14 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-git/go-git/v6/plumbing"
-	gitfilesystem "github.com/go-git/go-git/v6/storage/filesystem"
 )
 
 const refCASWaitDelay = 3 * time.Second
@@ -26,6 +24,8 @@ var (
 	ErrRefLocked = errors.New("git reference lock is unavailable")
 	// ErrRefSymbolic means the requested CAS target is a symbolic reference.
 	ErrRefSymbolic = errors.New("git reference is symbolic")
+	// ErrRefCASAbort means a prepared guarded update did not abort cleanly.
+	ErrRefCASAbort = errors.New("git reference transaction abort failed")
 )
 
 // CompareAndSwapRef atomically updates a direct ref through native Git and
@@ -36,6 +36,32 @@ func CompareAndSwapRef(
 	repoRoot string,
 	refName plumbing.ReferenceName,
 	newHash, expectedHash plumbing.Hash,
+) error {
+	return compareAndSwapRef(ctx, repoRoot, refName, newHash, expectedHash, nil)
+}
+
+// CompareAndSwapRefGuarded atomically updates a direct ref only when guard
+// succeeds. Git holds the prepared ref lock while guard runs, but the ref is
+// not changed until after guard returns nil.
+func CompareAndSwapRefGuarded(
+	ctx context.Context,
+	repoRoot string,
+	refName plumbing.ReferenceName,
+	newHash, expectedHash plumbing.Hash,
+	guard func() error,
+) error {
+	if guard == nil {
+		return errors.New("compare-and-swap ref guard is nil")
+	}
+	return compareAndSwapRef(ctx, repoRoot, refName, newHash, expectedHash, guard)
+}
+
+func compareAndSwapRef(
+	ctx context.Context,
+	repoRoot string,
+	refName plumbing.ReferenceName,
+	newHash, expectedHash plumbing.Hash,
+	guard func() error,
 ) error {
 	tx, err := prepareRefCAS(ctx, repoRoot, refName, newHash, expectedHash)
 	if err != nil {
@@ -51,6 +77,14 @@ func CompareAndSwapRef(
 			fmt.Errorf("ref %s points to %s: %w", refName, target, ErrRefSymbolic),
 			tx.abort(),
 		)
+	}
+	if guard != nil {
+		if err := guard(); err != nil {
+			if abortErr := tx.abort(); abortErr != nil {
+				return errors.Join(err, fmt.Errorf("abort guarded ref update: %w", errors.Join(ErrRefCASAbort, abortErr)))
+			}
+			return err
+		}
 	}
 	return tx.commit()
 }
@@ -234,28 +268,7 @@ func refIsAbsent(repoRoot string, refName plumbing.ReferenceName) (bool, error) 
 		return false, fmt.Errorf("open repository to verify missing ref: %w", err)
 	}
 	defer repo.Close()
-	// go-git falls back to packed refs after any loose-ref read error, so its
-	// not-found result alone cannot distinguish a directory from absence.
-	if storage, ok := repo.Storer.(*gitfilesystem.Storage); ok {
-		info, statErr := storage.Filesystem().Lstat(refName.String())
-		if statErr == nil {
-			if info.IsDir() {
-				return false, fmt.Errorf("ref %s is a directory", refName)
-			}
-			return false, nil
-		}
-		if !errors.Is(statErr, os.ErrNotExist) {
-			return false, fmt.Errorf("inspect ref %s: %w", refName, statErr)
-		}
-	}
-	_, err = repo.Reference(refName, false)
-	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read ref %s: %w", refName, err)
-	}
-	return false, nil
+	return ReferenceIsAbsent(repo, refName)
 }
 
 func symbolicRefTarget(ctx context.Context, repoRoot string, refName plumbing.ReferenceName) (string, bool, error) {

@@ -2059,22 +2059,12 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 // cleanupShadowBranchIfUnused deletes a shadow branch if no other active sessions reference it.
 func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, _ *git.Repository, shadowBranchName, excludeSessionID string) error {
-	// List all session states to check if any other session uses this shadow branch
-	allStates, err := s.listAllSessionStates(ctx)
+	canDelete, err := CanDeleteShadowBranch(ctx, shadowBranchName, excludeSessionID)
 	if err != nil {
-		return fmt.Errorf("failed to list session states: %w", err)
+		return err
 	}
-
-	for _, state := range allStates {
-		if state.SessionID == excludeSessionID {
-			continue
-		}
-		otherShadow := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		// Only SaveStep checkpoints live on the shadow branch; task records do
-		// not, so they no longer pin the branch alive.
-		if otherShadow == shadowBranchName && state.StepCount > 0 {
-			return nil
-		}
+	if !canDelete {
+		return nil
 	}
 
 	// No other sessions need it, delete the shadow branch via CLI

@@ -1928,7 +1928,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`, `OPFBatchTooLargeError`, `OPFRawBytesTooLargeError`, `OPFNoCategoriesError` (OPF enabled with zero effective categories — the pre-push decision and the rewrite both fail closed instead of stamping the trailer without a scan).
 - `manual_commit_opf_refs.go` - The git-refs half of pre-push OPF: `RewriteQueuedCheckpointRefsWithOPF` walks the push queue and rewrites every unpushed commit on each queued ref, reusing the v1 rewrite's blob walk, caps, and error types. See the OPF bullet above for why the two backends fail closed differently.
 - `settings/opf_command_trust.go` - Ownership gate for the executed OPF `command` (local-only + untracked); see the OPF trust-boundary bullet above
-- `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
+- `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata. Destructive protection scans use `StateStore.ListStrict` (via `ListSessionStatesStrict` where needed); unreadable state cannot authorize deletion. Session expiry retains pending checkpoint content, and orphan cleanup requires `gitrepo.ReferenceIsAbsent` to distinguish unreadable loose refs from absent refs.
 - `session_state.go` - Package-level session state functions
 - `hooks.go` - Git hook installation
 

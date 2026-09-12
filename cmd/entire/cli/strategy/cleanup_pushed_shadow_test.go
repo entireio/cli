@@ -2,6 +2,8 @@ package strategy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -188,9 +190,10 @@ func TestDeleteShadowBranchesIfUnchanged_PreservesMovedBranch(t *testing.T) {
 	require.NoError(t, env.repo.Storer.SetReference(
 		plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadow), newHash)))
 
-	deleted, failed := DeleteShadowBranchesIfUnchanged(context.Background(), map[string]plumbing.Hash{
+	deleted, failed, err := DeleteShadowBranchesIfUnchanged(context.Background(), map[string]plumbing.Hash{
 		shadow: env.baseHash,
 	})
+	require.NoError(t, err)
 	require.Empty(t, deleted)
 	require.Equal(t, []string{shadow}, failed)
 	require.True(t, env.branchExists(shadow))
@@ -209,7 +212,24 @@ func TestDeleteShadowBranchesIfUnchanged_PreservesBranchProtectedAfterSnapshot(t
 
 	env.addSessionState("s-race", env.baseHash.String(), "", nil, nil, false)
 
-	deleted, failed := DeleteShadowBranchesIfUnchanged(context.Background(), snapshot)
+	deleted, failed, err := DeleteShadowBranchesIfUnchanged(context.Background(), snapshot)
+	require.NoError(t, err)
+	require.Empty(t, deleted)
+	require.Equal(t, []string{shadow}, failed)
+	require.True(t, env.branchExists(shadow))
+}
+
+func TestDeleteShadowBranchesIfUnchanged_ReturnsProtectionRecheckError(t *testing.T) {
+	env := newShadowCleanupEnv(t)
+	shadow := env.addShadowBranch(env.baseHash.String(), "")
+	path := filepath.Join(env.dir, ".git", "entire-sessions", "malformed.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte(`{"session_id":`), 0o600))
+
+	deleted, failed, err := DeleteShadowBranchesIfUnchanged(context.Background(), map[string]plumbing.Hash{
+		shadow: env.baseHash,
+	})
+	require.ErrorContains(t, err, "recheck protection for shadow branch")
 	require.Empty(t, deleted)
 	require.Equal(t, []string{shadow}, failed)
 	require.True(t, env.branchExists(shadow))
