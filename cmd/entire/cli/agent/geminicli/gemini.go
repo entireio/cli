@@ -108,17 +108,30 @@ func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) s
 	return filepath.Join(sessionDir, "session-"+timestamp+"-"+shortID+".json")
 }
 
+// geminiHomeEnvVar relocates the home directory Gemini CLI resolves ~ to.
+// Unlike CLAUDE_CONFIG_DIR it does not replace ~/.gemini itself: Gemini's
+// homedir() helper returns this value in place of os.homedir() and every
+// storage path, chats included, still appends .gemini underneath it.
+const geminiHomeEnvVar = "GEMINI_CLI_HOME"
+
+// resolveGeminiHome returns the home directory Gemini CLI uses:
+// $GEMINI_CLI_HOME when set, else the user's home. See agent.ResolveHome for
+// the override policy.
+func resolveGeminiHome() (string, error) {
+	return agent.ResolveHome(geminiHomeEnvVar, "") //nolint:wrapcheck // the error already names the override and its value
+}
+
 // GetSessionDir returns the directory where Gemini stores session transcripts.
-// Gemini stores sessions in ~/.gemini/tmp/<project-hash>/chats/
+// Gemini stores sessions in <home>/.gemini/tmp/<project-hash>/chats/
 func (g *GeminiCLIAgent) GetSessionDir(repoPath string) (string, error) {
 	// Check for test environment override
 	if override := os.Getenv("ENTIRE_TEST_GEMINI_PROJECT_DIR"); override != "" {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := resolveGeminiHome()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
 
 	// Gemini uses a SHA256 hash of the project path for the directory name
@@ -130,9 +143,9 @@ func (g *GeminiCLIAgent) GetSessionDir(repoPath string) (string, error) {
 // Unlike GetSessionDir, this does NOT use ENTIRE_TEST_GEMINI_PROJECT_DIR because the
 // test override points to a specific project dir, not the base containing all projects.
 func (g *GeminiCLIAgent) GetSessionBaseDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := resolveGeminiHome()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
 	return filepath.Join(homeDir, ".gemini", "tmp"), nil
 }

@@ -47,6 +47,12 @@ const (
 // for main.go (which restores $PATH) to notice. Those backstops hold, but each
 // answers a question of its own, two layers from where this one is decided.
 //
+// agent.ResolveHome applies the same check to the agents' own relocation
+// variables (CLAUDE_CONFIG_DIR, CODEX_HOME, and the rest). Nothing of Entire's
+// is protected there; the concern is agreeing with where the agent wrote, and a
+// relative value resolves differently inside a hook than in a user's shell. It
+// calls this helper so the rule keeps one implementation.
+//
 // Rejecting is louder than falling through to the platform default, and that is
 // deliberate: a misconfigured override is a user error worth surfacing, and for
 // the config directory the platform default is the developer's REAL

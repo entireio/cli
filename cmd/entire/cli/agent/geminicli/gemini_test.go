@@ -179,17 +179,23 @@ func TestGetSessionDir(t *testing.T) {
 func TestGetSessionDir_DefaultPath(t *testing.T) {
 	ag := &GeminiCLIAgent{}
 
-	// Make sure env var is not set
+	// Clear both overrides so the test exercises the home fallback rather
+	// than a dev shell's relocated Gemini home.
 	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", "")
+	t.Setenv("GEMINI_CLI_HOME", "")
 
 	dir, err := ag.GetSessionDir("/some/repo")
 	if err != nil {
 		t.Fatalf("GetSessionDir() error = %v", err)
 	}
 
-	// Should contain .gemini/tmp and end with /chats
-	if !filepath.IsAbs(dir) {
-		t.Errorf("GetSessionDir() should return absolute path, got %q", dir)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".gemini", "tmp", GetProjectHash("/some/repo"), "chats")
+	if dir != want {
+		t.Errorf("GetSessionDir() = %q, want %q", dir, want)
 	}
 }
 
@@ -834,5 +840,35 @@ func TestGeminiCLIAgent_LaunchCmd(t *testing.T) {
 	joined := strings.Join(cmd.Args, " ")
 	if !strings.Contains(joined, "hello world") {
 		t.Errorf("args missing prompt: %v", cmd.Args)
+	}
+}
+
+func TestGetSessionDir_HonorsGeminiCLIHome(t *testing.T) {
+	geminiHome := t.TempDir()
+	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", "")
+	t.Setenv("GEMINI_CLI_HOME", geminiHome)
+
+	dir, err := (&GeminiCLIAgent{}).GetSessionDir("/some/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Gemini treats the variable as the home directory and still creates
+	// .gemini inside it, so the result is $GEMINI_CLI_HOME/.gemini/...
+	want := filepath.Join(geminiHome, ".gemini", "tmp", GetProjectHash("/some/repo"), "chats")
+	if dir != want {
+		t.Errorf("GetSessionDir = %q, want %q", dir, want)
+	}
+}
+
+func TestGetSessionBaseDir_HonorsGeminiCLIHome(t *testing.T) {
+	geminiHome := t.TempDir()
+	t.Setenv("GEMINI_CLI_HOME", geminiHome)
+
+	base, err := (&GeminiCLIAgent{}).GetSessionBaseDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(geminiHome, ".gemini", "tmp"); base != want {
+		t.Errorf("GetSessionBaseDir = %q, want %q", base, want)
 	}
 }
