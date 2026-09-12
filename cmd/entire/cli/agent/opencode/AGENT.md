@@ -97,7 +97,11 @@ identity that survives `task_id` resumption and is what `opencode export` takes.
 - Child assistant messages carry `info.parentID` too, but that is the **message**
   parent (the user message ID), not the session parent. Do not confuse the two.
 
-## Current Entire Behaviour (before this work)
+## Behaviour Before Native Tracking
+
+Fixed by the design in
+`docs/superpowers/specs/2026-09-11-opencode-native-subagent-tracking-design.md`;
+kept as the record of what the probe observed.
 
 Confirmed live with Entire enabled in the probe repo:
 
@@ -119,25 +123,32 @@ Confirmed live with Entire enabled in the probe repo:
 This is the OpenCode analogue of Pi issue #1870: a child mistaken for a
 top-level session.
 
-## Proposed Mapping
+## Implemented Mapping
 
 | Native signal | Entire EventType | Notes |
 |---------------|------------------|-------|
-| `tool.execute.before` with `tool == "task"` on P | `SubagentStart` | `ToolUseID = callID`, `SessionID = P`, `SubagentType`/`TaskDescription` from `args`. Child ID is **not** known yet here. |
-| parent `message.part.updated`, task part `status: running` with `metadata.sessionId` | `SubagentStart` (`subagent-start` hook) | First moment the child ID is bound to the `callID`, so this is the signal actually used to launch the record; `DeferredCompletion: true`, since completion arrives separately from `subagent-stop` rather than here. |
-| `session.created` with `info.parentID` | (suppress) | Must **not** fire `session-start`; record child→parent in plugin state instead. |
-| child `message.updated` (user) / `session.status` / `session.idle` | (suppress) | Must not fire `turn-start`/`turn-end` for a session whose `parentID` is set. |
-| `tool.execute.after` with `tool == "task"` on P | `SubagentEnd` (`subagent-stop` hook) | `ToolUseID = callID`, `SubagentID = output.metadata.sessionId`, `Final: true`, `CompletionWithoutLaunch: true`. The child is exported via `opencode export` and declared via `SubagentTranscriptPath` (`.entire/tmp/<childID>.json`); `ModifiedFiles` are extracted from that transcript at capture time rather than placed on the event, and token usage is computed from the same export. |
+| `session.created` / `session.updated` / `session.idle` with `info.parentID` set, and any task-tool metadata naming a child | (suppressed plugin-side) | The plugin filters children out of `session.*` events' `parentID` and out of task metadata before anything reaches the Go side; no `session-start`/`turn-start`/`turn-end` is ever fired for a child. |
+| parent `message.part.updated`, task part `status: running` with `metadata.sessionId` | `SubagentStart` (`subagent-start` hook) | First moment the child ID is bound to the `callID`. `ToolUseID = callID`, `SessionID = parent`, `SubagentID = metadata.sessionId`, `SubagentType`/`TaskDescription` from `args`. `DeferredCompletion: true`, since completion arrives separately from `subagent-stop`. |
+| `tool.execute.after` with `tool == "task"` on the parent | `SubagentEnd` (`subagent-stop` hook) | `ToolUseID = callID`, `SubagentID = output.metadata.sessionId`, `Final: true`, `CompletionWithoutLaunch: true`. The child is exported via `opencode export` and declared via `SubagentTranscriptPath` (`.entire/tmp/<childID>.json`); `ModifiedFiles` are extracted from that transcript at capture time rather than placed on the event, and token usage is computed from the same export. |
 
-The plugin must forward `parentID` (or a `parent_session_id` field) so the Go
-side can make the suppression decision from the payload rather than from
-ordering. `session.created` arrives 5 ms after `tool.execute.before`, and the
-child's first `message.updated` 120 ms later, so plugin-side state keyed on
-`callID → childID` is sufficient for foreground tasks; the `session.created`
-event itself is the authoritative parent link.
+The suppression decision is made entirely on the plugin side, from the events
+and metadata it already observes — the Go side never sees a `session-start`,
+`turn-start`, or `turn-end` for a child session in the first place, so there is
+no ordering or payload-forwarding requirement for it to enforce. A user who
+drives a child session directly in the OpenCode TUI (rather than through the
+task tool) is fully suppressed the same way: it still carries `parentID`, so
+its lifecycle events never reach Entire and no session or task record is
+created for it. That is deliberate — Entire tracks the task tool's children,
+not arbitrary session nesting.
 
 ## Gaps & Limitations
 
+- **Unresolved-symlink paths on macOS**: when a child spells a path through an
+  unresolved symlink (e.g. `/var/folders/...` from `pwd`) while git's worktree
+  root is the realpath (`/private/var/...`), the shared path normalizer drops
+  the file from the task record's `files`; the parent's turn-end git status
+  still attributes it to the checkpoint. Agent-agnostic normalizer behaviour,
+  not fixed here.
 - **Background subagents** (`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`)
   return from `tool.execute.after` immediately with `metadata.background: true`
   and `state: "running"`; true completion is a later synthetic user part on the

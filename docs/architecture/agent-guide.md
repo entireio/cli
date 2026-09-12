@@ -59,7 +59,8 @@ Every agent must implement all 19 methods on the `Agent` interface:
 
 Not an interface — a field. On `SubagentEnd`, set `Event.SubagentTranscriptPath` when
 the agent's hook payload names the subagent's own transcript (Codex and Cursor both
-send `agent_transcript_path`). Leave it empty and the framework probes the layout
+send `agent_transcript_path`; OpenCode declares the `opencode export` cache path of
+the child). Leave it empty and the framework probes the layout
 Claude Code and Factory AI Droid share, which finds nothing for any other agent and
 fails silently — the task checkpoint simply stores no subagent transcript. See the
 field's doc comment in `cmd/entire/cli/agent/event.go`.
@@ -441,8 +442,8 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `after-agent` | `stop` | `turn-end` | `stop` | `agent-stop` |
 | `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compress` | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
 | `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
-| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) |
-| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) |
+| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | `subagent-start` (plugin: parent task part `running` with `metadata.sessionId`; `DeferredCompletion`) | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) |
+| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | *(not used)* | `subagent-stop` | `subagent-stop` (plugin: `tool.execute.after` for `task`; `Final` + `CompletionWithoutLaunch`, child exported and declared) | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) |
 
 ### Event Field Requirements
 
