@@ -19,17 +19,19 @@ var (
 )
 
 // ParseExportSession parses export JSON content into an ExportSession structure.
+// It accepts both the OpenCode 1 and OpenCode 2 export shapes, returning the
+// v1-normalized form the rest of the package consumes.
 func ParseExportSession(data []byte) (*ExportSession, error) {
 	if len(data) == 0 {
 		return nil, nil //nolint:nilnil // nil for empty data is expected
 	}
 
-	var session ExportSession
-	if err := json.Unmarshal(data, &session); err != nil {
+	session, err := NormalizeExportSession(data)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse export session: %w", err)
 	}
 
-	return &session, nil
+	return session, nil
 }
 
 // parseExportSessionFromFile reads a file and parses its contents as an ExportSession.

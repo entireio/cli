@@ -3,6 +3,7 @@ package opencode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/redact"
 
 	"github.com/charmbracelet/x/ansi"
@@ -29,14 +31,24 @@ type openCodeExportError struct {
 func (e *openCodeExportError) Error() string { return e.message }
 func (e *openCodeExportError) Unwrap() error { return e.cause }
 
-// runOpenCodeExportToFile runs `opencode export <sessionID>` and redirects stdout
-// to outputPath. This avoids pipe/stdout capture truncation bugs in some opencode versions.
+// openCodeExportInvocations lists the export subcommands across OpenCode
+// versions, newest first. OpenCode 2 moved export under `session`; OpenCode 1
+// exposes it at the top level.
+var openCodeExportInvocations = [][]string{
+	{"session", "export"},
+	{"export"},
+}
+
+// runOpenCodeExportToFile runs the OpenCode export command and redirects stdout
+// to outputName, trying each supported invocation until one produces valid
+// session JSON. This avoids pipe/stdout capture truncation bugs in some opencode
+// versions.
 //
 // outputName is relative to root, the shared .entire root, and must be a staging
-// name, never a live transcript: `opencode export` can fail after writing a
-// partial payload, and can exit 0 having written nothing at all. Callers own the
-// validate-then-install step — see fetchAndCacheExport, which is the only caller
-// and stages under .entire/tmp.
+// name, never a live transcript: the export can fail after writing a partial
+// payload, and a version that does not know a subcommand can exit 0 having
+// written only help text. Callers own the validate-then-install step — see
+// fetchAndCacheExport, which is the only caller and stages under .entire/tmp.
 //
 // opencode never sees the name: it inherits the already-opened file as stdout, so
 // the root's containment covers the whole write even though the payload is
@@ -46,10 +58,36 @@ func (e *openCodeExportError) Unwrap() error { return e.cause }
 // some filesystems can surface the rename as complete while the file is still
 // empty after a hard crash, which would destroy the transcript the staging exists
 // to protect. Same reasoning as jsonutil.WriteFileAtomic.
-func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outputName string) (retErr error) {
+func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outputName string) error {
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
+	var lastErr error
+	for _, invocation := range openCodeExportInvocations {
+		if err := writeOpenCodeExport(ctx, root, outputName, invocation, sessionID); err != nil {
+			lastErr = err
+			continue
+		}
+		data, err := entiredir.ReadFile(root, outputName)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read export file: %w", err)
+			continue
+		}
+		if openCodeExportLooksValid(data) {
+			return nil
+		}
+		lastErr = &openCodeExportError{
+			message: fmt.Sprintf("OpenCode returned invalid transcript data for session %q. Try updating OpenCode and running the command again.", sessionID),
+		}
+	}
+	if lastErr == nil {
+		lastErr = &openCodeExportError{message: "OpenCode export could not be started."}
+	}
+	return lastErr
+}
+
+// writeOpenCodeExport runs one export invocation, writing stdout to outputName.
+func writeOpenCodeExport(ctx context.Context, root *os.Root, outputName string, invocation []string, sessionID string) (retErr error) {
 	file, err := root.OpenFile(outputName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create export file: %w", err)
@@ -60,7 +98,8 @@ func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outp
 		}
 	}()
 
-	cmd := exec.CommandContext(ctx, "opencode", "export", sessionID)
+	args := append(append([]string{}, invocation...), sessionID)
+	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Stdout = file
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -73,6 +112,22 @@ func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outp
 	}
 
 	return nil
+}
+
+// openCodeExportLooksValid reports whether data is a session object rather than
+// an error or help page. Both export versions share the top-level shape.
+func openCodeExportLooksValid(data []byte) bool {
+	if !json.Valid(data) {
+		return false
+	}
+	var probe struct {
+		Info     *json.RawMessage `json:"info"`
+		Messages *json.RawMessage `json:"messages"`
+	}
+	if json.Unmarshal(data, &probe) != nil {
+		return false
+	}
+	return probe.Info != nil && probe.Messages != nil
 }
 
 func classifyOpenCodeExportError(ctx context.Context, err error, stderr, sessionID string) error {
@@ -169,20 +224,47 @@ func runOpenCodeSessionDelete(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// runOpenCodeImport runs `opencode import <file>` to import a session into
-// OpenCode's database. The import preserves the original session ID
-// from the export file.
+// openCodeImportInvocations lists the import subcommands across OpenCode
+// versions, newest first.
+var openCodeImportInvocations = [][]string{
+	{"session", "import"},
+	{"import"},
+}
+
+// runOpenCodeImport imports a session into OpenCode's database, trying each
+// supported invocation. The import preserves the original session ID from the
+// export file. A version that does not know a subcommand can exit 0 printing
+// help, so help output is treated as "try the next invocation".
 func runOpenCodeImport(ctx context.Context, exportFilePath string) error {
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "opencode", "import", exportFilePath)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	var lastErr error
+	for _, invocation := range openCodeImportInvocations {
+		args := append(append([]string{}, invocation...), exportFilePath)
+		cmd := exec.CommandContext(ctx, "opencode", args...)
+		output, err := cmd.CombinedOutput()
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("opencode import timed out after %s", openCodeCommandTimeout)
 		}
-		return fmt.Errorf("opencode import failed: %w (output: %s)", err, string(output))
+		if err == nil && !looksLikeOpenCodeHelp(output) {
+			return nil
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("opencode import failed: %w (output: %s)", err, string(output))
+		} else {
+			lastErr = fmt.Errorf("opencode import is not supported by this OpenCode version (output: %s)", string(output))
+		}
 	}
+	if lastErr == nil {
+		lastErr = errors.New("opencode import could not be started")
+	}
+	return lastErr
+}
 
-	return nil
+// looksLikeOpenCodeHelp reports whether output is a command help page. A version
+// that does not know a subcommand can exit 0 printing help instead of failing.
+func looksLikeOpenCodeHelp(output []byte) bool {
+	text := string(output)
+	return strings.Contains(text, "DESCRIPTION") && strings.Contains(text, "USAGE")
 }
