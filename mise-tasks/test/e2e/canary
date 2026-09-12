@@ -40,9 +40,9 @@ PATH="$E2E_PATH" E2E_AGENT=vogon gotestsum --format dots \
   ${filter:+-run "$filter"} \
   ./e2e/tests/... || vogon_rc=$?
 
-go run ./e2e/cmd/testreport -color \
+go run ./e2e/cmd/testreport -fail-on-empty -color \
   -o "$E2E_ARTIFACT_DIR/report-vogon.txt" \
-  "$E2E_ARTIFACT_DIR/test-events-vogon.json"
+  "$E2E_ARTIFACT_DIR/test-events-vogon.json" || vogon_rc=1
 
 # --- roger-roger: external agent tests only (binaries from mise) ---
 echo "--- canary: roger-roger ---"
@@ -65,12 +65,12 @@ E2E_AGENT=roger-roger gotestsum --format dots \
   -run "$rr_filter" \
   ./e2e/tests/... || rr_rc=$?
 
-go run ./e2e/cmd/testreport -color \
+go run ./e2e/cmd/testreport -fail-on-empty -color \
   -o "$E2E_ARTIFACT_DIR/report-roger-roger.txt" \
-  "$E2E_ARTIFACT_DIR/test-events-roger-roger.json"
+  "$E2E_ARTIFACT_DIR/test-events-roger-roger.json" || rr_rc=1
 
 echo ""
-cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
+cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null || true
 echo "artifacts: $E2E_ARTIFACT_DIR"
 if [ "$vogon_rc" -ne 0 ] || [ "$rr_rc" -ne 0 ]; then
   exit 1

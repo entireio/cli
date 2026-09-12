@@ -26,6 +26,7 @@ mkdir -p "$E2E_ARTIFACT_DIR"
 echo "artifacts: $E2E_ARTIFACT_DIR"
 
 filter="${usage_filter:-}"
+rc=0
 
 # Use an explicit package path without the "..." wildcard. The wildcard
 # triggers a Go toolchain panic on Windows ARM64 in modload/search.go
@@ -44,8 +45,12 @@ gotestsum --format dots --rerun-fails=1 --packages=./e2e/tests \
   -tags=e2e -count=1 -timeout=30m \
   ${filter:+-run "$filter"} || rc=$?
 
-go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
+report_rc=0
+go run ./e2e/cmd/testreport -fail-on-empty -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json" || report_rc=$?
 echo ""
-cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
+cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null || true
 echo "artifacts: $E2E_ARTIFACT_DIR"
-exit "${rc:-0}"
+if [ "$rc" -ne 0 ]; then
+  exit "$rc"
+fi
+exit "$report_rc"
