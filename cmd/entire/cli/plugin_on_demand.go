@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/spf13/cobra"
@@ -38,12 +39,8 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 		// Reinstalling automatically would be the other option, and it is
 		// deliberately not taken: replacing a developer's deliberate symlink
 		// with a released binary is their call to make, not ours.
-		if reinstallFixes, cerr := checkManagedPluginRunnable(installed.Path); cerr != nil {
-			broken := fmt.Errorf("the entire-%s plugin is installed at %s but cannot be run: %w", name, installed.Path, cerr)
-			if !reinstallFixes {
-				return "", broken
-			}
-			return "", fmt.Errorf("%w; reinstall it with 'entire plugin install %s --force'", broken, name)
+		if err := managedEntryUnrunnable(name, installed.Path); err != nil {
+			return "", err
 		}
 		return installed.Path, nil
 	}
@@ -128,6 +125,27 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 	return installed.Path, nil
 }
 
+// managedEntryUnrunnable wraps checkManagedPluginRunnable's verdict for a
+// managed bin/ entry into the user-facing error, attaching the reinstall
+// remedy only when a reinstall repairs the condition. Nil when it runs.
+func managedEntryUnrunnable(name, path string) error {
+	reinstallFixes, err := checkManagedPluginRunnable(path)
+	if err == nil {
+		return nil
+	}
+	broken := fmt.Errorf("the entire-%s plugin is installed at %s but cannot be run: %w", name, path, err)
+	if !reinstallFixes {
+		return broken
+	}
+	return fmt.Errorf("%w; reinstall it with 'entire plugin install %s --force'", broken, name)
+}
+
+// isManagedBinEntry reports whether path sits directly in the managed bin dir.
+func isManagedBinEntry(path string) bool {
+	binDir, err := PluginBinDir()
+	return err == nil && pathEntriesEqual(filepath.Dir(path), binDir)
+}
+
 // checkManagedPluginRunnable reports why a managed plugin entry cannot be
 // executed, or a nil error when it can. reinstallFixes is true only for a
 // condition a reinstall actually repairs, so the caller does not attach that
@@ -142,6 +160,9 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 // brought this function into being. The executable bit is left to the exec —
 // findInaccessiblePlugin draws the same line for PATH entries, and the mode
 // does not mean the same thing on Windows.
+//
+// An unfollowable symlink (the entry earlier Windows builds left behind, see
+// plugin_store_windows.go) and an empty file are both repaired by a reinstall.
 func checkManagedPluginRunnable(path string) (reinstallFixes bool, err error) {
 	info, statErr := os.Stat(path)
 	if statErr != nil {
@@ -151,10 +172,16 @@ func checkManagedPluginRunnable(path string) (reinstallFixes bool, err error) {
 			// exists; what is missing is whatever it points at.
 			return true, errors.New("it points at a file that no longer exists")
 		}
+		if linkInfo, lerr := os.Lstat(path); lerr == nil && linkInfo.Mode()&os.ModeSymlink != 0 {
+			return true, fmt.Errorf("it is a symlink whose target cannot be followed: %w", statErr)
+		}
 		return false, statErr //nolint:wrapcheck // the caller adds the plugin name and path
 	}
 	if info.IsDir() {
 		return true, errors.New("it is a directory")
+	}
+	if info.Mode().IsRegular() && info.Size() == 0 {
+		return true, errors.New("it is an empty file")
 	}
 	return false, nil
 }

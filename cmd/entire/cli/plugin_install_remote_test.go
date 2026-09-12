@@ -113,7 +113,6 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	if got := installedPayload(t); got != "payload-0.2.0" {
 		t.Errorf("installed payload = %q, want payload-0.2.0", got)
 	}
-
 	// Second install without --force refuses.
 	if _, err := InstallPluginFromRepo(ctx, repoURL, "", RemoteInstallOptions{}); err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Errorf("reinstall without force = %v, want already-installed error", err)
@@ -138,6 +137,36 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	}
 	if got := installedPayload(t); got != "payload-0.3.0" {
 		t.Errorf("post-upgrade payload = %q, want payload-0.3.0", got)
+	}
+}
+
+// The bin/ entry is what the dispatcher execs: it must hash to the recorded
+// binary and, on Windows, must not be a symlink (see plugin_store_windows.go).
+// Named for CI's Windows job, which runs only -run '(Windows|MSYS)'.
+func TestInstallPluginFromRepo_WindowsBinEntryMatchesManifest(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	repoURL, _ := newDemoPluginRepo(t, []string{remoteTestTagOld}, "0.1.0")
+	res, err := InstallPluginFromRepo(context.Background(), repoURL, "", RemoteInstallOptions{})
+	if err != nil {
+		t.Fatalf("InstallPluginFromRepo: %v", err)
+	}
+	if entryDigest, err := fileSHA256(res.Installed.Path); err != nil {
+		t.Errorf("hash bin entry: %v", err)
+	} else if entryDigest != res.Manifest.BinarySHA256 {
+		t.Errorf("bin entry hashes to %s, manifest binary_sha256 is %s", entryDigest, res.Manifest.BinarySHA256)
+	}
+	if runtime.GOOS != windowsGOOS {
+		return
+	}
+	info, err := os.Lstat(res.Installed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Size() == 0 {
+		t.Errorf("Windows bin entry is mode %v size %d; want a non-empty regular file", info.Mode(), info.Size())
+	}
+	if issues, err := RunPluginDoctor(context.Background()); err != nil || len(issues) != 0 {
+		t.Errorf("doctor on a fresh install: issues=%+v err=%v", issues, err)
 	}
 }
 
