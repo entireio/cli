@@ -247,6 +247,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	// Where checkpoint data syncs (the single elected remote), and how many
 	// checkpoints have not reached it yet. Local-only computation.
 	if s.Enabled {
+		writeHookDeliveryLine(ctx, &b, sty)
 		writeCheckpointSyncLines(ctx, &b, s, sty)
 	}
 
@@ -560,6 +561,26 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 		return 0
 	}
 	return n
+}
+
+// writeHookDeliveryLine reports whether Entire's hooks will fire.
+//
+// Without it status named a checkpoint destination while no hook existed to
+// reach it, which is issue #2264. The destination line below is still shown —
+// it is true, and status is the only place it appears — but this line above it
+// removes the claim that delivery is working.
+func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusStyles) {
+	delivery := strategy.CheckHookDelivery(ctx)
+	b.WriteString("\n")
+	switch {
+	case delivery.OK && delivery.Manager != "":
+		b.WriteString(sty.render(sty.dim, "  Git hooks · via "+delivery.Manager))
+	case delivery.OK:
+		b.WriteString(sty.render(sty.dim, "  Git hooks · installed"))
+	default:
+		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints are NOT being captured: "+delivery.Reason))
+		b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
+	}
 }
 
 // writeCheckpointSyncLines reports the checkpoint sync destination (and the
@@ -1060,6 +1081,16 @@ type statusJSON struct {
 	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
+	// HooksDeliver reports whether Entire's Git hooks will actually fire, and
+	// HooksManager names the hook manager that owns the files when one does.
+	// Without these, status could report a destination while nothing would
+	// reach it (#2264).
+	HooksDeliver       bool   `json:"hooks_deliver"`
+	HooksManager       string `json:"hooks_manager,omitempty"`
+	HooksDeliverReason string `json:"hooks_deliver_reason,omitempty"`
+	// HooksLefthookDeclined names a Lefthook local config Entire will not
+	// write to, which is why Lefthook is not the one delivering.
+	HooksLefthookDeclined string `json:"hooks_lefthook_declined,omitempty"`
 	// CheckpointReadSourceUnknown reports that the read-source probe failed,
 	// so no read source could be determined. Emitted only alongside
 	// checkpoint_push_disabled, and checkpoint_sync_remote is then absent
@@ -1167,6 +1198,11 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncRemote = syncInfo.Remote
 		result.CheckpointSyncRemoteSource = syncInfo.Source
 		result.CheckpointSyncError = syncInfo.Err
+		delivery := strategy.CheckHookDelivery(ctx)
+		result.HooksDeliver = delivery.OK
+		result.HooksManager = delivery.Manager
+		result.HooksDeliverReason = delivery.Reason
+		result.HooksLefthookDeclined = delivery.Declined
 		result.CheckpointReadFallback = syncInfo.ReadFallback
 		result.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
 		result.UnpushedCheckpoints = syncInfo.Unpushed

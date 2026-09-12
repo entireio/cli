@@ -78,7 +78,7 @@ jobs:
 
   test-windows:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,9 +86,19 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # Lefthook owns .git/hooks/* and runs Entire's hooks as `scripts` with a
+      # bash runner, which is the one part of that integration Windows can
+      # break. Installing the real binary is what makes
+      # TestLefthookDeliversEntireOnWindows a test rather than a skip;
+      # ENTIRE_TEST_REQUIRE_LEFTHOOK turns a failed install into a failure
+      # instead of a silent pass.
+      - name: Install lefthook
+        run: go install github.com/evilmartians/lefthook/v2@v2.1.10
       # Real-Windows tests must include Windows or MSYS in their top-level
       # test name so this job selects them without running POSIX-only harnesses.
       - name: Windows unit tests
+        env:
+          ENTIRE_TEST_REQUIRE_LEFTHOOK: "1"
         run: go test ./cmd/entire/cli/... -run '(Windows|MSYS)' -count=1 -v
 
   test:

@@ -234,18 +234,18 @@ func TestPathIsVersioned_MemoizesWithinProcess(t *testing.T) {
 	root, _, local := newOPFRepo(t)
 	writeSettingsFile(t, local, localOPFSettings(attackerCommand))
 
-	first, err := localSettingsIsVersioned(t.Context(), local, true)
+	first, err := pathIsVersioned(t.Context(), filepath.Dir(filepath.Dir(local)), EntireSettingsLocalFile, true)
 	require.NoError(t, err)
 	require.False(t, first, "file is untracked to begin with")
 
 	testutil.RunGit(t, root, "add", "-f", EntireSettingsLocalFile)
 
-	second, err := localSettingsIsVersioned(t.Context(), local, true)
+	second, err := pathIsVersioned(t.Context(), filepath.Dir(filepath.Dir(local)), EntireSettingsLocalFile, true)
 	require.NoError(t, err)
 	assert.False(t, second, "result is cached for the process lifetime")
 
 	ClearVersionedPathCache()
-	third, err := localSettingsIsVersioned(t.Context(), local, true)
+	third, err := pathIsVersioned(t.Context(), filepath.Dir(filepath.Dir(local)), EntireSettingsLocalFile, true)
 	require.NoError(t, err)
 	assert.True(t, third, "the reset seam must drop the cached verdict")
 }
@@ -263,7 +263,7 @@ func TestPathIsVersioned_NoGitBinaryRequired(t *testing.T) {
 
 	t.Setenv("PATH", "")
 
-	versioned, err := probeLocalSettingsIsVersioned(t.Context(), local, true)
+	versioned, err := probePathIsVersioned(t.Context(), filepath.Dir(filepath.Dir(local)), EntireSettingsLocalFile, true)
 	require.NoError(t, err, "probe must not depend on the git binary")
 	assert.True(t, versioned, "committed file must still be detected")
 }
@@ -284,12 +284,12 @@ func TestPathIsVersioned_LinkedWorktreeUsesOwnIndex(t *testing.T) {
 	local := filepath.Join(wt, EntireSettingsLocalFile)
 	require.NoError(t, os.WriteFile(local, []byte(localOPFSettings(trustedCommand)), 0o644))
 
-	versioned, err := probeLocalSettingsIsVersioned(t.Context(), local, true)
+	versioned, err := probePathIsVersioned(t.Context(), filepath.Dir(filepath.Dir(local)), EntireSettingsLocalFile, true)
 	require.NoError(t, err)
 	assert.False(t, versioned, "untracked in the linked worktree")
 
 	testutil.RunGit(t, wt, "add", "-f", EntireSettingsLocalFile)
-	versioned, err = probeLocalSettingsIsVersioned(t.Context(), local, true)
+	versioned, err = probePathIsVersioned(t.Context(), filepath.Dir(filepath.Dir(local)), EntireSettingsLocalFile, true)
 	require.NoError(t, err)
 	assert.True(t, versioned, "must read the linked worktree's own index")
 }
@@ -316,7 +316,7 @@ func TestPathIsVersioned_ReftableRepo(t *testing.T) {
 	testutil.RunGit(t, root, "commit", "-m", "carry")
 	testutil.RunGit(t, root, "rm", "--cached", EntireSettingsLocalFile)
 
-	versioned, err := probeLocalSettingsIsVersioned(t.Context(), local, true)
+	versioned, err := probePathIsVersioned(t.Context(), filepath.Dir(filepath.Dir(local)), EntireSettingsLocalFile, true)
 	require.NoError(t, err, "reftable repo must be verifiable")
 	assert.True(t, versioned, "HEAD lookup must work on reftable")
 }
@@ -528,8 +528,7 @@ func TestPathIsVersioned_DecoySiblingDoesNotMaskRealEntry(t *testing.T) {
 			commitIndexAndClear(t, root, tc.decoy, EntireSettingsLocalFile)
 
 			ClearVersionedPathCache()
-			got, err := probeLocalSettingsIsVersioned(
-				t.Context(), filepath.Join(root, EntireSettingsLocalFile), true)
+			got, err := probePathIsVersioned(t.Context(), root, EntireSettingsLocalFile, true)
 			require.NoError(t, err)
 			assert.True(t, got, "the real entry must be found past the earlier-sorting decoy")
 		})
@@ -554,8 +553,7 @@ func TestPathIsVersioned_Win32TrailingCharVariantsAreTracked(t *testing.T) {
 			stageBlobAt(t, root, variant)
 
 			ClearVersionedPathCache()
-			got, err := probeLocalSettingsIsVersioned(
-				t.Context(), filepath.Join(root, EntireSettingsLocalFile), false)
+			got, err := probePathIsVersioned(t.Context(), root, EntireSettingsLocalFile, false)
 			require.NoError(t, err)
 			assert.True(t, got, "a Win32-equivalent committed name must count as tracked")
 		})
