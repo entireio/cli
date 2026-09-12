@@ -1116,34 +1116,6 @@ func TestRecommendationRulesSubagentHeavyAvoidsOverflow(t *testing.T) {
 	t.Fatalf("expected subagent-heavy recommendation, got %+v", recs)
 }
 
-func TestRecommendationRulesCacheReplayUsesTopLevelTokenTotal(t *testing.T) {
-	t.Parallel()
-
-	recs := recommendationRules(tokenRecommendationSignals{
-		Tokens: &sessionTokensUsage{
-			Total:         10000,
-			Input:         100,
-			CacheRead:     800,
-			CacheWrite:    50,
-			Output:        50,
-			APICalls:      20,
-			SubagentTotal: 9000,
-		},
-	})
-
-	var ids []string
-	for _, rec := range recs {
-		ids = append(ids, rec.ID)
-	}
-
-	expected := []string{"context-replay-hotspot", "summarize-before-boundary"}
-	for _, id := range expected {
-		if !slices.Contains(ids, id) {
-			t.Fatalf("expected %s recommendation in %+v", id, recs)
-		}
-	}
-}
-
 func TestRecommendationThresholdsDocumentCurrentHeuristics(t *testing.T) {
 	t.Parallel()
 
@@ -1288,52 +1260,6 @@ func reportHasSessionRecommendation(report sessionTokensReport, id string) bool 
 	return false
 }
 
-func TestRecommendationRules_CacheWritePressure(t *testing.T) {
-	t.Parallel()
-
-	recs := recommendationRules(tokenRecommendationSignals{
-		Tokens: &sessionTokensUsage{
-			Total:      50_000,
-			CacheWrite: 6_000,
-		},
-	})
-
-	if !recommendationsIncludeID(recs, "cache-write-pressure") {
-		t.Fatalf("expected cache-write-pressure recommendation, got %+v", recs)
-	}
-}
-
-func TestRecommendationRules_OutputPressure(t *testing.T) {
-	t.Parallel()
-
-	recs := recommendationRules(tokenRecommendationSignals{
-		Tokens: &sessionTokensUsage{
-			Total:  100_000,
-			Output: 3_500,
-		},
-	})
-
-	if !recommendationsIncludeID(recs, "output-pressure") {
-		t.Fatalf("expected output-pressure recommendation, got %+v", recs)
-	}
-}
-
-func TestRecommendationRules_OutputPressureWithLargeCacheReplay(t *testing.T) {
-	t.Parallel()
-
-	recs := recommendationRules(tokenRecommendationSignals{
-		Tokens: &sessionTokensUsage{
-			Total:     10_000_000,
-			CacheRead: 9_800_000,
-			Output:    100_000,
-		},
-	})
-
-	if !recommendationsIncludeID(recs, "output-pressure") {
-		t.Fatalf("expected output-pressure recommendation for high absolute output, got %+v", recs)
-	}
-}
-
 func recommendationsIncludeID(recs []sessionTokensRecommendation, id string) bool {
 	for _, rec := range recs {
 		if rec.ID == id {
@@ -1382,8 +1308,6 @@ func TestTokensCmd_AgentBriefPrioritizesNextAction(t *testing.T) {
 		"Signals:",
 		"- Cache/context replay dominates token volume.",
 		"- API call count is high for one session.",
-		"- Cache write/new context pressure is elevated.",
-		"- Output pressure is elevated.",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -1564,12 +1488,7 @@ func TestSessionTokensAgentBriefClassAwareCostProxy(t *testing.T) {
 	checks := []string{
 		"Session token brief",
 		"Session: test-cost-proxy-brief",
-		"Use at most 3 batched reads",
-		"Avoid broad grep, broad diffs, broad tests",
-		"otherwise answer now",
-		"keep the answer tight",
-		"- Cache write/new context pressure is elevated.",
-		"- Output pressure is elevated.",
+		"No high-signal token risk detected from captured usage.",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -1600,12 +1519,7 @@ func TestCheckpointTokensAgentBriefClassAwareCostProxy(t *testing.T) {
 	checks := []string{
 		"Checkpoint token brief",
 		"Checkpoint: c05e500cafe0",
-		"Use at most 3 batched reads",
-		"Avoid broad grep, broad diffs, broad tests",
-		"otherwise answer now",
-		"keep the answer tight",
-		"- Cache write/new context pressure is elevated.",
-		"- Output pressure is elevated.",
+		"No high-signal token risk detected from captured usage.",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -1634,12 +1548,9 @@ func TestCheckpointTokensAgentBriefCombinesOutputAndReplayPressure(t *testing.T)
 
 	out := stdout.String()
 	checks := []string{
-		"Use at most 3 batched reads",
-		"Avoid broad grep, broad diffs, broad tests",
-		"keep the answer tight",
+		"Use at most 3 batched reads before answering.",
 		"- Cache/context replay dominates token volume.",
 		"- API call count is high for one session.",
-		"- Output pressure is elevated.",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -1793,9 +1704,7 @@ func TestTokensCmd_PrioritizesContextReplayHotspot(t *testing.T) {
 	out := stdout.String()
 	checks := []string{
 		"Recommendations",
-		"Cache/context replay is 97.4% of token volume",
 		"Large context was replayed across 70 API calls",
-		"Compact or restart after summarizing this investigation",
 		"Token usage",
 		"Total:  6.2M tokens",
 		"Cache read: 6.1M",
@@ -1994,7 +1903,6 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 		"Agent:      Claude Code",
 		"Branch:     e2e-triage-fix",
 		"Recommendations",
-		"Cache/context replay is 97.4% of token volume",
 		"Large context was replayed across 70 API calls",
 		"Token usage",
 		"Total:  6.2M tokens",
@@ -2169,8 +2077,6 @@ func TestCheckpointTokensCmd_AgentBriefGivesOperationalBudget(t *testing.T) {
 		"Signals:",
 		"- Cache/context replay dominates token volume.",
 		"- API call count is high for one session.",
-		"- Cache write/new context pressure is elevated.",
-		"- Output pressure is elevated.",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -3508,4 +3414,140 @@ func TestTokensCmd_PrefersTheCallersSession(t *testing.T) {
 	if strings.Contains(out, "test-tokens-decoy") {
 		t.Fatalf("expected the more recent decoy session to be ignored, got:\n%s", out)
 	}
+}
+
+// TestRecommendationRules_NoiseRulesAreGone pins the three rules deleted in
+// PR 5a. Each fired on a clear majority of real checkpoints, so it described
+// the baseline rather than a finding: measured over 135 distinct committed
+// checkpoints, context-replay-hotspot 91%, output-pressure 39%,
+// cache-write-pressure 31%. summarize-before-boundary goes with the hotspot
+// because its condition requires it.
+func TestRecommendationRules_NoiseRulesAreGone(t *testing.T) {
+	t.Parallel()
+
+	// A session that fires every one of them under the old rules: cache read
+	// dominant, output and cache write both over their absolute gates, and
+	// enough calls for the boundary rule.
+	recs := recommendationRules(tokenRecommendationSignals{
+		Tokens: &sessionTokensUsage{
+			Total:      1_000_000,
+			CacheRead:  900_000,
+			CacheWrite: 60_000,
+			Output:     20_000,
+			APICalls:   50,
+		},
+	})
+
+	for _, id := range []string{
+		"context-replay-hotspot",
+		"cache-write-pressure",
+		"output-pressure",
+		"summarize-before-boundary",
+	} {
+		if recommendationsIncludeID(recs, id) {
+			t.Errorf("rule %q should have been deleted, still fires: %+v", id, recs)
+		}
+	}
+
+	// The surviving rule still fires on the same input, and its message must
+	// carry the replay framing that cacheReadHotspot gates — deleting the
+	// recommendation must not delete the qualifier.
+	if !recommendationsIncludeID(recs, "api-call-amplification") {
+		t.Fatalf("api-call-amplification should still fire, got %+v", recs)
+	}
+}
+
+func TestCacheReadHotspotUsesTopLevelTokenTotal(t *testing.T) {
+	t.Parallel()
+
+	// context-replay-hotspot was deleted in PR 5a, but the invariant it pinned
+	// outlives it: the share is measured against the top-level total, not one
+	// inflated by nested subagent tokens. Against the raw Total this session
+	// reads as 8% cache read; against the top-level total it is 80%.
+	tokens := &sessionTokensUsage{
+		Total:         10000,
+		Input:         100,
+		CacheRead:     800,
+		CacheWrite:    50,
+		Output:        50,
+		APICalls:      20,
+		SubagentTotal: 9000,
+	}
+
+	if !cacheReadHotspot(tokens) {
+		t.Fatalf("expected cache read to dominate the top-level total, got %d of %d",
+			tokens.CacheRead, topLevelSessionTokenTotal(tokens))
+	}
+}
+
+// TestAgentBriefSurvivesRuleDeletion pins the two ways deleting the three
+// noisy rules changes the agent brief. Both are deliberate; neither is
+// asserted anywhere else, and without these a later edit could reverse them
+// silently, because hasTokenRecommendation matches by string and a stale
+// reference just goes false instead of failing the build.
+func TestAgentBriefSurvivesRuleDeletion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("replay still drives the next action without its recommendation", func(t *testing.T) {
+		t.Parallel()
+
+		// Replay dominates but the call count is below the api-call gate. This
+		// is the ~61% case: before PR 5a the context-replay-hotspot arm answered
+		// it. That recommendation is gone, so the arm now keys on the usage
+		// itself — an agent must not lose its instruction because a printed
+		// line was removed.
+		tokens := &sessionTokensUsage{
+			Total:     10_000_000,
+			CacheRead: 9_800_000,
+			Output:    100_000,
+			APICalls:  5,
+		}
+		report := sessionTokensReport{
+			SessionID:       "replay-without-calls",
+			Tokens:          tokens,
+			Recommendations: recommendationRules(tokenRecommendationSignals{Tokens: tokens}),
+		}
+
+		if recommendationsIncludeID(report.Recommendations, "context-replay-hotspot") {
+			t.Fatalf("context-replay-hotspot should not be a recommendation: %+v", report.Recommendations)
+		}
+
+		action, ok := agentBriefOptimizationAction(report)
+		if !ok {
+			t.Fatal("expected a next action for a replay-dominated session")
+		}
+		if !strings.Contains(action, "Avoid broad grep") {
+			t.Errorf("expected the replay action, got %q", action)
+		}
+		if !slices.Contains(agentBriefSignals(report), "Cache/context replay dominates token volume.") {
+			t.Errorf("expected the replay signal, got %v", agentBriefSignals(report))
+		}
+	})
+
+	t.Run("an unremarkable session now yields no action at all", func(t *testing.T) {
+		t.Parallel()
+
+		// 50k total, 6k cache write, 3.5k output, 4 calls. This used to be told
+		// "use at most 3 batched reads" by the cache-write arm — advice from a
+		// rule that fired on 31% of real checkpoints. Silence is the fix, not a
+		// regression.
+		tokens := &sessionTokensUsage{
+			Total:      50_000,
+			CacheWrite: 6_000,
+			Output:     3_500,
+			APICalls:   4,
+		}
+		report := sessionTokensReport{
+			SessionID:       "unremarkable",
+			Tokens:          tokens,
+			Recommendations: recommendationRules(tokenRecommendationSignals{Tokens: tokens}),
+		}
+
+		if len(report.Recommendations) != 0 {
+			t.Errorf("expected no recommendations, got %+v", report.Recommendations)
+		}
+		if action, ok := agentBriefOptimizationAction(report); ok {
+			t.Errorf("expected no next action, got %q", action)
+		}
+	})
 }

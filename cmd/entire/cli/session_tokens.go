@@ -231,7 +231,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 	} else {
 		report.Limitations = append(report.Limitations, "No token usage recorded for this session.")
 		report.Recommendations = append(report.Recommendations, sessionTokensRecommendation{
-			ID:       "no-token-data",
+			ID:       recNoTokenData,
 			Severity: "low",
 			Message:  "Token usage is unavailable for this session; the agent may not expose token data yet, or no checkpoint has captured it.",
 			Signals:  []string{"missing_token_usage"},
@@ -436,32 +436,45 @@ func roundedPercent(value, total int) int {
 	return int(quotient)
 }
 
+// Recommendation IDs. These are matched by string in several places
+// (the agent brief, its signal list, tests), so a deletion compiles clean and
+// every stale reference silently goes false. Naming them makes the next
+// deletion a build failure instead.
+const (
+	recAPICallAmplification = "api-call-amplification"
+	recSubagentHeavy        = "subagent-heavy"
+	recHighContextPressure  = "high-context-pressure"
+	recLongSession          = "long-session"
+	recNoTokenData          = "no-token-data"
+)
+
+// cacheReadHotspot reports whether replayed context dominates this session.
+//
+// It is deliberately NOT a recommendation. Measured over 135 distinct
+// committed checkpoints it was true of 91%, and the spec's own calibration
+// says why: cache read is the largest class in ~90% of sessions, so on its own
+// it describes the baseline rather than a finding. It survives as a qualifier
+// because two things still need it — the API-call message, which asserts
+// replay, and the agent brief's next action, which must not change just
+// because a printed recommendation was removed.
+func cacheReadHotspot(tokens *sessionTokensUsage) bool {
+	if tokens == nil || tokens.CacheRead <= 0 {
+		return false
+	}
+	return tokenPercent(tokens.CacheRead, topLevelSessionTokenTotal(tokens)) >= recommendationHighCacheReadPercent
+}
+
 func recommendationRules(signals tokenRecommendationSignals) []sessionTokensRecommendation {
 	var recs []sessionTokensRecommendation
 
-	cacheReadHotspot := false
-	if signals.Tokens != nil && signals.Tokens.CacheRead > 0 {
-		cacheReadPercent := tokenPercent(signals.Tokens.CacheRead, topLevelSessionTokenTotal(signals.Tokens))
-		if cacheReadPercent >= recommendationHighCacheReadPercent {
-			cacheReadHotspot = true
-			recs = append(recs, sessionTokensRecommendation{
-				ID:       "context-replay-hotspot",
-				Severity: "high",
-				Message: fmt.Sprintf(
-					"Cache/context replay is %s of token volume; reduce unnecessary follow-up calls in this large-context session.",
-					formatPercent(cacheReadPercent),
-				),
-				Signals: []string{"cache_read_tokens"},
-			})
-		}
-	}
+	hotspot := cacheReadHotspot(signals.Tokens)
 	if signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
 		message := fmt.Sprintf("API call count is high for one session: %d calls. Batch the next diagnosis and reduce iterative calls.", signals.Tokens.APICalls)
-		if cacheReadHotspot {
+		if hotspot {
 			message = fmt.Sprintf("Large context was replayed across %d API calls; batch the next diagnosis and reduce iterative tool calls.", signals.Tokens.APICalls)
 		}
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "api-call-amplification",
+			ID:       recAPICallAmplification,
 			Severity: "medium",
 			Message:  message,
 			Signals:  []string{"api_call_count"},
@@ -469,49 +482,23 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 	}
 	if signals.Tokens != nil && tokenShareAtLeastOneTenth(signals.Tokens.SubagentTotal, signals.Tokens.Total) {
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "subagent-heavy",
+			ID:       recSubagentHeavy,
 			Severity: "medium",
 			Message:  "Scope subagent tasks tightly; give each subagent a narrow objective and expected output.",
 			Signals:  []string{"subagent_tokens"},
 		})
 	}
-	if signals.Tokens != nil && signals.Tokens.Total > 0 &&
-		tokenClassPressure(signals.Tokens.CacheWrite, signals.Tokens.Total, 5000, 10, 50_000) {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "cache-write-pressure",
-			Severity: "medium",
-			Message:  "Cache write is elevated; avoid broad new context and narrow the next read before continuing.",
-			Signals:  []string{"cache_write_tokens"},
-		})
-	}
-	if signals.Tokens != nil && signals.Tokens.Total > 0 &&
-		tokenClassPressure(signals.Tokens.Output, signals.Tokens.Total, 3000, 2, 10_000) {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "output-pressure",
-			Severity: "medium",
-			Message:  "Output tokens are elevated; keep the next answer tight and avoid restating evidence.",
-			Signals:  []string{"output_tokens"},
-		})
-	}
 	if signals.Context != nil && signals.Context.Percent >= recommendationHighContextPercent {
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "high-context-pressure",
+			ID:       recHighContextPressure,
 			Severity: "medium",
 			Message:  fmt.Sprintf("Context pressure is %d%% of the window; preserve only relevant context before continuing.", signals.Context.Percent),
 			Signals:  []string{"context_tokens"},
 		})
 	}
-	if cacheReadHotspot && signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "summarize-before-boundary",
-			Severity: "low",
-			Message:  "Compact or restart after summarizing this investigation; do not discard useful findings just because cache read is high.",
-			Signals:  []string{"cache_read_tokens", "api_call_count"},
-		})
-	}
 	if signals.TurnCount >= recommendationLongSessionTurns || signals.CheckpointCount >= recommendationLongSessionCheckpoints {
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "long-session",
+			ID:       recLongSession,
 			Severity: "low",
 			Message:  "Compact or restart after summarizing the useful findings if older context is no longer needed.",
 			Signals:  []string{"turn_count", "checkpoint_count"},
@@ -526,16 +513,6 @@ func tokenShareAtLeastOneTenth(part, total int) bool {
 		return false
 	}
 	return part >= (total-1)/recommendationSubagentShareDenominator+1
-}
-
-func tokenClassPressure(value, total, minTokens int, minPercent float64, highTokens int) bool {
-	if value <= 0 || total <= 0 {
-		return false
-	}
-	if value >= highTokens {
-		return true
-	}
-	return value >= minTokens && tokenPercent(value, total) >= minPercent
 }
 
 func tokenPercent(value, total int) float64 {
@@ -646,7 +623,7 @@ func formatAPICalls(count int) string {
 }
 
 func agentBriefNextAction(report sessionTokensReport) string {
-	if hasTokenRecommendation(report, "no-token-data") {
+	if hasTokenRecommendation(report, recNoTokenData) {
 		return "Token usage is not available yet. Use this as a context check, not a spend diagnosis; continue after the next checkpoint captures usage."
 	}
 	if action, ok := agentBriefOptimizationAction(report); ok {
@@ -656,27 +633,21 @@ func agentBriefNextAction(report sessionTokensReport) string {
 }
 
 func agentBriefOptimizationAction(report sessionTokensReport) (string, bool) {
+	// The replay arm keys on the usage itself, not on a recommendation. PR 5a
+	// stopped printing context-replay-hotspot because it fired on 91% of real
+	// checkpoints, but the brief returns exactly one next action and always
+	// returned something here; letting a recommendation deletion silently
+	// change the agent's instruction is the coupling Decision 7 rejects.
 	switch {
-	case (hasTokenRecommendation(report, "cache-write-pressure") || hasTokenRecommendation(report, "output-pressure")) &&
-		(hasTokenRecommendation(report, "context-replay-hotspot") || hasTokenRecommendation(report, "api-call-amplification")):
+	case hasTokenRecommendation(report, recAPICallAmplification):
 		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "cache-write-pressure") && hasTokenRecommendation(report, "output-pressure"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "cache-write-pressure"):
-		return "Use at most 3 batched reads and avoid broad new context until you have one narrowed hypothesis.", true
-	case hasTokenRecommendation(report, "output-pressure"):
-		return "Keep the next answer tight; cite only necessary evidence and avoid restating prior context.", true
-	case hasTokenRecommendation(report, "context-replay-hotspot") && hasTokenRecommendation(report, "api-call-amplification"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "api-call-amplification"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "context-replay-hotspot"):
+	case cacheReadHotspot(report.Tokens):
 		return "Use at most 2 focused reads only if a named file or test can change the answer; otherwise answer now. Avoid broad grep, broad diffs, and broad tests.", true
-	case hasTokenRecommendation(report, "subagent-heavy"):
+	case hasTokenRecommendation(report, recSubagentHeavy):
 		return "Do not launch broad subagents. Use one narrowly scoped check with a concrete expected output.", true
-	case hasTokenRecommendation(report, "high-context-pressure"):
+	case hasTokenRecommendation(report, recHighContextPressure):
 		return "Preserve useful findings, then answer with at most 2 focused reads if more evidence is required.", true
-	case hasTokenRecommendation(report, "long-session"):
+	case hasTokenRecommendation(report, recLongSession):
 		return "Summarize useful findings and stop unless one focused read can change the answer.", true
 	default:
 		return "", false
@@ -685,25 +656,19 @@ func agentBriefOptimizationAction(report sessionTokensReport) (string, bool) {
 
 func agentBriefSignals(report sessionTokensReport) []string {
 	var signals []string
-	if hasTokenRecommendation(report, "context-replay-hotspot") {
+	if cacheReadHotspot(report.Tokens) {
 		signals = append(signals, "Cache/context replay dominates token volume.")
 	}
-	if hasTokenRecommendation(report, "api-call-amplification") {
+	if hasTokenRecommendation(report, recAPICallAmplification) {
 		signals = append(signals, "API call count is high for one session.")
 	}
-	if hasTokenRecommendation(report, "cache-write-pressure") {
-		signals = append(signals, "Cache write/new context pressure is elevated.")
-	}
-	if hasTokenRecommendation(report, "output-pressure") {
-		signals = append(signals, "Output pressure is elevated.")
-	}
-	if hasTokenRecommendation(report, "subagent-heavy") {
+	if hasTokenRecommendation(report, recSubagentHeavy) {
 		signals = append(signals, "Subagent usage is a meaningful part of total tokens.")
 	}
-	if hasTokenRecommendation(report, "high-context-pressure") {
+	if hasTokenRecommendation(report, recHighContextPressure) {
 		signals = append(signals, "Context pressure is high.")
 	}
-	if hasTokenRecommendation(report, "long-session") {
+	if hasTokenRecommendation(report, recLongSession) {
 		signals = append(signals, "Session has crossed a long-session or checkpoint boundary.")
 	}
 	if hasTokenRecommendation(report, "no-token-data") {

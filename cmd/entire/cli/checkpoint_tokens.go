@@ -242,7 +242,7 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	} else {
 		report.Limitations = append(report.Limitations, "No token usage recorded for this checkpoint.")
 		report.Recommendations = append(report.Recommendations, sessionTokensRecommendation{
-			ID:       "no-token-data",
+			ID:       recNoTokenData,
 			Severity: "low",
 			Message:  "Token usage is unavailable for this checkpoint; the agent may not expose token data yet, or this checkpoint predates token tracking.",
 			Signals:  []string{"missing_token_usage"},
@@ -677,7 +677,7 @@ func writeCheckpointTokensAgentBrief(w io.Writer, report checkpointTokensReport)
 
 func checkpointAgentBriefNextAction(report checkpointTokensReport) string {
 	sessionReport := checkpointAgentBriefSessionReport(report)
-	if hasTokenRecommendation(sessionReport, "no-token-data") {
+	if hasTokenRecommendation(sessionReport, recNoTokenData) {
 		return "Do not spend extra commands on token optimization for this checkpoint. Continue with the task and capture a newer checkpoint before rechecking tokens."
 	}
 	if action, ok := agentBriefOptimizationAction(sessionReport); ok {
