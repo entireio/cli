@@ -462,6 +462,44 @@ func TestInstallHooks_ChildSessionsNeverFireLifecycleHooks(t *testing.T) {
 	}
 }
 
+func TestInstallHooks_SubagentHooksFireFromParentTaskSignals(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		// start: parent task part, running, with the child ID bound, once per callID
+		`part.type === "tool" && part.tool === "task"`,
+		`part.state?.status === "running"`,
+		`part.state?.metadata?.sessionId`,
+		`announcedTasks.has(part.callID)`,
+		`callHookSync("subagent-start", {`,
+		// stop: tool.execute.after for the task tool, foreground only, synchronous
+		`"tool.execute.after": async (input, output) => {`,
+		`if (input.tool !== "task") return`,
+		`if (output?.metadata?.background === true) return`,
+		`callHookSync("subagent-stop", {`,
+		`subagent_id: childID`,
+		`tool_use_id: input.callID`,
+		// a child's own task call (nested subagents, off by default) is not ours
+		`if (childSessions.has(input.sessionID)) return`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("plugin missing %q", want)
+		}
+	}
+	if strings.Contains(content, `callHook("subagent-stop"`) {
+		t.Error("subagent-stop must be synchronous: opencode run exits on the parent's idle right after")
+	}
+}
+
 // TestCommittedDogfoodPluginIsCurrent guards the copy of this plugin that the
 // repo commits for its own use against drifting from the template.
 func TestCommittedDogfoodPluginIsCurrent(t *testing.T) {

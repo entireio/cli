@@ -147,6 +147,28 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
         pendingInjection = null
       }
     },
+    // Subagent completion. tool.execute.after for the task tool fires once, at
+    // true completion, with the child session ID in output.metadata. Background
+    // tasks (experimental) return immediately with metadata.background and are
+    // not tracked. Synchronous: `opencode run` exits on the parent's idle right
+    // after this, and an async hook would be killed before it finished.
+    "tool.execute.after": async (input, output) => {
+      if (input.tool !== "task") return
+      // A child's own task call (subagent_depth > 1) belongs to a session we do
+      // not track; report only the user's session's tasks.
+      if (childSessions.has(input.sessionID)) return
+      if (output?.metadata?.background === true) return
+      const childID = output?.metadata?.sessionId
+      if (!childID) return
+      callHookSync("subagent-stop", {
+        session_id: input.sessionID,
+        tool_use_id: input.callID,
+        subagent_id: childID,
+        subagent_type: input.args?.subagent_type ?? "",
+        task_description: input.args?.description ?? "",
+        model: currentModel ?? "",
+      })
+    },
     event: async ({ event }) => {
       try {
         const props = (event as any).properties
@@ -219,6 +241,28 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
                 })
               }
             }
+
+            // Subagent launch: the parent's task part is the first signal that
+            // binds the tool call to the child session (state.metadata.sessionId).
+            // tool.execute.before fires earlier but has no child ID yet, and
+            // session.created for the child can interleave with a sibling's, so
+            // neither is a safe join. Announce once per callID; the running
+            // update repeats.
+            if (part.type === "tool" && part.tool === "task" && part.callID &&
+                part.state?.status === "running" && part.state?.metadata?.sessionId &&
+                !announcedTasks.has(part.callID)) {
+              announcedTasks.add(part.callID)
+              const sessionID = part.sessionID ?? currentSessionID
+              if (sessionID) {
+                callHookSync("subagent-start", {
+                  session_id: sessionID,
+                  tool_use_id: part.callID,
+                  subagent_id: part.state.metadata.sessionId,
+                  subagent_type: part.state?.input?.subagent_type ?? "",
+                  task_description: part.state?.input?.description ?? "",
+                })
+              }
+            }
             break
           }
 
@@ -254,6 +298,8 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             messageStore.clear()
             currentSessionID = null
             pendingInjection = null
+            childSessions.clear()
+            announcedTasks.clear()
             // Use sync variant: session-end may fire during shutdown.
             callHookSync("session-end", {
               session_id: session.id,
@@ -271,6 +317,8 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             messageStore.clear()
             currentSessionID = null
             pendingInjection = null
+            childSessions.clear()
+            announcedTasks.clear()
             // Use sync variant: this is the last event before process exit.
             callHookSync("session-end", {
               session_id: sessionID,
