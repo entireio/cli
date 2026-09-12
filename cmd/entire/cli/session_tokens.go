@@ -721,7 +721,7 @@ func agentBriefSignals(report sessionTokensReport) []string {
 	if hasTokenRecommendation(report, recLongSession) {
 		signals = append(signals, "Session has crossed a long-session or checkpoint boundary.")
 	}
-	if hasTokenRecommendation(report, "no-token-data") {
+	if hasTokenRecommendation(report, recNoTokenData) {
 		signals = append([]string{"Token usage is unavailable for this session."}, signals...)
 	}
 	if len(signals) == 0 && report.Tokens != nil {
