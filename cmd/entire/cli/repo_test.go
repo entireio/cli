@@ -608,3 +608,70 @@ func TestRepoList_GroupedFlagHelp(t *testing.T) {
 	)
 	require.NotContains(t, stdout, "Filtering & Sorting Flags:")
 }
+
+// TestRepoProjectFlagRedundancyWarning covers the one spelling where --project
+// used to be swallowed in silence. A ULID identifies the repo globally, so the
+// flag cannot change what is resolved — resolveRepoRef returns before it is
+// ever read — and a user who supplied a project the repo is not in got a clean
+// success confirming a wrong belief.
+//
+// It is a warning, not a refusal: the combination has been accepted since the
+// flag shipped and may be scripted, and the command still does exactly what it
+// did. What changes is that it says so.
+//
+// Not parallel: swaps the package-level activeCoreClient seam via runCoreCmd.
+func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
+	const repoULID = "0123456789ABCDEFGHJKMNPQR5"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := printJSON(w, &coreapi.Repo{ID: repoULID, Name: "web", OwningProjectId: ulidProjectWidgets}); err != nil {
+			t.Errorf("encode repo: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Run("a ULID ref warns that --project is ignored", func(t *testing.T) {
+		stdout, stderr, err := runCoreCmd(t, newRepoGetCmd, srv.URL, repoULID, "--project", "not-this-project")
+		require.NoError(t, err, "the command must still succeed")
+		require.Contains(t, stdout, repoULID, "the repo must still be shown")
+		require.Contains(t, stderr, "--project")
+		require.Contains(t, stderr, "ignored")
+	})
+
+	t.Run("an explicit empty --project still warns", func(t *testing.T) {
+		// Changed(), not a non-empty value: --project "" is still the user
+		// saying something about this repo's project, and it is still ignored.
+		_, stderr, err := runCoreCmd(t, newRepoGetCmd, srv.URL, repoULID, "--project", "")
+		require.NoError(t, err)
+		require.Contains(t, stderr, "ignored")
+	})
+
+	t.Run("a ULID ref without the flag says nothing", func(t *testing.T) {
+		_, stderr, err := runCoreCmd(t, newRepoGetCmd, srv.URL, repoULID)
+		require.NoError(t, err)
+		require.NotContains(t, stderr, "ignored")
+	})
+
+	t.Run("the warning is wired on every command binding the flag", func(t *testing.T) {
+		// The flag is bound in three files across four command families; the
+		// warning rides on bindRepoProjectFlag so it cannot be wired for some
+		// and missed for others. Asserting the PreRunE exists is what pins
+		// that, without standing up a server per command.
+		for name, newCmd := range map[string]func() *cobra.Command{
+			"repo get":               newRepoGetCmd,
+			"repo delete":            newRepoDeleteCmd,
+			"repo visibility get":    newRepoVisibilityGetCmd,
+			"repo visibility set":    newRepoVisibilitySetCmd,
+			"repo protection list":   newRepoProtectionListCmd,
+			"repo protection add":    newRepoProtectionAddCmd,
+			"repo protection remove": newRepoProtectionRemoveCmd,
+			"grant repo add":         newGrantRepoAddCmd,
+			"grant repo list":        newGrantRepoListCmd,
+			"grant repo remove":      newGrantRepoRemoveCmd,
+		} {
+			cmd := newCmd()
+			require.NotNilf(t, cmd.Flags().Lookup("project"), "%s must bind --project", name)
+			require.NotNilf(t, cmd.PreRunE, "%s must carry the redundancy check", name)
+		}
+	})
+}

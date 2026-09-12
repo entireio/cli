@@ -248,8 +248,18 @@ func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string
 // and project names are globally unique), a ULID against the resolved project
 // id — neither costs an extra round trip.
 func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef string) (string, error) {
+	// The refusal is about the ref SHAPE, not about the command. Several
+	// commands sharing this resolver DO address mirror repos by ULID — `repo
+	// protection list` has a purpose-built mirror branch (protectionMirrorNote)
+	// telling the user branch protection is governed upstream, which is a better
+	// answer than any this message could give. Saying "this command addresses
+	// Entire-native repos" was therefore false, and pointing at `entire repo
+	// mirror` is a dead end from `repo protection` and `repo visibility`, which
+	// have no counterpart there. What genuinely cannot work is the by-name
+	// lookup below: it resolves a project and then a repo inside it, and a
+	// mirror is in no project. So name the way through — the ULID.
 	if declaresForge(ref, mirrorCloneForge) {
-		return "", fmt.Errorf("repo %q is a GitHub mirror ref; this command addresses Entire-native repos — manage mirrors with `entire repo mirror`", ref)
+		return "", fmt.Errorf("repo %q is a GitHub mirror ref; only the native /%s/<project>/<repo> path resolves by name here — pass the repo's ULID instead, or see `entire repo mirror` for the mirror-specific commands", ref, nativeCloneForge)
 	}
 	project, repoName, parseErr := parseNativeCloneRef(ref)
 	if parseErr != nil {
@@ -259,9 +269,21 @@ func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef st
 		// A bare <a>/<b> names no forge (#2252): suggest the native reading when
 		// it would parse, instead of guessing it or 404ing a by-name lookup that
 		// can never match a slash-bearing name.
+		//
+		// Deliberately not bareRefSuggestions, which answers the same question
+		// for `repo clone`: it also offers the /gh/ reading, and this resolver
+		// refuses /gh/ refs outright (see above). A suggestion that fails on the
+		// next run is worse than none.
 		native := "/" + nativeCloneForge + "/" + trimRefPrefix(ref)
 		if _, _, err := parseNativeCloneRef(native); err == nil {
-			return "", fmt.Errorf("repo ref %q must name its forge — did you mean %s?", ref, native)
+			// The suggested path names its own project, so a --project already
+			// on the command line would fail the agreement check below on the
+			// very next run. Say so here rather than making them find out.
+			drop := ""
+			if projectRef != "" {
+				drop = fmt.Sprintf(" (and drop --project %q, which the path supplies)", projectRef)
+			}
+			return "", fmt.Errorf("repo ref %q must name its forge — did you mean %s?%s", ref, native, drop)
 		}
 		return "", fmt.Errorf("invalid repo ref %q: expected /%s/<project>/<repo>, a repo name with --project, or a repo ULID", ref, nativeCloneForge)
 	}

@@ -449,9 +449,52 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 }
 
 // bindRepoProjectFlag wires the shared --project scope used to resolve a repo
-// addressed by name (a repo name is unique only within its project). Ignored
-// when the repo arg is already a ULID; checked for agreement when it is a
-// /et/<project>/<repo> path, which names its own project.
+// addressed by a BARE NAME. That is the only form it serves: a repo name is
+// unique only within its project, and the control plane has no by-name route
+// that is not project-scoped (ListProjectRepos takes the project as a path
+// segment), so without the flag a bare name is not an address at all.
+//
+// The other two spellings carry their own project, so the flag cannot change
+// what they resolve to — and the two used to disagree about saying so. A
+// /et/<project>/<repo> path is checked for agreement by resolveRepoPathRef,
+// which costs nothing because it resolves that project anyway. A ULID
+// short-circuits resolveRepoRef before projectRef is ever read, so a flatly
+// wrong project was accepted in silence; warnRedundantProjectFlag is what ends
+// that.
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, "project", "", "Owning project (name or ULID); required when <repo> is a bare name")
+	cmd.Flags().StringVar(project, "project", "", "Owning project (name or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
+	warnRedundantProjectFlag(cmd, project)
+}
+
+// warnRedundantProjectFlag reports on stderr that --project cannot affect the
+// lookup, when the ref identifies the repo on its own.
+//
+// It WARNS rather than refusing because addressing a repo by ULID with an
+// unconditional --project has been accepted since the flag shipped (ece9fb3dc,
+// June 2026) and is plausibly scripted; breaking that to report a flag that was
+// already being ignored is a poor trade. It does not VALIDATE because that
+// needs GetRepo's owningProjectId, an extra round trip on every command here
+// except `repo get` — which alone already fetches the repo and prints its
+// project.
+//
+// Wired as a PreRunE because the answer needs only the flag and args[0]: no
+// resolution, no network, and every command binding this flag takes the repo
+// ref as args[0]. An existing PreRunE is chained rather than clobbered, so a
+// command that grows one later does not silently lose the warning (or its own
+// hook).
+func warnRedundantProjectFlag(cmd *cobra.Command, project *string) {
+	prev := cmd.PreRunE
+	cmd.PreRunE = func(c *cobra.Command, args []string) error {
+		if prev != nil {
+			if err := prev(c, args); err != nil {
+				return err
+			}
+		}
+		// Changed(), not a non-empty value: an explicit --project "" is still
+		// the user saying something, and reporting it is the point.
+		if len(args) > 0 && c.Flags().Changed("project") && looksLikeULID(args[0]) {
+			fmt.Fprintf(c.ErrOrStderr(), "Note: --project %q is ignored — %s is a repo ULID, which identifies the repo on its own.\n", *project, args[0])
+		}
+		return nil
+	}
 }

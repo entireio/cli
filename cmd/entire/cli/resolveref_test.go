@@ -367,6 +367,51 @@ func TestResolveRepoRef_NativePath(t *testing.T) {
 		refuseLocally(t, "/gh/entirehq/entire-api", "entire repo mirror")
 	})
 
+	// The message describes the REF, not the command. Several commands sharing
+	// this resolver do address mirror repos by ULID — `repo protection list`
+	// answers one with protectionMirrorNote — so claiming the command is
+	// native-only was false, and `entire repo mirror` has no visibility or
+	// protection counterpart to send those callers to. Naming the ULID is the
+	// part that is true everywhere and actually unblocks the user.
+	t.Run("the mirror refusal names the ULID as the way through", func(t *testing.T) {
+		t.Parallel()
+		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		_, err := resolveRepoRef(context.Background(), c, "/gh/entirehq/entire-api", "")
+		if err == nil {
+			t.Fatal("a /gh/ ref must be refused")
+		}
+		if !strings.Contains(err.Error(), "ULID") {
+			t.Errorf("mirror refusal = %q, want it to offer the ULID", err)
+		}
+		if strings.Contains(err.Error(), "addresses Entire-native repos") {
+			t.Errorf("mirror refusal must not claim the command is native-only: %q", err)
+		}
+	})
+
+	// Following the suggestion with the flag still set would fail the agreement
+	// check on the very next run, so the suggestion has to mention it.
+	t.Run("the forge suggestion says to drop a --project that would then clash", func(t *testing.T) {
+		t.Parallel()
+		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			t.Error("a forge-less pair must not reach the control plane")
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+		_, err := resolveRepoRef(context.Background(), c, "acme/tool", "widgets")
+		if err == nil {
+			t.Fatal("a forge-less pair must be refused")
+		}
+		for _, want := range []string{"/et/acme/tool", "--project", "widgets"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("suggestion = %q, want it to contain %q", err, want)
+			}
+		}
+		if n := calls.Load(); n != 0 {
+			t.Errorf("made %d HTTP calls, want 0", n)
+		}
+	})
+
 	t.Run("a bare pair names no forge and is refused with the /et/ suggestion", func(t *testing.T) {
 		t.Parallel()
 		refuseLocally(t, "widgets/web", "/et/widgets/web")
