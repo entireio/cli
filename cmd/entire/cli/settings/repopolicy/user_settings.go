@@ -145,14 +145,14 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var settings UserSettings
 	if err := decoder.Decode(&settings); err != nil {
-		return nil, fmt.Errorf("parsing user settings: %w", err)
+		return nil, fmt.Errorf("%s: %w: %w", path, ErrRepoSettingsMalformed, err)
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return nil, errors.New("parsing user settings: multiple JSON values")
+			return nil, fmt.Errorf("%s: %w: multiple JSON values", path, ErrRepoSettingsMalformed)
 		}
-		return nil, fmt.Errorf("parsing user settings: trailing data: %w", err)
+		return nil, fmt.Errorf("%s: %w: trailing data: %w", path, ErrRepoSettingsMalformed, err)
 	}
 	return &settings, nil
 }
