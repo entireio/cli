@@ -11,6 +11,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
+// openCodeToolPart is the "type" of an OpenCode tool-call content part, and the
+// key that names the tool in the v1 part map.
+const openCodeToolPart = "tool"
+
 // --- OpenCode format support ---
 //
 // OpenCode transcripts are a single JSON object (not JSONL):
@@ -155,7 +159,7 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 				"type": b,
 				"text": part[transcript.ContentTypeText],
 			})
-		case "tool":
+		case openCodeToolPart:
 			toolBlock := make(map[string]json.RawMessage)
 			b, err := json.Marshal(transcript.ContentTypeToolUse)
 			if err != nil {
@@ -165,7 +169,7 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 			if callID := part["callID"]; callID != nil {
 				toolBlock["id"] = callID
 			}
-			if toolName := part["tool"]; toolName != nil {
+			if toolName := part[openCodeToolPart]; toolName != nil {
 				toolBlock["name"] = toolName
 			}
 			if stateRaw := part["state"]; stateRaw != nil {
@@ -265,7 +269,7 @@ func normalizeOpenCodeMessage(raw json.RawMessage) (openCodeMessage, error) {
 				"type": rawJSON(transcript.ContentTypeText),
 				"text": rawJSON(content.Text),
 			})
-		case "tool":
+		case openCodeToolPart:
 			var status, output string
 			if content.State != nil {
 				status = content.State.Status
@@ -281,10 +285,10 @@ func normalizeOpenCodeMessage(raw json.RawMessage) (openCodeMessage, error) {
 				}
 			}
 			out.Parts = append(out.Parts, map[string]json.RawMessage{
-				"type":   rawJSON("tool"),
-				"tool":   rawJSON(content.Name),
-				"callID": rawJSON(content.ID),
-				"state":  marshalRaw(map[string]json.RawMessage{"status": rawJSON(status), "output": rawJSON(output)}),
+				"type":           rawJSON(openCodeToolPart),
+				openCodeToolPart: rawJSON(content.Name),
+				"callID":         rawJSON(content.ID),
+				"state":          marshalRaw(map[string]json.RawMessage{"status": rawJSON(status), "output": rawJSON(output)}),
 			})
 		}
 	}

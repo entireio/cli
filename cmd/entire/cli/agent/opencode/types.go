@@ -66,6 +66,12 @@ const (
 	roleUser      = "user"
 )
 
+// OpenCode message content part types.
+const (
+	partTypeText = "text"
+	partTypeTool = "tool"
+)
+
 // Time holds message timestamps.
 type Time struct {
 	Created   int64 `json:"created"`
@@ -269,7 +275,7 @@ func normalizeV2Export(env exportEnvelope) (*ExportSession, error) {
 		}
 		// User and system messages carry their text at the message level.
 		if msg.Text != "" {
-			out.Parts = append(out.Parts, Part{Type: "text", Text: msg.Text})
+			out.Parts = append(out.Parts, Part{Type: partTypeText, Text: msg.Text})
 		}
 		session.Messages = append(session.Messages, out)
 	}
@@ -292,12 +298,12 @@ func normalizeRoleV2(messageType string) string {
 
 func partFromV2(content contentV2) Part {
 	switch content.Type {
-	case "text":
-		return Part{Type: "text", Text: content.Text}
+	case partTypeText:
+		return Part{Type: partTypeText, Text: content.Text}
 	case "reasoning":
 		return Part{Type: "reasoning", Text: content.Text}
-	case "tool":
-		part := Part{Type: "tool", Tool: content.Name, CallID: content.ID}
+	case partTypeTool:
+		part := Part{Type: partTypeTool, Tool: content.Name, CallID: content.ID}
 		if content.State != nil {
 			part.State = &ToolState{
 				Status:   content.State.Status,
@@ -320,7 +326,7 @@ func toolOutputFromV2(state *toolStateV2) string {
 	}
 	var out strings.Builder
 	for _, content := range state.Content {
-		if content.Type != "text" || content.Text == "" {
+		if content.Type != partTypeText || content.Text == "" {
 			continue
 		}
 		if out.Len() > 0 {
