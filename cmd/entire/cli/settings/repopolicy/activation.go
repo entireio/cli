@@ -122,10 +122,20 @@ func ReadRepoActivation(ctx context.Context, worktreeRoot string) (RepoActivatio
 	return activation, nil
 }
 
+// ErrRepoSettingsMalformed reports that a repository's settings file would not
+// parse. Callers match it with errors.Is to name the real cause.
+//
+// It exists because .entire's location now routes through repository-policy
+// classification, and classification reads settings — so a bad settings file
+// surfaces while resolving a DIRECTORY. Failing there is right; reporting it as
+// "cannot access .entire" is not, because the directory is fine and the reader
+// is sent after the wrong thing.
+var ErrRepoSettingsMalformed = errors.New("settings file is malformed")
+
 func enabledFromSettingsData(data []byte) (*bool, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing settings: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrRepoSettingsMalformed, err)
 	}
 	value, ok := raw["enabled"]
 	if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {

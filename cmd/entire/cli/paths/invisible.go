@@ -92,6 +92,15 @@ func runtimeRootForPath(ctx context.Context, root string) (string, error) {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return "", fmt.Errorf("classifying repository policy: %w", ctxErr)
 			}
+			// A settings file that will not parse is reported as itself, not as
+			// a routing failure: the directory is fine, the JSON is not, and
+			// "route cannot be verified" sends the reader after the wrong thing.
+			// It still carries ErrUnroutableRuntimePath so the hook paths keep
+			// failing OPEN on it — see the callers that warn and skip capture
+			// rather than breaking the user's turn.
+			if errors.Is(err, repopolicy.ErrRepoSettingsMalformed) {
+				return "", unroutableSettingsError{err: err}
+			}
 			return "", fmt.Errorf("%w: classifying repository policy: %w", ErrUnroutableRuntimePath, err)
 		}
 	}
@@ -124,4 +133,15 @@ func sameWorktree(policyRoot, root string) bool {
 		b = rb
 	}
 	return a == b
+}
+
+// unroutableSettingsError presents a malformed-settings failure by its own
+// message while still matching ErrUnroutableRuntimePath, so presentation can
+// name the settings file and the hook paths keep their fail-open behavior.
+type unroutableSettingsError struct{ err error }
+
+func (e unroutableSettingsError) Error() string { return e.err.Error() }
+
+func (e unroutableSettingsError) Unwrap() []error {
+	return []error{e.err, ErrUnroutableRuntimePath}
 }

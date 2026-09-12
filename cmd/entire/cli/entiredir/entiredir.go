@@ -182,6 +182,12 @@ func anchor(ctx context.Context) (string, error) {
 	case err == nil:
 		return worktreeRoot, nil
 	case !errors.Is(err, paths.ErrNotARepository):
+		if errors.Is(err, repopolicy.ErrRepoSettingsMalformed) {
+			// The directory resolved fine; the settings file did not parse.
+			// Prefixing this with "resolve .entire location" would name the
+			// wrong thing.
+			return "", err //nolint:wrapcheck // deliberately unwrapped: see comment
+		}
 		return "", fmt.Errorf("resolve %s location: %w", paths.EntireDir, err)
 	}
 
@@ -235,6 +241,12 @@ func runtimeBase(ctx context.Context) (string, error) {
 		return base, nil
 	case errors.Is(err, paths.ErrNotARepository):
 	default:
+		if errors.Is(err, repopolicy.ErrRepoSettingsMalformed) {
+			// The directory resolved fine; the settings file did not parse.
+			// Prefixing this with "resolve .entire location" would name the
+			// wrong thing.
+			return "", err //nolint:wrapcheck // deliberately unwrapped: see comment
+		}
 		return "", fmt.Errorf("resolve %s location: %w", paths.EntireDir, err)
 	}
 	cwd, cwdErr := os.Getwd() //nolint:forbidigo // no repository here; see anchor's doc comment

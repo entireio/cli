@@ -1803,6 +1803,13 @@ func FilesPresent(ctx context.Context) (project, local bool, err error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, false, nil
 		}
+		// .entire's location routes through repository-policy classification,
+		// which reads settings — so an unparseable settings file arrives here.
+		// Report it as what it is. "cannot access .entire" would blame the
+		// directory, which is fine.
+		if errors.Is(err, repopolicy.ErrRepoSettingsMalformed) {
+			return false, false, fmt.Errorf("failed to load settings: %w", err)
+		}
 		return false, false, fmt.Errorf("cannot access %s: %w", paths.EntireDir, err)
 	}
 	project, err = fileExists(root, SettingsName)
