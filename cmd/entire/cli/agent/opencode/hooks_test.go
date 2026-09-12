@@ -45,8 +45,14 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	if !strings.Contains(content, "hooks opencode") {
 		t.Error("plugin file does not contain 'hooks opencode'")
 	}
-	if !strings.Contains(content, "EntirePlugin") {
-		t.Error("plugin file does not contain 'EntirePlugin' export")
+	if !strings.Contains(content, `id: "entire"`) {
+		t.Error("plugin file does not contain the entire plugin id")
+	}
+	if !strings.Contains(content, `async setup(ctx`) {
+		t.Error("plugin file does not contain the V2 setup entrypoint")
+	}
+	if !strings.Contains(content, entireMarker) {
+		t.Error("plugin file does not contain the install marker")
 	}
 	// Should use production command
 	if strings.Contains(content, "go run") {
@@ -94,8 +100,8 @@ func TestInstallHooks_SessionStartIsGuardedBySessionSwitch(t *testing.T) {
 	}
 
 	content := string(data)
-	guard := "if (resetSessionTracking(session.id)) {"
-	hook := `await callHook("session-start", {`
+	guard := "if (resetSessionTracking(sessionID)) {"
+	hook := `callHookSync("session-start", {`
 
 	guardIdx := strings.Index(content, guard)
 	hookIdx := strings.Index(content, hook)
@@ -140,7 +146,7 @@ func TestInstallHooks_TurnStartUsesSyncHook(t *testing.T) {
 	// turn-start is dispatched via fireTurnStart, which fires synchronously
 	// (spawnSync) so session state is ready before any mid-turn commit, and
 	// also captures the hook's stdout to apply Entire's one-time context injection.
-	if !strings.Contains(content, `fireTurnStart({`) {
+	if !strings.Contains(content, `fireTurnStart(sessionID,`) {
 		t.Fatal("plugin file should dispatch turn-start via fireTurnStart")
 	}
 	if !strings.Contains(content, `spawnSync(cmd, args, {`) {
@@ -171,22 +177,21 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 
 	content := string(data)
 	// The plugin must read the injection envelope from the turn-start hook's
-	// stdout and apply it to the system prompt via the chat system transform.
+	// stdout and apply it to the model context via the session context hook.
 	if !strings.Contains(content, `inject_context`) {
 		t.Fatal("plugin file should parse the inject_context envelope")
 	}
-	if !strings.Contains(content, `"experimental.chat.system.transform"`) {
-		t.Fatal("plugin file should apply injection via experimental.chat.system.transform")
+	if !strings.Contains(content, `ctx.session.hook("context"`) {
+		t.Fatal("plugin file should apply injection via the session context hook")
 	}
-	if !strings.Contains(content, `output.system.push(pendingInjection)`) {
+	if !strings.Contains(content, `event.system.push({ type: "text", text: pendingInjection.text })`) {
 		t.Fatal("plugin file should push the injection onto the system prompt")
 	}
 	// Every session-reset site must clear the stashed injection so a session
 	// change cannot leak the prior session's context into the next session.
 	resetSites := []struct{ name, start, end string }{
 		{"resetSessionTracking", "function resetSessionTracking", "return true"},
-		{"session.deleted", `case "session.deleted"`, `callHookSync("session-end"`},
-		{"server.instance.disposed", `case "server.instance.disposed"`, `callHookSync("session-end"`},
+		{"endSession", "function endSession", `callHookSync("session-end"`},
 	}
 	for _, site := range resetSites {
 		_, after, found := strings.Cut(content, site.start)
@@ -200,7 +205,7 @@ func TestInstallHooks_AppliesContextInjection(t *testing.T) {
 	}
 }
 
-func TestInstallHooks_MessageUpdatedFallsBackToSessionStart(t *testing.T) {
+func TestInstallHooks_PromptHookDrivesTurnLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	ag := &OpenCodeAgent{}
@@ -216,18 +221,19 @@ func TestInstallHooks_MessageUpdatedFallsBackToSessionStart(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, `if (msg.sessionID && resetSessionTracking(msg.sessionID)) {`) {
-		t.Fatal("plugin file should bootstrap session tracking from message.updated")
+	// turn-start and the session-start fallback both fire at prompt admission.
+	if !strings.Contains(content, `ctx.session.hook("prompt"`) {
+		t.Fatal("plugin file should register the prompt hook")
 	}
-	if !strings.Contains(content, `callHookSync("session-start", {`) {
-		t.Fatal("plugin file should dispatch fallback session-start via callHookSync")
+	if !strings.Contains(content, `if (resetSessionTracking(sessionID)) {`) {
+		t.Fatal("plugin file should start the session before the first turn")
 	}
-	if !strings.Contains(content, `session_id: msg.sessionID,`) {
-		t.Fatal("plugin file should pass msg.sessionID in fallback session-start")
+	if !strings.Contains(content, `fireTurnStart(sessionID, event.prompt.text ?? "")`) {
+		t.Fatal("plugin file should start the turn from the prompt text")
 	}
 }
 
-func TestInstallHooks_MessageUpdatedFallsBackToTurnStart(t *testing.T) {
+func TestInstallHooks_SubscribesToLifecycleEvents(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	ag := &OpenCodeAgent{}
@@ -243,11 +249,13 @@ func TestInstallHooks_MessageUpdatedFallsBackToTurnStart(t *testing.T) {
 	}
 
 	content := string(data)
-	if !strings.Contains(content, `if (msg.role === "user" && !seenUserMessages.has(msg.id)) {`) {
-		t.Fatal("plugin file should use message.updated as a fallback turn-start source")
+	if !strings.Contains(content, `ctx.event.subscribe({ signal: abort.signal })`) {
+		t.Fatal("plugin file should subscribe to the OpenCode event stream")
 	}
-	if !strings.Contains(content, `prompt: "",`) {
-		t.Fatal("plugin file should send an empty prompt for fallback turn-start")
+	for _, event := range []string{"session.created", "session.status", "session.compaction.ended", "session.deleted"} {
+		if !strings.Contains(content, `case "`+event+`"`) {
+			t.Fatalf("plugin file should handle %s", event)
+		}
 	}
 }
 
@@ -481,20 +489,29 @@ func TestPlugin_SpawnsHooksUnderNode(t *testing.T) {
 import { pathToFileURL } from "node:url"
 
 const pluginPath = process.argv[2]
-const { EntirePlugin } = await import(pathToFileURL(pluginPath).href)
-const handlers = await EntirePlugin({ directory: process.cwd() })
-await handlers.event({
-  event: {
-    type: "session.created",
-    properties: { info: { id: "sess-canary" } },
+const plugin = (await import(pathToFileURL(pluginPath).href)).default
+
+const hooks = {}
+const ctx = {
+  location: { directory: process.cwd() },
+  session: {
+    hook: async (name, callback) => {
+      hooks[name] = callback
+      return { dispose: async () => {} }
+    },
   },
-})
-await handlers.event({
   event: {
-    type: "session.status",
-    properties: { status: { type: "idle" }, sessionID: "sess-canary" },
+    subscribe: () => (async function* () {
+      yield { type: "session.created", data: { sessionID: "sess-canary", model: { id: "m", providerID: "p" } } }
+      yield { type: "session.status", data: { sessionID: "sess-canary", status: { type: "idle" } } }
+    })(),
   },
-})
+}
+
+const cleanup = await plugin.setup(ctx)
+hooks.prompt({ sessionID: "sess-canary", prompt: { text: "hello" } })
+await new Promise((resolve) => setTimeout(resolve, 50))
+await cleanup()
 `
 	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
 		t.Fatal(err)

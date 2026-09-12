@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
+
+// openCodeToolPart is the "type" of an OpenCode tool-call content part, and the
+// key that names the tool in the v1 part map.
+const openCodeToolPart = "tool"
 
 // --- OpenCode format support ---
 //
@@ -64,14 +69,22 @@ type openCodeMsgToken struct {
 // opts.StartLine is treated as a message-index offset (not a newline offset)
 // because the OpenCode transcript is a single JSON object.
 func compactOpenCode(content []byte, opts MetadataFields) ([]byte, error) {
-	var session struct {
-		Messages []openCodeMessage `json:"messages"`
+	var raw struct {
+		Messages []json.RawMessage `json:"messages"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(content), &session); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(content), &raw); err != nil {
 		return nil, fmt.Errorf("parsing opencode session: %w", err)
 	}
 
-	messages := session.Messages
+	messages := make([]openCodeMessage, 0, len(raw.Messages))
+	for _, rawMessage := range raw.Messages {
+		msg, err := normalizeOpenCodeMessage(rawMessage)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+
 	if opts.StartLine > 0 {
 		if opts.StartLine >= len(messages) {
 			return []byte{}, nil
@@ -146,7 +159,7 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 				"type": b,
 				"text": part[transcript.ContentTypeText],
 			})
-		case "tool":
+		case openCodeToolPart:
 			toolBlock := make(map[string]json.RawMessage)
 			b, err := json.Marshal(transcript.ContentTypeToolUse)
 			if err != nil {
@@ -156,7 +169,7 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 			if callID := part["callID"]; callID != nil {
 				toolBlock["id"] = callID
 			}
-			if toolName := part["tool"]; toolName != nil {
+			if toolName := part[openCodeToolPart]; toolName != nil {
 				toolBlock["name"] = toolName
 			}
 			if stateRaw := part["state"]; stateRaw != nil {
@@ -213,6 +226,121 @@ func msToTimestamp(ms int64) json.RawMessage {
 	}
 	t := time.UnixMilli(ms).UTC()
 	b, err := json.Marshal(t.Format(time.RFC3339Nano))
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// normalizeOpenCodeMessage converts either OpenCode export shape into the v1
+// message the emitters below consume. OpenCode 1 nests metadata under "info" and
+// content under "parts"; OpenCode 2 carries "type" plus a typed "content" array.
+func normalizeOpenCodeMessage(raw json.RawMessage) (openCodeMessage, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return openCodeMessage{}, fmt.Errorf("parsing opencode message: %w", err)
+	}
+	if _, ok := probe["info"]; ok {
+		var v1 openCodeMessage
+		if err := json.Unmarshal(raw, &v1); err != nil {
+			return openCodeMessage{}, fmt.Errorf("parsing opencode v1 message: %w", err)
+		}
+		return v1, nil
+	}
+
+	var v2 openCodeMessageV2
+	if err := json.Unmarshal(raw, &v2); err != nil {
+		return openCodeMessage{}, fmt.Errorf("parsing opencode v2 message: %w", err)
+	}
+
+	out := openCodeMessage{
+		Info: openCodeMessageInfo{
+			ID:     v2.ID,
+			Role:   v2.Type,
+			Time:   v2.Time,
+			Tokens: v2.Tokens,
+		},
+	}
+
+	for _, content := range v2.Content {
+		switch content.Type {
+		case transcript.ContentTypeText:
+			out.Parts = append(out.Parts, map[string]json.RawMessage{
+				"type": rawJSON(transcript.ContentTypeText),
+				"text": rawJSON(content.Text),
+			})
+		case openCodeToolPart:
+			var status, output string
+			if content.State != nil {
+				status = content.State.Status
+				output = content.State.Output
+				if output == "" {
+					var texts []string
+					for _, c := range content.State.Content {
+						if c.Type == transcript.ContentTypeText && c.Text != "" {
+							texts = append(texts, c.Text)
+						}
+					}
+					output = strings.Join(texts, "\n")
+				}
+			}
+			out.Parts = append(out.Parts, map[string]json.RawMessage{
+				"type":           rawJSON(openCodeToolPart),
+				openCodeToolPart: rawJSON(content.Name),
+				"callID":         rawJSON(content.ID),
+				"state":          marshalRaw(map[string]json.RawMessage{"status": rawJSON(status), "output": rawJSON(output)}),
+			})
+		}
+	}
+
+	// User and system messages carry their text at the message level.
+	if v2.Text != "" {
+		out.Parts = append(out.Parts, map[string]json.RawMessage{
+			"type": rawJSON(transcript.ContentTypeText),
+			"text": rawJSON(v2.Text),
+		})
+	}
+
+	return out, nil
+}
+
+// openCodeMessageV2 mirrors the OpenCode 2 message shape.
+type openCodeMessageV2 struct {
+	ID      string              `json:"id"`
+	Type    string              `json:"type"`
+	Text    string              `json:"text"`
+	Time    openCodeMsgTime     `json:"time"`
+	Tokens  *openCodeMsgToken   `json:"tokens"`
+	Content []openCodeContentV2 `json:"content"`
+}
+
+type openCodeContentV2 struct {
+	Type  string               `json:"type"`
+	Text  string               `json:"text"`
+	ID    string               `json:"id"`
+	Name  string               `json:"name"`
+	State *openCodeToolStateV2 `json:"state"`
+}
+
+type openCodeToolStateV2 struct {
+	Status  string `json:"status"`
+	Output  string `json:"output"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func rawJSON(s string) json.RawMessage {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return b
+}
+
+func marshalRaw(v any) json.RawMessage {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return nil
 	}
