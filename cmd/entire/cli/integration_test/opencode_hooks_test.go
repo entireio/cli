@@ -3,11 +3,15 @@
 package integration
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestOpenCodeHookFlow verifies the full hook flow for OpenCode:
@@ -266,6 +270,120 @@ func TestOpenCodeMidTurnCommit(t *testing.T) {
 		Strategy:     strategy.StrategyNameManualCommit,
 		FilesTouched: []string{"script.sh"},
 	})
+}
+
+func TestOpenCodeLatePromptRepairAfterMidTurnCommitPreservesTurnState(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.InitEntireWithAgent(agent.AgentNameOpenCode)
+	sess := env.NewOpenCodeSession()
+
+	require.NoError(t, env.SimulateOpenCodeSessionStart(sess.ID, sess.TranscriptPath))
+	require.NoError(t, env.SimulateOpenCodeTurnStart(sess.ID, sess.TranscriptPath, ""))
+
+	prePromptPath := filepath.Join(env.RepoDir, paths.EntireTmpDir, "pre-prompt-"+sess.ID+".json")
+	prePromptBefore, err := os.ReadFile(prePromptPath)
+	require.NoError(t, err)
+
+	env.WriteFile("repair.go", "package repair\n")
+	sess.CreateOpenCodeTranscript("preserve this prompt", []FileChange{
+		{Path: "repair.go", Content: "package repair\n"},
+	})
+	env.CopyTranscriptToEntireTmp(sess.ID, sess.TranscriptPath)
+	env.GitCommitWithShadowHooksAsAgent("Add repair package", "repair.go")
+
+	stateBefore, err := env.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stateBefore)
+	require.NotEmpty(t, stateBefore.TurnID)
+	require.NotEmpty(t, stateBefore.LastCheckpointID)
+	require.NotEmpty(t, stateBefore.TurnCheckpointIDs)
+
+	require.NoError(t, env.SimulateOpenCodePromptUpdate(sess.ID, "preserve this prompt"))
+
+	stateAfter, err := env.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stateAfter)
+	prePromptAfter, err := os.ReadFile(prePromptPath)
+	require.NoError(t, err)
+	promptPath := filepath.Join(env.RepoDir, paths.SessionMetadataDirFromSessionID(sess.ID), paths.PromptFileName)
+	prompt, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+
+	t.Logf("before repair: turn=%s last_checkpoint=%s turn_checkpoints=%v",
+		stateBefore.TurnID, stateBefore.LastCheckpointID, stateBefore.TurnCheckpointIDs)
+	t.Logf("after repair:  turn=%s last_checkpoint=%s turn_checkpoints=%v",
+		stateAfter.TurnID, stateAfter.LastCheckpointID, stateAfter.TurnCheckpointIDs)
+	t.Logf("after repair:  prompt.txt=%q last_prompt=%q pre_prompt_unchanged=%t",
+		string(prompt), stateAfter.LastPrompt, string(prePromptBefore) == string(prePromptAfter))
+
+	assert.Equal(t, "preserve this prompt", string(prompt))
+	assert.Equal(t, "preserve this prompt", stateAfter.LastPrompt)
+	assert.Equal(t, stateBefore.TurnID, stateAfter.TurnID)
+	assert.Equal(t, prePromptBefore, prePromptAfter)
+	assert.Equal(t, stateBefore.AttributionBaseCommit, stateAfter.AttributionBaseCommit)
+	assert.Equal(t, stateBefore.PendingPromptAttribution, stateAfter.PendingPromptAttribution)
+	assert.Equal(t, stateBefore.PromptAttributions, stateAfter.PromptAttributions)
+	assert.Equal(t, stateBefore.LastCheckpointID, stateAfter.LastCheckpointID)
+	assert.Equal(t, stateBefore.TurnCheckpointIDs, stateAfter.TurnCheckpointIDs)
+	expectedState := *stateBefore
+	expectedState.LastPrompt = "preserve this prompt"
+	assert.Equal(t, &expectedState, stateAfter, "prompt repair should only update LastPrompt in session state")
+
+	require.NoError(t, env.SimulateOpenCodeTurnEnd(sess.ID, sess.TranscriptPath))
+	checkpointPrompt, found := env.ReadFileFromBranch(
+		paths.MetadataBranchName,
+		SessionFilePath(string(stateBefore.LastCheckpointID), paths.PromptFileName),
+	)
+	require.True(t, found)
+	t.Logf("finalized checkpoint %s prompt.txt=%q", stateBefore.LastCheckpointID, checkpointPrompt)
+	assert.Equal(t, "preserve this prompt", checkpointPrompt)
+}
+
+func TestOpenCodeLatePromptRepairBeforeMidTurnCommitIsCheckpointed(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.InitEntireWithAgent(agent.AgentNameOpenCode)
+	sess := env.NewOpenCodeSession()
+
+	require.NoError(t, env.SimulateOpenCodeSessionStart(sess.ID, sess.TranscriptPath))
+	require.NoError(t, env.SimulateOpenCodeTurnStart(sess.ID, sess.TranscriptPath, ""))
+
+	stateBefore, err := env.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stateBefore)
+	require.NotEmpty(t, stateBefore.TurnID)
+
+	require.NoError(t, env.SimulateOpenCodePromptUpdate(sess.ID, "repair before commit"))
+
+	stateAfterRepair, err := env.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stateAfterRepair)
+	expectedState := *stateBefore
+	expectedState.LastPrompt = "repair before commit"
+	assert.Equal(t, &expectedState, stateAfterRepair, "prompt repair should only update LastPrompt before the commit")
+
+	env.WriteFile("repair-before.go", "package repairbefore\n")
+	sess.CreateOpenCodeTranscript("repair before commit", []FileChange{
+		{Path: "repair-before.go", Content: "package repairbefore\n"},
+	})
+	env.CopyTranscriptToEntireTmp(sess.ID, sess.TranscriptPath)
+	env.GitCommitWithShadowHooksAsAgent("Add pre-repaired prompt", "repair-before.go")
+
+	stateAfterCommit, err := env.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stateAfterCommit)
+	require.NotEmpty(t, stateAfterCommit.LastCheckpointID)
+	require.Contains(t, stateAfterCommit.TurnCheckpointIDs, stateAfterCommit.LastCheckpointID.String())
+
+	checkpointPrompt, found := env.ReadFileFromBranch(
+		paths.MetadataBranchName,
+		SessionFilePath(string(stateAfterCommit.LastCheckpointID), paths.PromptFileName),
+	)
+	require.True(t, found)
+	assert.Equal(t, "repair before commit", checkpointPrompt)
 }
 
 // TestOpenCodeResumedSessionAfterCommit verifies that resuming an OpenCode session

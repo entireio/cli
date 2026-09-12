@@ -101,6 +101,22 @@ func TestParseHookEvent_TurnStart_EmptyModel(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_PromptUpdate(t *testing.T) {
+	t.Parallel()
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id": "sess-1", "prompt": "Fix the bug in login.ts"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNamePromptUpdate, strings.NewReader(input))
+
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.PromptUpdate, event.Type)
+	require.Equal(t, "sess-1", event.SessionID)
+	require.Equal(t, "Fix the bug in login.ts", event.Prompt)
+	require.Empty(t, event.SessionRef)
+}
+
 func TestParseHookEvent_TurnEnd(t *testing.T) {
 	t.Parallel()
 
@@ -235,6 +251,7 @@ func TestHookNames(t *testing.T) {
 		HookNameSessionStart,
 		HookNameSessionEnd,
 		HookNameTurnStart,
+		HookNamePromptUpdate,
 		HookNameTurnEnd,
 		HookNameCompaction,
 	}

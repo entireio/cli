@@ -438,6 +438,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 |------------|-------------------|------------------|-----------------|-----------------|---------------|----------------------|-----------------|
 | `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` |
 | `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-agent` | `before-submit-prompt` | `turn-start` | `user-prompt-submit` | `user-prompt-submitted` |
+| `PromptUpdate` | Stores late prompt text without starting a new logical turn or changing checkpoint bookkeeping | *(not used)* | *(not used)* | *(not used)* | `prompt-update` | *(not used)* | *(not used)* |
 | `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `after-agent` | `stop` | `turn-end` | `stop` | `agent-stop` |
 | `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compress` | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
 | `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
@@ -450,6 +451,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 |------------|----------------|-----------------|
 | `SessionStart` | `SessionID` | `SessionRef`, `ResponseMessage`, `Metadata` |
 | `TurnStart` | `SessionID`, `SessionRef` | `Prompt`, `PreviousSessionID`, `Metadata` |
+| `PromptUpdate` | `SessionID`, `Prompt` | *(none)* |
 | `TurnEnd` | `SessionRef` | `SessionID` (falls back to `"unknown"`), `Metadata` |
 | `Compaction` | `SessionID` | `SessionRef`, `Metadata` |
 | `SessionEnd` | `SessionID` | `SessionRef`, `Metadata` |
