@@ -383,24 +383,43 @@ var (
 If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Gemini's `.gemini/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
 
 ```go
-func (a *YourAgent) InstallHooks(force bool) (int, error) {
-    // 1. Find repo root
-    repoRoot, err := paths.RepoRoot()
+// HookConfigRelPath implements agent.HookConfigLocator: the same
+// worktree-relative, slash-separated path passed to OpenHookConfig. Callers
+// that reason about the path without doing I/O on it (doctor's symlink
+// diagnosis) read it from here.
+func (a *YourAgent) HookConfigRelPath() string { return ".youragent/settings.json" }
+
+func (a *YourAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
+    // 1. Open the config file through its root. Never filepath.Join the path
+    // and hand the result to os.ReadFile/os.WriteFile: an agent's hook config
+    // is one of the trees CLAUDE.md's "Root Anchors" gives an owner, because a
+    // symlinked `.youragent` supplied by the checkout would otherwise be
+    // resolved before any boundary exists — and this file names the command
+    // Entire executes on every agent turn.
+    repoRoot, err := paths.WorktreeRoot(ctx)
+    if err != nil {
+        return 0, err
+    }
+    cfg, err := agent.OpenHookConfig(repoRoot, a.HookConfigRelPath())
     if err != nil {
         return 0, err
     }
 
-    // 2. Read existing settings (preserve unknown fields)
-    settingsPath := filepath.Join(repoRoot, ".youragent", "settings.json")
-    // ... read and parse ...
+    // 2. Read existing settings (preserve unknown fields). A missing file comes
+    // back unwrapped, so os.IsNotExist picks "write fresh" over "merge".
+    existing, err := cfg.Read()
+    // ... parse into map[string]json.RawMessage, or start empty if absent ...
 
     // 3. Build hook commands.
     // Always name the "entire" binary, resolved through PATH. Never build a
     // hook command from a path inside the working tree: the hook would then run
     // whatever the checked-out branch contains, on every agent turn. Wrap it so
     // a missing binary exits cleanly instead of failing the agent's operation.
+    //
+    // Pick the wrapper per host — see "Choosing the hook wrapper" below.
     const cmdPrefix = "entire hooks your-agent "
-    hookCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "stop")
+    useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
+    hookCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+"stop", useWindowsHooks)
 
     // Drop Entire-owned hooks carrying any other command before adding this
     // one, even without force — otherwise a hook written by an older version
@@ -408,7 +427,9 @@ func (a *YourAgent) InstallHooks(force bool) (int, error) {
     // matched for exactly this reason; see entireHookPrefixes in any agent.
 
     // 4. Add hooks if they don't exist (idempotent)
-    // 5. Write settings back (preserving unknown fields)
+    // 5. Write settings back through the same handle, preserving unknown fields.
+    // Write creates the parent directories, refusing a symlinked one.
+    // if err := cfg.Write(output, 0o600); err != nil { return 0, err }
 
     return count, nil
 }
@@ -417,6 +438,34 @@ func (a *YourAgent) UninstallHooks() error         { /* reverse of install */ }
 func (a *YourAgent) AreHooksInstalled() bool        { /* check settings file */ }
 func (a *YourAgent) GetSupportedHooks() []agent.HookType { /* list supported types */ }
 ```
+
+#### Choosing the hook wrapper
+
+The sh-based wrappers carry `>` and `&`. On Windows, an agent that hands the
+stored command to `cmd.exe` has those read as its own redirection and separator,
+so the command is cut apart and `entire` never runs — at **exit code 0**, so
+nothing reports a problem. Never install an unconditional
+`WrapProductionSilentHookCommand`; choose per host with the `*ForOS` selectors
+(`WrapProductionSilentHookCommandForOS`,
+`WrapProductionJSONWarningHookCommandForOS`,
+`WrapProductionPlainTextWarningHookCommandForOS`), passing one of two gates:
+
+| Gate | Use it when | Adopters |
+| --- | --- | --- |
+| `agent.UseWindowsProductionHooks(ctx)` | The agent may genuinely reach a POSIX sh on Windows. Probes whether `sh -c 'exit 0'` runs and keeps the sh wrapper if it does. | codex, cursor |
+| `agent.HookHostIsWindows()` | The agent hands every hook to `cmd.exe` on Windows whatever else is installed. No probe. | factoryai-droid |
+
+**Establish which by reading the agent's runner, not by assuming.** The probe is
+not the safe default: it only proves that a command carrying *no* cmd.exe
+metacharacters runs, so a Windows host with Git Bash reports success while the
+real wrapper is still cut apart. That is exactly how droid shipped broken on
+Windows — see `agent.HookHostIsWindows`'s doc comment for how its runner was
+read out of the shipped binaries, and for why codex and cursor are on the other
+gate for reasons of evidence rather than mechanism.
+
+Both gates are overridable in tests via `agent.SetWindowsHookProbeForTesting`;
+key install-test expectations to the host rather than hardcoding one wrapper, or
+they assert a command `InstallHooks` does not write on the other platform.
 
 Also implement `HookHandler` — this is required for the CLI to register `entire hooks <agent> <verb>` subcommands:
 

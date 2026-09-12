@@ -58,6 +58,46 @@ func factoryHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 	return agent.OpenHookConfig(repoRoot, (&FactoryAIDroidAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
+// hookCommandPrefix is what every hook command Entire writes for droid begins
+// with; the verb is one of the HookName* constants.
+const hookCommandPrefix = "entire hooks factoryai-droid "
+
+// silentHookCommand wraps one hook verb in the silent production wrapper for
+// this host.
+//
+// Droid's Windows build runs every hook command as an argument of cmd.exe,
+// while its macOS/Linux build runs the same string under sh. cmd.exe reads the
+// sh wrapper's `>` and `&` as its own redirections and separators, so the
+// command is cut apart and no `entire hooks` process is ever created — the
+// session never starts, so a commit produces no checkpoint and nothing says
+// why.
+//
+// Unlike Codex and Cursor the choice is NOT gated on
+// agent.UseWindowsProductionHooks: droid never hands a hook to sh on Windows,
+// so whether a working sh exists there changes nothing. See
+// agent.HookHostIsWindows.
+//
+// Scope: this fixes droid 0.178.0 and later, the two compositions verified end
+// to end on Windows. 0.109.1 spawned `cmd.exe /c <H>` WITHOUT
+// windowsVerbatimArguments, so libuv quotes the argument and backslash-escapes
+// the inner quotes of the silent wrapper's nested `cmd.exe /d /s /c "…"` — an
+// escape cmd.exe does not understand. That version stays broken, but it was
+// equally broken before: the sh wrapper never survived its cmd.exe either. The
+// bare (unnested) wrapper shape the Stop hook uses would likely work there too,
+// and switching every hook to it is the fix if anyone still runs 0.109.1 — it
+// is not taken here because it would trade the shape actually verified on
+// current droid for one that is not.
+func silentHookCommand(verb string, useWindows bool) string {
+	return agent.WrapProductionSilentHookCommandForOS(hookCommandPrefix+verb, useWindows)
+}
+
+// stopHookCommand is silentHookCommand for the Stop hook, which carries the
+// plain-text warning wrapper rather than the silent one.
+func stopHookCommand(useWindows bool) string {
+	return agent.WrapProductionPlainTextWarningHookCommandForOS(
+		hookCommandPrefix+HookNameStop, agent.WarningFormatSingleLine, useWindows)
+}
+
 // InstallHooks installs Factory AI Droid hooks in .factory/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
@@ -123,14 +163,15 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 		preCompact = removeEntireHooks(preCompact)
 	}
 
-	// Define hook commands
-	sessionStartCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start")
-	sessionEndCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end")
-	stopCmd := agent.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agent.WarningFormatSingleLine)
-	userPromptSubmitCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit")
-	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use")
-	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use")
-	preCompactCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact")
+	// Wrapper form is host-dependent; see silentHookCommand.
+	useWindowsHooks := agent.HookHostIsWindows()
+	sessionStartCmd := silentHookCommand(HookNameSessionStart, useWindowsHooks)
+	sessionEndCmd := silentHookCommand(HookNameSessionEnd, useWindowsHooks)
+	stopCmd := stopHookCommand(useWindowsHooks)
+	userPromptSubmitCmd := silentHookCommand(HookNameUserPromptSubmit, useWindowsHooks)
+	preTaskCmd := silentHookCommand(HookNamePreToolUse, useWindowsHooks)
+	postTaskCmd := silentHookCommand(HookNamePostToolUse, useWindowsHooks)
+	preCompactCmd := silentHookCommand(HookNamePreCompact, useWindowsHooks)
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher) does not survive
