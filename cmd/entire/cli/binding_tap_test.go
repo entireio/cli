@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -86,7 +88,7 @@ func TestRecordForeignEvidence_EnabledForeignRepoRecorded(t *testing.T) {
 	if rec.AgentType != testAgentName || rec.LaunchRoot != rootA {
 		t.Errorf("session meta not stored: %+v", rec)
 	}
-	if br.AdoptedAt == nil || loadTargetState(ctx, t, rootB) == nil {
+	if br.AdoptedAt == nil || loadTargetState(ctx, t, rootB, "sess-1") == nil {
 		t.Fatalf("an enabled foreign repo must be adopted, not just recorded: %+v", br)
 	}
 }
@@ -674,9 +676,9 @@ func commitInitial(t *testing.T, root string) {
 	testutil.GitCommit(t, root, "initial")
 }
 
-func loadTargetState(ctx context.Context, t *testing.T, root string) *session.State {
+func loadTargetState(ctx context.Context, t *testing.T, root, sessionID string) *session.State {
 	t.Helper()
-	state, err := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName)).Load(ctx, "sess-1")
+	state, err := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName)).Load(ctx, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +712,7 @@ func TestRecordForeignEvidence_SiblingWorktreeIsNotAdopted(t *testing.T) {
 	if rec.BoundRepos[0].AdoptedAt != nil {
 		t.Fatalf("a sibling worktree must never be marked adopted: %+v", rec.BoundRepos[0])
 	}
-	still := loadTargetState(ctx, t, rootA)
+	still := loadTargetState(ctx, t, rootA, "sess-1")
 	if still == nil || still.WorktreePath != source.WorktreePath || still.StepCount != source.StepCount {
 		t.Fatalf("shared state must be untouched: %+v", still)
 	}
@@ -743,7 +745,7 @@ func TestEnsureSessionReplicated_MarkerFailureStillReportsReplicated(t *testing.
 	if err != nil || !replicated {
 		t.Fatalf("replicated = %v, err = %v; want true with the marker failure logged", replicated, err)
 	}
-	if loadTargetState(ctx, t, rootB) == nil {
+	if loadTargetState(ctx, t, rootB, "sess-1") == nil {
 		t.Fatal("target state must exist")
 	}
 }
@@ -774,7 +776,7 @@ func TestEnsureSessionReplicated_FailedBaselineWalkDefersAdoption(t *testing.T) 
 	if err == nil || replicated {
 		t.Fatalf("replicated = %v, err = %v; want a deferred adoption", replicated, err)
 	}
-	if loadTargetState(ctx, t, rootB) != nil {
+	if loadTargetState(ctx, t, rootB, "sess-1") != nil {
 		t.Fatal("no replica may be persisted without its baselines")
 	}
 	rec, err := binding.LoadRecord(ctx, "sess-1")
@@ -839,7 +841,122 @@ func TestRecordForeignEvidence_DisabledRepoIsNotAdopted(t *testing.T) {
 	if br.AdoptedAt != nil {
 		t.Error("a disabled repo must not be adopted")
 	}
-	if loadTargetState(ctx, t, rootB) != nil {
+	if loadTargetState(ctx, t, rootB, "sess-1") != nil {
 		t.Error("a disabled repo must not receive replicated session state")
+	}
+}
+
+// userGlobalSettingsFileName is the user-global settings file inside
+// $ENTIRE_CONFIG_DIR. Spelled out rather than taken from
+// settings.UserSettingsFileName, which arrives with the repository-policy
+// classifier: this test has to be correct both before and after that.
+const userGlobalSettingsFileName = "settings.json"
+
+// tierActivationAvailable reports whether activation on this build consults the
+// user-global tracking tier, by asking about a repository that has no .entire
+// at all while the tier is enabled. Only the classifier-backed IsActiveAtRoot
+// can answer true; the repo-level-only one cannot see a tier.
+//
+// This is a capability probe, not a branch check. The two halves of session
+// binding's activation gate live on different branches right now — the gate
+// itself here, the tier that feeds it with the classifier — and neither order
+// of landing is decided. The probe means the test below is inert until they
+// meet and runs for real the moment they do, with nobody having to remember it.
+func tierActivationAvailable(ctx context.Context, t *testing.T) bool {
+	t.Helper()
+	return settings.IsActiveAtRoot(ctx, newBindingRepo(t))
+}
+
+// enableGlobalTierForTest points ENTIRE_CONFIG_DIR at a fresh directory and
+// turns the user-global tier on in it, optionally carving out excluded paths.
+func enableGlobalTierForTest(t *testing.T, excludePaths ...string) {
+	t.Helper()
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	global := map[string]any{"enabled": true}
+	if len(excludePaths) > 0 {
+		global["exclude_paths"] = excludePaths
+	}
+	body, err := json.Marshal(map[string]any{"global": global})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, userGlobalSettingsFileName), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRecordForeignEvidence_GloballyTrackedRepoIsAdopted is the composition the
+// two unit halves cannot cover between them: that binding's gate actually
+// carries a repo the tier alone makes active.
+//
+// It is the half no settings file can express. Under global tracking a repo has
+// no .entire — that is the point of the tier — so an activation check that only
+// reads settings files answers false for every globally tracked repo, and
+// binding would skip exactly the repos the user asked to have tracked
+// machine-wide. Nothing else notices: evidence is still recorded, it is simply
+// recorded as not enabled, and no session state is ever replicated.
+func TestRecordForeignEvidence_GloballyTrackedRepoIsAdopted(t *testing.T) {
+	ctx := context.Background()
+	enableGlobalTierForTest(t)
+	if !tierActivationAvailable(ctx, t) {
+		t.Skip("activation does not consult the user-global tier on this build yet")
+	}
+	rootA := newBindingRepo(t)
+	rootB := newBindingRepo(t) // no .entire: tracked only by the tier
+	commitInitial(t, rootB)
+	commitInitial(t, rootA)
+	bindingSourceState(ctx, t, rootA, "sess-global")
+	t.Chdir(rootA)
+
+	recordForeignEvidence(ctx, "sess-global", bindingTestMeta(rootA), rootA,
+		[]string{filepath.Join(rootB, "pkg", "f.go")})
+
+	rec, err := binding.LoadRecord(ctx, "sess-global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || len(rec.BoundRepos) != 1 {
+		t.Fatalf("expected one bound repo, got %+v", rec)
+	}
+	if !rec.BoundRepos[0].Enabled {
+		t.Error("a repo covered by the tier must record Enabled=true")
+	}
+	if loadTargetState(ctx, t, rootB, "sess-global") == nil {
+		t.Error("a repo covered by the tier must receive replicated session state")
+	}
+}
+
+// TestRecordForeignEvidence_GloballyExcludedRepoIsNotAdopted is the qualifier on
+// that half: the tier only carries a repo the user's exclude list does not carve
+// out. Without it the gate could trade one over-broad answer for another.
+func TestRecordForeignEvidence_GloballyExcludedRepoIsNotAdopted(t *testing.T) {
+	ctx := context.Background()
+	rootA := newBindingRepo(t)
+	rootB := newBindingRepo(t)
+	enableGlobalTierForTest(t, rootB)
+	if !tierActivationAvailable(ctx, t) {
+		t.Skip("activation does not consult the user-global tier on this build yet")
+	}
+	commitInitial(t, rootB)
+	commitInitial(t, rootA)
+	bindingSourceState(ctx, t, rootA, "sess-excluded")
+	t.Chdir(rootA)
+
+	recordForeignEvidence(ctx, "sess-excluded", bindingTestMeta(rootA), rootA,
+		[]string{filepath.Join(rootB, "pkg", "f.go")})
+
+	rec, err := binding.LoadRecord(ctx, "sess-excluded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || len(rec.BoundRepos) != 1 {
+		t.Fatalf("expected one bound repo, got %+v", rec)
+	}
+	if rec.BoundRepos[0].Enabled {
+		t.Error("an excluded repo must not be recorded as enabled")
+	}
+	if loadTargetState(ctx, t, rootB, "sess-excluded") != nil {
+		t.Error("an excluded repo must not receive replicated session state")
 	}
 }
