@@ -73,7 +73,10 @@ git -C "$REPO" config user.name probe
 git -C "$REPO" config user.email probe@example.com
 git -C "$REPO" config commit.gpgsign false
 printf '# probe\n' > "$REPO/README.md"
-git -C "$REPO" add README.md
+# docs/ exists up front: some models' write tool refuses to create parent
+# directories and the child then asks for permission instead of writing.
+mkdir -p "$REPO/docs" && : > "$REPO/docs/.gitkeep"
+git -C "$REPO" add README.md docs/.gitkeep
 git -C "$REPO" commit -q -m "init"
 
 # Same shape the e2e harness writes: non-interactive runs auto-reject the
