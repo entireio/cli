@@ -1707,9 +1707,11 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
 		bypassNoChangesSkip: true,
 		analyzerFilesOnly:   true,
-		// Only an agent with no standalone child transcript (Copilot CLI) has
+		// Only a completion with no child transcript obtainable — either by
+		// contract (Copilot CLI) or because the fetch failed (OpenCode) — has
 		// nothing to scan; a completion learned at stop time that DOES declare a
-		// transcript (OpenCode) still attributes files from it.
+		// transcript (OpenCode, on a successful export) still attributes files
+		// from it.
 		eventFilesOnly: event.SubagentTranscriptUnavailable,
 	})
 	if captureErr != nil {

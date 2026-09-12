@@ -297,18 +297,16 @@ const childExportFixture = `{"info":{"id":"ses_child","parentID":"ses_parent","a
 	`"parts":[{"type":"tool","tool":"write","callID":"w1","state":{"status":"completed","input":{"filePath":"/repo/docs/red.md"},"metadata":{"files":[{"filePath":"/repo/docs/red.md"}]}}}]}]}`
 
 func TestParseHookEvent_SubagentStop_ExportsChildAndDeclaresTranscript(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
+	// Not parallel: t.Chdir. See TestPrepareTranscript_AlwaysRefreshesTranscript.
+	t.Chdir(t.TempDir())
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
-	original := runOpenCodeExportToFileFn
 	var exported []string
-	runOpenCodeExportToFileFn = func(_ context.Context, root *os.Root, sessionID, outputName string) error {
+	stubExport(t, func(_ context.Context, root *os.Root, sessionID, outputName string) error {
 		exported = append(exported, sessionID)
 		return root.WriteFile(outputName, []byte(childExportFixture), 0o600)
-	}
-	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
+	})
 
 	ag := &OpenCodeAgent{}
 	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child","subagent_type":"general","task_description":"Create docs/red.md","model":"gemini-2.5-flash"}`
@@ -332,20 +330,20 @@ func TestParseHookEvent_SubagentStop_ExportsChildAndDeclaresTranscript(t *testin
 	require.NotNil(t, event.TokenUsage)
 	assert.Equal(t, 100, event.TokenUsage.InputTokens)
 	assert.Equal(t, 20, event.TokenUsage.OutputTokens)
+	assert.Equal(t, 5, event.TokenUsage.CacheReadTokens)
+	assert.Equal(t, 1, event.TokenUsage.APICallCount)
 	assert.Empty(t, event.ModifiedFiles, "files come from the declared transcript at capture time, not the event")
 }
 
 func TestParseHookEvent_SubagentStop_ExportFailureStillCompletes(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
+	// Not parallel: t.Chdir. See TestPrepareTranscript_AlwaysRefreshesTranscript.
+	t.Chdir(t.TempDir())
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
-	original := runOpenCodeExportToFileFn
-	runOpenCodeExportToFileFn = func(context.Context, *os.Root, string, string) error {
+	stubExport(t, func(context.Context, *os.Root, string, string) error {
 		return errors.New("opencode not reachable")
-	}
-	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
+	})
 
 	ag := &OpenCodeAgent{}
 	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child"}`
@@ -360,8 +358,12 @@ func TestParseHookEvent_SubagentStop_ExportFailureStillCompletes(t *testing.T) {
 }
 
 func TestParseHookEvent_SubagentStop_RejectsUnsafeIDs(t *testing.T) {
-	t.Parallel()
+	// Not parallel: stubExport swaps the package-level runOpenCodeExportToFileFn.
 	ag := &OpenCodeAgent{}
+	stubExport(t, func(context.Context, *os.Root, string, string) error {
+		t.Fatalf("export must not be attempted for a rejected payload")
+		return nil
+	})
 	_, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop,
 		strings.NewReader(`{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"../../evil"}`))
 	require.Error(t, err)

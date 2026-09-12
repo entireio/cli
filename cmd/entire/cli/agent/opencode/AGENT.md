@@ -124,10 +124,10 @@ top-level session.
 | Native signal | Entire EventType | Notes |
 |---------------|------------------|-------|
 | `tool.execute.before` with `tool == "task"` on P | `SubagentStart` | `ToolUseID = callID`, `SessionID = P`, `SubagentType`/`TaskDescription` from `args`. Child ID is **not** known yet here. |
-| parent `message.part.updated`, task part `status: running` with `metadata.sessionId` | (attach) | First moment the child ID is bound to the `callID`; alternative launch signal if the child ID is wanted at start. |
+| parent `message.part.updated`, task part `status: running` with `metadata.sessionId` | `SubagentStart` (`subagent-start` hook) | First moment the child ID is bound to the `callID`, so this is the signal actually used to launch the record; `DeferredCompletion: true`, since completion arrives separately from `subagent-stop` rather than here. |
 | `session.created` with `info.parentID` | (suppress) | Must **not** fire `session-start`; record child→parent in plugin state instead. |
 | child `message.updated` (user) / `session.status` / `session.idle` | (suppress) | Must not fire `turn-start`/`turn-end` for a session whose `parentID` is set. |
-| `tool.execute.after` with `tool == "task"` on P | `SubagentEnd` | `ToolUseID = callID`, `SubagentID = output.metadata.sessionId`, `SubagentTranscriptPath` = export path of the child (`.entire/tmp/<childID>.json`, produced via `opencode export` at hook time), `ModifiedFiles` from the child export. Single-signal agent: leave `Final` false unless background tasks are supported. |
+| `tool.execute.after` with `tool == "task"` on P | `SubagentEnd` (`subagent-stop` hook) | `ToolUseID = callID`, `SubagentID = output.metadata.sessionId`, `Final: true`, `CompletionWithoutLaunch: true`. The child is exported via `opencode export` and declared via `SubagentTranscriptPath` (`.entire/tmp/<childID>.json`); `ModifiedFiles` are extracted from that transcript at capture time rather than placed on the event, and token usage is computed from the same export. |
 
 The plugin must forward `parentID` (or a `parent_session_id` field) so the Go
 side can make the suppression decision from the payload rather than from

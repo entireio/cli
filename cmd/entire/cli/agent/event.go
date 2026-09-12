@@ -146,9 +146,11 @@ type Event struct {
 	// child does any work, and completion comes from tool.execute.after.
 	DeferredCompletion bool
 
-	// SubagentTranscriptUnavailable records an agent contract with no standalone
-	// child transcript. It prevents later generic layout probing from mistaking
-	// an unrelated agent-<id>.jsonl file for this child's transcript.
+	// SubagentTranscriptUnavailable records that no child transcript is
+	// obtainable for this completion — either by contract (Copilot CLI) or
+	// because the fetch failed (OpenCode). It prevents later generic layout
+	// probing from mistaking an unrelated agent-<id>.jsonl file for this
+	// child's transcript.
 	SubagentTranscriptUnavailable bool
 
 	// SubagentTranscriptPath is the agent-declared path to the subagent's own

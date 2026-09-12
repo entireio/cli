@@ -20,26 +20,18 @@ type turnEndRaw struct {
 	Model     string `json:"model"`
 }
 
-// subagentStartRaw is the payload the plugin sends when the parent's `task`
-// tool part first carries the child session ID (state.metadata.sessionId).
-type subagentStartRaw struct {
+// subagentRaw is the payload the plugin sends for both subagent-start (when
+// the parent's `task` tool part first carries the child session ID,
+// state.metadata.sessionId) and subagent-stop (tool.execute.after for the
+// `task` tool). Model is populated only on stop; subagent-start does not know
+// it yet and leaves it empty.
+type subagentRaw struct {
 	SessionID       string `json:"session_id"`       // parent
 	ToolUseID       string `json:"tool_use_id"`      // task part callID
 	SubagentID      string `json:"subagent_id"`      // child session ID
 	SubagentType    string `json:"subagent_type"`    // task args.subagent_type
 	TaskDescription string `json:"task_description"` // task args.description
-}
-
-// subagentStopRaw is the payload the plugin sends from tool.execute.after for
-// the `task` tool. Same identity fields as subagentStartRaw plus the model the
-// parent was using.
-type subagentStopRaw struct {
-	SessionID       string `json:"session_id"`
-	ToolUseID       string `json:"tool_use_id"`
-	SubagentID      string `json:"subagent_id"`
-	SubagentType    string `json:"subagent_type"`
-	TaskDescription string `json:"task_description"`
-	Model           string `json:"model"`
+	Model           string `json:"model"`            // stop only
 }
 
 // --- Export JSON types (from `opencode export`) ---

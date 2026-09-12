@@ -142,14 +142,7 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 		}, nil
 
 	case HookNameSubagentStart:
-		raw, err := agent.ReadAndParseHookInput[subagentStartRaw](stdin)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateSubagentIdentity(raw.SessionID, raw.ToolUseID, raw.SubagentID); err != nil {
-			return nil, err
-		}
-		parentRef, err := sessionTranscriptPath(ctx, raw.SessionID)
+		raw, parentRef, err := a.parseSubagentPayload(ctx, stdin)
 		if err != nil {
 			return nil, err
 		}
@@ -166,14 +159,7 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 		}, nil
 
 	case HookNameSubagentStop:
-		raw, err := agent.ReadAndParseHookInput[subagentStopRaw](stdin)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateSubagentIdentity(raw.SessionID, raw.ToolUseID, raw.SubagentID); err != nil {
-			return nil, err
-		}
-		parentRef, err := sessionTranscriptPath(ctx, raw.SessionID)
+		raw, parentRef, err := a.parseSubagentPayload(ctx, stdin)
 		if err != nil {
 			return nil, err
 		}
@@ -224,10 +210,35 @@ func validateSubagentIdentity(parentID, toolUseID, childID string) error {
 	return nil
 }
 
+// parseSubagentPayload reads a subagent-start or subagent-stop payload,
+// validates its identity fields, and resolves the parent's transcript path.
+// Both ParseHookEvent cases share this and differ only in the event they
+// build from the result.
+func (a *OpenCodeAgent) parseSubagentPayload(ctx context.Context, stdin io.Reader) (*subagentRaw, string, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentRaw](stdin)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := validateSubagentIdentity(raw.SessionID, raw.ToolUseID, raw.SubagentID); err != nil {
+		return nil, "", err
+	}
+	parentRef, err := sessionTranscriptPath(ctx, raw.SessionID)
+	if err != nil {
+		return nil, "", err
+	}
+	return raw, parentRef, nil
+}
+
 // attachSubagentTranscript exports the child session and declares it on the
 // event with its exact token usage. On failure the event is left marked
-// transcript-unavailable: a record that says so is more useful than no record,
-// and the sweep has no other way to fetch a child.
+// transcript-unavailable: OpenCode does implement TranscriptFetcher, but
+// neither the SessionEnd sweep nor condensation calls it — condensation reads
+// only DeclaredTranscriptPath candidates — so a failed export here permanently
+// loses a transcript that still exists in OpenCode's store. Degrading to a
+// completed, transcript-unavailable record is still better than an error that
+// leaves the marker live until SessionEnd completes it transcriptless anyway.
+// Follow-up: a lazy FetchTranscript at condensation for a declared-but-missing
+// OpenCode path.
 func (a *OpenCodeAgent) attachSubagentTranscript(ctx context.Context, event *agent.Event) {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	path, err := a.fetchAndCacheExport(ctx, event.SubagentID)
