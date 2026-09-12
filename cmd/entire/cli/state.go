@@ -398,18 +398,35 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 // FilterAndNormalizePaths converts absolute paths to relative and filters out
 // infrastructure paths and paths outside the repo.
 func FilterAndNormalizePaths(files []string, cwd string) []string {
-	var result []string
+	kept, _ := FilterAndNormalizePathsCollectingForeign(files, cwd)
+	return kept
+}
+
+// FilterAndNormalizePathsCollectingForeign is FilterAndNormalizePaths plus a
+// second return: the paths dropped for being outside the repo. Only ABSOLUTE
+// inputs can be dropped that way (ToRelativePath returns non-absolute input
+// unchanged, so relative junk — including ../ traversal — stays kept exactly
+// as before), which makes foreign a list of absolute out-of-repo paths:
+// cross-repo binding evidence, not garbage.
+//
+// Note the deliberate asymmetry: a path inside a repo NESTED under cwd is
+// path-wise inside and therefore KEPT — this function's kept output is the
+// capture input and must stay byte-identical regardless of nested repos. The
+// binding tap (recordForeignEvidence) separately re-examines kept paths for
+// nested-repo evidence without touching them; see nestedRepoEvidencePaths.
+func FilterAndNormalizePathsCollectingForeign(files []string, cwd string) (kept, foreign []string) {
 	for _, file := range files {
 		relPath := paths.ToRelativePath(file, cwd)
 		if relPath == "" {
+			foreign = append(foreign, file)
 			continue // outside repo
 		}
 		if shouldIgnoreSessionTrackingPath(relPath) {
 			continue
 		}
-		result = append(result, filepath.ToSlash(relPath))
+		kept = append(kept, filepath.ToSlash(relPath))
 	}
-	return result
+	return kept, foreign
 }
 
 // mergeUnique appends elements from extra into base, skipping duplicates already in base.

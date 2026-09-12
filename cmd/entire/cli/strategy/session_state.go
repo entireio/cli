@@ -782,7 +782,7 @@ func WithSessionStateLocks(ctx context.Context, sessionID string, commonDirs []s
 			releaseAll()
 			return fmt.Errorf("session state lock canceled: %w", err)
 		}
-		release, err := flock.AcquireIn(lock.root, lock.name)
+		release, err := flock.AcquireContextIn(ctx, lock.root, lock.name)
 		if err != nil {
 			releaseAll()
 			return fmt.Errorf("acquire session state lock: %w", err)

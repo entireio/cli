@@ -1559,3 +1559,49 @@ func TestGetCheckpointPushRemote(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSetUpAtRoot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("root with settings.json", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, ".entire"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, EntireSettingsFile), []byte(`{"enabled":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !isSetUpAtRoot(root) {
+			t.Error("root with settings.json must be set up")
+		}
+	})
+
+	t.Run("root with only settings.local.json", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, ".entire"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, EntireSettingsLocalFile), []byte(`{"enabled":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !isSetUpAtRoot(root) {
+			t.Error("root with only settings.local.json must be set up")
+		}
+	})
+
+	t.Run("bare root", func(t *testing.T) {
+		t.Parallel()
+		if isSetUpAtRoot(t.TempDir()) {
+			t.Error("bare root must not be set up")
+		}
+	})
+
+	t.Run("nonexistent root", func(t *testing.T) {
+		t.Parallel()
+		if isSetUpAtRoot(filepath.Join(t.TempDir(), "does-not-exist")) {
+			t.Error("nonexistent root must not be set up")
+		}
+	})
+}

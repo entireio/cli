@@ -333,6 +333,11 @@ func TestMaybeSpawnSessionSweep_SeamAndThrottle(t *testing.T) {
 	// process-global.
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
+	// An explicit empty config dir: the spawn decision also consults binding's
+	// record store (binding.RetentionDue), and this test is about the zombie
+	// nomination. Without this it would depend on whatever the rest of the
+	// package left in the shared per-process config dir.
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	ctx := context.Background()
 
 	var spawns atomic.Int32

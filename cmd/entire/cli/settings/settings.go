@@ -1822,6 +1822,59 @@ func entireFileExists(ctx context.Context, name string) bool {
 	return err == nil
 }
 
+// isSetUpAtRoot reports whether Entire has been set up in the repository whose
+// worktree root is the given directory. It mirrors IsSetUp/IsSetUpAny Lstat
+// semantics against an explicit root instead of the process cwd: IsSetUpAny
+// resolves through paths.AbsPath → the process-cwd WorktreeRoot, so a hook
+// process checking a FOREIGN repo cannot use it.
+//
+// Unexported: presence is never the answer a caller wants (see IsActiveAtRoot),
+// and the forbidigo rule that rejects settings.IsSetUpAtRoot says so. This is
+// the first half of that predicate, not a predicate.
+func isSetUpAtRoot(root string) bool {
+	if _, err := os.Lstat(filepath.Join(root, EntireSettingsFile)); err == nil {
+		return true
+	}
+	_, err := os.Lstat(filepath.Join(root, EntireSettingsLocalFile))
+	return err == nil
+}
+
+// IsActiveAtRoot reports whether Entire captures sessions in the repository
+// whose worktree root is the given directory — the at-root form of the
+// question a hook process must ask about a FOREIGN repo before it writes
+// there (see binding adoption).
+//
+// Use this, never a settings-file presence check. `entire disable` sets
+// enabled:false and leaves the file in place, so presence still answers true
+// and the "absolute veto" an explicit disable is supposed to be never fires.
+// Any read error is inactive (fail closed), matching IsSetUpAndEnabled: a
+// repository whose settings we cannot parse is not one we may write into.
+//
+// This is the repo-level half of the full predicate. The complete form is
+//
+//	(the repo's own settings enable it)  OR  (global tracking covers it)
+//
+// and the second half needs the repository-policy classifier, which is not on
+// this branch — there is no user-global tier here for it to consult, so the
+// repo-level answer is the whole answer until there is. The NAME is
+// deliberately the final one (settings.IsActiveAtRoot, the spelling the
+// forbidigo rule already points callers at), so when the classifier arrives
+// this body gives way to the classifier-backed one and no call site moves.
+// Two differences to expect when it does: it also honors the tier and its
+// exclude lists, and it resolves the repository first, so a root that is not
+// a git repository answers false rather than being judged on stray settings
+// files.
+func IsActiveAtRoot(ctx context.Context, root string) bool {
+	if !isSetUpAtRoot(root) {
+		return false
+	}
+	s, err := loadForWorktreeRoot(ctx, root)
+	if err != nil {
+		return false
+	}
+	return s.Enabled
+}
+
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
 // "Set up" spans either scope — .entire/settings.json OR
 // .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.

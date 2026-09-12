@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -87,6 +88,17 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 // logged and retried by the next sweep.
 func runSessionSweep(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, "session-sweep")
+
+	// Binding's machine-level record store, first and independent of the repo
+	// work below: the records live under the user config directory, so nothing
+	// repo-scoped reclaims them, and a session that never touched a repo leaves
+	// a record here and no session state at all. Best-effort — a failure here
+	// must not cost the repo-scoped half of the sweep.
+	if pruned, err := binding.PruneStaleRecords(logCtx, time.Now()); err != nil {
+		logging.Debug(logCtx, "sweep record retention failed", slog.String("error", err.Error()))
+	} else if pruned > 0 {
+		logging.Info(logCtx, "sweep pruned stale session records", slog.Int("count", pruned))
+	}
 
 	states, err := strategy.ListSessionStates(ctx)
 	if err != nil {
@@ -245,13 +257,18 @@ func maybeSpawnSessionSweep(ctx context.Context) {
 		return
 	}
 	n := countSweepableZombies(states, time.Now())
-	if n == 0 {
+	// Retention nominates the sweep on its own. Zombie sessions are absent on
+	// exactly the machines whose record store grows — a session that never
+	// touches a repo writes a record and no session state — so gating the spawn
+	// on zombies alone would run retention only where it was not needed.
+	retentionDue := binding.RetentionDue(ctx, time.Now())
+	if n == 0 && !retentionDue {
 		return
 	}
 	if sweepRecentlySpawned(commonDir, time.Now()) {
 		return
 	}
 	sweepSpawn(root)
-	logging.Info(logCtx, "zombie sessions detected, spawned detached sweep",
-		slog.Int("count", n))
+	logging.Info(logCtx, "spawned detached sweep",
+		slog.Int("zombie_sessions", n), slog.Bool("record_retention_due", retentionDue))
 }

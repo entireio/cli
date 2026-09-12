@@ -100,6 +100,14 @@ func New(cfg Config) (*Logger, error) {
 	return l, nil
 }
 
+// Discard returns a Logger that drops every line. It exists for hook processes
+// running where no file sink is allowed (a cwd outside any repository): with
+// no Logger on the context, Info/Warn/Error fall back to slog's default handler
+// and land on the agent's stderr, so those paths attach this instead.
+func Discard() *Logger {
+	return &Logger{slog: slog.New(slog.DiscardHandler)}
+}
+
 // open creates the log file. Caller holds mu. A failure is remembered so the
 // next line does not retry the syscalls.
 func (l *Logger) open() error {
