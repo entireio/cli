@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -802,6 +803,77 @@ func setupCondensableSessionWithTranscript(t *testing.T, sessionID string) (*git
 	state, err := s.loadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	return repo, state
+}
+
+func TestCondenseAndUpdateState_QueueFailurePreservesRetryState(t *testing.T) {
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+
+	repo, state := setupCondensableSessionWithTranscript(t, "2026-09-12-push-queue-retry")
+	t.Cleanup(gitdir.Reset)
+
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	repoRoot := worktree.Filesystem().Root()
+	metadata, err := gitrepo.ResolveWorktreeMetadata(repoRoot)
+	require.NoError(t, err)
+
+	queuePath := filepath.Join(metadata.CommonDir, "entire-checkpoint-push-queue.jsonl")
+	require.NoError(t, os.Mkdir(queuePath, 0o700))
+	t.Cleanup(func() {
+		gitdir.Reset()
+		_ = os.RemoveAll(queuePath)
+	})
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	checkpointID := id.MustCheckpointID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	shadowBranchesToDelete := make(map[string]struct{})
+	originalBaseCommit := state.BaseCommit
+	originalStepCount := state.StepCount
+	originalFilesTouched := append([]string(nil), state.FilesTouched...)
+	originalLastCheckpointID := state.LastCheckpointID
+
+	s := &ManualCommitStrategy{}
+	condensed, skillEvents, signal := s.condenseAndUpdateState(
+		context.Background(), repo, checkpointID, state, head, shadowBranchName,
+		shadowBranchesToDelete, nil, condenseOpts{repoDir: repoRoot},
+	)
+
+	assert.False(t, condensed)
+	assert.Nil(t, skillEvents)
+	assert.Nil(t, signal)
+	assert.Empty(t, shadowBranchesToDelete)
+	assert.Equal(t, originalBaseCommit, state.BaseCommit)
+	assert.Equal(t, originalStepCount, state.StepCount)
+	assert.Equal(t, originalFilesTouched, state.FilesTouched)
+	assert.Equal(t, originalLastCheckpointID, state.LastCheckpointID)
+	assert.False(t, state.PromptWindowResetPending)
+
+	refName, err := checkpoint.RefName(checkpointID)
+	require.NoError(t, err)
+	_, err = repo.Reference(refName, true)
+	require.NoError(t, err, "the locally written checkpoint remains readable")
+
+	gitdir.Reset()
+	require.NoError(t, os.Remove(queuePath))
+
+	condensed, _, _ = s.condenseAndUpdateState(
+		context.Background(), repo, checkpointID, state, head, shadowBranchName,
+		shadowBranchesToDelete, nil, condenseOpts{repoDir: repoRoot},
+	)
+	require.True(t, condensed)
+	assert.Contains(t, shadowBranchesToDelete, shadowBranchName)
+	assert.Zero(t, state.StepCount)
+	assert.Empty(t, state.FilesTouched)
+	assert.Equal(t, checkpointID, state.LastCheckpointID)
+	assert.True(t, state.PromptWindowResetPending)
+
+	queue, err := checkpoint.PushQueueForRepo(context.Background(), repo)
+	require.NoError(t, err)
+	queuedRefs, err := queue.Peek()
+	require.NoError(t, err)
+	assert.Contains(t, queuedRefs, refName)
 }
 
 // checkpointTaskFile reads one file from a committed checkpoint's
