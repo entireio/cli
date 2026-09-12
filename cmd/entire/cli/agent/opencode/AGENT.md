@@ -127,7 +127,7 @@ top-level session.
 
 | Native signal | Entire EventType | Notes |
 |---------------|------------------|-------|
-| `session.created` / `session.updated` / `session.idle` with `info.parentID` set, and any task-tool metadata naming a child | (suppressed plugin-side) | The plugin filters children out of `session.*` events' `parentID` and out of task metadata before anything reaches the Go side; no `session-start`/`turn-start`/`turn-end` is ever fired for a child. |
+| `session.created` / `session.updated` with `info.parentID` set, and any task-tool metadata naming a child | (suppressed plugin-side) | These populate `childSessions`. `session.idle` / `session.status` carry only `properties.sessionID` (no `info.parentID` to check) and are instead suppressed by membership in that same `childSessions` set; no `session-start`/`turn-start`/`turn-end` is ever fired for a child. |
 | parent `message.part.updated`, task part `status: running` with `metadata.sessionId` | `SubagentStart` (`subagent-start` hook) | First moment the child ID is bound to the `callID`. `ToolUseID = callID`, `SessionID = parent`, `SubagentID = metadata.sessionId`, `SubagentType`/`TaskDescription` from `args`. `DeferredCompletion: true`, since completion arrives separately from `subagent-stop`. |
 | `tool.execute.after` with `tool == "task"` on the parent | `SubagentEnd` (`subagent-stop` hook) | `ToolUseID = callID`, `SubagentID = output.metadata.sessionId`, `Final: true`, `CompletionWithoutLaunch: true`. The child is exported via `opencode export` and declared via `SubagentTranscriptPath` (`.entire/tmp/<childID>.json`); `ModifiedFiles` are extracted from that transcript at capture time rather than placed on the event, and token usage is computed from the same export. |
 

@@ -26,9 +26,9 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   // subagent-start / subagent-stop, fired from the PARENT's task part and
   // tool hook. Learned from session.* events' `parentID`, and from the child
   // ID surfaced in the parent's task part / tool.execute.after — the latter
-  // two also cover a child whose own session.created this process never saw
-  // (resumed from an earlier process, or a restart). These sets live for the
-  // process and are cleared only on server.instance.disposed.
+  // two also cover a child session resumed via `task_id` from an earlier
+  // process, whose own session.created predates this plugin instance. These
+  // sets live for the process and are cleared only on server.instance.disposed.
   const childSessions = new Set<string>()
   // task callIDs already announced via subagent-start (the running part
   // update repeats).
@@ -172,7 +172,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
           subagent_id: childID,
           subagent_type: input.args?.subagent_type ?? "",
           task_description: input.args?.description ?? "",
-          model: currentModel ?? "",
+          model: output?.metadata?.model?.modelID ?? currentModel ?? "",
         })
       } catch {
         // Silently ignore — plugin failures must not crash OpenCode
