@@ -54,7 +54,7 @@ func TestEnsureLefthookIntegration(t *testing.T) {
 	mainBefore, err := os.ReadFile(filepath.Join(dir, "lefthook.yml"))
 	require.NoError(t, err)
 
-	written, err := EnsureLefthookIntegration(t.Context(), false)
+	written, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 	require.Positive(t, written)
 
@@ -82,12 +82,12 @@ func TestEnsureLefthookIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, mainBefore, mainAfter, "Lefthook's own config must not be touched")
 
-	current, err := LefthookIntegrationCurrent(t.Context(), false)
+	current, err := LefthookIntegrationCurrent(t.Context())
 	require.NoError(t, err)
 	require.True(t, current)
 
 	// Repeat installs are no-ops.
-	written, err = EnsureLefthookIntegration(t.Context(), false)
+	written, err = EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 	require.Zero(t, written)
 }
@@ -98,9 +98,9 @@ func TestEnsureLefthookIntegration_MainConfigFormatIsIrrelevant(t *testing.T) {
 	for _, name := range []string{"lefthook.toml", "lefthook.json", ".lefthook.yaml"} {
 		t.Run(name, func(t *testing.T) {
 			newLefthookRepo(t, name)
-			_, err := EnsureLefthookIntegration(t.Context(), false)
+			_, err := EnsureLefthookIntegration(t.Context())
 			require.NoError(t, err)
-			current, err := LefthookIntegrationCurrent(t.Context(), false)
+			current, err := LefthookIntegrationCurrent(t.Context())
 			require.NoError(t, err)
 			require.True(t, current)
 		})
@@ -120,7 +120,7 @@ func TestEnsureLefthookIntegration_PreservesLocalConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := newLefthookRepo(t, "")
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook-local.yml"), []byte(tc.local), 0o644))
-			_, err := EnsureLefthookIntegration(t.Context(), false)
+			_, err := EnsureLefthookIntegration(t.Context())
 			require.NoError(t, err)
 
 			got, err := os.ReadFile(filepath.Join(dir, "lefthook-local.yml"))
@@ -141,7 +141,7 @@ func TestEnsureLefthookIntegration_RefusesToShadowANonYAMLLocalConfig(t *testing
 	original := []byte("[pre-commit.commands.mine]\nrun = \"true\"\n")
 	require.NoError(t, os.WriteFile(tomlPath, original, 0o644))
 
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.ErrorIs(t, err, ErrLefthookLocalConfigUnwritable)
 
 	after, err := os.ReadFile(tomlPath)
@@ -176,7 +176,7 @@ func TestEnsureLefthookIntegration_DisplacesUnownedFiles(t *testing.T) {
 	theirConfig := []byte("# not Entire's\nkey: value\n")
 	require.NoError(t, os.WriteFile(configPath, theirConfig, 0o644))
 
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 
 	backup, err := os.ReadFile(scriptPath + GitHookBackupSuffix)
@@ -186,7 +186,7 @@ func TestEnsureLefthookIntegration_DisplacesUnownedFiles(t *testing.T) {
 	require.NoError(t, err, "the displaced config must be kept")
 	require.Equal(t, theirConfig, backup)
 
-	current, err := LefthookIntegrationCurrent(t.Context(), false)
+	current, err := LefthookIntegrationCurrent(t.Context())
 	require.NoError(t, err)
 	require.True(t, current, "and Entire's own artifacts installed over them")
 }
@@ -196,7 +196,7 @@ func TestRemoveLefthookIntegration(t *testing.T) {
 	dir := newLefthookRepo(t, "")
 	localPath := filepath.Join(dir, "lefthook-local.yml")
 	require.NoError(t, os.WriteFile(localPath, []byte("pre-commit:\n  commands:\n    mine:\n      run: true\n"), 0o644))
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 
 	removed, err := RemoveLefthookIntegration(t.Context())
@@ -210,7 +210,7 @@ func TestRemoveLefthookIntegration(t *testing.T) {
 	require.NotContains(t, string(local), entireLefthookConfig)
 	require.Contains(t, string(local), "mine")
 
-	current, err := LefthookIntegrationCurrent(t.Context(), false)
+	current, err := LefthookIntegrationCurrent(t.Context())
 	require.NoError(t, err)
 	require.False(t, current)
 }
@@ -252,7 +252,7 @@ func TestEnsureLefthookIntegration_ReconcilesHookFiles(t *testing.T) {
 	write("post-commit.old", theirs)
 	write("post-rewrite"+GitHookBackupSuffix, theirs)
 
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 
 	got, err := os.ReadFile(filepath.Join(hooksDir, "pre-push"))
@@ -295,16 +295,16 @@ func TestEnsureLefthookIntegration_ReconcilesHookFiles(t *testing.T) {
 // owns can be present and correct while nothing dispatches Entire at all.
 func TestCheckHookDelivery_Lefthook(t *testing.T) {
 	dir := newLefthookRepo(t, "")
-	got := CheckHookDelivery(t.Context(), false)
+	got := CheckHookDelivery(t.Context())
 	require.False(t, got.OK, "not registered yet")
 	require.Equal(t, LefthookManagerName, got.Manager)
 	require.NotEmpty(t, got.Reason)
 
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 
 	// Registered, but no hook file exists for any hook yet.
-	got = CheckHookDelivery(t.Context(), false)
+	got = CheckHookDelivery(t.Context())
 	require.False(t, got.OK, "a registration nothing triggers is not delivery")
 	require.Equal(t, LefthookManagerName, got.Manager)
 	for _, hook := range gitHookNames {
@@ -321,7 +321,7 @@ func TestCheckHookDelivery_Lefthook(t *testing.T) {
 	require.NoError(t, err)
 	ClearHooksDirCache()
 
-	got = CheckHookDelivery(t.Context(), false)
+	got = CheckHookDelivery(t.Context())
 	require.True(t, got.OK, "reason: %s", got.Reason)
 	require.Equal(t, LefthookManagerName, got.Manager)
 	require.Empty(t, got.Reason)
@@ -329,7 +329,7 @@ func TestCheckHookDelivery_Lefthook(t *testing.T) {
 	// A hook file that belongs to neither is not delivery either.
 	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-push"),
 		[]byte("#!/bin/sh\necho someone else\n"), 0o755))
-	got = CheckHookDelivery(t.Context(), false)
+	got = CheckHookDelivery(t.Context())
 	require.False(t, got.OK)
 	require.Contains(t, got.Reason, "pre-push")
 }
@@ -343,7 +343,7 @@ func TestCheckHookDelivery_Native(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	ClearHooksDirCache()
 
-	got := CheckHookDelivery(t.Context(), false)
+	got := CheckHookDelivery(t.Context())
 	require.False(t, got.OK)
 	require.Empty(t, got.Manager)
 
@@ -351,7 +351,7 @@ func TestCheckHookDelivery_Native(t *testing.T) {
 		t.Fatalf("ReinstallGitHooks: %v", err)
 	}
 	ClearHooksDirCache()
-	got = CheckHookDelivery(t.Context(), false)
+	got = CheckHookDelivery(t.Context())
 	require.True(t, got.OK)
 	require.Empty(t, got.Manager)
 }
@@ -366,7 +366,7 @@ func TestEnsureLefthookIntegration_ExcludesArtifacts(t *testing.T) {
 	require.NoError(t, os.WriteFile(excludePath,
 		[]byte("# user's own\n/scratch\n"+excludeBlockBegin+"/stale-entry\n"+excludeBlockEnd), 0o644))
 
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 
 	got, err := os.ReadFile(excludePath)
@@ -385,13 +385,13 @@ func TestEnsureLefthookIntegration_ExcludesArtifacts(t *testing.T) {
 	// An install that predates an entry is not "current", so it repairs itself.
 	require.NoError(t, os.WriteFile(excludePath,
 		[]byte(excludeBlockBegin+"/"+entireLefthookConfig+"\n"+excludeBlockEnd), 0o644))
-	current, err := LefthookIntegrationCurrent(t.Context(), false)
+	current, err := LefthookIntegrationCurrent(t.Context())
 	require.NoError(t, err)
 	require.False(t, current, "a partial exclude block must trigger a repair")
 
-	_, err = EnsureLefthookIntegration(t.Context(), false)
+	_, err = EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
-	current, err = LefthookIntegrationCurrent(t.Context(), false)
+	current, err = LefthookIntegrationCurrent(t.Context())
 	require.NoError(t, err)
 	require.True(t, current)
 
@@ -444,7 +444,7 @@ func TestEnsureLefthookIntegration_RefusesToBuryABackup(t *testing.T) {
 	older := []byte("#!/bin/sh\necho older\n")
 	require.NoError(t, os.WriteFile(scriptPath+GitHookBackupSuffix, older, 0o755))
 
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.ErrorIs(t, err, ErrLefthookArtifactBlocked)
 
 	got, err := os.ReadFile(scriptPath + GitHookBackupSuffix)
@@ -462,7 +462,7 @@ func TestEnsureLefthookIntegration_RefusesToBuryABackup(t *testing.T) {
 // A visible install that installed nothing must not claim otherwise.
 func TestInstallGitHook_ReportsLefthookDeliveryInsteadOfAFalseInstall(t *testing.T) {
 	dir := newLefthookRepo(t, "")
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 
 	hooksDir := filepath.Join(dir, ".git", "hooks")
@@ -504,7 +504,7 @@ func TestCheckHookDelivery_DeclinedLefthookConfigFallsBackToNativeHooks(t *testi
 		[]byte("[pre-commit.commands.mine]\nrun = \"true\"\n"), 0o644))
 	ClearHooksDirCache()
 
-	got := CheckHookDelivery(t.Context(), false)
+	got := CheckHookDelivery(t.Context())
 	require.False(t, got.OK, "no hooks installed yet")
 	require.Empty(t, got.Manager, "Lefthook is not the one delivering")
 	require.Equal(t, "lefthook-local.toml is not YAML", got.Declined)
@@ -514,7 +514,7 @@ func TestCheckHookDelivery_DeclinedLefthookConfigFallsBackToNativeHooks(t *testi
 	require.NoError(t, err)
 	ClearHooksDirCache()
 
-	got = CheckHookDelivery(t.Context(), false)
+	got = CheckHookDelivery(t.Context())
 	require.True(t, got.OK, "Entire's own hooks deliver here")
 	require.Empty(t, got.Manager)
 	require.Equal(t, "lefthook-local.toml is not YAML", got.Declined, "and the reason why is still reported")
@@ -577,14 +577,14 @@ func TestEnsureLefthookIntegration_TrackedLocalConfig(t *testing.T) {
 	testutil.GitAdd(t, dir, "lefthook-local.yml")
 	testutil.GitCommit(t, dir, "team config")
 
-	_, err := EnsureLefthookIntegration(t.Context(), false)
+	_, err := EnsureLefthookIntegration(t.Context())
 	require.ErrorIs(t, err, ErrLefthookLocalConfigTracked)
 
 	after, err := os.ReadFile(localPath)
 	require.NoError(t, err)
 	require.Equal(t, original, after, "a tracked config must not be modified")
 
-	got := CheckHookDelivery(t.Context(), false)
+	got := CheckHookDelivery(t.Context())
 	require.Empty(t, got.Manager, "Lefthook is not the one delivering")
 	require.Equal(t, "lefthook-local.yml is tracked by git", got.Declined)
 
@@ -592,9 +592,44 @@ func TestEnsureLefthookIntegration_TrackedLocalConfig(t *testing.T) {
 	// Entire has nothing to write and the integration proceeds.
 	require.NoError(t, os.WriteFile(localPath,
 		append([]byte("extends:\n  - "+entireLefthookConfig+"\n"), original...), 0o644))
-	_, err = EnsureLefthookIntegration(t.Context(), false)
+	_, err = EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
-	current, err := LefthookIntegrationCurrent(t.Context(), false)
+	current, err := LefthookIntegrationCurrent(t.Context())
 	require.NoError(t, err)
 	require.True(t, current)
+}
+
+// A repo configured with absolute_git_hook_path must survive every entry
+// point. doctor called these with a hardcoded false, so it reported a working
+// install as NOT DELIVERING and then --force rewrote the scripts down to a
+// bare `entire` — breaking delivery for the GUI git clients that setting
+// exists to serve. The prefix now comes from settings, so no caller can
+// choose it wrongly.
+func TestLefthookIntegration_HonoursAbsoluteGitHookPath(t *testing.T) {
+	dir := newLefthookRepo(t, "")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "absolute_git_hook_path": true}`), 0o644))
+
+	_, err := EnsureLefthookIntegration(t.Context())
+	require.NoError(t, err)
+
+	script, err := os.ReadFile(filepath.Join(dir, lefthookScriptPath("pre-push")))
+	require.NoError(t, err)
+	require.NotContains(t, string(script), "if command -v entire >",
+		"an absolute-path repo must not get the bare command form: %s", script)
+
+	current, err := LefthookIntegrationCurrent(t.Context())
+	require.NoError(t, err)
+	require.True(t, current, "the install must read as current, not as needing repair")
+
+	got := CheckHookDelivery(t.Context())
+	require.Equal(t, LefthookManagerName, got.Manager)
+
+	// The repair path must not rewrite it into the bare form either.
+	_, err = EnsureLefthookIntegration(t.Context())
+	require.NoError(t, err)
+	after, err := os.ReadFile(filepath.Join(dir, lefthookScriptPath("pre-push")))
+	require.NoError(t, err)
+	require.Equal(t, script, after, "a second install must not downgrade the command")
 }

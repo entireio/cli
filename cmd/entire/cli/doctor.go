@@ -637,7 +637,7 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	// their contents say nothing about whether Entire runs. Every other
 	// manager only overwrites at install time, so for those the hook files
 	// remain the answer and the check below is the right one.
-	delivery := strategy.CheckHookDelivery(ctx, false)
+	delivery := strategy.CheckHookDelivery(ctx)
 	if delivery.Declined != "" {
 		// Entire's own hooks are the arrangement here, so the checks below are
 		// the right ones — but say why Lefthook is not carrying it, since
@@ -652,7 +652,7 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 			// launcher, so every hook runs Entire twice — gets straightened
 			// out. Delivery reads OK in that state, so it needs asking for.
 			if force {
-				if _, err := strategy.EnsureLefthookIntegration(ctx, false); err != nil {
+				if _, err := strategy.EnsureLefthookIntegration(ctx); err != nil {
 					return fmt.Errorf("reconcile %s hooks: %w", delivery.Manager, err)
 				}
 			}
@@ -666,7 +666,7 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 			fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
 			return nil
 		}
-		if _, err := strategy.EnsureLefthookIntegration(ctx, false); err != nil {
+		if _, err := strategy.EnsureLefthookIntegration(ctx); err != nil {
 			return fmt.Errorf("register Entire with Lefthook: %w", err)
 		}
 		// Registering is not enough when Lefthook has no hook file for a hook

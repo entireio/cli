@@ -1831,15 +1831,14 @@ func ensureLefthookIntegrationIfManaged(ctx context.Context) error {
 	if err != nil || !LefthookManaged(repoRoot) {
 		return nil //nolint:nilerr // not a Lefthook repo: nothing to do
 	}
-	absolute := hookSettingsFromConfig(ctx)
-	current, err := LefthookIntegrationCurrent(ctx, absolute)
+	current, err := LefthookIntegrationCurrent(ctx)
 	if err != nil {
 		return nil //nolint:nilerr // inspection failure falls back to native hooks
 	}
 	if current {
 		return reconcileHookFiles(ctx)
 	}
-	if _, err := EnsureLefthookIntegration(ctx, absolute); err != nil {
+	if _, err := EnsureLefthookIntegration(ctx); err != nil {
 		// Both refusals are decisions about the user's repository, not
 		// failures: the native hooks stay and status/doctor report why.
 		if errors.Is(err, ErrLefthookLocalConfigUnwritable) || errors.Is(err, ErrLefthookLocalConfigTracked) {
