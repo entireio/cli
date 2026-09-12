@@ -23,15 +23,81 @@ type runConfig struct {
 	Model          string
 	PermissionMode string
 	PromptTimeout  time.Duration
+
+	// promptTimeoutExact suppresses TimeoutMultiplier scaling of
+	// PromptTimeout. See withExactPromptTimeout.
+	promptTimeoutExact bool
 }
 
+// WithPromptTimeout bounds one prompt at d, scaled by the runner's
+// TimeoutMultiplier. It is for TESTS: a duration in a test file is authored for
+// the work, not for whichever of the ten runners draws the subtest.
 func WithPromptTimeout(d time.Duration) Option {
-	return func(c *runConfig) { c.PromptTimeout = d }
+	return func(c *runConfig) {
+		c.PromptTimeout = d
+		c.promptTimeoutExact = false
+	}
+}
+
+// withExactPromptTimeout bounds one prompt at exactly d, with no scaling. It is
+// for the harness's OWN deadlines, where the premise behind scaling is false:
+// such a number was written by one runner, for that runner, already knowing how
+// slow it is, so multiplying it by that same runner's multiplier double-counts.
+//
+// opencode's Bootstrap warmup is the case that motivated splitting these.
+// openCodeWarmupRetryBudget exists precisely because "3 x 90s is over four
+// minutes of blocked CI"; scaling it by opencode's 2.0 turned the sequence into
+// 180s + 60s + 60s and broke the bound the constant was written to enforce.
+//
+// Unexported on purpose, and TestHarnessDeadlinesAreNotScaled pins that the
+// package's own runners reach for this one rather than WithPromptTimeout.
+func withExactPromptTimeout(d time.Duration) Option {
+	return func(c *runConfig) {
+		c.PromptTimeout = d
+		c.promptTimeoutExact = true
+	}
 }
 
 // PromptTimeoutEnv is the environment variable that overrides every agent's
 // per-prompt timeout. It is documented in e2e/README.md and CLAUDE.md.
 const PromptTimeoutEnv = "E2E_TIMEOUT"
+
+// timeoutScaler is the one method promptTimeout needs from a runner. It is
+// narrowed from Agent so a test can stub it without implementing the other
+// nine; every runner satisfies it by being an Agent.
+type timeoutScaler interface {
+	TimeoutMultiplier() float64
+}
+
+// scalePromptTimeout widens a test-supplied per-prompt budget by the runner's
+// TimeoutMultiplier — the same factor runForAgents already applies to the
+// scenario timeout it hands to ForEachAgent.
+//
+// A duration written in a test file is authored without knowing which of the
+// ten runners will execute it, so it can only mean "this much work", not "this
+// much wall clock on whichever agent draws the subtest". Left unscaled it binds
+// hardest on exactly the agents the multiplier exists to give room to:
+// TestRapidSequentialCommits asks three commits of gemini in 120s while
+// granting it a 10m scenario budget for being 2.5x slow.
+//
+// It only ever widens, which is the one asymmetry with the scenario timeout.
+// Scaling down for the two 0.5x runners (vogon and roger-roger) would buy
+// nothing — both are local, deterministic and finish far inside either bound —
+// while tightening a threshold that can only fire on a loaded machine.
+//
+// Deliberately not scaled: a runner's own default, which is already
+// agent-specific and would be double-counted, and E2E_TIMEOUT, which a human
+// types for one particular run and should get verbatim.
+func scalePromptTimeout(d time.Duration, scaler timeoutScaler) time.Duration {
+	if scaler == nil {
+		return d
+	}
+	mult := scaler.TimeoutMultiplier()
+	if mult <= 1 {
+		return d
+	}
+	return time.Duration(float64(d) * mult)
+}
 
 // promptTimeout resolves the per-prompt deadline for a single RunPrompt call.
 //
@@ -50,7 +116,11 @@ const PromptTimeoutEnv = "E2E_TIMEOUT"
 // A malformed E2E_TIMEOUT is an error, not a fallback to the default. Silently
 // ignoring it is how you widen a budget, watch the run fail at the old ceiling
 // anyway, and conclude the agent is slow.
-func promptTimeout(agentDefault time.Duration, cfg *runConfig) (time.Duration, error) {
+//
+// A per-test value is scaled by the runner's TimeoutMultiplier; see
+// scalePromptTimeout for why that one and not the other two, and
+// withExactPromptTimeout for the harness's own deadlines, which are not.
+func promptTimeout(scaler timeoutScaler, agentDefault time.Duration, cfg *runConfig) (time.Duration, error) {
 	timeout := agentDefault
 	if v := strings.TrimSpace(os.Getenv(PromptTimeoutEnv)); v != "" {
 		parsed, err := time.ParseDuration(v)
@@ -63,7 +133,11 @@ func promptTimeout(agentDefault time.Duration, cfg *runConfig) (time.Duration, e
 		timeout = parsed
 	}
 	if cfg != nil && cfg.PromptTimeout > 0 {
-		timeout = cfg.PromptTimeout
+		if cfg.promptTimeoutExact {
+			timeout = cfg.PromptTimeout
+		} else {
+			timeout = scalePromptTimeout(cfg.PromptTimeout, scaler)
+		}
 	}
 	return timeout, nil
 }
@@ -80,8 +154,8 @@ func promptTimeout(agentDefault time.Duration, cfg *runConfig) (time.Duration, e
 // Runners that need the duration itself — cursor computes an absolute deadline
 // from it, and codex, copilot-cli and gemini derive a separate promptCtx — call
 // promptTimeout directly.
-func boundPrompt(ctx context.Context, agentDefault time.Duration, cfg *runConfig) (context.Context, context.CancelFunc, error) {
-	timeout, err := promptTimeout(agentDefault, cfg)
+func boundPrompt(ctx context.Context, scaler timeoutScaler, agentDefault time.Duration, cfg *runConfig) (context.Context, context.CancelFunc, error) {
+	timeout, err := promptTimeout(scaler, agentDefault, cfg)
 	if err != nil {
 		return ctx, func() {}, err
 	}

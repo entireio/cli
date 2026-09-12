@@ -212,7 +212,7 @@ func (a *openCodeAgent) Bootstrap() error {
 		// The difference is not cosmetic: openCodePromptEnv forces PWD, without
 		// which opencode resolves a different project root and never loads the
 		// plugin — a warmup that skipped it would warm the wrong directory.
-		out, err := a.RunPrompt(context.Background(), warmDir, "say hi", WithPromptTimeout(budget))
+		out, err := a.RunPrompt(context.Background(), warmDir, "say hi", withExactPromptTimeout(budget))
 		elapsed := time.Since(start).Round(time.Millisecond)
 		if err == nil {
 			fmt.Fprintf(os.Stderr, "opencode warmup succeeded on attempt %d in %s\n", i+1, elapsed)
@@ -365,7 +365,7 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	}
 	args = append(args, prompt)
 
-	timeout, err := promptTimeout(a.timeout, cfg)
+	timeout, err := promptTimeout(a, a.timeout, cfg)
 	if err != nil {
 		return Output{}, err
 	}

@@ -138,6 +138,19 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
           E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
+          # Unpinned, Cursor routes via `auto` and picks per run, so turn
+          # duration moves for reasons unrelated to the change under test.
+          # Measured per 3-commit prompt (n=3 each, all completed): nano
+          # $0.0047/26.8s, gpt-5-mini $0.0049/35.9s, luna $0.0082/23.5s,
+          # composer-2.5 $0.0169/18.3s. composer is fastest but dearest --- it
+          # bills cache reads at $0.20/M against nano's $0.02/M, and an agentic
+          # loop re-sends the conversation every turn, so that line dominates
+          # even though composer uses the fewest tokens. Nano is the weakest
+          # tier offered; if a test fails on capability rather than on our
+          # code, bump to gpt-5-mini (same cost, one tier up) before digging.
+          # A stale id is safe: the CLI exits 1 naming every valid id rather
+          # than falling back to `auto`. Refresh from `agent --list-models`.
+          E2E_CURSOR_MODEL: ${{ matrix.agent == 'cursor-cli' && 'gpt-5.4-nano-medium' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
           # Only the copilot-cli leg gets the token; other agents must not receive it.

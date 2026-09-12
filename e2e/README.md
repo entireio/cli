@@ -52,7 +52,13 @@ e2e/
 |----------|-------------|---------|
 | `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
-| `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. | per runner: 60s (codex, copilot-cli, gemini), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
+| `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. Neither this nor a runner default is scaled by `TimeoutMultiplier` — only a per-test override is, and upward only. | per runner: 60s (codex, copilot-cli, gemini), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
+| `E2E_CLAUDE_MODEL` | Model for the claude-code runner. `RunPrompt` only — `StartSession` passes no `--model` and uses the account default. | `haiku` |
+| `E2E_CODEX_MODEL` | Model for the codex runner (pinned in `config.toml` so the interactive TUI skips its upgrade dialog) | `gpt-5.4` |
+| `E2E_GEMINI_MODEL` | Model for the gemini-cli runner | `gemini-2.5-flash` |
+| `E2E_OPENCODE_MODEL` | Model for the opencode runner | `anthropic/claude-haiku-4-5` |
+| `E2E_COPILOT_MODEL` | Model for the copilot-cli runner | `claude-haiku-4.5` |
+| `E2E_CURSOR_MODEL` | Model for the cursor-cli runner (`agent --list-models` for ids; an unknown one exits 1 rather than falling back). Unset means Cursor's `auto` routing picks per run, which makes turn duration non-deterministic. CI pins `gpt-5.4-nano-medium` (cheapest measured; `gpt-5-mini` is the same cost one tier up if nano proves too weak). | unset (`auto`) |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |
 | `E2E_CHECKPOINT_STORE` | Checkpoint backend to run the suite against (`git-branch`, `git-refs`). Maps to the `ENTIRE_CHECKPOINTS_PRIMARY` override that every spawned binary/hook honors. | `git-branch` |
 | `E2E_ARTIFACT_DIR` | Override artifact output directory | `e2e/artifacts/<timestamp>` |

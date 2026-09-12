@@ -82,13 +82,24 @@ func (c *Claude) Bootstrap() error {
 	return os.WriteFile(path, []byte(config), 0o644)
 }
 
+// claudeModel returns the model for e2e runs. E2E_CLAUDE_MODEL overrides the
+// cheap default. The variable has been documented in CLAUDE.md far longer than
+// it has been read — nothing consulted it until now, so a run that set it got
+// haiku anyway and no warning.
+func claudeModel() string {
+	if m := strings.TrimSpace(os.Getenv("E2E_CLAUDE_MODEL")); m != "" {
+		return m
+	}
+	return "haiku"
+}
+
 func (c *Claude) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
-	cfg := &runConfig{Model: "haiku"}
+	cfg := &runConfig{Model: claudeModel()}
 	for _, o := range opts {
 		o(cfg)
 	}
 
-	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	ctx, cancel, err := boundPrompt(ctx, c, 0, cfg)
 	if err != nil {
 		return Output{}, err
 	}
