@@ -1572,7 +1572,7 @@ func TestIsSetUpAtRoot(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, EntireSettingsFile), []byte(`{"enabled":true}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if !IsSetUpAtRoot(root) {
+		if !isSetUpAtRoot(root) {
 			t.Error("root with settings.json must be set up")
 		}
 	})
@@ -1586,21 +1586,21 @@ func TestIsSetUpAtRoot(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, EntireSettingsLocalFile), []byte(`{"enabled":true}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if !IsSetUpAtRoot(root) {
+		if !isSetUpAtRoot(root) {
 			t.Error("root with only settings.local.json must be set up")
 		}
 	})
 
 	t.Run("bare root", func(t *testing.T) {
 		t.Parallel()
-		if IsSetUpAtRoot(t.TempDir()) {
+		if isSetUpAtRoot(t.TempDir()) {
 			t.Error("bare root must not be set up")
 		}
 	})
 
 	t.Run("nonexistent root", func(t *testing.T) {
 		t.Parallel()
-		if IsSetUpAtRoot(filepath.Join(t.TempDir(), "does-not-exist")) {
+		if isSetUpAtRoot(filepath.Join(t.TempDir(), "does-not-exist")) {
 			t.Error("nonexistent root must not be set up")
 		}
 	})

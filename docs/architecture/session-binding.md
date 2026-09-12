@@ -26,6 +26,14 @@ the no-nested-repo common case costs zero forks.
 
 ## Adoption
 
+"Active" is `settings.IsActiveAtRoot(ctx, root)`, both where evidence records a
+repo's `enabled` and where adoption re-checks before writing. A settings-file
+presence check is not the same question: `entire disable` leaves the file in
+place, so the veto below never fires. The name is the final one — when the
+repository-policy classifier lands, that helper also answers the user-global
+half ("or global tracking covers it, unless excluded") and these call sites do
+not move.
+
 For each bound repo that is active, `ensureSessionReplicated` writes an
 additive replica of the session state into the target's
 `<common dir>/entire-sessions/`: same session ID, agent, transcript path and

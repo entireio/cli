@@ -35,10 +35,11 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	// Enabled is evidence-time data. Re-check immediately before the repo write
 	// so a concurrent explicit disable remains an absolute veto.
 	//
-	// IsEnabledAtRoot, not IsSetUpAtRoot: the latter only Lstats for a settings
-	// file, so a repo the user disabled still answered true and the veto never
-	// fired.
-	if !settings.IsEnabledAtRoot(ctx, ev.Repo.WorktreeRoot) {
+	// IsActiveAtRoot, not a settings-file presence check: the latter only
+	// Lstats for a file, so a repo the user disabled still answered true and
+	// the veto never fired. It also grows the global-tier half in place, so
+	// this line does not move again when the classifier lands.
+	if !settings.IsActiveAtRoot(ctx, ev.Repo.WorktreeRoot) {
 		return false, nil
 	}
 	rec, err := binding.LoadRecord(ctx, sessionID)

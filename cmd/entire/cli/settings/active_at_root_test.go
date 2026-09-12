@@ -7,15 +7,21 @@ import (
 	"testing"
 )
 
-// TestIsEnabledAtRoot is the property IsSetUpAtRoot cannot provide.
+// TestIsActiveAtRoot is the property a settings-file presence check cannot
+// provide.
 //
-// IsSetUpAtRoot only Lstats for a settings file, so a repo the user explicitly
-// disabled still answers true — the file is still there, it just says
-// enabled:false. binding_adopt.go used it as what its own comment called "an
-// absolute veto" on replicating a session into a foreign repo, which meant the
-// veto never fired: Entire would write session state and checkpoints into a
+// Presence only Lstats for a file, so a repo the user explicitly disabled still
+// answers true — the file is still there, it just says enabled:false.
+// binding_adopt.go used presence as what its own comment called "an absolute
+// veto" on replicating a session into a foreign repo, which meant the veto
+// never fired: Entire would write session state and checkpoints into a
 // repository the user had turned it off in.
-func TestIsEnabledAtRoot(t *testing.T) {
+//
+// These are the repo-level cases, which are the whole answer on this branch.
+// The user-global tier's cases belong to the classifier-backed implementation
+// that replaces this one; they are written against IsActiveAtRoot too, so the
+// two tables union rather than compete.
+func TestIsActiveAtRoot(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -55,7 +61,7 @@ func TestIsEnabledAtRoot(t *testing.T) {
 		},
 		{
 			// Fail closed: an unreadable repo is not a repo we may write to.
-			name:     "malformed settings are not enabled",
+			name:     "malformed settings are not active",
 			write:    map[string]string{EntireSettingsFile: `{"enabled":true`},
 			expected: false,
 		},
@@ -74,8 +80,8 @@ func TestIsEnabledAtRoot(t *testing.T) {
 				}
 			}
 
-			if got := IsEnabledAtRoot(context.Background(), root); got != tc.expected {
-				t.Errorf("IsEnabledAtRoot() = %v, want %v", got, tc.expected)
+			if got := IsActiveAtRoot(context.Background(), root); got != tc.expected {
+				t.Errorf("IsActiveAtRoot() = %v, want %v", got, tc.expected)
 			}
 		})
 	}

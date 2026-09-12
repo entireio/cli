@@ -806,7 +806,7 @@ func disableEntireAt(t *testing.T, root string) {
 // ensureSessionReplicated's comment has always claimed and never had.
 //
 // A repo the user ran `entire disable` in keeps its settings file, so the old
-// presence check (IsSetUpAtRoot) still answered true and the session was
+// presence check still answered true and the session was
 // replicated into it — Entire writing session state and checkpoints into a
 // repository it had been turned off in. Evidence may still be RECORDED, since
 // the record is machine-level and outside every repo; what must not happen is
