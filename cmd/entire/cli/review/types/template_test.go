@@ -243,3 +243,93 @@ func TestReviewerTemplate_StartReturnsErrTemplateMisconfigured(t *testing.T) {
 		})
 	}
 }
+
+// PrepareCmd exists so an adapter can establish a launch precondition that can
+// fail — for the Claude reviewer, the settings file that keeps a reviewed
+// branch's configuration from executing. The three tests below pin the parts
+// that make it safe to depend on: a failure stops the run, and the resource is
+// always released.
+
+// TestReviewerTemplate_PrepareErrorAbortsBeforeLaunch: if the precondition
+// cannot be established, no process may start. Degrading to an unprepared
+// launch is exactly the failure mode PrepareCmd exists to prevent.
+func TestReviewerTemplate_PrepareErrorAbortsBeforeLaunch(t *testing.T) {
+	t.Parallel()
+	built := false
+	tmpl := &ReviewerTemplate{
+		AgentName: "test-agent",
+		PrepareCmd: func(context.Context, RunConfig) (func(), error) {
+			return nil, errors.New("cannot establish trusted settings")
+		},
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			built = true
+			return exec.CommandContext(ctx, "true")
+		},
+		Parser: func(io.Reader) <-chan Event { ch := make(chan Event); close(ch); return ch },
+	}
+	if _, err := tmpl.Start(context.Background(), RunConfig{}); err == nil {
+		t.Fatal("Start succeeded despite PrepareCmd failure")
+	} else if !strings.Contains(err.Error(), "cannot establish trusted settings") {
+		t.Errorf("error %q does not carry the prepare failure", err)
+	}
+	if built {
+		t.Error("BuildCmd ran after PrepareCmd failed; no process may be built without the precondition")
+	}
+}
+
+// TestReviewerTemplate_CleanupRunsAfterWait: the resource must outlive the
+// process (the agent reads it at startup) and must not leak afterwards.
+func TestReviewerTemplate_CleanupRunsAfterWait(t *testing.T) {
+	t.Parallel()
+	cleaned := 0
+	tmpl := &ReviewerTemplate{
+		AgentName: "test-agent",
+		PrepareCmd: func(context.Context, RunConfig) (func(), error) {
+			return func() { cleaned++ }, nil
+		},
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd { return exec.CommandContext(ctx, "true") },
+		Parser:   func(io.Reader) <-chan Event { ch := make(chan Event); close(ch); return ch },
+	}
+	proc, err := tmpl.Start(context.Background(), RunConfig{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if cleaned != 0 {
+		t.Fatal("cleanup ran before the process exited; the agent may still need the resource")
+	}
+	for range proc.Events() { //nolint:revive // draining to EOF; events are asserted elsewhere
+	}
+	if err := proc.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleanup ran %d times after Wait, want 1", cleaned)
+	}
+	// A second Wait must not release the resource twice (a double os.Remove is
+	// harmless, but a future cleanup may not be idempotent).
+	_ = proc.Wait() //nolint:errcheck // second Wait: only the cleanup count matters
+	if cleaned != 1 {
+		t.Errorf("cleanup ran %d times across two Waits, want exactly 1", cleaned)
+	}
+}
+
+// TestReviewerTemplate_CleanupRunsWhenStartFails: a failure between prepare and
+// spawn must not strand the resource, since nobody will call Wait.
+func TestReviewerTemplate_CleanupRunsWhenStartFails(t *testing.T) {
+	t.Parallel()
+	cleaned := 0
+	tmpl := &ReviewerTemplate{
+		AgentName: "test-agent",
+		PrepareCmd: func(context.Context, RunConfig) (func(), error) {
+			return func() { cleaned++ }, nil
+		},
+		BuildCmd: func(context.Context, RunConfig) *exec.Cmd { return nil },
+		Parser:   func(io.Reader) <-chan Event { ch := make(chan Event); close(ch); return ch },
+	}
+	if _, err := tmpl.Start(context.Background(), RunConfig{}); err == nil {
+		t.Fatal("Start succeeded with a nil BuildCmd result")
+	}
+	if cleaned != 1 {
+		t.Errorf("cleanup ran %d times after a failed Start, want 1", cleaned)
+	}
+}

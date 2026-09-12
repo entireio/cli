@@ -18,6 +18,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/procutil"
 )
@@ -30,6 +31,20 @@ const maxProcessStderrBytes = 64 * 1024
 type ReviewerTemplate struct {
 	// AgentName is returned by Name(). Stable identifier per agent.
 	AgentName string
+
+	// PrepareCmd, when set, runs immediately before BuildCmd. It exists for
+	// launch preconditions that can fail and that own a resource: an agent
+	// that must be pointed at a file the CLI writes (rather than at whatever
+	// the reviewed checkout happens to contain) needs that file created, and
+	// needs the run to stop if it cannot be.
+	//
+	// Returning an error aborts before any process starts. That is deliberate:
+	// a launch precondition that cannot be established must fail the review,
+	// never degrade into launching the agent without it.
+	//
+	// The returned cleanup func (may be nil) runs once the process has exited,
+	// or immediately if Start fails after PrepareCmd succeeded.
+	PrepareCmd func(ctx context.Context, cfg RunConfig) (cleanup func(), err error)
 
 	// BuildCmd constructs the *exec.Cmd to spawn the agent process,
 	// including argv, stdin (if any), and ENTIRE_REVIEW_* env vars.
@@ -67,8 +82,24 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	if t.Parser == nil {
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (nil Parser for agent %q)", ErrTemplateMisconfigured, t.AgentName)
 	}
+	var cleanup func()
+	if t.PrepareCmd != nil {
+		c, err := t.PrepareCmd(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("%s: prepare launch: %w", t.AgentName, err)
+		}
+		cleanup = c
+	}
+	// Every failure path below has to release what PrepareCmd created; the
+	// happy path hands it to templateProcess, which releases it in Wait.
+	release := func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}
 	cmd := t.BuildCmd(ctx, cfg)
 	if cmd == nil {
+		release()
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (BuildCmd returned nil for agent %q)", ErrTemplateMisconfigured, t.AgentName)
 	}
 	// Without this, a cancelled review hangs: the agent's grandchildren keep the
@@ -77,13 +108,16 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	procutil.TerminateOnCancel(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("%s: stdout pipe: %w", t.AgentName, err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("%s: stderr pipe: %w", t.AgentName, err)
 	}
 	if err := cmd.Start(); err != nil {
+		release()
 		return nil, fmt.Errorf("%s: start: %w", t.AgentName, err)
 	}
 	p := &templateProcess{
@@ -93,6 +127,7 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 		events:     make(chan Event, 32),
 		stderr:     &boundedStderrBuffer{limit: maxProcessStderrBytes},
 		stderrDone: make(chan struct{}),
+		cleanup:    cleanup,
 	}
 	go p.run(stdout, t.Parser)
 	go p.captureStderr(stderr)
@@ -114,6 +149,21 @@ type templateProcess struct {
 	events     chan Event
 	stderr     *boundedStderrBuffer
 	stderrDone chan struct{}
+
+	// cleanup releases whatever ReviewerTemplate.PrepareCmd created. Run once,
+	// from Wait, because a resource the launch depends on (e.g. a settings file
+	// the agent reads) must outlive Start and cannot be removed before exit.
+	cleanup     func()
+	cleanupOnce sync.Once
+}
+
+// release runs the PrepareCmd cleanup exactly once.
+func (p *templateProcess) release() {
+	p.cleanupOnce.Do(func() {
+		if p.cleanup != nil {
+			p.cleanup()
+		}
+	})
 }
 
 // Events returns the channel that streams parsed events from the agent process.
@@ -126,6 +176,7 @@ func (p *templateProcess) Events() <-chan Event { return p.events }
 // with stderr; other types for I/O or pipe failures. ProcessError implements
 // Unwrap so callers can use errors.As and errors.Is to classify.
 func (p *templateProcess) Wait() error {
+	defer p.release()
 	if p.stderrDone != nil {
 		<-p.stderrDone
 	}

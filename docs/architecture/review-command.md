@@ -97,6 +97,72 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
 7. On the next `git commit`, the PostCommit hook condenses worker review sessions into the checkpoint on `entire/checkpoints/v1`, with `Kind`, `ReviewSkills`, and `ReviewPrompt` recorded in `CommittedMetadata`.
 8. `CheckpointSummary.HasReview` is set for O(1) lookup. `entire status` and the re-run guard read this flag from checkpoint metadata.
 
+## Reviewer isolation (Claude Code)
+
+A review reads code the reviewer did not write — with `--target`, code fetched from a
+branch nobody on this machine controls. `claude -p` otherwise loads the Claude
+configuration of the directory it starts in and, in non-interactive mode, treats that
+directory as trusted with no workspace-trust prompt. Entire therefore launches the Claude
+reviewer with checkout configuration suppressed:
+
+| Flag | Purpose |
+| --- | --- |
+| `--setting-sources ""` | No settings are read at all — project and local are controlled by the reviewed branch, and a user-level hook would run with that branch as its working directory |
+| `--strict-mcp-config` (and no `--mcp-config`) | No MCP servers start; setting sources do not gate these |
+| `--permission-mode default` | Pinned, so a future default cannot widen the reviewer |
+| `--settings <file>` | Entire's own lifecycle hooks, written outside the worktree, mode 0600 |
+| `--plugin-dir <dir>` | Only the profile's configured skills, copied into a directory Entire owns |
+| `--append-system-prompt` | Trust-boundary instruction; appended so a profile prompt cannot displace it |
+
+User settings are excluded as well as project and local ones. The reviewer's
+working directory is the reviewed checkout, so a user-level hook that runs
+`npm run …`, `make …`, or any checkout-relative script would execute code from
+the branch under review — the same problem one hop removed. Excluding them
+would normally stop user- and plugin-provided review skills resolving, so
+instead Entire stages exactly the skills the profile names: it copies them
+from the user's own configuration into a temporary plugin directory and loads
+that with `--plugin-dir`, rewriting the invocation to `/entire-review:<name>`.
+The user's chosen skill runs; nothing else of theirs is loaded. Curated
+builtins such as `/review` need no staging. A configured skill that cannot be
+staged fails the review before launch — a reviewer started without its skill
+reports `Unknown command` and reviews nothing.
+
+The `--settings` file carries Entire's own lifecycle hooks — the same inventory
+`entire enable` installs, composed from `entireHookSpecs()` — so reviews are still captured
+as sessions with transcripts, without reading those hooks back out of the reviewed
+checkout. It deliberately does **not** carry the user's `apiKeyHelper`: Claude runs that
+helper as a shell command with the reviewed checkout as its working directory,
+so a relative helper would execute branch content before the first request.
+Reviewers authenticate with `ANTHROPIC_API_KEY` or a Claude sign-in; Entire
+prints a note before launch if a helper is configured and no env key is set.
+
+Consequences worth knowing:
+
+- Project-level MCP servers do not run during review. Configure them at user level if a
+  review needs them.
+- Project-level Claude settings, including permissions, do not apply to reviewers.
+- User-level settings, skills and plugins keep working, so existing review profiles are
+  unaffected.
+- If the trusted configuration cannot be written, the review fails before starting the
+  agent. There is no unisolated fallback.
+
+**Why not Claude's `--restricted` flag?** It is a better isolation primitive (it
+ignores non-managed settings as a first-class flag, refuses `bypassPermissions`, and
+confines file tools to the working directories), but it is documented 2.1.248+ and the
+reviewer exits without capturing a session on 2.1.237 (the reported version), and it
+removes the command-running tools the review model uses to compute the diff (the prompt
+gives a scope-vs-base clause, not the diff itself). It is a good follow-up once the diff
+is fed into the prompt or a git-only tool is allow-listed and the supported floor is
+2.1.248+. See the `Why not --restricted` note in `review_launch.go`.
+
+This is configuration isolation, not an OS sandbox: the reviewer still runs with the
+invoking account's privileges, and user-level and managed policy configuration remain
+trusted. The system prompt reduces the chance the reviewer *follows* instructions embedded
+in the material under review; it cannot prevent execution that happens before the model's
+first request, which is what the flags above are for.
+
+See `cmd/entire/cli/agent/claudecode/review_launch.go`.
+
 ## Checkpoint Metadata
 
 Review metadata is stored at two levels on `entire/checkpoints/v1`:
