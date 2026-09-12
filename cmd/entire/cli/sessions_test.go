@@ -1077,7 +1077,7 @@ func TestTokensCmd_TextOutputWithRecommendations(t *testing.T) {
 		"Of the total, subagents used",
 		"Context pressure: 85% of 10k tokens",
 		"Recommendations",
-		"Scope subagent tasks tightly",
+		"Subagents used ",
 		"Context pressure is 85% of the window",
 		// long-session is low severity, so the two-line display cap trims it
 		// behind the medium-severity lines above. Asserted in
@@ -1706,7 +1706,7 @@ func TestTokensCmd_PrioritizesContextReplayHotspot(t *testing.T) {
 	out := stdout.String()
 	checks := []string{
 		"Recommendations",
-		"Large context was replayed across 70 API calls",
+		"70 API calls at about ",
 		"Token usage",
 		"Total:  6.2M tokens",
 		"Cache read: 6.1M",
@@ -1905,7 +1905,7 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 		"Agent:      Claude Code",
 		"Branch:     e2e-triage-fix",
 		"Recommendations",
-		"Large context was replayed across 70 API calls",
+		"70 API calls at about ",
 		"Token usage",
 		"Total:  6.2M tokens",
 		"Cache read: 6.1M",
@@ -3724,5 +3724,88 @@ func TestRecommendationSignalsBuilderIsTheOnlyPath(t *testing.T) {
 		if strings.Contains(string(src), "recommendationRules(tokenRecommendationSignals{") {
 			t.Errorf("%s builds a raw signals literal, bypassing the builder", f)
 		}
+	}
+}
+
+// TestRecommendationsQuoteFiguresFromTheRowsAbove is the bar this PR exists to
+// meet: a recommendation names a contributor and every number it cites appears
+// in a row the reader can find, formatted by the same helper that row uses.
+// Recomputing a percentage is the failure mode — the classes block prints an
+// int percent with a "<1%" case, so a float recomputation renders "87.6%"
+// under a row that says "88%".
+func TestRecommendationsQuoteFiguresFromTheRowsAbove(t *testing.T) {
+	t.Parallel()
+
+	tokens := &sessionTokensUsage{
+		Total:         286_344_584,
+		CacheRead:     269_400_000,
+		Output:        1_000_000,
+		APICalls:      509,
+		SubagentTotal: 29_099_852,
+	}
+	classes := &tokenClassBreakdown{
+		CacheRead: tokenClassShare{Tokens: 269_400_000, VolumePercent: 94},
+		Output:    tokenClassShare{Tokens: 1_000_000, VolumePercent: 1},
+		Total:     286_344_584,
+	}
+
+	recs := recommendationRules(sessionTokenRecommendationSignals(tokens, classes, nil, 0, 0))
+
+	byID := map[string]string{}
+	for _, rec := range recs {
+		byID[rec.ID] = rec.Message
+	}
+
+	apiCall, ok := byID[recAPICallAmplification]
+	if !ok {
+		t.Fatalf("expected api-call-amplification, got %+v", recs)
+	}
+	// Every figure must be one the usage line prints: the call count, the
+	// per-call average (total/calls, which is what "Per call" shows), and the
+	// cache-read class total. Dividing cache read by the call count reads
+	// plausibly but appears in no row.
+	for _, want := range []string{
+		"509",
+		formatTokenCount(286_344_584 / 509),
+		formatTokenCount(269_400_000),
+	} {
+		if !strings.Contains(apiCall, want) {
+			t.Errorf("api-call message must quote %q, got %q", want, apiCall)
+		}
+	}
+	if strings.Contains(apiCall, formatTokenCount(269_400_000/509)) {
+		t.Errorf("api-call message cites a per-call replay figure that no row prints: %q", apiCall)
+	}
+
+	subagent, ok := byID[recSubagentHeavy]
+	if !ok {
+		t.Fatalf("expected subagent-heavy, got %+v", recs)
+	}
+	// The share must be the row's own, via the row's formatter.
+	wantShare := formatSharePercent(29_099_852, roundedPercent(29_099_852, classes.Total))
+	for _, want := range []string{formatTokenCount(29_099_852), formatTokenCount(286_344_584), wantShare} {
+		if !strings.Contains(subagent, want) {
+			t.Errorf("subagent message must quote %q, got %q", want, subagent)
+		}
+	}
+}
+
+// TestUsageLineCarriesPerCall pins the row that makes the API-call
+// recommendation citable. Without it the message quotes a quotient that
+// appears nowhere.
+func TestUsageLineCarriesPerCall(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	writeTokenUsageSection(&out, &sessionTokensUsage{Total: 1_000_000, CacheRead: 900_000, APICalls: 50})
+	if !strings.Contains(out.String(), "Per call: "+formatTokenCount(1_000_000/50)) {
+		t.Errorf("expected a per-call figure in the usage line, got:\n%s", out.String())
+	}
+
+	// No calls recorded means no quotient to print.
+	out.Reset()
+	writeTokenUsageSection(&out, &sessionTokensUsage{Total: 1000, APICalls: 0})
+	if strings.Contains(out.String(), "Per call") {
+		t.Errorf("expected no per-call figure without API calls, got:\n%s", out.String())
 	}
 }

@@ -497,9 +497,23 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 
 	hotspot := cacheReadHotspot(signals.Tokens)
 	if signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
-		message := fmt.Sprintf("API call count is high for one session: %d calls. Batch the next diagnosis and reduce iterative calls.", signals.Tokens.APICalls)
+		message := fmt.Sprintf(
+			"%d API calls for one session. Batch the next diagnosis and reduce iterative calls.",
+			signals.Tokens.APICalls)
 		if hotspot {
-			message = fmt.Sprintf("Large context was replayed across %d API calls; batch the next diagnosis and reduce iterative tool calls.", signals.Tokens.APICalls)
+			// Every figure here is one the usage line prints: the call count,
+			// the per-call average, and the cache-read class total. An earlier
+			// version divided cache read by the call count, which reads as the
+			// replay cost per call but appears in no row — the usage line's
+			// Per call is the whole total divided by calls. A recommendation
+			// that cites a number the reader cannot find is the thing this
+			// change exists to stop.
+			message = fmt.Sprintf(
+				"%d API calls at about %s each, of which %s was replayed cached context. Batch the next diagnosis: each further call replays the context again.",
+				signals.Tokens.APICalls,
+				formatTokenCount(signals.Tokens.Total/signals.Tokens.APICalls),
+				formatTokenCount(signals.Tokens.CacheRead),
+			)
 		}
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       recAPICallAmplification,
@@ -511,9 +525,17 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 	if signals.Tokens != nil && tokenShareAtLeastOneTenth(signals.Tokens.SubagentTotal, signals.Tokens.Total) {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       recSubagentHeavy,
-			Severity: "medium",
-			Message:  "Scope subagent tasks tightly; give each subagent a narrow objective and expected output.",
-			Signals:  []string{"subagent_tokens"},
+			Severity: trailReviewSeverityMedium,
+			Message: fmt.Sprintf(
+				"Subagents used %s of %s tokens (%s). Give each a narrower objective and expected output.",
+				formatTokenCount(signals.Tokens.SubagentTotal),
+				formatTokenCount(signals.Tokens.Total),
+				// The row's own share, through the row's own formatter, so the
+				// two strings match rather than merely agreeing to a rounding.
+				formatSharePercent(signals.Tokens.SubagentTotal,
+					roundedPercent(signals.Tokens.SubagentTotal, signals.Tokens.Total)),
+			),
+			Signals: []string{"subagent_tokens"},
 		})
 	}
 	if signals.Context != nil && signals.Context.Percent >= recommendationHighContextPercent {
@@ -800,6 +822,14 @@ func writeTokenUsageSectionWithTitle(w io.Writer, title string, tokens *sessionT
 			"Cache write: " + formatTokenCount(tokens.CacheWrite),
 			"Output: " + formatTokenCount(tokens.Output),
 			fmt.Sprintf("API calls: %d", tokens.APICalls),
+		}
+		// Per call is what makes the API-call recommendation citable: it quotes
+		// this figure, and a number a recommendation cites has to be visible in
+		// a row above it. It is an average, so the message it feeds says only
+		// that a further call replays the context again — the marginal call
+		// costs the current context, which is larger in a growing session.
+		if tokens.APICalls > 0 {
+			parts = append(parts, "Per call: "+formatTokenCount(tokens.Total/tokens.APICalls))
 		}
 		fmt.Fprintf(w, "  %s\n", strings.Join(parts, " | "))
 	} else {
