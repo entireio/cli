@@ -118,13 +118,19 @@ type mockAnalyzerAgent struct {
 	// returns. Tests use it to simulate a racing SessionEnd landing exactly in
 	// that window.
 	onExtract func()
+
+	// scannedPath records the path ExtractModifiedFilesFromOffset was called
+	// with, so tests can prove which transcript (parent or declared child) the
+	// capture actually scanned.
+	scannedPath string
 }
 
 var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
 
 func (m *mockAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) { return 0, nil }
 
-func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]string, int, error) {
+func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(path string, _ int) ([]string, int, error) {
+	m.scannedPath = path
 	if m.onExtract != nil {
 		m.onExtract()
 	}
@@ -3375,6 +3381,25 @@ func writeSubagentTranscripts(t *testing.T, agentID string) (mainTranscriptPath,
 	return mainTranscriptPath, subagentTranscriptPath
 }
 
+// writeDeclaredOnlyChildTranscript writes a main transcript plus a child
+// transcript that the legacy same-directory/subagents-dir layout
+// (ResolveAgentTranscriptPath) cannot find: a differently-named file in its
+// own temp dir, unrelated to the main transcript's directory. A test
+// asserting the capture used this path proves the declared
+// SubagentTranscriptPath field was actually read, rather than the legacy
+// fallback happening to compute the same path independently.
+func writeDeclaredOnlyChildTranscript(t *testing.T) (mainTranscriptPath, childTranscriptPath string) {
+	t.Helper()
+	mainDir := t.TempDir()
+	mainTranscriptPath = filepath.Join(mainDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"do something"}}`+"\n"), 0o600))
+
+	childDir := t.TempDir()
+	childTranscriptPath = filepath.Join(childDir, "child.jsonl")
+	require.NoError(t, os.WriteFile(childTranscriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+	return mainTranscriptPath, childTranscriptPath
+}
+
 // findSessionCheckpoint returns the permanent checkpoint written for sessionID,
 // or false when none exists.
 func findSessionCheckpoint(ctx context.Context, t *testing.T, sessionID string) (strategy.CheckpointInfo, bool) {
@@ -3536,6 +3561,57 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 		assert.Contains(t, state.FilesTouched, "second.txt",
 			"the second uncorrelated subagent's files must not be dropped by the exactly-once claim")
 	})
+}
+
+// TestHandleLifecycleSubagentStart_DeferredCompletion_RecordsInFlightMarker pins
+// the OpenCode launch shape: the start hook knows the tool call, the child ID and
+// the labels, and completion arrives later as a Final SubagentEnd. The start
+// must leave a live record (so `checkpoint list --pending` shows it and the
+// SessionEnd sweep can complete it) and must not disturb a record a racing
+// Final already completed.
+func TestHandleLifecycleSubagentStart_DeferredCompletion_RecordsInFlightMarker(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-deferred-start"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	start := &agent.Event{
+		Type:               agent.SubagentStart,
+		SessionID:          sessionID,
+		ToolUseID:          "call_red",
+		SubagentID:         "ses_child_red",
+		SubagentType:       "general",
+		TaskDescription:    "Create docs/red.md",
+		DeferredCompletion: true,
+		Timestamp:          time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	rec := state.FindTaskRecord("call_red")
+	require.NotNil(t, rec, "deferred start must record an in-flight marker")
+	assert.True(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, "ses_child_red", rec.AgentID)
+	assert.Equal(t, "general", rec.SubagentType)
+	assert.Equal(t, "Create docs/red.md", rec.TaskDescription)
+
+	preState, preErr := LoadPreTaskState(ctx, "call_red")
+	require.NoError(t, preErr)
+	assert.Nil(t, preState, "a deferred-completion start must not write a worktree pre-task baseline")
+
+	// A late duplicate start after completion must not reopen the record.
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		require.True(t, s.CompleteTaskRecord("call_red", time.Now()))
+		return nil
+	}))
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, state.TaskRecords, 1)
+	assert.False(t, state.TaskRecords[0].CompletedAt.IsZero(), "duplicate start must not overwrite a completed record")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabel
@@ -3966,6 +4042,113 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveSt
 	assert.True(t, gotDirt,
 		"the first SaveStep must snapshot pre-existing uncommitted state (IsFirstCheckpoint baseline) even after a transcript-only task step")
 	assert.Equal(t, "pre-existing uncommitted work", content)
+}
+
+// TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscript
+// pins the OpenCode stop shape: no launch marker is required, but a child
+// transcript IS declared, so the final capture must extract the child's files
+// from it instead of treating the completion as event-files-only (Copilot's
+// shape, which additionally sets SubagentTranscriptUnavailable).
+func TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscript(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-completion-declared"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	mainPath, childPath := writeDeclaredOnlyChildTranscript(t)
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"docs_red.md"},
+	}
+
+	event := finalSubagentEvent(sessionID, "call_red", "ses_child_red")
+	event.SessionRef = mainPath
+	event.SubagentTranscriptPath = childPath
+	event.CompletionWithoutLaunch = true
+	event.SubagentType = "general"
+	event.TokenUsage = &agent.TokenUsage{InputTokens: 12, OutputTokens: 3}
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, event))
+
+	assert.Equal(t, childPath, ag.scannedPath,
+		"files must be extracted from the declared child transcript, not the parent")
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	rec := state.FindTaskRecord("call_red")
+	require.NotNil(t, rec, "a completion learned at stop time creates the record when no launch marker exists")
+	assert.False(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, []string{"docs_red.md"}, rec.Files)
+	assert.Equal(t, childPath, rec.DeclaredTranscriptPath)
+	assert.False(t, rec.TranscriptUnavailable)
+	require.NotNil(t, rec.TokenUsage)
+	assert.Equal(t, 12, rec.TokenUsage.InputTokens)
+	assert.Contains(t, state.FilesTouched, "docs_red.md")
+}
+
+// TestHandleLifecycleSubagentStart_ThenFinalCompletion_CompletesTheDeferredRecord
+// pins the real OpenCode sequence end-to-end: a DeferredCompletion start
+// records the in-flight marker, and the later Final + CompletionWithoutLaunch
+// stop must complete THAT SAME record — not create a second one — preserving
+// the launch-time StartedAt and labels while attaching the stop-time capture
+// (files, declared transcript, tokens).
+func TestHandleLifecycleSubagentStart_ThenFinalCompletion_CompletesTheDeferredRecord(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-deferred-then-final"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	start := &agent.Event{
+		Type:               agent.SubagentStart,
+		SessionID:          sessionID,
+		ToolUseID:          "call_red",
+		SubagentID:         "ses_child_red",
+		SubagentType:       "general",
+		TaskDescription:    "Create docs/red.md",
+		DeferredCompletion: true,
+		Timestamp:          time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	launchRec := state.FindTaskRecord("call_red")
+	require.NotNil(t, launchRec, "the deferred start must record the in-flight marker")
+	launchedAt := launchRec.StartedAt
+
+	mainPath, childPath := writeDeclaredOnlyChildTranscript(t)
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"docs_red.md"},
+	}
+	final := finalSubagentEvent(sessionID, "call_red", "ses_child_red")
+	final.SessionRef = mainPath
+	final.SubagentTranscriptPath = childPath
+	final.CompletionWithoutLaunch = true
+	final.TokenUsage = &agent.TokenUsage{InputTokens: 12, OutputTokens: 3}
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, final))
+
+	assert.Equal(t, childPath, ag.scannedPath, "files must be extracted from the declared child transcript")
+
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Len(t, state.TaskRecords, 1, "the Final completion must complete the deferred record, not create a second one")
+	rec := state.TaskRecords[0]
+	assert.False(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, launchedAt, rec.StartedAt, "completion must not re-stamp the launch-time StartedAt")
+	assert.Equal(t, "general", rec.SubagentType, "launch-time labels must survive completion")
+	assert.Equal(t, "Create docs/red.md", rec.TaskDescription)
+	assert.Equal(t, []string{"docs_red.md"}, rec.Files)
+	assert.Equal(t, childPath, rec.DeclaredTranscriptPath)
+	require.NotNil(t, rec.TokenUsage)
+	assert.Equal(t, 12, rec.TokenUsage.InputTokens)
+	assert.Contains(t, state.FilesTouched, "docs_red.md")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_UnresolvableTranscript_SkipsParentAttribution

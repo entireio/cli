@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -237,6 +238,8 @@ func TestHookNames(t *testing.T) {
 		HookNameTurnStart,
 		HookNameTurnEnd,
 		HookNameCompaction,
+		HookNameSubagentStart,
+		HookNameSubagentStop,
 	}
 
 	if len(names) != len(expected) {
@@ -252,6 +255,118 @@ func TestHookNames(t *testing.T) {
 			t.Errorf("missing expected hook name: %s", e)
 		}
 	}
+}
+
+func TestParseHookEvent_SubagentStart(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child","subagent_type":"general","task_description":"Create docs/red.md"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	assert.Equal(t, agent.SubagentStart, event.Type)
+	assert.Equal(t, "ses_parent", event.SessionID)
+	assert.True(t, strings.HasSuffix(event.SessionRef, filepath.Join(paths.EntireTmpDir, "ses_parent.json")), event.SessionRef)
+	assert.Equal(t, "call_red", event.ToolUseID)
+	assert.Equal(t, "ses_child", event.SubagentID)
+	assert.Equal(t, "general", event.SubagentType)
+	assert.Equal(t, "Create docs/red.md", event.TaskDescription)
+	assert.True(t, event.DeferredCompletion, "OpenCode completes from tool.execute.after, so the start must record a marker")
+}
+
+func TestParseHookEvent_SubagentStart_RejectsUnsafeIDs(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+	for name, input := range map[string]string{
+		"child traversal": `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"../etc"}`,
+		"missing tool id": `{"session_id":"ses_parent","subagent_id":"ses_child"}`,
+		"missing child":   `{"session_id":"ses_parent","tool_use_id":"call_red"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+			require.Error(t, err)
+		})
+	}
+}
+
+const childExportFixture = `{"info":{"id":"ses_child","parentID":"ses_parent","agent":"general"},"messages":[` +
+	`{"info":{"id":"m1","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"make red"}]},` +
+	`{"info":{"id":"m2","role":"assistant","time":{"created":2},"tokens":{"input":100,"output":20,"reasoning":0,"cache":{"read":5,"write":0}}},` +
+	`"parts":[{"type":"tool","tool":"write","callID":"w1","state":{"status":"completed","input":{"filePath":"/repo/docs/red.md"},"metadata":{"files":[{"filePath":"/repo/docs/red.md"}]}}}]}]}`
+
+func TestParseHookEvent_SubagentStop_ExportsChildAndDeclaresTranscript(t *testing.T) {
+	// Not parallel: t.Chdir. See TestPrepareTranscript_AlwaysRefreshesTranscript.
+	t.Chdir(t.TempDir())
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	var exported []string
+	stubExport(t, func(_ context.Context, root *os.Root, sessionID, outputName string) error {
+		exported = append(exported, sessionID)
+		return root.WriteFile(outputName, []byte(childExportFixture), 0o600)
+	})
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child","subagent_type":"general","task_description":"Create docs/red.md","model":"gemini-2.5-flash"}`
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+
+	assert.Equal(t, []string{"ses_child"}, exported, "stop must export exactly the child")
+	assert.Equal(t, agent.SubagentEnd, event.Type)
+	assert.True(t, event.Final)
+	assert.True(t, event.CompletionWithoutLaunch)
+	assert.False(t, event.SubagentTranscriptUnavailable)
+	assert.Equal(t, "ses_parent", event.SessionID)
+	assert.Equal(t, "call_red", event.ToolUseID)
+	assert.Equal(t, "ses_child", event.SubagentID)
+	assert.Equal(t, "general", event.SubagentType)
+	assert.Equal(t, "Create docs/red.md", event.TaskDescription)
+	assert.Equal(t, "gemini-2.5-flash", event.Model)
+	assert.True(t, strings.HasSuffix(event.SubagentTranscriptPath, filepath.Join(paths.EntireTmpDir, "ses_child.json")), event.SubagentTranscriptPath)
+	assert.FileExists(t, event.SubagentTranscriptPath)
+	require.NotNil(t, event.TokenUsage)
+	assert.Equal(t, 100, event.TokenUsage.InputTokens)
+	assert.Equal(t, 20, event.TokenUsage.OutputTokens)
+	assert.Equal(t, 5, event.TokenUsage.CacheReadTokens)
+	assert.Equal(t, 1, event.TokenUsage.APICallCount)
+	assert.Empty(t, event.ModifiedFiles, "files come from the declared transcript at capture time, not the event")
+}
+
+func TestParseHookEvent_SubagentStop_ExportFailureStillCompletes(t *testing.T) {
+	// Not parallel: t.Chdir. See TestPrepareTranscript_AlwaysRefreshesTranscript.
+	t.Chdir(t.TempDir())
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	stubExport(t, func(context.Context, *os.Root, string, string) error {
+		return errors.New("opencode not reachable")
+	})
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child"}`
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+	require.NoError(t, err, "a failed export must degrade the record, not drop the completion")
+	require.NotNil(t, event)
+	assert.True(t, event.Final)
+	assert.True(t, event.CompletionWithoutLaunch)
+	assert.True(t, event.SubagentTranscriptUnavailable)
+	assert.Empty(t, event.SubagentTranscriptPath)
+	assert.Nil(t, event.TokenUsage)
+}
+
+func TestParseHookEvent_SubagentStop_RejectsUnsafeIDs(t *testing.T) {
+	// Not parallel: stubExport swaps the package-level runOpenCodeExportToFileFn.
+	ag := &OpenCodeAgent{}
+	stubExport(t, func(context.Context, *os.Root, string, string) error {
+		t.Fatalf("export must not be attempted for a rejected payload")
+		return nil
+	})
+	_, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop,
+		strings.NewReader(`{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"../../evil"}`))
+	require.Error(t, err)
 }
 
 func TestPrepareTranscript_AlwaysRefreshesTranscript(t *testing.T) {

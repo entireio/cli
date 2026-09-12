@@ -342,6 +342,13 @@ for task work; the payload is materialized at condensation (below).
 - **Factory Droid Workers** upsert (`UpsertCompletedTaskRecord`): a worker
   spans multiple turns, so repeat completions merge files into the same record
   instead of claiming exactly-once.
+- **OpenCode task tool**: `subagent-start` (parent task part bound to the child
+  session) records the in-flight marker via `DeferredCompletion`;
+  `subagent-stop` (`tool.execute.after`) exports the child session with
+  `opencode export`, declares it as the transcript, attaches exact tokens, and
+  completes the record through the Final path with `CompletionWithoutLaunch`,
+  so a start the plugin never saw still completes. Child sessions fire no
+  lifecycle hooks of their own.
 
 **Exactly-once completion.** Completion goes through
 `strategy.CompleteTaskRecord`: one `MutateSessionState` closure marks

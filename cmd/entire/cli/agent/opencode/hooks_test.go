@@ -432,6 +432,80 @@ func TestCheckHookConfig(t *testing.T) {
 	}
 }
 
+func TestInstallHooks_ChildSessionsNeverFireLifecycleHooks(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+	content := string(data)
+
+	// The child set is learned from parentID and consulted before the event switch.
+	learn := `if (event.type.startsWith("session.") && info?.parentID && info?.id) childSessions.add(info.id)`
+	guard := "if (eventSessionID && childSessions.has(eventSessionID)) return"
+	sw := "switch (event.type) {"
+	learnIdx, guardIdx, swIdx := strings.Index(content, learn), strings.Index(content, guard), strings.Index(content, sw)
+	if learnIdx == -1 || guardIdx == -1 || swIdx == -1 {
+		t.Fatalf("plugin missing child-session learn/guard/switch: %d %d %d", learnIdx, guardIdx, swIdx)
+	}
+	if learnIdx >= guardIdx || guardIdx >= swIdx {
+		t.Fatalf("child guard must run before the event switch: learn=%d guard=%d switch=%d", learnIdx, guardIdx, swIdx)
+	}
+	// The one-time context injection is for the user's session only.
+	if !strings.Contains(content, "if (input?.sessionID && childSessions.has(input.sessionID)) return") {
+		t.Fatal("system.transform must not spend the parent's injection on a child session")
+	}
+}
+
+func TestInstallHooks_SubagentHooksFireFromParentTaskSignals(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		// start: parent task part, running, with the child ID bound, once per callID
+		`part.type === "tool" && part.tool === "task"`,
+		`part.state?.status === "running"`,
+		`part.state?.metadata?.sessionId`,
+		`announcedTasks.has(part.callID)`,
+		// the child is learned here too, so a subagent-start we never saw
+		// session.created for is still suppressed
+		`childSessions.add(part.state.metadata.sessionId)`,
+		`callHookSync("subagent-start", {`,
+		// stop: tool.execute.after for the task tool, foreground only, synchronous
+		`"tool.execute.after": async (input, output) => {`,
+		`if (input.tool !== "task") return`,
+		`if (output?.metadata?.background === true) return`,
+		`childSessions.add(childID)`,
+		`callHookSync("subagent-stop", {`,
+		`subagent_id: childID`,
+		`tool_use_id: input.callID`,
+		`if (childSessions.has(input.sessionID)) return`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("plugin missing %q", want)
+		}
+	}
+	if strings.Contains(content, `callHook("subagent-start"`) {
+		t.Error("subagent-start must be synchronous: opencode run can exit before an async hook completes")
+	}
+	if strings.Contains(content, `callHook("subagent-stop"`) {
+		t.Error("subagent-stop must be synchronous: opencode run exits on the parent's idle right after")
+	}
+}
+
 // TestCommittedDogfoodPluginIsCurrent guards the copy of this plugin that the
 // repo commits for its own use against drifting from the template.
 func TestCommittedDogfoodPluginIsCurrent(t *testing.T) {
