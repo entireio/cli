@@ -446,7 +446,7 @@ func TestInstallHooks_ChildSessionsNeverFireLifecycleHooks(t *testing.T) {
 	content := string(data)
 
 	// The child set is learned from parentID and consulted before the event switch.
-	learn := "if (info?.parentID && info?.id) childSessions.add(info.id)"
+	learn := `if (event.type.startsWith("session.") && info?.parentID && info?.id) childSessions.add(info.id)`
 	guard := "if (eventSessionID && childSessions.has(eventSessionID)) return"
 	sw := "switch (event.type) {"
 	learnIdx, guardIdx, swIdx := strings.Index(content, learn), strings.Index(content, guard), strings.Index(content, sw)
@@ -480,11 +480,15 @@ func TestInstallHooks_SubagentHooksFireFromParentTaskSignals(t *testing.T) {
 		`part.state?.status === "running"`,
 		`part.state?.metadata?.sessionId`,
 		`announcedTasks.has(part.callID)`,
+		// the child is learned here too, so a subagent-start we never saw
+		// session.created for is still suppressed
+		`childSessions.add(part.state.metadata.sessionId)`,
 		`callHookSync("subagent-start", {`,
 		// stop: tool.execute.after for the task tool, foreground only, synchronous
 		`"tool.execute.after": async (input, output) => {`,
 		`if (input.tool !== "task") return`,
 		`if (output?.metadata?.background === true) return`,
+		`childSessions.add(childID)`,
 		`callHookSync("subagent-stop", {`,
 		`subagent_id: childID`,
 		`tool_use_id: input.callID`,
@@ -494,6 +498,9 @@ func TestInstallHooks_SubagentHooksFireFromParentTaskSignals(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Errorf("plugin missing %q", want)
 		}
+	}
+	if strings.Contains(content, `callHook("subagent-start"`) {
+		t.Error("subagent-start must be synchronous: opencode run can exit before an async hook completes")
 	}
 	if strings.Contains(content, `callHook("subagent-stop"`) {
 		t.Error("subagent-stop must be synchronous: opencode run exits on the parent's idle right after")
