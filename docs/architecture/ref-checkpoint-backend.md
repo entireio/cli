@@ -74,7 +74,7 @@ Every persistent write (`WriteSession`, and the `Backfill*` operations for trans
 3. **Create a commit** with the current tip as parent (orphan on first write, parented thereafter), so each checkpoint accretes its **own per-checkpoint history**.
 4. **Point the ref at the new commit** (`setRef`) and **enqueue it for push**.
 
-Enqueue is best-effort: a write that lands locally but fails to enqueue must not fail condensation. The ref is still local and correct; only its remote sync is deferred until the next write to the same checkpoint re-enqueues it (see the push queue below).
+Enqueue is required for a successful write result because the queue is the only local source of refs for pre-push. If a ref update succeeds but enqueue fails, the store reports an explicit partial failure. The ref remains local and correct, condensation retains its retryable session state, and a later write to the same checkpoint re-enqueues the ref (see the push queue below).
 
 ## Push and fetch
 
