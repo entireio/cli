@@ -51,6 +51,10 @@ func resolveUserSettingsPath() (string, error) {
 // userSettingsGlobalKey is the one block this binary interprets.
 const userSettingsGlobalKey = "global"
 
+// userSettingsPathTrustKey is a TOP-LEVEL block: see UserSettings.PathTrust
+// for why it cannot live inside `global`.
+const userSettingsPathTrustKey = "path_trust_destinations"
+
 // UnmarshalJSON decodes the user settings file with per-block strictness: the
 // `global` block is strict (an unknown key inside it is an error — an older
 // binary must fail closed rather than misread consent it does not understand),
@@ -63,6 +67,14 @@ func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	}
 	*us = UserSettings{}
 	for key, raw := range blocks {
+		if key == userSettingsPathTrustKey {
+			var pathTrust map[string][]string
+			if err := json.Unmarshal(raw, &pathTrust); err != nil {
+				return fmt.Errorf("%s: %w", userSettingsPathTrustKey, err)
+			}
+			us.PathTrust = pathTrust
+			continue
+		}
 		if key != userSettingsGlobalKey {
 			if us.extra == nil {
 				us.extra = make(map[string]json.RawMessage, len(blocks))
@@ -99,6 +111,13 @@ func (us UserSettings) MarshalJSON() ([]byte, error) {
 			return nil, fmt.Errorf("encoding %s block: %w", userSettingsGlobalKey, err)
 		}
 		out[userSettingsGlobalKey] = raw
+	}
+	if len(us.PathTrust) > 0 {
+		raw, err := json.Marshal(us.PathTrust)
+		if err != nil {
+			return nil, fmt.Errorf("encoding %s block: %w", userSettingsPathTrustKey, err)
+		}
+		out[userSettingsPathTrustKey] = raw
 	}
 	data, err := json.Marshal(out)
 	if err != nil {

@@ -3,6 +3,7 @@ package repopolicy
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -38,6 +39,7 @@ func ResolveTrustIdentity(ctx context.Context, repository Repository) (TrustIden
 		return identity, nil
 	}
 	identity.Path = repository.WorktreeRoot
+	identity.PathRemotes = append([]string(nil), sync.URLs...)
 	return identity, nil
 }
 
@@ -51,7 +53,15 @@ func ResolveTrustIdentity(ctx context.Context, repository Repository) (TrustIden
 // user settings file. `entire enable` records that trust itself and the
 // pre-push prompt records it interactively, so the only repos that ever see
 // a hold are ones the user never explicitly enabled or trusted.
-func DecideEgress(ctx context.Context, policy RepoPolicy, global *GlobalConfig, repository Repository) TrustDecision {
+// Takes the whole UserSettings, not just its global block: trust now spans two
+// top-level blocks — `global` holds the trusted origins and paths, and
+// `path_trust_destinations` holds the destination each path consent was
+// recorded for. See UserSettings.PathTrust.
+func DecideEgress(ctx context.Context, policy RepoPolicy, us *UserSettings, repository Repository) TrustDecision {
+	var global *GlobalConfig
+	if us != nil {
+		global = us.Global
+	}
 	if !policy.Active {
 		return TrustDecision{Source: TrustSourceNone, Reason: TrustReasonInactive}
 	}
@@ -72,7 +82,7 @@ func DecideEgress(ctx context.Context, policy RepoPolicy, global *GlobalConfig, 
 		return TrustDecision{Source: TrustSourceNone, Reason: TrustReasonIdentityUnresolved}
 	}
 	decision := TrustDecision{Source: TrustSourceNone, Reason: TrustReasonUntrusted, Identity: identity}
-	if identityTrusted(ctx, global, identity) {
+	if identityTrusted(ctx, global, identity) && pathTrustCoversDestination(ctx, us.PathTrust, identity) {
 		decision.Allowed, decision.Source, decision.Reason = true, TrustSourceRepo, TrustReasonNone
 	}
 	return decision
@@ -89,6 +99,47 @@ func identityTrusted(ctx context.Context, global *GlobalConfig, identity TrustId
 	}
 	matched, err := MatchesExcludePathExact(ctx, global.TrustedPaths, identity.Path)
 	return err == nil && matched
+}
+
+// pathTrustCoversDestination reports whether a path-keyed consent still names
+// the destination transcripts would go to.
+//
+// A path names a WORKTREE, not a destination, so on its own it cannot honor
+// "new destination, new consent": two filesystem remotes reduce to the same
+// path. Recorded destinations close that. An entry with none recorded predates
+// the discriminator and is honored on the path alone, so closing the gap does
+// not revoke consent anyone already gave.
+func pathTrustCoversDestination(ctx context.Context, recorded map[string][]string, identity TrustIdentity) bool {
+	// Find the entry the same way TrustedPaths is matched — symlink-aware, via
+	// MatchesExcludePathExact — not by raw string compare. The recorded key and
+	// the resolved worktree root can be different spellings of one directory
+	// (/var vs /private/var on macOS), and a raw compare silently misses,
+	// which reads as "no destination recorded" and waves the push through.
+	var want []string
+	for key, remotes := range recorded {
+		matched, err := MatchesExcludePathExact(ctx, []string{key}, identity.Path)
+		if err == nil && matched {
+			want = remotes
+			break
+		}
+	}
+	if len(want) == 0 {
+		return true // legacy entry: consented before the discriminator existed
+	}
+	if len(want) != len(identity.PathRemotes) {
+		return false
+	}
+	have := make([]string, len(identity.PathRemotes))
+	for i, u := range identity.PathRemotes {
+		have[i] = filepath.ToSlash(u)
+	}
+	got := make([]string, len(want))
+	for i, u := range want {
+		got[i] = filepath.ToSlash(u)
+	}
+	slices.Sort(have)
+	slices.Sort(got)
+	return slices.Equal(have, got)
 }
 
 func containsOrigin(entries []string, key string) bool {

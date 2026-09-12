@@ -38,7 +38,7 @@ func classifyRepoPolicy(ctx context.Context, resolve RepositoryResolver) (RepoPo
 		policy.Trust = TrustDecision{Source: TrustSourceNone, Reason: TrustReasonSettings}
 		return policy, nil //nolint:nilerr // deliberate: repo-level activation survives an unreadable user settings file; only egress is held
 	}
-	policy.Trust = DecideEgress(ctx, policy, inputs.global, inputs.repository)
+	policy.Trust = DecideEgress(ctx, policy, inputs.userSettings, inputs.repository)
 	return policy, nil
 }
 
@@ -61,6 +61,9 @@ func ClassifyActivationAt(ctx context.Context, dir string) (RepoPolicy, error) {
 type activationInputs struct {
 	repository Repository
 	global     *GlobalConfig
+	// userSettings is the whole file: trust spans `global` and the top-level
+	// path_trust_destinations block.
+	userSettings *UserSettings
 	// settingsErr is set when repo-level activation holds but the user
 	// settings file is unreadable: capture stays on, egress is held.
 	settingsErr error
@@ -94,6 +97,7 @@ func classifyActivation(ctx context.Context, resolve RepositoryResolver) (RepoPo
 	userSettings, settingsErr := LoadUserSettings(ctx)
 	if settingsErr == nil {
 		inputs.global = userSettings.Global
+		inputs.userSettings = userSettings
 	}
 	switch {
 	case activation.Configured && activation.Enabled:

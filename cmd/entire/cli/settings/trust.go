@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
@@ -100,6 +101,16 @@ func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 		}
 		if !anyPathEntryIsRoot(ctx, us.Global.TrustedPaths, identity.Path) {
 			us.Global.TrustedPaths = append(us.Global.TrustedPaths, identity.Path)
+		}
+		// Record WHICH destination this path consent was for. A path names a
+		// worktree, not a destination, so without this two filesystem remotes
+		// share one consent and swapping them redirects transcripts silently.
+		// See repopolicy.UserSettings.PathTrust.
+		if len(identity.PathRemotes) > 0 {
+			if us.PathTrust == nil {
+				us.PathTrust = make(map[string][]string, 1)
+			}
+			us.PathTrust[filepath.ToSlash(identity.Path)] = append([]string(nil), identity.PathRemotes...)
 		}
 		return nil
 	})

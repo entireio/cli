@@ -127,12 +127,12 @@ func TestEgressDecision_LocalActivationIsGatedWhileGlobalIsOn(t *testing.T) {
 	_, repository := newPolicyRepo(t) // git-initialized, no origin: identity is the path
 	policy := RepoPolicy{Active: true, ActivationSource: ActivationLocal, WorktreeRoot: repository.WorktreeRoot}
 
-	held := DecideEgress(t.Context(), policy, &GlobalConfig{Enabled: true}, repository)
+	held := DecideEgress(t.Context(), policy, &UserSettings{Global: &GlobalConfig{Enabled: true}}, repository)
 	if held.Allowed || held.Reason != TrustReasonUntrusted || held.Identity.Path != repository.WorktreeRoot {
 		t.Fatalf("untrusted local repo with global on = %+v, want held by path identity", held)
 	}
 
-	trusted := DecideEgress(t.Context(), policy, &GlobalConfig{Enabled: true, TrustedPaths: []string{repository.WorktreeRoot}}, repository)
+	trusted := DecideEgress(t.Context(), policy, &UserSettings{Global: &GlobalConfig{Enabled: true, TrustedPaths: []string{repository.WorktreeRoot}}}, repository)
 	if !trusted.Allowed || trusted.Source != TrustSourceRepo {
 		t.Fatalf("trusted-path local repo with global on = %+v, want allowed by repo trust", trusted)
 	}

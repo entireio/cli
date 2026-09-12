@@ -56,8 +56,12 @@ const (
 type TrustIdentity struct {
 	OriginKeys []string `json:"origin_keys,omitempty"`
 	Path       string   `json:"path,omitempty"`
-	RemoteName string   `json:"remote,omitempty"`
-	Dedicated  bool     `json:"dedicated,omitempty"`
+	// PathRemotes are the raw delivery URLs behind a path-keyed identity — the
+	// destination the path alone cannot name. Empty when the repo has no remote
+	// at all, which is the one case where a path genuinely is the whole identity.
+	PathRemotes []string `json:"path_remotes,omitempty"`
+	RemoteName  string   `json:"remote,omitempty"`
+	Dedicated   bool     `json:"dedicated,omitempty"`
 }
 
 // OriginKeyed reports whether this identity is remote-origin based.
@@ -224,6 +228,24 @@ type GlobalConfig struct {
 //nolint:recvcheck // see above: the value receiver on MarshalJSON is load-bearing
 type UserSettings struct {
 	Global *GlobalConfig `json:"global,omitempty"`
+	// PathTrust records which destination each TrustedPaths entry was consented
+	// for, keyed by the same slash-form worktree root.
+	//
+	// A path-keyed identity names a WORKTREE, not a destination, so on its own
+	// it cannot honor TrustIdentity's "new destination, new consent" rule: two
+	// filesystem remotes reduce to the same path, and swapping one for the
+	// other in .git/config redirected transcripts with no prompt. This is the
+	// discriminator; the path fallback itself is unchanged.
+	//
+	// A TOP-LEVEL block rather than a key inside `global`, because `global` is
+	// parsed with DisallowUnknownFields: a new key there makes every older
+	// binary reject the whole file, while an unknown top-level block is
+	// round-tripped untouched.
+	//
+	// An entry absent here is a consent recorded before this existed and is
+	// honored on the path alone — closing the gap must not revoke consent
+	// anyone already gave.
+	PathTrust map[string][]string `json:"path_trust_destinations,omitempty"`
 	// extra holds top-level blocks this binary does not know, preserved
 	// byte-for-byte across read-modify-write so a newer binary's settings
 	// survive an older one's `entire trust`.
