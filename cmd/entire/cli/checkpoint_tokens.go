@@ -298,12 +298,11 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	if summary != nil {
 		checkpointCount = summary.CheckpointsCount
 	}
-	report.Recommendations = append(report.Recommendations, recommendationRules(tokenRecommendationSignals{
-		Tokens:          report.Tokens,
-		Context:         report.Context,
-		TurnCount:       turnCount,
-		CheckpointCount: checkpointCount,
-	})...)
+	report.Recommendations = append(report.Recommendations, recommendationRules(
+		sessionTokenRecommendationSignals(
+			report.Tokens, report.Classes, report.Context,
+			turnCount, checkpointCount,
+		))...)
 	return report
 }
 

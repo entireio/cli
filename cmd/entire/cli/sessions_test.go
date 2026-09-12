@@ -3652,3 +3652,77 @@ func TestTokenRecommendationsNeverTrimAHighSeverityLine(t *testing.T) {
 		}
 	}
 }
+
+// TestRecommendationSignalsCarryTheClassRows pins that the rules can reach the
+// billing-class breakdown PR 1 renders. Without it a recommendation cannot
+// quote a figure the reader can find in a row above it, which is the whole
+// bar for a good recommendation.
+func TestRecommendationSignalsCarryTheClassRows(t *testing.T) {
+	t.Parallel()
+
+	classes := &tokenClassBreakdown{
+		CacheRead: tokenClassShare{Tokens: 9_000_000, VolumePercent: 90},
+		Output:    tokenClassShare{Tokens: 100_000, VolumePercent: 1},
+		Total:     10_000_000,
+		Priced:    true,
+	}
+	signals := tokenRecommendationSignals{
+		Tokens:  &sessionTokensUsage{Total: 10_000_000, CacheRead: 9_000_000, APICalls: 60},
+		Classes: classes,
+	}
+
+	if signals.Tokens == nil || signals.Tokens.CacheRead != 9_000_000 {
+		t.Fatalf("expected the usage totals to reach the rules, got %+v", signals.Tokens)
+	}
+	if signals.Classes.CacheRead.VolumePercent != 90 {
+		t.Fatalf("expected the cache-read row to reach the rules, got %+v", signals.Classes)
+	}
+	// Decision 4: capability is a property of the price family, not the agent.
+	if !signals.Classes.Priced {
+		t.Fatal("expected the priced flag to reach the rules")
+	}
+}
+
+// TestRecommendationSignalsBuilderIsTheOnlyPath pins that both commands build
+// their rule input through one function. Guarding the constructor is what
+// keeps `session tokens` and `checkpoint tokens` from drifting in what they
+// hand the rules; that the call sites actually pass report.Classes is proven
+// end to end by the citation tests, which run through both commands.
+func TestRecommendationSignalsBuilderIsTheOnlyPath(t *testing.T) {
+	t.Parallel()
+
+	classes := &tokenClassBreakdown{
+		CacheRead: tokenClassShare{Tokens: 900, VolumePercent: 90},
+		Total:     1000,
+	}
+	signals := sessionTokenRecommendationSignals(
+		&sessionTokensUsage{Total: 1000, CacheRead: 900, APICalls: 60},
+		classes,
+		&sessionTokensContext{Percent: 50},
+		7, 3,
+	)
+
+	if signals.Classes != classes {
+		t.Error("builder dropped the class breakdown")
+	}
+	if signals.Context == nil || signals.Context.Percent != 50 {
+		t.Error("builder dropped the context row")
+	}
+	if signals.TurnCount != 7 || signals.CheckpointCount != 3 {
+		t.Errorf("builder dropped the counts: %+v", signals)
+	}
+
+	// Both production call sites must go through it.
+	for _, f := range []string{"session_tokens.go", "checkpoint_tokens.go"} {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		if !strings.Contains(string(src), "sessionTokenRecommendationSignals(") {
+			t.Errorf("%s does not build its signals through the shared builder", f)
+		}
+		if strings.Contains(string(src), "recommendationRules(tokenRecommendationSignals{") {
+			t.Errorf("%s builds a raw signals literal, bypassing the builder", f)
+		}
+	}
+}

@@ -72,10 +72,38 @@ type sessionTokensRecommendation struct {
 }
 
 type tokenRecommendationSignals struct {
-	Tokens          *sessionTokensUsage
+	Tokens *sessionTokensUsage
+	// Classes is the billing-class breakdown the report renders above the
+	// recommendations. A rule quotes figures from it rather than recomputing
+	// them, so every number in a recommendation appears in a row the reader can
+	// find. It also carries the capability signals a rule needs before firing:
+	// Priced says whether cost shares mean anything, and a class's CostZero
+	// says the provider bills none of it — which is a property of the model's
+	// price family, not of the agent. Nil when the report has no breakdown.
+	Classes         *tokenClassBreakdown
 	Context         *sessionTokensContext
 	TurnCount       int
 	CheckpointCount int
+}
+
+// sessionTokenRecommendationSignals builds the rule input. Both `session
+// tokens` and `checkpoint tokens` go through it so the two cannot drift in
+// what they hand the rules — a rule that silently sees no Classes on one
+// command would quietly stop citing rows there.
+func sessionTokenRecommendationSignals(
+	tokens *sessionTokensUsage,
+	classes *tokenClassBreakdown,
+	contextInfo *sessionTokensContext,
+	turnCount int,
+	checkpointCount int,
+) tokenRecommendationSignals {
+	return tokenRecommendationSignals{
+		Tokens:          tokens,
+		Classes:         classes,
+		Context:         contextInfo,
+		TurnCount:       turnCount,
+		CheckpointCount: checkpointCount,
+	}
 }
 
 // Recommendation thresholds are coarse diagnostics for clear token hotspots, not a cost model or quality verdict.
@@ -271,12 +299,11 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		})
 	}
 
-	report.Recommendations = append(report.Recommendations, recommendationRules(tokenRecommendationSignals{
-		Tokens:          report.Tokens,
-		Context:         report.Context,
-		TurnCount:       state.SessionTurnCount,
-		CheckpointCount: state.StepCount,
-	})...)
+	report.Recommendations = append(report.Recommendations, recommendationRules(
+		sessionTokenRecommendationSignals(
+			report.Tokens, report.Classes, report.Context,
+			state.SessionTurnCount, state.StepCount,
+		))...)
 	return report
 }
 
