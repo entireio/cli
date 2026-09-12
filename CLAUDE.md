@@ -106,11 +106,25 @@ the commands are always runnable in every build.
   Requiring the prefix is a **namesquatting** guard, not tidiness: without it,
   whichever namespace the CLI defaulted to could shadow the other, and
   `TestCloneRefAlwaysRequiresItsForgePrefix` pins that no forge-less pair
-  resolves in either parser or in the command. It holds only for *intent* —
+  resolves in either parser, in `repo clone`, or in `resolveRepoRef` — the last
+  being the surface every other repo-ref command shares. It holds only for
+  *intent* —
   lookups are already unambiguous because native rows are stored prefixed in the
   same `full_name` index (`et/<project>/<repo>`), which is why the bare-pair
   `--repo` filters on `search`/`experts`/`explain` cannot cross namespaces
   either.
+  The native `/et/<project>/<repo>` path is **not** clone-only: it is the
+  `path` the API returns, and `resolveRepoRef` accepts it for every command
+  that takes a repo ref — `get`, `delete`, the `visibility` and `protection`
+  subtrees, and `grant repo add`/`list`/`remove` (COR-1632). The other two
+  clone shapes are not: a `/gh/` mirror ref is refused there (the by-name
+  lookup resolves a project and then a repo inside it, and a mirror is in no
+  project — so a mirror is addressed by ULID), and an `entire://` URL is not
+  parsed at all. `--project` serves the **bare-name** spelling alone, because
+  the control plane has no by-name repo route that is not project-scoped; the
+  path form is checked against it for agreement, and a ULID warns that it is
+  ignored rather than validating, which would cost a `GetRepo` on every command
+  but `repo get`.
   Native names are validated client-side against the server's own rules
   (`nativeProjectRe`/`nativeRepoRe`, mirroring `normalizeName` in entiredb
   `core/resource/project_name.go`); those bounds are server parity only and buy
