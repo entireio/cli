@@ -73,20 +73,26 @@ func TestAttach_TranscriptNotFound(t *testing.T) {
 		t.Fatalf("runAttach error = %v, want existing transcript-not-found error", err)
 	}
 	// Auto-detection does not export on the user's behalf, so the error has to
-	// point at the agent that could have.
-	if !strings.Contains(err.Error(), "--agent opencode") {
-		t.Errorf("runAttach error = %v, want a hint naming the on-demand-export agent", err)
+	// point at the agent that could have — as a command to paste, not one to
+	// assemble.
+	if !strings.Contains(err.Error(), "entire session attach nonexistent-session-id --agent opencode") {
+		t.Errorf("runAttach error = %v, want a pasteable retry command", err)
 	}
 }
 
 func TestUnprobedFetcherHint(t *testing.T) {
 	t.Parallel()
 
-	hint := unprobedFetcherHint(agent.AgentNameClaudeCode)
-	if !strings.Contains(hint, "--agent opencode") {
-		t.Errorf("unprobedFetcherHint(claude-code) = %q, want it to name opencode", hint)
+	const sessionID = "f736da47-b2ca-4f86-bb32-a1bbe582e464"
+	hint := unprobedFetcherHint(agent.AgentNameClaudeCode, sessionID)
+	if want := "entire session attach " + sessionID + " --agent opencode"; !strings.Contains(hint, want) {
+		t.Errorf("unprobedFetcherHint(claude-code) = %q, want it to contain %q", hint, want)
 	}
-	if got := unprobedFetcherHint(agent.AgentNameOpenCode); got != "" {
+	// With a single candidate the command is definitive, not an example.
+	if strings.Contains(hint, "e.g.") {
+		t.Errorf("unprobedFetcherHint(claude-code) = %q, want no example marker for a single candidate", hint)
+	}
+	if got := unprobedFetcherHint(agent.AgentNameOpenCode, sessionID); got != "" {
 		t.Errorf("unprobedFetcherHint(opencode) = %q, want empty (nothing left to suggest)", got)
 	}
 }
@@ -129,6 +135,33 @@ func TestResolveAndValidateTranscript_PreservesFetchFailureAfterFallback(t *test
 	}
 	if !errors.Is(err, wantErr) {
 		t.Fatal("final error does not retain the fetch failure")
+	}
+}
+
+// TestResolveAndValidateTranscript_CanceledFetchIsSuppressible: a Ctrl-C during
+// the export must reach resolveAgentAndTranscript as a transcriptFetchError, or
+// the caller appends a secondary auto-detection failure to a cancellation. It also
+// skips the project-dir fallback, which cannot succeed on a dead context.
+func TestResolveAndValidateTranscript_CanceledFetchIsSuppressible(t *testing.T) {
+	setupAttachTestRepo(t)
+
+	baseAgent, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &failingTranscriptFetcher{
+		Agent:      baseAgent,
+		baseDirErr: errors.New("fallback must not be consulted"),
+		err:        context.Canceled,
+	}
+
+	_, err = resolveAndValidateTranscript(context.Background(), "test-canceled-fetch", ag, lookupAllowFetch)
+	var fetchFailure *transcriptFetchError
+	if !errors.As(err, &fetchFailure) {
+		t.Fatalf("resolveAndValidateTranscript error = %v, want a *transcriptFetchError", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to retain context.Canceled", err)
 	}
 }
 
