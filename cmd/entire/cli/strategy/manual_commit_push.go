@@ -511,7 +511,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	pushCtx, pushSpan := perf.Start(ctx, "push_checkpoint_refs")
 	defer pushSpan.End()
 
-	existing, stale := partitionLocalRefs(repo, queued)
+	existing, stale, expectedHashes := partitionLocalRefs(repo, queued)
 	if len(stale) > 0 {
 		if err := queue.Remove(stale); err != nil {
 			logging.Warn(ctx, "git-refs push: prune stale queue entries failed",
@@ -540,7 +540,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	batchErr := batchPushRefs(pushCtx, dest.target, existing)
 	if batchErr == nil {
 		stop(" done")
-		if removeErr := queue.Remove(existing); removeErr != nil {
+		if removeErr := queue.RemoveIfUnchanged(existing, expectedHashes); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
 		}
@@ -588,7 +588,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 		pushed = append(pushed, ref)
 	}
 	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
-	if err := queue.Remove(pushed); err != nil {
+	if err := queue.RemoveIfUnchanged(pushed, expectedHashes); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
 	}
