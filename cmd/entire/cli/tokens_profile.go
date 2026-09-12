@@ -41,13 +41,26 @@ type tokensProfileSignalDefinition struct {
 }
 
 var tokensProfileSignalDefinitions = []tokensProfileSignalDefinition{
-	{id: "context-replay-hotspot", label: "Cache/context replay hotspot"},
-	{id: "api-call-amplification", label: "API call amplification"},
-	{id: "subagent-heavy", label: "Subagent-heavy sessions"},
+	{id: profileSignalReplayHotspot, label: "Cache/context replay hotspot"},
+	{id: profileSignalAPICallAmplify, label: "API call amplification"},
+	{id: profileSignalSubagentHeavy, label: "Subagent-heavy sessions"},
 	{id: "missing-token-data", label: "Missing token data"},
 }
 
 const tokensProfileUsageScopeCheckpointObserved = "checkpoint_observed"
+
+// profileSignalReplayHotspot is `tokens profile`'s OWN signal id. It is
+// deliberately not the recommendation rule of the same spelling, which PR 5a
+// deleted: this one counts recurrence across checkpoints through independent
+// machinery. Naming it separately keeps the two from being "unified" later by
+// someone who sees a matching string. `tokens profile`'s thresholds (its
+// api-call signal still fires at >= 20, where the shared rules now use >= 40)
+// are PR 6's to revisit.
+const (
+	profileSignalReplayHotspot  = "context-replay-hotspot"
+	profileSignalAPICallAmplify = "api-call-amplification"
+	profileSignalSubagentHeavy  = "subagent-heavy"
+)
 
 func newTokensGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -222,13 +235,13 @@ func addTokensProfileTokenSignals(signals map[string]*tokensProfileSignal, check
 	}
 	topLevelTotal := topLevelSessionTokenTotal(tokens)
 	if topLevelTotal > 0 && tokenPercent(tokens.CacheRead, topLevelTotal) >= recommendationHighCacheReadPercent {
-		addTokensProfileSignal(signals, "context-replay-hotspot", checkpointID, denominator)
+		addTokensProfileSignal(signals, profileSignalReplayHotspot, checkpointID, denominator)
 	}
 	if tokens.APICalls >= 20 {
-		addTokensProfileSignal(signals, "api-call-amplification", checkpointID, denominator)
+		addTokensProfileSignal(signals, profileSignalAPICallAmplify, checkpointID, denominator)
 	}
 	if tokenShareAtLeastOneTenth(tokens.SubagentTotal, tokens.Total) {
-		addTokensProfileSignal(signals, "subagent-heavy", checkpointID, denominator)
+		addTokensProfileSignal(signals, profileSignalSubagentHeavy, checkpointID, denominator)
 	}
 }
 
@@ -282,8 +295,8 @@ func tokensProfileRecommendations(report tokensProfileReport) []sessionTokensRec
 		}}
 	}
 
-	if tokensProfileSignalCount(report.Signals, "context-replay-hotspot") > 0 ||
-		tokensProfileSignalCount(report.Signals, "api-call-amplification") > 0 {
+	if tokensProfileSignalCount(report.Signals, profileSignalReplayHotspot) > 0 ||
+		tokensProfileSignalCount(report.Signals, profileSignalAPICallAmplify) > 0 {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "search-before-reinvestigation",
 			Severity: "high",
@@ -291,7 +304,7 @@ func tokensProfileRecommendations(report tokensProfileReport) []sessionTokensRec
 			Signals:  []string{"cache_read_tokens", "api_call_count"},
 		})
 	}
-	if tokensProfileSignalCount(report.Signals, "api-call-amplification") > 0 {
+	if tokensProfileSignalCount(report.Signals, profileSignalAPICallAmplify) > 0 {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "batch-diagnostics",
 			Severity: "medium",
@@ -299,7 +312,7 @@ func tokensProfileRecommendations(report tokensProfileReport) []sessionTokensRec
 			Signals:  []string{"api_call_count"},
 		})
 	}
-	if tokensProfileSignalCount(report.Signals, "context-replay-hotspot") > 0 {
+	if tokensProfileSignalCount(report.Signals, profileSignalReplayHotspot) > 0 {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "preserve-then-compact",
 			Severity: "medium",
@@ -307,7 +320,7 @@ func tokensProfileRecommendations(report tokensProfileReport) []sessionTokensRec
 			Signals:  []string{"cache_read_tokens"},
 		})
 	}
-	if tokensProfileSignalCount(report.Signals, "subagent-heavy") > 0 {
+	if tokensProfileSignalCount(report.Signals, profileSignalSubagentHeavy) > 0 {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "scope-subagents",
 			Severity: "medium",
@@ -382,7 +395,7 @@ func writeTokensProfileText(w io.Writer, report tokensProfileReport) {
 	writeTokenUsageSectionWithTitle(w, "Checkpoint-observed token usage", report.Tokens)
 	writeTokensProfileSignals(w, report.Signals)
 	if len(report.Recommendations) > 0 {
-		writeTokenRecommendations(w, report.Recommendations)
+		writeTokenRecommendations(w, report.Recommendations, tokenRecommendationNoLimit)
 	}
 	writeTokenLimitations(w, report.Limitations)
 }

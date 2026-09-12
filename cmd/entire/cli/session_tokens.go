@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,10 +72,38 @@ type sessionTokensRecommendation struct {
 }
 
 type tokenRecommendationSignals struct {
-	Tokens          *sessionTokensUsage
+	Tokens *sessionTokensUsage
+	// Classes is the billing-class breakdown the report renders above the
+	// recommendations. A rule quotes figures from it rather than recomputing
+	// them, so every number in a recommendation appears in a row the reader can
+	// find. It also carries the capability signals a rule needs before firing:
+	// Priced says whether cost shares mean anything, and a class's CostZero
+	// says the provider bills none of it — which is a property of the model's
+	// price family, not of the agent. Nil when the report has no breakdown.
+	Classes         *tokenClassBreakdown
 	Context         *sessionTokensContext
 	TurnCount       int
 	CheckpointCount int
+}
+
+// sessionTokenRecommendationSignals builds the rule input. Both `session
+// tokens` and `checkpoint tokens` go through it so the two cannot drift in
+// what they hand the rules — a rule that silently sees no Classes on one
+// command would quietly stop citing rows there.
+func sessionTokenRecommendationSignals(
+	tokens *sessionTokensUsage,
+	classes *tokenClassBreakdown,
+	contextInfo *sessionTokensContext,
+	turnCount int,
+	checkpointCount int,
+) tokenRecommendationSignals {
+	return tokenRecommendationSignals{
+		Tokens:          tokens,
+		Classes:         classes,
+		Context:         contextInfo,
+		TurnCount:       turnCount,
+		CheckpointCount: checkpointCount,
+	}
 }
 
 // Recommendation thresholds are coarse diagnostics for clear token hotspots, not a cost model or quality verdict.
@@ -231,7 +260,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 	} else {
 		report.Limitations = append(report.Limitations, "No token usage recorded for this session.")
 		report.Recommendations = append(report.Recommendations, sessionTokensRecommendation{
-			ID:       "no-token-data",
+			ID:       recNoTokenData,
 			Severity: "low",
 			Message:  "Token usage is unavailable for this session; the agent may not expose token data yet, or no checkpoint has captured it.",
 			Signals:  []string{"missing_token_usage"},
@@ -270,12 +299,11 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		})
 	}
 
-	report.Recommendations = append(report.Recommendations, recommendationRules(tokenRecommendationSignals{
-		Tokens:          report.Tokens,
-		Context:         report.Context,
-		TurnCount:       state.SessionTurnCount,
-		CheckpointCount: state.StepCount,
-	})...)
+	report.Recommendations = append(report.Recommendations, recommendationRules(
+		sessionTokenRecommendationSignals(
+			report.Tokens, report.Classes, report.Context,
+			state.SessionTurnCount, state.StepCount,
+		))...)
 	return report
 }
 
@@ -436,32 +464,59 @@ func roundedPercent(value, total int) int {
 	return int(quotient)
 }
 
+// Recommendation IDs. These are matched by string in several places
+// (the agent brief, its signal list, tests), so a deletion compiles clean and
+// every stale reference silently goes false. Naming them makes the next
+// deletion a build failure instead.
+const (
+	recAPICallAmplification = "api-call-amplification"
+	recSubagentHeavy        = "subagent-heavy"
+	recHighContextPressure  = "high-context-pressure"
+	recLongSession          = "long-session"
+	recNoTokenData          = "no-token-data"
+)
+
+// cacheReadHotspot reports whether replayed context dominates this session.
+//
+// It is deliberately NOT a recommendation. Measured over 135 distinct
+// committed checkpoints it was true of 91%, and the spec's own calibration
+// says why: cache read is the largest class in ~90% of sessions, so on its own
+// it describes the baseline rather than a finding. It survives as a qualifier
+// because two things still need it — the API-call message, which asserts
+// replay, and the agent brief's next action, which must not change just
+// because a printed recommendation was removed.
+func cacheReadHotspot(tokens *sessionTokensUsage) bool {
+	if tokens == nil || tokens.CacheRead <= 0 {
+		return false
+	}
+	return tokenPercent(tokens.CacheRead, topLevelSessionTokenTotal(tokens)) >= recommendationHighCacheReadPercent
+}
+
 func recommendationRules(signals tokenRecommendationSignals) []sessionTokensRecommendation {
 	var recs []sessionTokensRecommendation
 
-	cacheReadHotspot := false
-	if signals.Tokens != nil && signals.Tokens.CacheRead > 0 {
-		cacheReadPercent := tokenPercent(signals.Tokens.CacheRead, topLevelSessionTokenTotal(signals.Tokens))
-		if cacheReadPercent >= recommendationHighCacheReadPercent {
-			cacheReadHotspot = true
-			recs = append(recs, sessionTokensRecommendation{
-				ID:       "context-replay-hotspot",
-				Severity: "high",
-				Message: fmt.Sprintf(
-					"Cache/context replay is %s of token volume; reduce unnecessary follow-up calls in this large-context session.",
-					formatPercent(cacheReadPercent),
-				),
-				Signals: []string{"cache_read_tokens"},
-			})
-		}
-	}
+	hotspot := cacheReadHotspot(signals.Tokens)
 	if signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
-		message := fmt.Sprintf("API call count is high for one session: %d calls. Batch the next diagnosis and reduce iterative calls.", signals.Tokens.APICalls)
-		if cacheReadHotspot {
-			message = fmt.Sprintf("Large context was replayed across %d API calls; batch the next diagnosis and reduce iterative tool calls.", signals.Tokens.APICalls)
+		message := fmt.Sprintf(
+			"%d API calls for one session. Batch the next diagnosis and reduce iterative calls.",
+			signals.Tokens.APICalls)
+		if hotspot {
+			// Every figure here is one the usage line prints: the call count,
+			// the per-call average, and the cache-read class total. An earlier
+			// version divided cache read by the call count, which reads as the
+			// replay cost per call but appears in no row — the usage line's
+			// Per call is the whole total divided by calls. A recommendation
+			// that cites a number the reader cannot find is the thing this
+			// change exists to stop.
+			message = fmt.Sprintf(
+				"%d API calls at about %s each, of which %s was replayed cached context. Batch the next diagnosis: each further call replays the context again.",
+				signals.Tokens.APICalls,
+				formatTokenCount(signals.Tokens.Total/signals.Tokens.APICalls),
+				formatTokenCount(signals.Tokens.CacheRead),
+			)
 		}
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "api-call-amplification",
+			ID:       recAPICallAmplification,
 			Severity: "medium",
 			Message:  message,
 			Signals:  []string{"api_call_count"},
@@ -469,49 +524,31 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 	}
 	if signals.Tokens != nil && tokenShareAtLeastOneTenth(signals.Tokens.SubagentTotal, signals.Tokens.Total) {
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "subagent-heavy",
-			Severity: "medium",
-			Message:  "Scope subagent tasks tightly; give each subagent a narrow objective and expected output.",
-			Signals:  []string{"subagent_tokens"},
-		})
-	}
-	if signals.Tokens != nil && signals.Tokens.Total > 0 &&
-		tokenClassPressure(signals.Tokens.CacheWrite, signals.Tokens.Total, 5000, 10, 50_000) {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "cache-write-pressure",
-			Severity: "medium",
-			Message:  "Cache write is elevated; avoid broad new context and narrow the next read before continuing.",
-			Signals:  []string{"cache_write_tokens"},
-		})
-	}
-	if signals.Tokens != nil && signals.Tokens.Total > 0 &&
-		tokenClassPressure(signals.Tokens.Output, signals.Tokens.Total, 3000, 2, 10_000) {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "output-pressure",
-			Severity: "medium",
-			Message:  "Output tokens are elevated; keep the next answer tight and avoid restating evidence.",
-			Signals:  []string{"output_tokens"},
+			ID:       recSubagentHeavy,
+			Severity: trailReviewSeverityMedium,
+			Message: fmt.Sprintf(
+				"Subagents used %s of %s tokens (%s). Give each a narrower objective and expected output.",
+				formatTokenCount(signals.Tokens.SubagentTotal),
+				formatTokenCount(signals.Tokens.Total),
+				// The row's own share, through the row's own formatter, so the
+				// two strings match rather than merely agreeing to a rounding.
+				formatSharePercent(signals.Tokens.SubagentTotal,
+					roundedPercent(signals.Tokens.SubagentTotal, signals.Tokens.Total)),
+			),
+			Signals: []string{"subagent_tokens"},
 		})
 	}
 	if signals.Context != nil && signals.Context.Percent >= recommendationHighContextPercent {
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "high-context-pressure",
+			ID:       recHighContextPressure,
 			Severity: "medium",
 			Message:  fmt.Sprintf("Context pressure is %d%% of the window; preserve only relevant context before continuing.", signals.Context.Percent),
 			Signals:  []string{"context_tokens"},
 		})
 	}
-	if cacheReadHotspot && signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "summarize-before-boundary",
-			Severity: "low",
-			Message:  "Compact or restart after summarizing this investigation; do not discard useful findings just because cache read is high.",
-			Signals:  []string{"cache_read_tokens", "api_call_count"},
-		})
-	}
 	if signals.TurnCount >= recommendationLongSessionTurns || signals.CheckpointCount >= recommendationLongSessionCheckpoints {
 		recs = append(recs, sessionTokensRecommendation{
-			ID:       "long-session",
+			ID:       recLongSession,
 			Severity: "low",
 			Message:  "Compact or restart after summarizing the useful findings if older context is no longer needed.",
 			Signals:  []string{"turn_count", "checkpoint_count"},
@@ -526,16 +563,6 @@ func tokenShareAtLeastOneTenth(part, total int) bool {
 		return false
 	}
 	return part >= (total-1)/recommendationSubagentShareDenominator+1
-}
-
-func tokenClassPressure(value, total, minTokens int, minPercent float64, highTokens int) bool {
-	if value <= 0 || total <= 0 {
-		return false
-	}
-	if value >= highTokens {
-		return true
-	}
-	return value >= minTokens && tokenPercent(value, total) >= minPercent
 }
 
 func tokenPercent(value, total int) float64 {
@@ -593,7 +620,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	writeTokenUsageSection(w, report.Tokens)
 	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))
 	if len(report.Recommendations) > 0 {
-		writeTokenRecommendations(w, report.Recommendations)
+		writeTokenRecommendations(w, report.Recommendations, tokenRecommendationDisplayLimit)
 	}
 
 	writeTokenContributors(w, report.Contributors, report.Context,
@@ -646,7 +673,7 @@ func formatAPICalls(count int) string {
 }
 
 func agentBriefNextAction(report sessionTokensReport) string {
-	if hasTokenRecommendation(report, "no-token-data") {
+	if hasTokenRecommendation(report, recNoTokenData) {
 		return "Token usage is not available yet. Use this as a context check, not a spend diagnosis; continue after the next checkpoint captures usage."
 	}
 	if action, ok := agentBriefOptimizationAction(report); ok {
@@ -656,27 +683,21 @@ func agentBriefNextAction(report sessionTokensReport) string {
 }
 
 func agentBriefOptimizationAction(report sessionTokensReport) (string, bool) {
+	// The replay arm keys on the usage itself, not on a recommendation. PR 5a
+	// stopped printing context-replay-hotspot because it fired on 91% of real
+	// checkpoints, but the brief returns exactly one next action and always
+	// returned something here; letting a recommendation deletion silently
+	// change the agent's instruction is the coupling Decision 7 rejects.
 	switch {
-	case (hasTokenRecommendation(report, "cache-write-pressure") || hasTokenRecommendation(report, "output-pressure")) &&
-		(hasTokenRecommendation(report, "context-replay-hotspot") || hasTokenRecommendation(report, "api-call-amplification")):
+	case hasTokenRecommendation(report, recAPICallAmplification):
 		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "cache-write-pressure") && hasTokenRecommendation(report, "output-pressure"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "cache-write-pressure"):
-		return "Use at most 3 batched reads and avoid broad new context until you have one narrowed hypothesis.", true
-	case hasTokenRecommendation(report, "output-pressure"):
-		return "Keep the next answer tight; cite only necessary evidence and avoid restating prior context.", true
-	case hasTokenRecommendation(report, "context-replay-hotspot") && hasTokenRecommendation(report, "api-call-amplification"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "api-call-amplification"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "context-replay-hotspot"):
+	case cacheReadHotspot(report.Tokens):
 		return "Use at most 2 focused reads only if a named file or test can change the answer; otherwise answer now. Avoid broad grep, broad diffs, and broad tests.", true
-	case hasTokenRecommendation(report, "subagent-heavy"):
+	case hasTokenRecommendation(report, recSubagentHeavy):
 		return "Do not launch broad subagents. Use one narrowly scoped check with a concrete expected output.", true
-	case hasTokenRecommendation(report, "high-context-pressure"):
+	case hasTokenRecommendation(report, recHighContextPressure):
 		return "Preserve useful findings, then answer with at most 2 focused reads if more evidence is required.", true
-	case hasTokenRecommendation(report, "long-session"):
+	case hasTokenRecommendation(report, recLongSession):
 		return "Summarize useful findings and stop unless one focused read can change the answer.", true
 	default:
 		return "", false
@@ -685,28 +706,22 @@ func agentBriefOptimizationAction(report sessionTokensReport) (string, bool) {
 
 func agentBriefSignals(report sessionTokensReport) []string {
 	var signals []string
-	if hasTokenRecommendation(report, "context-replay-hotspot") {
+	if cacheReadHotspot(report.Tokens) {
 		signals = append(signals, "Cache/context replay dominates token volume.")
 	}
-	if hasTokenRecommendation(report, "api-call-amplification") {
+	if hasTokenRecommendation(report, recAPICallAmplification) {
 		signals = append(signals, "API call count is high for one session.")
 	}
-	if hasTokenRecommendation(report, "cache-write-pressure") {
-		signals = append(signals, "Cache write/new context pressure is elevated.")
-	}
-	if hasTokenRecommendation(report, "output-pressure") {
-		signals = append(signals, "Output pressure is elevated.")
-	}
-	if hasTokenRecommendation(report, "subagent-heavy") {
+	if hasTokenRecommendation(report, recSubagentHeavy) {
 		signals = append(signals, "Subagent usage is a meaningful part of total tokens.")
 	}
-	if hasTokenRecommendation(report, "high-context-pressure") {
+	if hasTokenRecommendation(report, recHighContextPressure) {
 		signals = append(signals, "Context pressure is high.")
 	}
-	if hasTokenRecommendation(report, "long-session") {
+	if hasTokenRecommendation(report, recLongSession) {
 		signals = append(signals, "Session has crossed a long-session or checkpoint boundary.")
 	}
-	if hasTokenRecommendation(report, "no-token-data") {
+	if hasTokenRecommendation(report, recNoTokenData) {
 		signals = append([]string{"Token usage is unavailable for this session."}, signals...)
 	}
 	if len(signals) == 0 && report.Tokens != nil {
@@ -724,10 +739,70 @@ func hasTokenRecommendation(report sessionTokensReport, id string) bool {
 	return false
 }
 
-func writeTokenRecommendations(w io.Writer, recs []sessionTokensRecommendation) {
+// tokenRecommendationDisplayLimit is how many recommendations a report
+// prints. Two, because a list long enough to skim is a list nobody reads: the
+// pre-PR-5a report printed up to seven and 35% of real checkpoints got three
+// or more.
+//
+// tokenRecommendationNoLimit renders every recommendation. `tokens profile`
+// uses it: its rules are a different shape (they count recurrence across many
+// checkpoints rather than describing one session) and revisiting them is PR
+// 6's, so this change deliberately leaves that command's output alone.
+const (
+	tokenRecommendationDisplayLimit = 2
+	tokenRecommendationNoLimit      = 0
+)
+
+// recommendationSeverityRank orders the display. Unknown severities sort last
+// rather than first, so a typo demotes a line instead of promoting it.
+func recommendationSeverityRank(severity string) int {
+	// These are the package's existing severity strings (declared in
+	// trail_review_cmd.go); recommendations and trail findings share the
+	// vocabulary, so this reuses the constants rather than re-spelling them.
+	switch severity {
+	case trailReviewSeverityHigh:
+		return 0
+	case trailReviewSeverityMedium:
+		return 1
+	case trailReviewSeverityLow:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// writeTokenRecommendations renders at most limit recommendations, highest
+// severity first.
+//
+// The cap is applied HERE and never to report.Recommendations, because
+// agentBriefOptimizationAction and agentBriefSignals both read that slice:
+// truncating it would silently change an agent's next action and shorten its
+// diagnostic list as a side effect of a display choice. --json keeps the full
+// list for the same reason — it is the machine-readable surface, not the one
+// being decluttered.
+func writeTokenRecommendations(w io.Writer, recs []sessionTokensRecommendation, limit int) {
+	if len(recs) == 0 {
+		return
+	}
+	ordered := slices.Clone(recs)
+	slices.SortStableFunc(ordered, func(a, b sessionTokensRecommendation) int {
+		return recommendationSeverityRank(a.Severity) - recommendationSeverityRank(b.Severity)
+	})
+	// The limit trims noise, never a serious finding: every high-severity
+	// recommendation is kept even if that exceeds the limit, and the cap
+	// applies only to what follows. Capping by position alone would let two
+	// medium lines hide a high one on the day three fire at once.
+	if limit > 0 && len(ordered) > limit {
+		keep := limit
+		for keep < len(ordered) && ordered[keep].Severity == trailReviewSeverityHigh {
+			keep++
+		}
+		ordered = ordered[:keep]
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Recommendations")
-	for _, rec := range recs {
+	for _, rec := range ordered {
 		fmt.Fprintf(w, "- %s\n", rec.Message)
 	}
 }
@@ -747,6 +822,14 @@ func writeTokenUsageSectionWithTitle(w io.Writer, title string, tokens *sessionT
 			"Cache write: " + formatTokenCount(tokens.CacheWrite),
 			"Output: " + formatTokenCount(tokens.Output),
 			fmt.Sprintf("API calls: %d", tokens.APICalls),
+		}
+		// Per call is what makes the API-call recommendation citable: it quotes
+		// this figure, and a number a recommendation cites has to be visible in
+		// a row above it. It is an average, so the message it feeds says only
+		// that a further call replays the context again — the marginal call
+		// costs the current context, which is larger in a growing session.
+		if tokens.APICalls > 0 {
+			parts = append(parts, "Per call: "+formatTokenCount(tokens.Total/tokens.APICalls))
 		}
 		fmt.Fprintf(w, "  %s\n", strings.Join(parts, " | "))
 	} else {

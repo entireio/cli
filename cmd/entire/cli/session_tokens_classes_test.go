@@ -367,12 +367,15 @@ func TestSessionTokens_SubagentFigureAppearsOnlyOnce(t *testing.T) {
 	writeSessionTokensText(&buf, buildSessionTokensReport(state, "active"))
 	out := buf.String()
 
-	// "ubagents" (plural) and not "ubagent": with this fixture the
-	// subagent-heavy recommendation also fires and says "Scope subagent tasks
-	// tightly…" — singular. Matching the plural counts the figure's labels only.
-	// Do not "fix" this to "ubagent"; it will start counting the advice line.
-	if n := strings.Count(out, "ubagents"); n != 1 {
-		t.Errorf("the subagent figure must appear exactly once in the text, found %d mentions:\n%s", n, out)
+	// Count the FIGURE'S ROW, not the word. This used to count occurrences of
+	// "ubagents" on the premise that the recommendation said "subagent"
+	// singular, which stopped being true when PR 5a made recommendations quote
+	// the rows they cite: the subagent-heavy line now legitimately repeats this
+	// figure, and repeating it is the point — a reader must be able to find the
+	// cited number above. What must still hold is that the breakdown prints the
+	// row exactly once, which is the double-count this test was written for.
+	if n := strings.Count(out, "Of the total, subagents used"); n != 1 {
+		t.Errorf("the subagent row must appear exactly once in the text, found %d:\n%s", n, out)
 	}
 }
 
