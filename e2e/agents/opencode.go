@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -101,9 +102,17 @@ const (
 	openCodeSeedGitignore = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n"
 )
 
-// openCodeVersionRe matches what `opencode --version` prints. The result names
-// a directory, so it is validated rather than trusted.
-var openCodeVersionRe = regexp.MustCompile(`^[0-9][0-9A-Za-z.+-]*$`)
+// errOpenCodeDepsNotApplicable reports that the running OpenCode does not use
+// the pre-built @opencode-ai/plugin tree this seeding exists for. OpenCode 2
+// provides the V2 plugin API from the binary; a local plugin that imports only
+// SDK types (as Entire's does) has no npm dependency to pre-build, and pinning
+// @opencode-ai/plugin to the binary version no longer names an installable
+// package.
+var errOpenCodeDepsNotApplicable = errors.New("pre-built plugin deps do not apply to this OpenCode version")
+
+// openCodeVersionRe matches one version token, with or without a leading "v".
+// OpenCode 1 prints a bare version; OpenCode 2 prints "opencode v2.0.2".
+var openCodeVersionRe = regexp.MustCompile(`^v?([0-9][0-9A-Za-z.+-]*)$`)
 
 // openCodePluginDeps resolves the pre-built dependency tree, building it on
 // first use.
@@ -128,6 +137,9 @@ func openCodePluginDeps() (string, error) {
 	defer openCodeDeps.mu.Unlock()
 	if openCodeDeps.dir != "" {
 		return openCodeDeps.dir, nil
+	}
+	if errors.Is(openCodeDeps.err, errOpenCodeDepsNotApplicable) {
+		return "", openCodeDeps.err
 	}
 	if openCodeDeps.attempts >= openCodeDepsAttempts {
 		return "", openCodeDeps.err
@@ -235,6 +247,9 @@ func buildPluginDeps() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if openCodeMajor(version) >= 2 {
+		return "", errOpenCodeDepsNotApplicable
+	}
 	dir := openCodeDepsDir(version)
 	if _, err := os.Stat(filepath.Join(dir, "node_modules")); err == nil {
 		return dir, nil
@@ -278,7 +293,9 @@ func buildPluginDeps() (string, error) {
 }
 
 // openCodeVersion reports the running opencode's version, which is the version
-// its generated package.json will pin.
+// its generated package.json will pin. Different releases print different
+// shapes — "1.18.27", "v2.0.2", or "opencode v2.0.2" — so the version is the
+// last whitespace-separated token, returned without a leading "v".
 func openCodeVersion() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -286,12 +303,27 @@ func openCodeVersion() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("opencode --version: %w", err)
 	}
-	version, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	version = strings.TrimSpace(version)
-	if !openCodeVersionRe.MatchString(version) {
-		return "", fmt.Errorf("opencode --version printed %q, which is not a version", version)
+	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", errors.New("opencode --version printed no output")
 	}
-	return version, nil
+	m := openCodeVersionRe.FindStringSubmatch(fields[len(fields)-1])
+	if m == nil {
+		return "", fmt.Errorf("opencode --version printed %q, which is not a version", line)
+	}
+	return m[1], nil
+}
+
+// openCodeMajor returns the major version of a bare version string, or 0 when
+// it cannot be parsed.
+func openCodeMajor(version string) int {
+	major, _, _ := strings.Cut(version, ".")
+	n, err := strconv.Atoi(major)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // SeedRepo prepares a directory opencode is about to run in: its config file,
@@ -313,6 +345,11 @@ func (a *openCodeAgent) SeedRepo(dir string) error {
 
 	deps, err := openCodePluginDeps()
 	if err != nil {
+		if errors.Is(err, errOpenCodeDepsNotApplicable) {
+			// OpenCode 2 provides the plugin API from the binary, so there is
+			// no dependency tree to seed and nothing for the repo to install.
+			return nil
+		}
 		// Leave the repo alone and let opencode install for itself.
 		fmt.Fprintf(os.Stderr, "opencode: no pre-built plugin deps (%v); %s pays the install\n", err, dir)
 		return nil

@@ -230,3 +230,71 @@ func TestOpenCodeExportLooksValid(t *testing.T) {
 		t.Error("help text recognized as valid")
 	}
 }
+
+// TestRunOpenCodeExportToFile_PreservesClassifiedError proves the v1 fallback's
+// exit-0 help page does not overwrite the real failure reported by the OpenCode
+// 2 invocation.
+func TestRunOpenCodeExportToFile_PreservesClassifiedError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub opencode is a shell script")
+	}
+	// No t.Parallel: t.Setenv.
+
+	dir := t.TempDir()
+	root := mustOpenRoot(t, dir)
+
+	stubDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = session ]; then\n" +
+		"  echo 'Error: Session not found: ses_missing' 1>&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"printf 'DESCRIPTION\\n  OpenCode command line interface\\nUSAGE\\n  opencode <subcommand>\\n'\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "opencode"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+
+	err := runOpenCodeExportToFile(context.Background(), root, "ses_missing", ".export-ses_missing.json-1")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("classified error was lost to the fallback: %v", err)
+	}
+}
+
+// TestRunOpenCodeImport_FallsBackWhenSessionImportPrintsHelp covers the exit-0
+// help trap on import: OpenCode 1 does not know `session import` and prints help
+// instead of failing, so the top-level `import` must still run.
+func TestRunOpenCodeImport_FallsBackWhenSessionImportPrintsHelp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub opencode is a shell script")
+	}
+	// No t.Parallel: t.Setenv.
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "calls.txt")
+	stubDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"echo \"$1\" >> " + marker + "\n" +
+		"if [ \"$1\" = session ]; then printf 'DESCRIPTION\\nUSAGE\\n'; exit 0; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "opencode"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+
+	if err := runOpenCodeImport(context.Background(), filepath.Join(dir, "export.json")); err != nil {
+		t.Fatalf("runOpenCodeImport: %v", err)
+	}
+
+	calls, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read calls: %v", err)
+	}
+	got := strings.Fields(string(calls))
+	if len(got) != 2 || got[0] != "session" || got[1] != "import" {
+		t.Fatalf("expected session then import, got %v", got)
+	}
+}

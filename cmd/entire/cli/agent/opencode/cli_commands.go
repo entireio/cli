@@ -62,28 +62,36 @@ func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outp
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	var lastErr error
+	// Prefer a classified command failure over the "invalid output" a version
+	// that does not know a subcommand produces: on OpenCode 2 the v1 invocation
+	// exits 0 with a help page, and returning that generic error would hide the
+	// real cause (e.g. "session not found") reported by the OpenCode 2 attempt.
+	var invalidErr error
+	var commandErr error
 	for _, invocation := range openCodeExportInvocations {
 		if err := writeOpenCodeExport(ctx, root, outputName, invocation, sessionID); err != nil {
-			lastErr = err
+			commandErr = err
 			continue
 		}
 		data, err := entiredir.ReadFile(root, outputName)
 		if err != nil {
-			lastErr = fmt.Errorf("failed to read export file: %w", err)
+			commandErr = fmt.Errorf("failed to read export file: %w", err)
 			continue
 		}
 		if openCodeExportLooksValid(data) {
 			return nil
 		}
-		lastErr = &openCodeExportError{
+		invalidErr = &openCodeExportError{
 			message: fmt.Sprintf("OpenCode returned invalid transcript data for session %q. Try updating OpenCode and running the command again.", sessionID),
 		}
 	}
-	if lastErr == nil {
-		lastErr = &openCodeExportError{message: "OpenCode export could not be started."}
+	if commandErr != nil {
+		return commandErr
 	}
-	return lastErr
+	if invalidErr != nil {
+		return invalidErr
+	}
+	return &openCodeExportError{message: "OpenCode export could not be started."}
 }
 
 // writeOpenCodeExport runs one export invocation, writing stdout to outputName.

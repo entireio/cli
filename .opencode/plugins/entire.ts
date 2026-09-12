@@ -9,7 +9,7 @@
 // Uses node:child_process so hooks work under both Bun (OpenCode CLI/TUI) and
 // Node (OpenCode Desktop's Electron sidecar). See #2014.
 import { spawn, spawnSync } from "node:child_process"
-import type { Context as PluginContext, Plugin as PluginDefinition } from "@opencode/plugin/promise/plugin"
+import type { Plugin } from "@opencode/plugin"
 
 type IncomingEvent = {
   type: string
@@ -17,9 +17,9 @@ type IncomingEvent = {
   location?: { directory?: string }
 }
 
-const plugin: PluginDefinition = {
+const plugin: Plugin.Plugin = {
   id: "entire",
-  async setup(ctx: PluginContext) {
+  async setup(ctx: Plugin.Context) {
     const directory = ctx.location.directory
 
     // Track current session ID for events and hook payloads.
