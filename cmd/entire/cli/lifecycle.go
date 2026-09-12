@@ -1450,9 +1450,6 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 	}
 
 	if event.DeferredCompletion {
-		// The launch already names the tool call, the child and the labels;
-		// completion arrives as a separate Final SubagentEnd whose capture is
-		// analyzer-only, so the worktree baseline would never be read.
 		return recordDeferredTaskLaunch(logCtx, event)
 	}
 
@@ -1543,8 +1540,7 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 }
 
 // recordInFlightTaskLaunch handles a background Task launch (Claude Code's
-// run_in_background post-task stub): the record is replaced wholesale, which
-// is what a retried launch event wants. The real capture happens at
+// run_in_background post-task stub). The real capture happens at
 // SubagentStop (handleSubagentStopFinal), which is the first point that sees
 // the subagent's actual work.
 func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error {
@@ -1698,21 +1694,11 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		event.SubagentID = marker.AgentID
 	}
 
-	// analyzerFilesOnly: true because either a live marker was found above (a
-	// background or deferred-completion launch) or this is a
-	// CompletionWithoutLaunch event, which may reach this point without one.
-	// Either way the worktree-wide DetectFileChanges scan would risk sweeping
-	// in the parent's or another agent's later edits. See
-	// subagentCaptureOptions.analyzerFilesOnly.
+	// analyzerFilesOnly: every capture reaching here is Final (marker or CompletionWithoutLaunch); see subagentCaptureOptions.analyzerFilesOnly.
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
 		bypassNoChangesSkip: true,
 		analyzerFilesOnly:   true,
-		// Only a completion with no child transcript obtainable — either by
-		// contract (Copilot CLI) or because the fetch failed (OpenCode) — has
-		// nothing to scan; a completion learned at stop time that DOES declare a
-		// transcript (OpenCode, on a successful export) still attributes files
-		// from it.
-		eventFilesOnly: event.SubagentTranscriptUnavailable,
+		eventFilesOnly:      event.SubagentTranscriptUnavailable,
 	})
 	if captureErr != nil {
 		return captureErr

@@ -22,9 +22,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   // Child (subagent) sessions. OpenCode's task tool runs each subagent as a
   // real session, so without this set a child would register as the user's
   // session: its write would take the checkpoint and the parent would log
-  // "no files modified". Children are reported to Entire only through
-  // subagent-start / subagent-stop, fired from the PARENT's task part and
-  // tool hook. Learned from session.* events' `parentID`, and from the child
+  // "no files modified". Learned from session.* events' `parentID`, and from the child
   // ID surfaced in the parent's task part / tool.execute.after — the latter
   // two also cover a child session resumed via `task_id` from an earlier
   // process, whose own session.created predates this plugin instance. These

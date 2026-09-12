@@ -492,7 +492,6 @@ func TestInstallHooks_SubagentHooksFireFromParentTaskSignals(t *testing.T) {
 		`callHookSync("subagent-stop", {`,
 		`subagent_id: childID`,
 		`tool_use_id: input.callID`,
-		// a child's own task call (nested subagents, off by default) is not ours
 		`if (childSessions.has(input.sessionID)) return`,
 	} {
 		if !strings.Contains(content, want) {

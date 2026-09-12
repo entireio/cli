@@ -32,7 +32,7 @@ type subagentRaw struct {
 	SubagentID      string `json:"subagent_id"`      // child session ID
 	SubagentType    string `json:"subagent_type"`    // task args.subagent_type
 	TaskDescription string `json:"task_description"` // task args.description
-	Model           string `json:"model"`            // stop only: child's model, falling back to parent's
+	Model           string `json:"model"`            // stop only
 }
 
 // --- Export JSON types (from `opencode export`) ---

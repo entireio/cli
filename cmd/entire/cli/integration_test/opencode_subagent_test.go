@@ -14,10 +14,7 @@ import (
 // the real hook binary: the parent turn starts, two concurrent children and a
 // read-only child are announced and completed, and the commit condenses the
 // parent with each child's work as an independent task record rather than as
-// a session of its own. (Full suppression of a child's own lifecycle events
-// is enforced plugin-side; see the comment on the "no child session state"
-// assertion below for exactly what this test does and does not prove about
-// that.)
+// a session of its own.
 func TestOpenCodeSubagentTaskRecord(t *testing.T) {
 	t.Parallel()
 
@@ -58,8 +55,7 @@ func TestOpenCodeSubagentTaskRecord(t *testing.T) {
 	require.False(t, rec.TranscriptUnavailable)
 	// Exact values, not just presence: CreateOpenCodeTranscript's single
 	// assistant message writes input=150, output=80, cache.read=5,
-	// cache.write=15 (see hooks.go), and CalculateTokenUsage sums cache.read
-	// into CacheReadTokens and cache.write into CacheCreationTokens.
+	// cache.write=15 (see hooks.go).
 	require.NotNil(t, rec.TokenUsage, "child tokens are exact and must be recorded")
 	require.Equal(t, 150, rec.TokenUsage.InputTokens)
 	require.Equal(t, 80, rec.TokenUsage.OutputTokens)
@@ -67,24 +63,17 @@ func TestOpenCodeSubagentTaskRecord(t *testing.T) {
 	require.Equal(t, 15, rec.TokenUsage.CacheCreationTokens)
 	require.Equal(t, 1, rec.TokenUsage.APICallCount)
 
-	// The Go side creates no session state for the child from subagent-start/
-	// subagent-stop alone: those are the only hooks this test ever fires for
-	// the child, and neither one writes a session state file. That is not by
-	// itself proof that the child's own lifecycle (session-start/turn-start/
-	// turn-end) is suppressed — this test never fires those hooks for the
-	// child, so nothing here could fail if suppression broke. Suppression of
-	// the child's own lifecycle is enforced entirely plugin-side
-	// (childSessions in entire_plugin.ts) and is proven by the e2e
-	// single-session assertion and by the rendered-plugin tests in
-	// hooks_test.go. GetSessionState returns (nil, nil) for a missing state
-	// file.
+	// Suppression of the child's own lifecycle hooks is plugin-side
+	// (childSessions in entire_plugin.ts; see hooks_test.go and the e2e
+	// single-session assertion). This only checks the Go handlers write no
+	// child state.
 	childState, err := env.GetSessionState(child.ID)
 	require.NoError(t, err)
 	require.Nil(t, childState, "the Go side creates no child session state from subagent-start/subagent-stop alone")
 
 	// A stop whose child export cannot be fetched still completes the record,
-	// marked transcript-unavailable (spec acceptance criterion). No copy to
-	// .entire/tmp precedes this call, so the mock export fails.
+	// marked transcript-unavailable. No copy to .entire/tmp precedes this
+	// call, so the mock export fails.
 	const orphanToolUseID = "call_orphan_2"
 	require.NoError(t, env.SimulateOpenCodeSubagentStop(parent.ID, orphanToolUseID, "opencode-session-missing", "explore", "Look around"))
 	state, err = env.GetSessionState(parent.ID)
@@ -95,10 +84,8 @@ func TestOpenCodeSubagentTaskRecord(t *testing.T) {
 	require.True(t, orphan.TranscriptUnavailable)
 	require.Empty(t, orphan.Files)
 
-	// A second concurrent child, its start interleaved with a third child's
-	// start before either one's stop fires: the task tool can run multiple
-	// subagents within the same parent turn, and their records must stay
-	// independent by ToolUseID/AgentID rather than colliding.
+	// Two children started before either stops: records must stay independent
+	// by ToolUseID/AgentID.
 	child2 := env.NewOpenCodeSession()
 	const toolUseID2 = "call_blue_2"
 	child3 := env.NewOpenCodeSession()
@@ -140,9 +127,7 @@ func TestOpenCodeSubagentTaskRecord(t *testing.T) {
 	require.NotNil(t, rec3.TokenUsage)
 
 	// Parent turn ends with both children's files present, then the user
-	// commits. GitCommitWithShadowHooks (TTY shape) is deliberate and matches
-	// opencode_hooks_test.go; codex_subagent_test.go's ...AsAgent variant is
-	// the agent-commit shape and is not what this test is about.
+	// commits (TTY shape, as in opencode_hooks_test.go).
 	parent.CreateOpenCodeTranscript("use a subagent to create docs/red.md", nil)
 	require.NoError(t, env.SimulateOpenCodeTurnEnd(parent.ID, parent.TranscriptPath))
 	env.GitCommitWithShadowHooks("Add red.md via subagent", "docs/red.md", "docs/blue.md")

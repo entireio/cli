@@ -4073,7 +4073,7 @@ func TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscri
 	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, event))
 
 	assert.Equal(t, childPath, ag.scannedPath,
-		"files must be extracted from the declared child transcript, not the parent — childPath is unreachable by the legacy fallback, so this proves the declared field was read")
+		"files must be extracted from the declared child transcript, not the parent")
 
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, err)
@@ -4093,8 +4093,7 @@ func TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscri
 // records the in-flight marker, and the later Final + CompletionWithoutLaunch
 // stop must complete THAT SAME record — not create a second one — preserving
 // the launch-time StartedAt and labels while attaching the stop-time capture
-// (files, declared transcript, tokens). The two preceding tests each cover
-// one half of this sequence in isolation; this pins them chained together.
+// (files, declared transcript, tokens).
 func TestHandleLifecycleSubagentStart_ThenFinalCompletion_CompletesTheDeferredRecord(t *testing.T) {
 	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
 	_, headHash := setupSubagentEndTestRepo(t)

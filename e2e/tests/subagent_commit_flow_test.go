@@ -46,8 +46,6 @@ func TestSubagentCommitFlow(t *testing.T) {
 		assert.NotEmpty(t, meta.Sessions, "should have at least 1 session")
 
 		if s.Agent.Name() == "opencode" {
-			// The child must not be a session of its own: one OpenCode session,
-			// the one the user drove, owns the checkpoint.
 			assert.Len(t, meta.Sessions, 1, "OpenCode child sessions must be task records, not sessions")
 		}
 

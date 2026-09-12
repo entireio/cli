@@ -173,11 +173,8 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 			TaskDescription: raw.TaskDescription,
 			Model:           raw.Model,
 			Timestamp:       time.Now(),
-			// tool.execute.after fires once, at true completion, and is the
-			// first signal that can name both the tool call and the finished
-			// child — so it is the authoritative final capture, and it must not
-			// depend on the start having been seen (a plugin restarted
-			// mid-task never saw it).
+			// Final: tool.execute.after is the one true-completion signal.
+			// CompletionWithoutLaunch: a plugin restarted mid-task never saw the start.
 			Final:                   true,
 			CompletionWithoutLaunch: true,
 		}
@@ -212,8 +209,6 @@ func validateSubagentIdentity(parentID, toolUseID, childID string) error {
 
 // parseSubagentPayload reads a subagent-start or subagent-stop payload,
 // validates its identity fields, and resolves the parent's transcript path.
-// Both ParseHookEvent cases share this and differ only in the event they
-// build from the result.
 func (a *OpenCodeAgent) parseSubagentPayload(ctx context.Context, stdin io.Reader) (*subagentRaw, string, error) {
 	raw, err := agent.ReadAndParseHookInput[subagentRaw](stdin)
 	if err != nil {
