@@ -34,7 +34,8 @@ func TestSubagentCommitFlow(t *testing.T) {
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
-		if s.Agent.Name() == "copilot-cli" {
+		switch s.Agent.Name() {
+		case "copilot-cli", "opencode":
 			testutil.AssertCheckpointHasTaskRecord(t, s.Dir, cpID)
 		}
 
@@ -43,6 +44,12 @@ func TestSubagentCommitFlow(t *testing.T) {
 		assert.NotEmpty(t, meta.CLIVersion, "cli_version should be set")
 		assert.NotEmpty(t, meta.Strategy, "strategy should be set")
 		assert.NotEmpty(t, meta.Sessions, "should have at least 1 session")
+
+		if s.Agent.Name() == "opencode" {
+			// The child must not be a session of its own: one OpenCode session,
+			// the one the user drove, owns the checkpoint.
+			assert.Len(t, meta.Sessions, 1, "OpenCode child sessions must be task records, not sessions")
+		}
 
 		// Validate session metadata — agent field should be populated.
 		sm := testutil.ReadSessionMetadata(t, s.Dir, cpID, 0)
