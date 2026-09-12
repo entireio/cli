@@ -399,8 +399,9 @@ type checkpointSyncInfo struct {
 // name a read source, so the two cannot answer the question differently — the
 // asymmetry between them is what this function exists to remove.
 //
-// lead is the read candidate whose FETCH url joins origin in the ownership
-// vote: the elected remote, or "" when the election failed and reads fall
+// lead is the read candidate whose PUSH urls join origin in the ownership
+// vote (the same identity set the push side uses, so reads land where writes
+// went): the elected remote, or "" when the election failed and reads fall
 // open to origin alone.
 //
 // Reports whether it settled the answer — the dedicated store serves reads
@@ -471,10 +472,12 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// separate questions. With pushing enabled the line names a push
 	// destination, so PushURL decides, mirroring the pre-push exemption
 	// (ps.hasCheckpointURL). With pushing disabled it names a READ source,
-	// which is the fetch side's call over a different ownership identity set
-	// — origin plus the candidate's FETCH url, not its push urls — so a
-	// remote whose two urls have different owners is eligible on one side
-	// only, and asking the wrong side reports a store reads do not use.
+	// which is the fetch side's call. Both sides vote ownership over the same
+	// identity set — origin plus the candidate's PUSH urls, never its fetch
+	// url, so reads land where writes went — but the read side can still
+	// decline a store for reasons the push side does not consider (an origin
+	// URL that will not parse, a protocol with no checkpoint mapping), so
+	// asking the wrong side can report a store reads do not use.
 	//
 	// Both probes are local-only; never call resolvePushSettings here — its
 	// follow-up metadata fetch dials, and status must stay network-free.
@@ -518,25 +521,28 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// ignored. When the ownership check is what rejected it, say so: this is
 	// the one trust-gate rejection a user otherwise experiences only as
 	// checkpoints vanishing. Local-only, like everything else here.
-	// Accepted divergence: this verdict votes with the push identity set
-	// (origin + push URLs of the elected remote), while a fetch votes with its
-	// read candidate, so a push-only owner mismatch shows "not in use" here
-	// even though a lead-less fetch still resolves the checkpoint remote.
+	// Accepted divergence: this verdict votes on origin plus the elected
+	// remote's push URLs, and so does a fetch that names a read candidate —
+	// but a fetch with NO candidate votes on origin alone, so a mismatch that
+	// lives only in the elected remote's push URL shows "not in use" here
+	// even though such a lead-less fetch still resolves the checkpoint remote.
 	if cr := s.GetCheckpointRemote(); cr != nil {
 		if repo, reason, inherited := checkpointremote.InheritedCheckpointRemote(ctx, s, elected.Name); inherited {
 			info.IgnoredRemote = repo
 			info.IgnoredReason = reason
 		} else if info.PushDisabled {
-			// That verdict votes with the push identity set, so it accepts a
-			// store the fetch side declined — and with pushing disabled the
-			// fetch side is the one that decided the line above. Without this
-			// the configured store is reported by nothing at all, which is
-			// the silent-ignore the warning exists to prevent.
+			// That verdict is ownership only, so it accepts a store the fetch
+			// side declined for another reason (an unparseable origin URL, an
+			// unmappable protocol) — and with pushing disabled the fetch side
+			// is the one that decided the line above. Without this the
+			// configured store is reported by nothing at all, which is the
+			// silent-ignore the warning exists to prevent. Ownership itself
+			// cannot split the two: both vote over origin plus the
+			// candidate's push urls.
 			//
 			// No reason is given: the fetch side returns a verdict and not a
-			// cause, and its false covers ownership, an unparseable origin
-			// URL and an unmappable protocol alike, so naming one would be a
-			// guess. The causes are logged where they are decided.
+			// cause, so naming one would be a guess. The causes are logged
+			// where they are decided.
 			info.IgnoredRemote = cr.Repo
 			info.IgnoredReason = "checkpoint reads do not resolve to it (see .entire/logs for the reason)"
 		}
