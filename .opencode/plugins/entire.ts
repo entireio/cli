@@ -19,6 +19,16 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   // One-time model-context injection captured from the turn-start hook's stdout,
   // applied on the next LLM call via experimental.chat.system.transform.
   let pendingInjection: string | null = null
+  // Child (subagent) sessions, learned from `parentID` on session.created /
+  // session.updated. OpenCode's task tool runs each subagent as a real session,
+  // so without this set a child would register as the user's session: its
+  // write would take the checkpoint and the parent would log "no files
+  // modified". Children are reported to Entire only through subagent-start /
+  // subagent-stop, fired from the PARENT's task part and tool hook.
+  const childSessions = new Set<string>()
+  // task callIDs already announced via subagent-start (the running part
+  // update repeats).
+  const announcedTasks = new Set<string>()
 
   /**
    * Build the shell command for a hook invocation.
@@ -130,7 +140,8 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   return {
     // Apply the one-time Entire context injection captured at turn-start by
     // appending it to the system prompt for this LLM call.
-    "experimental.chat.system.transform": async (_input: unknown, output: { system: string[] }) => {
+    "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
+      if (input?.sessionID && childSessions.has(input.sessionID)) return
       if (pendingInjection && Array.isArray(output.system)) {
         output.system.push(pendingInjection)
         pendingInjection = null
@@ -138,6 +149,12 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     },
     event: async ({ event }) => {
       try {
+        const props = (event as any).properties
+        const info = props?.info
+        if (info?.parentID && info?.id) childSessions.add(info.id)
+        const eventSessionID: string | undefined =
+          props?.sessionID ?? info?.sessionID ?? info?.id ?? props?.part?.sessionID
+        if (eventSessionID && childSessions.has(eventSessionID)) return
         switch (event.type) {
           case "session.created": {
             const session = (event as any).properties?.info

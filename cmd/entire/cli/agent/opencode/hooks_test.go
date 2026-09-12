@@ -432,6 +432,36 @@ func TestCheckHookConfig(t *testing.T) {
 	}
 }
 
+func TestInstallHooks_ChildSessionsNeverFireLifecycleHooks(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	if err != nil {
+		t.Fatalf("plugin file not created: %v", err)
+	}
+	content := string(data)
+
+	// The child set is learned from parentID and consulted before the event switch.
+	learn := "if (info?.parentID && info?.id) childSessions.add(info.id)"
+	guard := "if (eventSessionID && childSessions.has(eventSessionID)) return"
+	sw := "switch (event.type) {"
+	learnIdx, guardIdx, swIdx := strings.Index(content, learn), strings.Index(content, guard), strings.Index(content, sw)
+	if learnIdx == -1 || guardIdx == -1 || swIdx == -1 {
+		t.Fatalf("plugin missing child-session learn/guard/switch: %d %d %d", learnIdx, guardIdx, swIdx)
+	}
+	if learnIdx >= guardIdx || guardIdx >= swIdx {
+		t.Fatalf("child guard must run before the event switch: learn=%d guard=%d switch=%d", learnIdx, guardIdx, swIdx)
+	}
+	// The one-time context injection is for the user's session only.
+	if !strings.Contains(content, "if (input?.sessionID && childSessions.has(input.sessionID)) return") {
+		t.Fatal("system.transform must not spend the parent's injection on a child session")
+	}
+}
+
 // TestCommittedDogfoodPluginIsCurrent guards the copy of this plugin that the
 // repo commits for its own use against drifting from the template.
 func TestCommittedDogfoodPluginIsCurrent(t *testing.T) {
