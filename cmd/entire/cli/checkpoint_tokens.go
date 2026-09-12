@@ -649,7 +649,7 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))
 	writeCheckpointTokenComparison(w, report.Comparison)
 	if len(report.Recommendations) > 0 {
-		writeTokenRecommendations(w, report.Recommendations)
+		writeTokenRecommendations(w, report.Recommendations, tokenRecommendationDisplayLimit)
 	}
 	writeTokenContributors(w, report.Contributors, report.Context,
 		subagentShareFitsBlock(report.Classes, subagentTotalOf(report.Tokens)))

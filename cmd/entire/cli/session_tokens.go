@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/bits"
+	"slices"
 	"strings"
 	"time"
 
@@ -570,7 +571,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	writeTokenUsageSection(w, report.Tokens)
 	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))
 	if len(report.Recommendations) > 0 {
-		writeTokenRecommendations(w, report.Recommendations)
+		writeTokenRecommendations(w, report.Recommendations, tokenRecommendationDisplayLimit)
 	}
 
 	writeTokenContributors(w, report.Contributors, report.Context,
@@ -689,10 +690,70 @@ func hasTokenRecommendation(report sessionTokensReport, id string) bool {
 	return false
 }
 
-func writeTokenRecommendations(w io.Writer, recs []sessionTokensRecommendation) {
+// tokenRecommendationDisplayLimit is how many recommendations a report
+// prints. Two, because a list long enough to skim is a list nobody reads: the
+// pre-PR-5a report printed up to seven and 35% of real checkpoints got three
+// or more.
+//
+// tokenRecommendationNoLimit renders every recommendation. `tokens profile`
+// uses it: its rules are a different shape (they count recurrence across many
+// checkpoints rather than describing one session) and revisiting them is PR
+// 6's, so this change deliberately leaves that command's output alone.
+const (
+	tokenRecommendationDisplayLimit = 2
+	tokenRecommendationNoLimit      = 0
+)
+
+// recommendationSeverityRank orders the display. Unknown severities sort last
+// rather than first, so a typo demotes a line instead of promoting it.
+func recommendationSeverityRank(severity string) int {
+	// These are the package's existing severity strings (declared in
+	// trail_review_cmd.go); recommendations and trail findings share the
+	// vocabulary, so this reuses the constants rather than re-spelling them.
+	switch severity {
+	case trailReviewSeverityHigh:
+		return 0
+	case trailReviewSeverityMedium:
+		return 1
+	case trailReviewSeverityLow:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// writeTokenRecommendations renders at most limit recommendations, highest
+// severity first.
+//
+// The cap is applied HERE and never to report.Recommendations, because
+// agentBriefOptimizationAction and agentBriefSignals both read that slice:
+// truncating it would silently change an agent's next action and shorten its
+// diagnostic list as a side effect of a display choice. --json keeps the full
+// list for the same reason — it is the machine-readable surface, not the one
+// being decluttered.
+func writeTokenRecommendations(w io.Writer, recs []sessionTokensRecommendation, limit int) {
+	if len(recs) == 0 {
+		return
+	}
+	ordered := slices.Clone(recs)
+	slices.SortStableFunc(ordered, func(a, b sessionTokensRecommendation) int {
+		return recommendationSeverityRank(a.Severity) - recommendationSeverityRank(b.Severity)
+	})
+	// The limit trims noise, never a serious finding: every high-severity
+	// recommendation is kept even if that exceeds the limit, and the cap
+	// applies only to what follows. Capping by position alone would let two
+	// medium lines hide a high one on the day three fire at once.
+	if limit > 0 && len(ordered) > limit {
+		keep := limit
+		for keep < len(ordered) && ordered[keep].Severity == trailReviewSeverityHigh {
+			keep++
+		}
+		ordered = ordered[:keep]
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Recommendations")
-	for _, rec := range recs {
+	for _, rec := range ordered {
 		fmt.Fprintf(w, "- %s\n", rec.Message)
 	}
 }

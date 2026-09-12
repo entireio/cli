@@ -391,7 +391,7 @@ func writeTokensProfileText(w io.Writer, report tokensProfileReport) {
 	writeTokenUsageSectionWithTitle(w, "Checkpoint-observed token usage", report.Tokens)
 	writeTokensProfileSignals(w, report.Signals)
 	if len(report.Recommendations) > 0 {
-		writeTokenRecommendations(w, report.Recommendations)
+		writeTokenRecommendations(w, report.Recommendations, tokenRecommendationNoLimit)
 	}
 	writeTokenLimitations(w, report.Limitations)
 }

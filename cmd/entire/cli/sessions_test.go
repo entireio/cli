@@ -1079,7 +1079,9 @@ func TestTokensCmd_TextOutputWithRecommendations(t *testing.T) {
 		"Recommendations",
 		"Scope subagent tasks tightly",
 		"Context pressure is 85% of the window",
-		"Compact or restart after summarizing the useful findings",
+		// long-session is low severity, so the two-line display cap trims it
+		// behind the medium-severity lines above. Asserted in
+		// TestTokenRecommendationsAreCappedAtTwo.
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -3550,4 +3552,103 @@ func TestAgentBriefSurvivesRuleDeletion(t *testing.T) {
 			t.Errorf("expected no next action, got %q", action)
 		}
 	})
+}
+
+// TestTokenRecommendationsAreCappedAtTwo pins the cap and its blast radius.
+// The cap lives at the render layer, never on report.Recommendations: the
+// agent brief picks its next action and builds its signal list from that
+// slice, so truncating it would change what an agent is told as a side effect
+// of a display decision.
+func TestTokenRecommendationsAreCappedAtTwo(t *testing.T) {
+	t.Parallel()
+
+	// Four rules fire at once: api-call-amplification and subagent-heavy
+	// (medium), high-context-pressure (medium), long-session (low).
+	tokens := &sessionTokensUsage{
+		Total:         10_000_000,
+		CacheRead:     9_000_000,
+		Output:        100_000,
+		APICalls:      60,
+		SubagentTotal: 2_000_000,
+	}
+	signals := tokenRecommendationSignals{
+		Tokens:    tokens,
+		Context:   &sessionTokensContext{Tokens: 90, WindowSize: 100, Percent: 90},
+		TurnCount: 40,
+	}
+	recs := recommendationRules(signals)
+	if len(recs) < 3 {
+		t.Fatalf("fixture should fire at least three rules, got %+v", recs)
+	}
+
+	var out bytes.Buffer
+	writeTokenRecommendations(&out, recs, tokenRecommendationDisplayLimit)
+
+	printed := 0
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "- ") {
+			printed++
+		}
+	}
+	if printed != 2 {
+		t.Errorf("expected 2 rendered recommendations, got %d:\n%s", printed, out.String())
+	}
+
+	// Severity first: a low-severity rule must not displace a medium one.
+	if strings.Contains(out.String(), "Compact or restart") {
+		t.Errorf("low-severity long-session displaced a medium rule:\n%s", out.String())
+	}
+
+	// The brief still sees every rule.
+	report := sessionTokensReport{SessionID: "capped", Tokens: tokens, Recommendations: recs}
+	if got := len(agentBriefSignals(report)); got < 3 {
+		t.Errorf("cap leaked into the agent brief: %d signals, want all of them", got)
+	}
+}
+
+// TestTokenRecommendationsSectionIsSilentWhenEmpty pins that a normal session
+// renders no section at all, which the spec calls the correct output.
+func TestTokenRecommendationsSectionIsSilentWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	tokens := &sessionTokensUsage{Total: 50_000, CacheWrite: 6_000, Output: 3_500, APICalls: 4}
+	recs := recommendationRules(tokenRecommendationSignals{Tokens: tokens})
+	if len(recs) != 0 {
+		t.Fatalf("expected an unremarkable session to fire nothing, got %+v", recs)
+	}
+
+	var out bytes.Buffer
+	writeSessionTokensText(&out, sessionTokensReport{SessionID: "quiet", Tokens: tokens, Recommendations: recs})
+	if strings.Contains(out.String(), "Recommendations") {
+		t.Errorf("expected no Recommendations section, got:\n%s", out.String())
+	}
+}
+
+// TestTokenRecommendationsNeverTrimAHighSeverityLine pins that the display
+// limit removes noise, not findings: three high-severity recommendations all
+// render even though the limit is two.
+func TestTokenRecommendationsNeverTrimAHighSeverityLine(t *testing.T) {
+	t.Parallel()
+
+	recs := []sessionTokensRecommendation{
+		{ID: "a", Severity: "high", Message: "high one"},
+		{ID: "b", Severity: "high", Message: "high two"},
+		{ID: "c", Severity: "high", Message: "high three"},
+		{ID: "d", Severity: "medium", Message: "medium one"},
+		{ID: "e", Severity: "low", Message: "low one"},
+	}
+
+	var out bytes.Buffer
+	writeTokenRecommendations(&out, recs, tokenRecommendationDisplayLimit)
+
+	for _, want := range []string{"high one", "high two", "high three"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("expected %q to survive the cap, got:\n%s", want, out.String())
+		}
+	}
+	for _, notWant := range []string{"medium one", "low one"} {
+		if strings.Contains(out.String(), notWant) {
+			t.Errorf("expected %q to be trimmed, got:\n%s", notWant, out.String())
+		}
+	}
 }
