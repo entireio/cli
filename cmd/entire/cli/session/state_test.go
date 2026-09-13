@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
@@ -496,6 +497,51 @@ func TestStateStore_List_DeletesStaleSession(t *testing.T) {
 	// Active session file should still exist
 	_, err = os.Stat(filepath.Join(stateDir, "active-session.json"))
 	assert.NoError(t, err, "active session file should still exist")
+}
+
+// Not parallel: resets the process-global gitdir roots.
+func TestStateStore_List_SkipsMalformedState(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	t.Cleanup(gitdir.Reset)
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	valid := &State{
+		SessionID:  "valid-session",
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}
+	require.NoError(t, store.Save(ctx, valid))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, "malformed-session.json"),
+		[]byte(`{"session_id":`),
+		0o600,
+	))
+
+	states, err := store.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	assert.Equal(t, valid.SessionID, states[0].SessionID)
+}
+
+// Not parallel: resets the process-global gitdir roots.
+func TestStateStore_ListStrict_RejectsMalformedState(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	t.Cleanup(gitdir.Reset)
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, "malformed-session.json"),
+		[]byte(`{"session_id":`),
+		0o600,
+	))
+
+	states, err := store.ListStrict(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, states)
+	assert.Contains(t, err.Error(), `failed to load session state "malformed-session"`)
 }
 
 func TestStateStore_Load_TraversalResistant(t *testing.T) {

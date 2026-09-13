@@ -161,12 +161,25 @@ func SaveSessionState(ctx context.Context, state *SessionState) error {
 // ListSessionStates returns all session states from the state directory.
 // This is a package-level function that doesn't require a specific strategy instance.
 func ListSessionStates(ctx context.Context) ([]*SessionState, error) {
+	return listSessionStates(ctx, false)
+}
+
+func listSessionStatesStrict(ctx context.Context) ([]*SessionState, error) {
+	return listSessionStates(ctx, true)
+}
+
+func listSessionStates(ctx context.Context, strict bool) ([]*SessionState, error) {
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	states, err := store.List(ctx)
+	var states []*SessionState
+	if strict {
+		states, err = store.ListStrict(ctx)
+	} else {
+		states, err = store.List(ctx)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to list session states: %w", err)
 	}
