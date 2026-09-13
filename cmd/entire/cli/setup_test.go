@@ -3802,6 +3802,96 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 	}
 }
 
+func TestManageAgents_ExternalAgentSettingDoesNotLeakAcrossScopes(t *testing.T) {
+	// Cannot use t.Parallel because setupTestRepo changes the working directory
+	// and the external agent registry is process-global.
+	tests := []struct {
+		name string
+		opts EnableOptions
+	}{
+		{
+			name: "default scope",
+		},
+		{
+			name: "project scope",
+			opts: EnableOptions{UseProjectSettings: true},
+		},
+		{
+			name: "local scope",
+			opts: EnableOptions{UseLocalSettings: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const externalAgentName = "external-settings-scope-test"
+			const projectSettings = `{"log_level":"warn"}`
+			const localSettings = `{"strategy_options":{"push":false},"absolute_git_hook_path":true}`
+
+			setupTestRepo(t)
+			writeSettings(t, projectSettings)
+			writeLocalSettings(t, localSettings)
+
+			externalDir := t.TempDir()
+			writeExternalAgentBinary(t, externalDir, externalAgentName)
+			t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ENTIRE_TEST_EXTERNAL_PRESENT", "1")
+
+			selectExternalAgent := func(_ []string) ([]string, error) {
+				return []string{externalAgentName}, nil
+			}
+			if err := runManageAgents(t.Context(), &bytes.Buffer{}, tt.opts, selectExternalAgent); err != nil {
+				t.Fatalf("runManageAgents() error = %v", err)
+			}
+
+			projectData, err := os.ReadFile(EntireSettingsFile)
+			if err != nil {
+				t.Fatalf("read project settings: %v", err)
+			}
+			if string(projectData) != projectSettings {
+				t.Fatalf("adding an external agent changed project settings:\n%s", projectData)
+			}
+
+			data, err := os.ReadFile(EntireSettingsLocalFile)
+			if err != nil {
+				t.Fatalf("read target settings: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("parse target settings: %v", err)
+			}
+			if _, exists := raw["log_level"]; exists {
+				t.Fatalf("project log_level leaked into local settings:\n%s", data)
+			}
+			var original map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(localSettings), &original); err != nil {
+				t.Fatalf("parse original local settings: %v", err)
+			}
+			for key, want := range original {
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, raw[key]); err != nil || !bytes.Equal(compact.Bytes(), want) {
+					t.Errorf("local setting %s changed: got %s, want %s", key, raw[key], want)
+				}
+			}
+			var externalAgents bool
+			if err := json.Unmarshal(raw["external_agents"], &externalAgents); err != nil || !externalAgents {
+				t.Fatalf("external_agents was not enabled in local settings:\n%s", data)
+			}
+			if len(raw) != len(original)+1 {
+				t.Fatalf("adding an external agent changed fields other than external_agents in local settings:\n%s", data)
+			}
+			effective, err := settings.Load(t.Context())
+			if err != nil {
+				t.Fatalf("load effective settings: %v", err)
+			}
+			if !effective.ExternalAgents {
+				reason, _ := effective.ExternalAgentsRejection()
+				t.Fatalf("external_agents grant was not honored by the settings loader: %s", reason)
+			}
+		})
+	}
+}
+
 func TestMaybePromptVercelDeploymentDisable_MergesExistingConfig(t *testing.T) {
 	setupTestRepo(t)
 
