@@ -45,6 +45,43 @@ func TestParseHookEvent_BeforeAgentStart(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_DoesNotWriteActiveSessionCache(t *testing.T) {
+	tests := []struct {
+		name     string
+		hookName string
+		payload  string
+	}{
+		{
+			name:     "session start",
+			hookName: HookNameSessionStart,
+			payload:  `{"type":"session_start","session_id":"abc-123"}`,
+		},
+		{
+			name:     "before agent start",
+			hookName: HookNameBeforeAgentStart,
+			payload:  `{"type":"before_agent_start","session_id":"abc-123","prompt":"do thing"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+
+			if _, err := (&PiAgent{}).ParseHookEvent(
+				context.Background(), tt.hookName, strings.NewReader(tt.payload),
+			); err != nil {
+				t.Fatalf("ParseHookEvent: %v", err)
+			}
+
+			cachePath := filepath.Join(dir, ".entire", "tmp", "pi", "pi-active-session")
+			if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+				t.Fatalf("active-session cache exists after %s; stat error = %v", tt.hookName, err)
+			}
+		})
+	}
+}
+
 func TestParseHookEvent_BeforeAgentStart_WithSkillEvent(t *testing.T) {
 	t.Parallel()
 	a := &PiAgent{}
@@ -127,40 +164,9 @@ func TestParseHookEvent_SessionShutdown_NoLifecycleEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHookEvent: %v", err)
 	}
-	// session_shutdown is cleanup-only — see ParseHookEvent for the rationale.
+	// session_shutdown is not a lifecycle event — see ParseHookEvent for the rationale.
 	if ev != nil {
 		t.Fatalf("expected nil event from session_shutdown, got %+v", ev)
-	}
-}
-
-func TestParseHookEvent_SessionShutdown_ClearsCache(t *testing.T) {
-	// session_shutdown's only side effect is clearing the cached session ID.
-	// Cannot use t.Parallel — t.Chdir.
-	dir := t.TempDir()
-	t.Chdir(dir)
-
-	ctx := context.Background()
-	a := &PiAgent{}
-
-	// Populate the cache via session_start.
-	if _, err := a.ParseHookEvent(ctx, HookNameSessionStart, strings.NewReader(
-		`{"type":"session_start","session_file":"/tmp/2026-05-09T12-00-00-000Z_cached-id.jsonl"}`)); err != nil {
-		t.Fatalf("session_start setup: %v", err)
-	}
-	if got := readCachedSessionID(ctx); got != "cached-id" {
-		t.Fatalf("cache pre-shutdown = %q, want cached-id", got)
-	}
-
-	// session_shutdown clears the cache and emits no event.
-	ev, err := a.ParseHookEvent(ctx, HookNameSessionShutdown, strings.NewReader(`{"type":"session_shutdown"}`))
-	if err != nil {
-		t.Fatalf("session_shutdown: %v", err)
-	}
-	if ev != nil {
-		t.Errorf("expected nil event, got %+v", ev)
-	}
-	if got := readCachedSessionID(ctx); got != "" {
-		t.Errorf("cache should be cleared after session_shutdown, got %q", got)
 	}
 }
 
@@ -199,25 +205,6 @@ func TestExtractSessionIDFromPath(t *testing.T) {
 		if got := extractSessionIDFromPath(in); got != want {
 			t.Errorf("extractSessionIDFromPath(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-func TestSessionIDCacheRoundtrip(t *testing.T) {
-	// Cannot use t.Parallel — t.Chdir mutates process state.
-	dir := t.TempDir()
-	t.Chdir(dir)
-
-	ctx := context.Background()
-	if got := readCachedSessionID(ctx); got != "" {
-		t.Errorf("expected empty cache initially, got %q", got)
-	}
-	cacheSessionID(ctx, "abc-123")
-	if got := readCachedSessionID(ctx); got != "abc-123" {
-		t.Errorf("readCachedSessionID = %q, want abc-123", got)
-	}
-	clearCachedSessionID(ctx)
-	if got := readCachedSessionID(ctx); got != "" {
-		t.Errorf("after clear, got %q", got)
 	}
 }
 
@@ -297,7 +284,7 @@ func TestCaptureTranscript_RejectsTraversalSessionID(t *testing.T) {
 func TestGetSupportedHooks(t *testing.T) {
 	t.Parallel()
 	got := (&PiAgent{}).GetSupportedHooks()
-	// Note: session_shutdown is cleanup-only, not a HookSessionEnd source —
+	// Note: session_shutdown is not a HookSessionEnd source —
 	// see ParseHookEvent's session_shutdown case for why.
 	want := []agent.HookType{
 		agent.HookSessionStart,
@@ -359,27 +346,17 @@ func TestPiAgent_ContextInjector(t *testing.T) {
 }
 
 // TestParseHookEvent_SessionlessPayloadIsSkipped pins the guard that keeps a
-// sessionless payload from being resolved against the per-repo session-ID cache.
+// sessionless payload from borrowing another Pi process's identity.
 //
 // A Pi subagent is a nested `pi --no-session` process that auto-discovers the same
 // project-local extension, so it fires these hooks carrying no session identity.
-// Resolving that against the single-slot cache handed the child its parent's ID,
-// and the nested turn then overwrote the parent's prompt and turn window.
+// The former single-slot fallback handed the child its parent's ID, and the nested
+// turn then overwrote the parent's prompt and turn window.
 func TestParseHookEvent_SessionlessPayloadIsSkipped(t *testing.T) {
-	// Cannot use t.Parallel — t.Chdir.
-	t.Chdir(t.TempDir())
+	t.Parallel()
 
 	ctx := context.Background()
 	a := &PiAgent{}
-
-	// A parent session populates the cache, so a leaked ID would be observable.
-	if _, err := a.ParseHookEvent(ctx, HookNameSessionStart, strings.NewReader(
-		`{"type":"session_start","session_file":"/tmp/2026-05-09T12-00-00-000Z_parent-id.jsonl"}`)); err != nil {
-		t.Fatalf("parent session_start: %v", err)
-	}
-	if got := readCachedSessionID(ctx); got != "parent-id" {
-		t.Fatalf("cache = %q, want parent-id", got)
-	}
 
 	tests := []struct {
 		name          string
@@ -404,9 +381,8 @@ func TestParseHookEvent_SessionlessPayloadIsSkipped(t *testing.T) {
 		},
 		{
 			// A session file whose basename carries no ID (trailing separator)
-			// also yields no session ID. Skipping is the safe reading: the
-			// alternative — requiring an empty session_file too — would let this
-			// payload fall through to the cache, which is the leak itself.
+			// also yields no session ID. Skipping is the safe reading because this
+			// payload cannot identify a session without a repo-global fallback.
 			name:  "session file with unparseable name",
 			hook:  HookNameBeforeAgentStart,
 			stdin: `{"type":"before_agent_start","cwd":"/repo","session_file":"/tmp/x_.jsonl","prompt":"hi"}`,
@@ -423,7 +399,7 @@ func TestParseHookEvent_SessionlessPayloadIsSkipped(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cacheBefore := readCachedSessionID(ctx)
+			t.Parallel()
 
 			ev, err := a.ParseHookEvent(ctx, tt.hook, strings.NewReader(tt.stdin))
 			if err != nil {
@@ -432,12 +408,8 @@ func TestParseHookEvent_SessionlessPayloadIsSkipped(t *testing.T) {
 
 			if tt.wantSessionID == "" {
 				if ev != nil {
-					t.Fatalf("emitted %s for session %q; want no event so the cached session is left alone",
+					t.Fatalf("emitted %s for session %q; want no event",
 						ev.Type, ev.SessionID)
-				}
-				// A skipped invocation must not disturb the cached session either.
-				if got := readCachedSessionID(ctx); got != cacheBefore {
-					t.Errorf("cache = %q after a skipped invocation, want %q", got, cacheBefore)
 				}
 				return
 			}
