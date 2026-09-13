@@ -106,6 +106,30 @@ func TestDetectHookManagers_LefthookToml(t *testing.T) {
 	}
 }
 
+func TestDetectHookManagers_LefthookConfigDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, ".config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("failed to create .config/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "lefthook.yml"), []byte(""), 0o644); err != nil {
+		t.Fatalf("failed to create .config/lefthook.yml: %v", err)
+	}
+
+	managers := detectHookManagers(tmpDir)
+	if len(managers) != 1 {
+		t.Fatalf("expected 1 manager, got %d", len(managers))
+	}
+	if managers[0].Name != "Lefthook" {
+		t.Errorf("expected Lefthook, got %s", managers[0].Name)
+	}
+	if managers[0].ConfigPath != filepath.Join(".config", "lefthook.yml") {
+		t.Errorf("expected .config/lefthook.yml, got %s", managers[0].ConfigPath)
+	}
+}
+
 func TestDetectHookManagers_LefthookLocal(t *testing.T) {
 	t.Parallel()
 
@@ -123,6 +147,18 @@ func TestDetectHookManagers_LefthookLocal(t *testing.T) {
 	}
 	if managers[0].ConfigPath != "lefthook-local.yml" {
 		t.Errorf("expected lefthook-local.yml, got %s", managers[0].ConfigPath)
+	}
+}
+
+func TestLefthookLocalConfigPath_LocalIsAlreadyLocal(t *testing.T) {
+	t.Parallel()
+
+	got, ok := lefthookLocalConfigPath("lefthook-local.yml")
+	if !ok {
+		t.Fatal("lefthook-local.yml should be supported")
+	}
+	if got != "lefthook-local.yml" {
+		t.Fatalf("lefthookLocalConfigPath() = %q, want lefthook-local.yml", got)
 	}
 }
 
@@ -361,13 +397,32 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 	if !strings.Contains(warning, "Note: Lefthook detected") {
 		t.Error("warning should contain 'Note: Lefthook detected'")
 	}
-	if !strings.Contains(warning, "run 'entire enable' to restore") {
-		t.Error("warning should mention running 'entire enable'")
+	if !strings.Contains(warning, "local Lefthook pre-push safety net") {
+		t.Error("warning should mention the local Lefthook pre-push safety net")
 	}
 
 	// Should NOT contain hook file copy-paste instructions
 	if strings.Contains(warning, "prepare-commit-msg:") {
 		t.Error("category B warning should not contain hook file instructions")
+	}
+}
+
+func TestHookManagerWarning_LefthookNonYAMLFallback(t *testing.T) {
+	t.Parallel()
+
+	managers := []hookManager{
+		{Name: "Lefthook", ConfigPath: "lefthook.toml", OverwritesHooks: false},
+	}
+
+	warning := hookManagerWarning(managers, "entire")
+	if !strings.Contains(warning, "Note: Lefthook detected") {
+		t.Error("warning should contain 'Note: Lefthook detected'")
+	}
+	if !strings.Contains(warning, "run 'entire enable' to restore") {
+		t.Error("warning should mention running 'entire enable' for unsupported local config formats")
+	}
+	if strings.Contains(warning, "local Lefthook pre-push safety net") {
+		t.Error("warning should not claim a safety net was added for non-YAML Lefthook configs")
 	}
 }
 
