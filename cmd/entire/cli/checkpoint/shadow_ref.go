@@ -85,15 +85,18 @@ func shadowBranchLock(commonDir, branchName string) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("open git common dir: %w", err)
 	}
-	if err := osroot.MkdirAllNoSymlink(root, shadowLockDirName, 0o750); err != nil {
+	if err := osroot.MkdirAllNoSymlink(root, ShadowLockDirName, 0o750); err != nil {
 		return nil, "", fmt.Errorf("create shadow lock directory: %w", err)
 	}
 	safe := strings.ReplaceAll(branchName, "/", "_")
-	return root, shadowLockDirName + "/" + safe + ".lock", nil
+	return root, ShadowLockDirName + "/" + safe + ".lock", nil
 }
 
-// shadowLockDirName is the shadow-branch lock directory inside the git common dir.
-const shadowLockDirName = "entire-shadow-locks"
+// ShadowLockDirName is the shadow-branch lock directory inside the git common
+// dir. Exported so `entire clean` can reclaim its lock files: a file is safe to
+// remove once no process holds its flock, and the next shadow-branch write
+// recreates it.
+const ShadowLockDirName = "entire-shadow-locks"
 
 // withShadowBranchFlock acquires the per-shadow-branch flock, runs fn, and
 // releases the flock. Serializes all WriteTemporary callers that target the
