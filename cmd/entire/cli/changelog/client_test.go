@@ -18,6 +18,7 @@ import (
 )
 
 const testOrigin = "https://entire.io"
+const indexDescription = "Published Entire blog posts in Changelog, newest first."
 
 func fixture(t *testing.T, name string) string {
 	t.Helper()
@@ -62,6 +63,12 @@ func TestParseIndex(t *testing.T) {
 		bad          bool
 	}{
 		{name: "empty", source: indexFixture(testOrigin, 0)},
+		{name: "punctuation drift", source: strings.Replace(indexFixture(testOrigin, 1), "newest first.", "newest first", 1), count: 1, title: "Title 0"},
+		{name: "description drift", source: strings.Replace(indexFixture(testOrigin, 1), indexDescription, "Latest Entire product updates in **Changelog**.", 1), count: 1, title: "Title 0"},
+		{name: "heading drift", source: strings.Replace(indexFixture(testOrigin, 1), "# Blog", "## Product updates", 1), count: 1, title: "Title 0"},
+		{name: "category in heading", source: strings.Replace(indexFixture(testOrigin, 1), "# Blog\n\n"+indexDescription, "# Product changelog", 1), count: 1, title: "Title 0"},
+		{name: "extra prose", source: indexFixture(testOrigin, 1) + "\n## About these updates\n\nRead more on the website.\n", count: 1, title: "Title 0"},
+		{name: "empty copy drift", source: "# Product updates\n\nNo posts in changelog yet.\n"},
 		{name: "ties", source: indexFixture(testOrigin, 3), count: 3, title: "Title 0"},
 		{name: "CRLF", source: strings.ReplaceAll(indexFixture(testOrigin, 1), "\n", "\r\n"), count: 1, title: "Title 0"},
 		{name: "formatting", source: strings.ReplaceAll(indexFixture(testOrigin, 1), "Title 0", "**Title [日本語]** and `code`"), count: 1, title: "Title [日本語] and code"},
@@ -70,6 +77,9 @@ func TestParseIndex(t *testing.T) {
 		{name: "HTML", source: "<html>Oops</html>", bad: true},
 		{name: "blank", bad: true},
 		{name: "category", source: strings.ReplaceAll(published, "in Changelog", "in Company"), bad: true},
+		{name: "unfiltered", source: strings.ReplaceAll(published, " in Changelog", ""), bad: true},
+		{name: "category substring", source: strings.ReplaceAll(published, "Changelog", "ChangelogArchive"), bad: true},
+		{name: "error page", source: "# Service unavailable\n\nPlease try again later.\n", bad: true},
 		{name: "date", source: strings.ReplaceAll(published, "2026-09-09", "2026-02-30"), bad: true},
 		{name: "description", source: strings.ReplaceAll(indexFixture(testOrigin, 1), "Description 0", ""), bad: true},
 		{name: "link", source: strings.ReplaceAll(indexFixture(testOrigin, 1), "[Title 0]", "Title 0"), bad: true},

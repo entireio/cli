@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/yuin/goldmark"
@@ -18,25 +19,36 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const indexDescription = "Published Entire blog posts in Changelog, newest first."
-
 func (c *Client) parseIndex(source []byte) ([]Entry, error) {
 	if !utf8.Valid(source) {
 		return nil, errors.New("malformed changelog index: invalid UTF-8")
 	}
 	doc := goldmark.New().Parser().Parse(text.NewReader(source))
 	heading := doc.FirstChild()
-	if heading == nil || heading.Kind() != ast.KindHeading || nodeText(heading, source) != "Blog" {
-		return nil, errors.New("malformed changelog index: missing Blog heading")
-	}
-	description := heading.NextSibling()
-	if description == nil || description.Kind() != ast.KindParagraph || nodeText(description, source) != indexDescription {
-		return nil, errors.New("malformed changelog index: expected Changelog category")
+	if heading == nil || heading.Kind() != ast.KindHeading || strings.TrimSpace(nodeText(heading, source)) == "" {
+		return nil, errors.New("malformed changelog index: missing heading")
 	}
 	entries := make([]Entry, 0)
 	seen := make(map[string]bool)
-	for block := description.NextSibling(); block != nil; block = block.NextSibling() {
-		if block.Kind() != ast.KindList {
+	categoryFound := false
+	for block := heading; block != nil; block = block.NextSibling() {
+		switch block.Kind() {
+		case ast.KindHeading, ast.KindParagraph:
+			// Identify the category before the posts without pinning surrounding copy.
+			if len(entries) == 0 {
+				words := strings.FieldsFunc(nodeText(block, source), func(r rune) bool {
+					return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+				})
+				for _, word := range words {
+					categoryFound = categoryFound || strings.EqualFold(word, "Changelog")
+				}
+			}
+			continue
+		case ast.KindList:
+			if !categoryFound {
+				return nil, errors.New("malformed changelog index: expected Changelog category")
+			}
+		default:
 			return nil, errors.New("malformed changelog index: expected post list")
 		}
 		for item := block.FirstChild(); item != nil; item = item.NextSibling() {
@@ -49,6 +61,9 @@ func (c *Client) parseIndex(source []byte) ([]Entry, error) {
 				seen[entry.MarkdownURL] = true
 			}
 		}
+	}
+	if !categoryFound {
+		return nil, errors.New("malformed changelog index: expected Changelog category")
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Date != entries[j].Date {
