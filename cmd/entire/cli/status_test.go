@@ -425,7 +425,7 @@ func TestWriteActiveSessions(t *testing.T) {
 			StartedAt:           now.Add(-2 * time.Hour),
 			LastInteractionTime: &recentInteraction,
 			LastPrompt:          "Fix auth bug in login flow",
-			AgentType:           types.AgentType("Claude Code"),
+			AgentType:           types.AgentType(testAgentClaude),
 			TokenUsage: &agent.TokenUsage{
 				InputTokens:  800,
 				OutputTokens: 400,
@@ -536,6 +536,85 @@ func TestWriteActiveSessions(t *testing.T) {
 	// Should NOT contain file counts (removed)
 	if strings.Contains(output, "files ") {
 		t.Errorf("Output should not contain file counts, got: %s", output)
+	}
+}
+
+// Status must report every session, and reporting must not change what it
+// reports. Two sessions for the same agent are two sessions — --json collapses
+// them to one entry per agent today — and a stale record must survive being
+// looked at, because List deletes what ListReadOnly only reads. One fixture,
+// because both are the same property: status observes, it does not mutate.
+func TestRunStatusJSON_ListsEverySessionWithoutMutating(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	ctx := context.Background()
+
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	recent := now.Add(-2 * time.Minute)
+	// Two live sessions for the SAME agent, which --json collapses today.
+	live := []*session.State{
+		{
+			SessionID:           "same-agent-worktree-a",
+			WorktreePath:        "/Users/test/repo",
+			StartedAt:           now.Add(-30 * time.Minute),
+			LastInteractionTime: &recent,
+			AgentType:           types.AgentType("Claude Code"),
+		},
+		{
+			SessionID:    "same-agent-worktree-b",
+			WorktreePath: "/Users/test/repo/.worktrees/other",
+			StartedAt:    now.Add(-10 * time.Minute),
+			AgentType:    types.AgentType(testAgentClaude),
+		},
+	}
+	// A stale record: List deletes it on read, ListReadOnly must not.
+	staleInteraction := now.Add(-2 * session.StaleSessionThreshold)
+	stale := &session.State{
+		SessionID:           "stale-but-must-survive-a-read",
+		WorktreePath:        "/Users/test/repo",
+		StartedAt:           now.Add(-3 * session.StaleSessionThreshold),
+		LastInteractionTime: &staleInteraction,
+		AgentType:           types.AgentType("Codex"),
+	}
+	for _, st := range append(append([]*session.State{}, live...), stale) {
+		if err := store.Save(ctx, st); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	statePath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, stale.SessionID+".json")
+
+	var stdout bytes.Buffer
+	if err := runStatus(ctx, &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	claude := 0
+	for _, entry := range result.ActiveSessions {
+		if entry.Agent == testAgentClaude {
+			claude++
+		}
+	}
+	if claude != len(live) {
+		t.Errorf("active_sessions has %d Claude Code entries, want %d — sessions must not be collapsed by agent (got %+v)",
+			claude, len(live), result.ActiveSessions)
+	}
+
+	if _, err := os.Stat(statePath); err != nil {
+		t.Errorf("status deleted the stale session state: %v", err)
 	}
 }
 
@@ -2133,7 +2212,13 @@ func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	}
 }
 
-func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
+// Replaces TestRunStatusJSON_DeduplicatesSessions, which pinned the old
+// one-entry-per-agent shape. That shape could not represent two concurrent
+// sessions for the same agent — a real setup, one per worktree — so the
+// second one was invisible. Each session is now its own entry; consumers that
+// want a per-agent view can group on the agent field, which they could not do
+// in reverse.
+func TestRunStatusJSON_ReportsEachSessionSeparately(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
@@ -2183,26 +2268,30 @@ func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if len(result.ActiveSessions) != 1 {
-		t.Fatalf("Expected 1 deduplicated session, got %d", len(result.ActiveSessions))
+	if len(result.ActiveSessions) != len(states) {
+		t.Fatalf("Expected %d session entries, got %d: %+v", len(states), len(result.ActiveSessions), result.ActiveSessions)
 	}
-	s := result.ActiveSessions[0]
-	if s.Agent != "Codex" {
-		t.Errorf("Expected agent='Codex', got %q", s.Agent)
+
+	byID := make(map[string]sessionBriefJSON, len(result.ActiveSessions))
+	for _, entry := range result.ActiveSessions {
+		if entry.Agent != "Codex" {
+			t.Errorf("Expected agent='Codex', got %q", entry.Agent)
+		}
+		byID[entry.SessionID] = entry
 	}
-	if s.Status != "active" {
-		t.Errorf("Expected status='active' (active wins over idle), got %q", s.Status)
+	for _, want := range states {
+		if _, ok := byID[want.SessionID]; !ok {
+			t.Errorf("session %s missing from active_sessions", want.SessionID)
+		}
 	}
-	if s.Model != "codex-mini" {
-		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	if got := byID["codex-active"]; got.Status != "active" || got.Model != "codex-mini" {
+		t.Errorf("active session entry = %+v, want status=active model=codex-mini", got)
+	}
+	if got := byID["codex-idle-1"]; got.Status != string(session.PhaseIdle) {
+		t.Errorf("idle session status = %q, want %q", got.Status, session.PhaseIdle)
 	}
 }
 
-// writeStatusHeadCheckpoint writes a v1 checkpoint with the requested
-// review/investigation flags, then amends HEAD to carry the
-// Entire-Checkpoint trailer. Mirrors the helper used in
-// head_checkpoint_flags_test.go but inlined to keep status_test.go
-// self-contained for readers comparing to other status tests.
 func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
 	t.Helper()
 	cwd, err := os.Getwd()

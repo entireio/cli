@@ -498,6 +498,43 @@ func TestStateStore_List_DeletesStaleSession(t *testing.T) {
 	assert.NoError(t, err, "active session file should still exist")
 }
 
+// ListReadOnly is the passive read: `entire status` must be able to report
+// what exists without observation changing it. List keeps its cleanup
+// contract — doctor and the sweeper still rely on it.
+func TestStateStore_ListReadOnly_ReturnsStaleWithoutDeleting(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	staleInteracted := time.Now().Add(-2 * 7 * 24 * time.Hour)
+	stale := &State{
+		SessionID:           "stale-session",
+		BaseCommit:          "def456",
+		StartedAt:           time.Now().Add(-3 * 7 * 24 * time.Hour),
+		LastInteractionTime: &staleInteracted,
+	}
+	require.NoError(t, store.Save(ctx, stale))
+	stalePath := filepath.Join(stateDir, "stale-session.json")
+
+	states, err := store.ListReadOnly(ctx)
+	require.NoError(t, err)
+	require.Len(t, states, 1, "ListReadOnly must report the stale session")
+	assert.Equal(t, "stale-session", states[0].SessionID)
+
+	_, err = os.Stat(stalePath)
+	require.NoError(t, err, "ListReadOnly must not delete the stale session file")
+
+	// The mutating read still cleans up, so doctor/sweeper are unaffected.
+	states, err = store.List(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, states)
+	_, err = os.Stat(stalePath)
+	assert.True(t, os.IsNotExist(err), "List must still delete stale sessions")
+}
+
 func TestStateStore_Load_TraversalResistant(t *testing.T) {
 	t.Parallel()
 
