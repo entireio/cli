@@ -139,6 +139,12 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
 	}
 
+	// Show the clone-wide enable/disable mirror when set, between Project and
+	// Local to match its merge position and because it spans every worktree.
+	if prefs, err := settings.LoadClonePreferences(ctx); err == nil && prefs.Enabled != nil {
+		fmt.Fprintln(w, formatSettingsStatus("Clone", &EntireSettings{Enabled: *prefs.Enabled}, sty))
+	}
+
 	// An external_agents grant the loader refused. The user can see the
 	// setting in their file and has no other way to learn it is inert:
 	// discovery simply does not run, and the agent never appears.

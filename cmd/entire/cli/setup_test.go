@@ -826,6 +826,82 @@ func TestRunDisable_AlreadyDisabled(t *testing.T) {
 	}
 }
 
+// TestRunDisable_MirrorsToClonePreferences verifies a local-scope disable writes
+// the clone-wide mirror (git common dir), which is what carries the opt-out
+// across worktrees.
+func TestRunDisable_MirrorsToClonePreferences(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runDisable(context.Background(), &stdout, false); err != nil {
+		t.Fatalf("runDisable() error = %v", err)
+	}
+
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	if err != nil {
+		t.Fatalf("LoadClonePreferences() error = %v", err)
+	}
+	if prefs.Enabled == nil || *prefs.Enabled {
+		t.Fatalf("clone mirror = %v, want explicit false", prefs.Enabled)
+	}
+}
+
+// TestDisable_ReachesLinkedWorktree reproduces the reported bug: a personal
+// disable in one worktree must leave a freshly added worktree disabled, even
+// though the new worktree carries only the committed settings.json.
+func TestDisable_ReachesLinkedWorktree(t *testing.T) {
+	mainDir := setupTestRepo(t)
+	// Commit the enabled project settings so the linked worktree carries them;
+	// git worktree add also needs a HEAD to check out.
+	testutil.WriteFile(t, mainDir, EntireSettingsFile, testSettingsEnabled)
+	testutil.GitAdd(t, mainDir, EntireSettingsFile)
+	testutil.GitCommit(t, mainDir, "enable entire")
+
+	var stdout bytes.Buffer
+	if err := runDisable(context.Background(), &stdout, false); err != nil {
+		t.Fatalf("runDisable() error = %v", err)
+	}
+
+	wtDir := filepath.Join(t.TempDir(), "wt")
+	testutil.RunGit(t, mainDir, "worktree", "add", wtDir, "-b", "feature")
+
+	// The new worktree has no settings.local.json — only the committed
+	// settings.json (enabled) plus the shared clone mirror (disabled).
+	ctx := settings.WithWorktreeRoot(context.Background(), wtDir)
+	s, err := settings.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if s.Enabled {
+		t.Fatal("linked worktree came back enabled; clone mirror did not reach it")
+	}
+}
+
+// TestEnable_RecoversClonewideDisable checks that a bare `entire enable` flips
+// the clone mirror back on when a worktree's own local file already says
+// enabled — otherwise the next new worktree would come back disabled.
+func TestEnable_RecoversClonewideDisable(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	var stdout bytes.Buffer
+	if err := runDisable(context.Background(), &stdout, false); err != nil {
+		t.Fatalf("runDisable() error = %v", err)
+	}
+	if err := runEnable(context.Background(), &stdout, false); err != nil {
+		t.Fatalf("runEnable() error = %v", err)
+	}
+
+	prefs, err := settings.LoadClonePreferences(context.Background())
+	if err != nil {
+		t.Fatalf("LoadClonePreferences() error = %v", err)
+	}
+	if prefs.Enabled == nil || !*prefs.Enabled {
+		t.Fatalf("clone mirror = %v, want explicit true", prefs.Enabled)
+	}
+}
+
 func TestCheckDisabledGuard(t *testing.T) {
 	setupTestDir(t)
 
