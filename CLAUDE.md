@@ -535,6 +535,10 @@ When duplication is found:
 2. If not, consider extracting the duplicated logic to a shared helper
 3. If duplication is intentional (e.g., test setup), add a `//nolint:dupl` comment with explanation
 
+### Complexity gate
+
+CI's `complexity-gate` job fails a pull request when a function is over cognitive complexity 30 **and** new or worsened against the merge base — never on the 105 pre-existing violations, which is why it is a `tools/complexity` diff rather than the `gocognit` linter (golangci has no per-linter new-only mode, so enabling it would fail `mise run lint` on all of them). Run it locally with `mise run complexity:gate`; the threshold is the gate's `-cognit-warn` flag (`COGNIT_WARN=25 mise run complexity:gate`), not a `.golangci.yaml` setting. A per-feature coverage comparison against `tools/complexity/baseline/<date>/features.csv` also exists, advisory-only and not yet wired into CI — see [tools/complexity/README.md](tools/complexity/README.md).
+
 ## Code Patterns
 
 ### Error Handling
