@@ -61,6 +61,8 @@ func TestIsTrailerLine(t *testing.T) {
 	}{
 		{"Signed-off-by: User <user@example.com>", true},
 		{"Entire-Checkpoint: abc123def456", true},
+		{"  Entire-Checkpoint: abc123def456", false},
+		{"\tEntire-Checkpoint: abc123def456", false},
 		{"not a trailer", false},
 		{"error: connection refused", true}, // "error" is a valid trailer key format
 		{"", false},
@@ -268,6 +270,8 @@ func TestParseAllCheckpoints(t *testing.T) {
 }
 
 func TestParseCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		message   string
@@ -326,6 +330,8 @@ func TestParseCheckpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			gotID, gotFound := ParseCheckpoint(tt.message)
 			if gotFound != tt.wantFound {
 				t.Errorf("ParseCheckpoint() found = %v, want %v", gotFound, tt.wantFound)
@@ -334,6 +340,88 @@ func TestParseCheckpoint(t *testing.T) {
 				t.Errorf("ParseCheckpoint() id = %v, want %v", gotID.String(), tt.wantID)
 			}
 		})
+	}
+}
+
+func TestParseAllCheckpointsFromFinalTrailerBlock(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		message string
+		want    []string
+	}{
+		{
+			name:    "checkpoint-shaped body line ignored",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nSigned-off-by: Test User <test@example.com>\n",
+			want:    nil,
+		},
+		{
+			name:    "final trailer accepted after checkpoint-shaped body line",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nBody continues here.\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want:    []string{"b2c3d4e5f6a1"},
+		},
+		{
+			name:    "multiple final checkpoint trailers",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Checkpoint: b2c3d4e5f6a1\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    []string{"a1b2c3d4e5f6", "b2c3d4e5f6a1"},
+		},
+		{
+			name:    "checkpoint key embedded in another trailer value ignored",
+			message: "Message\n\nNotes: Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "indented checkpoint is not a trailer",
+			message: "Message\n\n  Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "tab-indented checkpoint is not a trailer",
+			message: "Message\n\n\tEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+		{
+			name:    "continuation after checkpoint remains in trailer block",
+			message: "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n continuation text\nSigned-off-by: Test User <test@example.com>\n",
+			want:    []string{"a1b2c3d4e5f6"},
+		},
+		{
+			name:    "continuation of another trailer does not become checkpoint",
+			message: "Message\n\nNotes: details\n  Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ParseAllCheckpointsFromFinalTrailerBlock(tt.message)
+			t.Logf("message=%q parsed=%v", tt.message, got)
+			if len(got) != len(tt.want) {
+				t.Fatalf("ParseAllCheckpointsFromFinalTrailerBlock() = %v, want %v", got, tt.want)
+			}
+			for i, wantID := range tt.want {
+				if got[i].String() != wantID {
+					t.Errorf("ParseAllCheckpointsFromFinalTrailerBlock()[%d] = %v, want %v", i, got[i], wantID)
+				}
+			}
+		})
+	}
+}
+
+func TestParseCheckpointFromFinalTrailerBlockReturnsFirst(t *testing.T) {
+	t.Parallel()
+
+	message := "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\nEntire-Checkpoint: b2c3d4e5f6a1\n"
+	got, found := ParseCheckpointFromFinalTrailerBlock(message)
+	t.Logf("message=%q parsed=%v found=%v", message, got, found)
+	if !found {
+		t.Fatal("ParseCheckpointFromFinalTrailerBlock() did not find a checkpoint")
+	}
+	if got.String() != "a1b2c3d4e5f6" {
+		t.Errorf("ParseCheckpointFromFinalTrailerBlock() = %v, want a1b2c3d4e5f6", got)
 	}
 }
 

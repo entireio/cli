@@ -209,6 +209,35 @@ func TestMigrateShadowBranch_DifferentTrailerFromSameSession(t *testing.T) {
 	assert.Equal(t, initHash, state.AttributionBaseCommit, "AttributionBaseCommit should stay pinned (migrate, not reconcile)")
 }
 
+func TestMigrateShadowBranch_LegacyStateDoesNotReconcileBodyCheckpoint(t *testing.T) {
+	dir, initHash := setupMigrationRepo(t)
+	t.Chdir(dir)
+
+	cpID := checkpointID.MustCheckpointID("abc123def456")
+	testutil.WriteFile(t, dir, "file.txt", "content")
+	testutil.GitAdd(t, dir, "file.txt")
+	testutil.GitCommit(t, dir, "squash message\n\nEntire-Checkpoint: abc123def456\n\nBody continues.\n\nEntire-Checkpoint: 111111222222")
+	headHash := testutil.GetHeadHash(t, dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	state := &SessionState{
+		SessionID:             "legacy-session",
+		BaseCommit:            initHash,
+		AttributionBaseCommit: initHash,
+		LastCheckpointID:      cpID,
+		// Legacy state deliberately has no LastCheckpointCommitHash.
+	}
+
+	changed, reconciled, err := (&ManualCommitStrategy{}).migrateShadowBranchIfNeeded(context.Background(), repo, state)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.False(t, reconciled)
+	require.Equal(t, headHash, state.BaseCommit)
+	require.Equal(t, initHash, state.AttributionBaseCommit,
+		"checkpoint-shaped body text must not authorize attribution realignment")
+}
+
 // TestMigrateShadowBranch_EmptyLastCheckpointID verifies that when the session
 // has never been condensed (LastCheckpointID is empty), the reconcile guard is
 // skipped and the migrate path fires.
