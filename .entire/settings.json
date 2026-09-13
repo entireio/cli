@@ -7,8 +7,10 @@
     },
     "filtered_fetches": true
   },
-  "strategy": "manual-commit",
   "checkpoints": {
-    "primary": { "type": "git-refs" }
-  }
+    "primary": {
+      "type": "git-refs"
+    }
+  },
+  "strategy": "manual-commit"
 }
