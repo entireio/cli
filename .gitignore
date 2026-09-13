@@ -71,3 +71,14 @@ tmp/
 entire-external-cp-test/
 /skills/
 /git-remote-entire
+
+# Checkpoint Lens (Buildathon 2026)
+tools/**/__pycache__/
+*.pyc
+
+# Databricks credentials - MUST NEVER be committed
+.databricks.local.json
+.env.databricks
+
+# Checkpoint Lens verification baseline (machine-specific)
+.entire/lens-verify-baseline.json

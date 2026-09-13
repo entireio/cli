@@ -1,0 +1,111 @@
+<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Checkpoint Lens - Handoff</title><style>
+:root{
+  --bg:#f7f7f5; --panel:#ffffff; --ink:#16161a; --muted:#5c5f66;
+  --line:#e3e3df; --accent:#2f5fd0; --shadow:0 1px 2px rgba(0,0,0,.05);
+  --blocker:#b3261e; --risk:#a8560c; --open:#8a6d00; --rejected:#6b4ea8;
+  --decision:#1d6f42; --rationale:#3a6b8a; --assumption:#5c5f66;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#141416; --panel:#1c1c1f; --ink:#ececef; --muted:#a2a5ad;
+    --line:#2c2c31; --accent:#8fb0ff; --shadow:none;
+    --blocker:#ff8a80; --risk:#ffb870; --open:#ffd95e; --rejected:#c3a6ff;
+    --decision:#7ee0a5; --rationale:#8fc7e8; --assumption:#a2a5ad;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:32px 20px 64px}
+header{border-bottom:2px solid var(--ink);padding-bottom:16px;margin-bottom:28px}
+h1{font-size:24px;margin:0 0 6px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:14px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--muted);margin:32px 0 12px;font-weight:600}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:16px 18px;box-shadow:var(--shadow)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.stat .n{font-size:22px;font-weight:650;letter-spacing:-.02em}
+.stat .l{font-size:12px;color:var(--muted);margin-top:2px}
+.prov{font-size:12px;color:var(--muted);font-style:italic;margin-top:6px}
+.item{border-left:3px solid var(--line);padding:8px 0 8px 14px;margin:12px 0}
+.item .tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;
+  padding:1px 7px;border-radius:3px;border:1px solid currentColor;margin-bottom:6px}
+.item .src{font-size:11.5px;color:var(--muted);margin-top:5px}
+.k-blocker{border-left-color:var(--blocker)} .k-blocker .tag{color:var(--blocker)}
+.k-risk{border-left-color:var(--risk)} .k-risk .tag{color:var(--risk)}
+.k-open_question{border-left-color:var(--open)} .k-open_question .tag{color:var(--open)}
+.k-rejected{border-left-color:var(--rejected)} .k-rejected .tag{color:var(--rejected)}
+.k-decision{border-left-color:var(--decision)} .k-decision .tag{color:var(--decision)}
+.k-rationale{border-left-color:var(--rationale)} .k-rationale .tag{color:var(--rationale)}
+.k-assumption{border-left-color:var(--assumption)} .k-assumption .tag{color:var(--assumption)}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  padding:10px 12px;overflow-x:auto;margin:8px 0}
+ul.files{list-style:none;padding:0;margin:0;columns:2;column-gap:24px}
+ul.files li{font-family:ui-monospace,monospace;font-size:12.5px;padding:2px 0;
+  break-inside:avoid;color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.verdict{font-weight:650;font-size:12px}
+.v-IMPLEMENTED{color:var(--decision)} .v-PARTIAL{color:var(--risk)}
+.v-MISSING{color:var(--blocker)} .v-UNVERIFIED{color:var(--muted)}
+.warn{border-left:3px solid var(--risk);background:var(--panel);padding:12px 14px;
+  border-radius:0 6px 6px 0;margin:10px 0;font-size:13.5px}
+.na{color:var(--muted);font-style:italic}
+footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);
+  font-size:12px;color:var(--muted)}
+.scroll{overflow-x:auto}
+</style></head><body><div class='wrap'><header><h1>Checkpoint Lens &mdash; Handoff Brief</h1><div class="sub">01M1TQ2SJR65VG107JGSEQ9MTA &middot; 2026-09-06T06:39:22.5086715Z &middot; branch <code>RV/Entire_Trunk</code></div></header><div class="grid"><div class="stat"><div class="n">7</div><div class="l">files touched</div></div><div class="stat"><div class="n">19</div><div class="l">decisions recovered</div></div><div class="stat"><div class="n">0%</div><div class="l">agent-written</div></div><div class="stat"><div class="n">0</div><div class="l">lines changed</div></div><div class="stat"><div class="n">29,527,987</div><div class="l">tokens</div></div></div><h2>Stated intent</h2><div class='panel'><div>Workspace URL: https://dbc-fbf9202b-29fc.cloud.databricks.com/browse/folders/workspace?o=7474654658489311
+
+PAT: REDACTED
+HTTP Path: /sql/1.0/warehouses/08d05243c52e3597</div><div class="prov">Provenance: first substantive user prompt (verbatim, not generated)</div></div><h2>Linked commit</h2><div class='panel'><code>79743a33261b</code> &mdash; feat(lens): make recovered decisions trustworthy; HTML reports; data-quality fixes</div><h2>Decisions, risks and open questions</h2><p class="na">Recovered verbatim from checkpoint context &mdash; never paraphrased or generated.</p><div class="item k-open_question"><span class="tag">OPEN</span><div>Previously the classifier scored any sentence containing a keyword, so the agent quoting its own task back (&quot;open questions we still need to decide&quot;, &quot;Commit everything with a substantive message&quot;) outscored genuine reasoning.</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-open_question"><span class="tag">OPEN</span><div>[OPEN] open questions we still need to decide.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-risk"><span class="tag">RISK</span><div>No tests yet. Biggest quality risk; rubric explicitly wants tests covering critical + curveball behavior.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-rejected"><span class="tag">REJECTED</span><div>Substring matching on bare nouns was wrong in a way that produced confident nonsense: &quot;risk&quot; matched the column name &quot;file-churn/risk score&quot;, and &quot;abandoned&quot; matched a sentence *defining* what checkpoints preserve.</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-rejected"><span class="tag">REJECTED</span><div>Markers are now regexes requiring the term to be predicated of the work (&quot;we abandoned&quot;, &quot;the risk is&quot;).</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-rejected"><span class="tag">REJECTED</span><div>Three remaining defects I can see: sentences starting mid-way (hard-wrapped markdown split on newlines), instead of over-triggering REJECTED, and raw  markup.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-rejected"><span class="tag">REJECTED</span><div>Clean full sentences, no false REJECTED.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-rejected"><span class="tag">REJECTED</span><div>Now RISK over-matches — it&#x27;s catching the *word* &quot;risk&quot; in &quot;file-churn/risk score&quot;, and &quot;abandoned&quot; inside a definition.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-decision"><span class="tag">DECIDED</span><div>Threshold is deliberately high: dropping a real decision is worse than keeping a borderline one.</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-decision"><span class="tag">DECIDED</span><div>Over-correcting then lost most real content, because engineering prose states decisions passively (&quot;chosen over an LLM call&quot;, &quot;idempotent, so re-running never double-counts&quot;).</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>The coverage headline counts rows in the decisions table rather than SUM(decision_count) from sessions; the two disagreed because one is deduplicated, so the headline could not be reproduced by querying the data.</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>Includes an inline-SVG trend chart, hand-rolled rather than pulled from a charting CDN.</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>Anything uncomputable renders as an explicit &quot;unavailable&quot; panel, because a silently missing section reads as a clean bill of health.</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>Two checkpoints are labelled as too few to be a trend rather than drawn as one.</div><div class="src">source: commit message &middot; confidence: high</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>The Graph client had a silent bug: wrong flag spelling made entire graph commit exit 0 while printing an error to stdout — an empty blast radius that looked like &quot;no dependents.&quot; Caught by verifying against the real payload instead of trusting it.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>4m01s → 58s, and now checking 18 requirements instead of 8.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>Four real bugs found by verifying Graph output instead of trusting it — three were silent (wrong flag → exit 0 → empty section that reads as &quot;no impact&quot;).</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>Two real problems now: recall collapsed to 9, and &quot;No tests yet&quot; appears 6 times — because each checkpoint stores the *full* session transcript, so later checkpoints re-contain earlier decisions.</div><div class="src">source: session transcript &middot; confidence: medium</div></div>
+<div class="item k-rationale"><span class="tag">WHY</span><div>The commit messages are full of decisions phrased as declarative prose (&quot;The aggregates are chosen so that...&quot;, &quot;Sync is idempotent...</div><div class="src">source: session transcript &middot; confidence: medium</div></div><h2>Graph impact (blast radius)</h2><pre>
+GRAPH IMPACT (BLAST RADIUS)
+------------------------------------------------------------------------------
+  evidence command (rerun to verify):
+    $ entire graph commit 79743a33261b8fbf471c091915c8010ae6354e83 --repo . --max-seconds 120 --json
+
+  81 entity change(s) across 7 file(s):
+    - body_changed function cmd_handoff              tools/checkpoint_lens/cli.py  &lt;- 1 dependent(s)
+    - added function _aggregates_for_html            tools/checkpoint_lens/cli.py  &lt;- 1 dependent(s)
+    - added function _write_html                     tools/checkpoint_lens/cli.py  &lt;- 2 dependent(s)
+    - body_changed function cmd_drift                tools/checkpoint_lens/cli.py  &lt;- 1 dependent(s)
+    - body_changed function build_parser             tools/checkpoint_lens/cli.py  &lt;- 1 dependent(s)
+    - body_changed function common                   tools/checkpoint_lens/cli.py  &lt;- 119 dependent(s)
+    - added function is_generated_path               tools/checkpoint_lens/databricks.py  &lt;- 6 dependent(s)
+    - body_changed class DatabricksSync              tools/checkpoint_lens/databricks.py  &lt;- 5 dependent(s)
+    - body_changed method DatabricksSync.sync        tools/checkpoint_lens/databricks.py  &lt;- 195 dependent(s)
+    - signature_changed method DatabricksSync._query tools/checkpoint_lens/databricks.py  &lt;- 4 dependent(s)
+    - signature_changed method DatabricksSync.covera tools/checkpoint_lens/databricks.py  &lt;- 33 dependent(s)
+    - added function esc                             tools/checkpoint_lens/html.py  &lt;- 18 dependent(s)
+    - added function _stat                           tools/checkpoint_lens/html.py  &lt;- 2 dependent(s)
+    - added function _decisions_block                tools/checkpoint_lens/html.py  &lt;- 1 dependent(s)
+    - added function _trend_svg                      tools/checkpoint_lens/html.py  &lt;- 1 dependent(s)
+    ... 66 more
+
+  HIGH-RISK (signature/removal with dependents):
+    ! signature_changed method DatabricksSync.coverage in tools/checkpoint_lens/databricks.py (33 dependents)
+    ! signature_changed function extract_decisions in tools/checkpoint_lens/reader.py (22 dependents)
+    ! signature_changed method DatabricksSync._query in tools/checkpoint_lens/databricks.py (4 dependents)
+    ! signature_changed method CheckpointReader._read_session in tools/checkpoint_lens/reader.py (2 dependents)</pre><h2>Unresolved context over time (Databricks)</h2><div class="panel scroll" style="color:var(--accent)"><svg viewBox="0 0 900 170" width="100%" height="170" role="img" aria-label="Unresolved items per checkpoint"><rect x="28" y="85" width="132" height="57" rx="3" fill="currentColor" opacity="0.68"/><text x="94" y="80" font-size="11" text-anchor="middle" fill="currentColor" opacity=".95">1</text><text x="94" y="156" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">01M1TH</text><rect x="170" y="28" width="132" height="114" rx="3" fill="currentColor" opacity="1.00"/><text x="236" y="23" font-size="11" text-anchor="middle" fill="currentColor" opacity=".95">2</text><text x="236" y="156" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">01M1TM</text><rect x="312" y="142" width="132" height="2" rx="3" fill="currentColor" opacity="0.35"/><text x="378" y="137" font-size="11" text-anchor="middle" fill="currentColor" opacity=".95">0</text><text x="378" y="156" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">01M1TM</text><rect x="454" y="142" width="132" height="2" rx="3" fill="currentColor" opacity="0.35"/><text x="520" y="137" font-size="11" text-anchor="middle" fill="currentColor" opacity=".95">0</text><text x="520" y="156" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">01M1TN</text><rect x="596" y="142" width="132" height="2" rx="3" fill="currentColor" opacity="0.35"/><text x="662" y="137" font-size="11" text-anchor="middle" fill="currentColor" opacity=".95">0</text><text x="662" y="156" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">01M1TN</text><rect x="738" y="28" width="132" height="114" rx="3" fill="currentColor" opacity="1.00"/><text x="804" y="23" font-size="11" text-anchor="middle" fill="currentColor" opacity=".95">2</text><text x="804" y="156" font-size="9" text-anchor="middle" fill="currentColor" opacity=".5">01M1TQ</text></svg></div><h2>Files touched</h2><div class='panel'><ul class='files'><li>tools/checkpoint_lens/cli.py</li><li>tools/checkpoint_lens/databricks.py</li><li>tools/checkpoint_lens/html.py</li><li>tools/checkpoint_lens/models.py</li><li>tools/checkpoint_lens/reader.py</li><li>tools/checkpoint_lens/report.py</li><li>tools/checkpoint_lens/tests/test_extraction_quality.py</li></ul></div><h2>Checkpoint history</h2><div class='panel scroll'><table><tr><th>Checkpoint</th><th>When</th><th>Commit</th></tr><tr><td><code>01M1TH4V7EFETXQ0QGNR2E871W</code></td><td>2026-09-06T04:55:38</td><td>checkpoint(milestone-1): initial understanding and intended architecture</td></tr><tr><td><code>01M1TM6JKPX4MV0DV829FQ77GA</code></td><td>2026-09-06T05:49:01</td><td>checkpoint(milestone-2): last stable state before the Noon Curveball</td></tr><tr><td><code>01M1TM6ZCD0CP72K2HW6S945KY</code></td><td>2026-09-06T05:49:14</td><td>chore(lens): drop committed __pycache__ and ignore bytecode</td></tr><tr><td><code>01M1TM9WCDTJJBYQNFEDCBJ04N</code></td><td>2026-09-06T05:50:49</td><td>fix(lens): correct the graph commit interface and parse entities properly</td></tr><tr><td><code>01M1TNJQEJTDEK7Y6MSGR5KBBQ</code></td><td>2026-09-06T06:13:07</td><td>feat(lens): add drift, assess and Databricks sync; 40 tests</td></tr><tr><td><code>01M1TNPW8FD7E6AV3JX3KJ5RKM</code></td><td>2026-09-06T06:15:23</td><td>docs: add BUILDATHON.md</td></tr><tr><td><code>01M1TNVVBDT9YVNKF7G7P38WBN</code></td><td>2026-09-06T06:18:06</td><td>fix(lens): recover intent when a checkpoint carries no prompt.txt</td></tr><tr><td><code>01M1TQ2SJR65VG107JGSEQ9MTA</code></td><td>2026-09-06T06:39:22</td><td>feat(lens): make recovered decisions trustworthy; HTML reports; data-quality fixes</td></tr></table></div><footer>Generated by <code>entire lens</code> from real Entire Checkpoints. Every figure is derived from committed checkpoint data; nothing is synthesised. Graph findings are evidence, not proof &mdash; rerun the printed commands to verify.</footer></div></body></html>
