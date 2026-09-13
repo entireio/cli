@@ -168,6 +168,7 @@ func NewRootCmd() *cobra.Command {
 	// Noun groups (canonical homes for subcommands).
 	cmd.AddCommand(inGroup(newSessionsCmd(), groupSessions))                              // 'session' (with 'sessions' as Cobra alias)
 	cmd.AddCommand(inGroup(newCheckpointGroupCmd(), groupSessions))                       // 'checkpoint' / 'cp' / 'checkpoints'
+	cmd.AddCommand(inGroup(newAgentCheckCmd(), groupSessions))                            // 'agentcheck' - read-only AgentCheck evidence/reporting
 	experimental.Register(cmd, newTokensGroupCmd())                                       // 'tokens' (experimental)
 	cmd.AddCommand(inGroup(newAgentGroupCmd(), groupSetup))                               // 'agent'
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newAuthCmd(), groupAccount)))         // 'auth'
