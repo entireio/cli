@@ -58,78 +58,68 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify commands
-	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
-	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks cursor session-start"))
-	assertEntryCommand(t, hooksFile.Hooks.BeforeSubmitPrompt, agent.WrapProductionSilentHookCommand("entire hooks cursor before-submit-prompt"))
-	assertEntryCommand(t, hooksFile.Hooks.PreCompact, agent.WrapProductionSilentHookCommand("entire hooks cursor pre-compact"))
-	assertEntryCommand(t, hooksFile.Hooks.SubagentStart, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-start"))
-	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, cursorHookCommand(HookNameStop))
+	assertEntryCommand(t, hooksFile.Hooks.SessionStart, cursorHookCommand(HookNameSessionStart))
+	assertEntryCommand(t, hooksFile.Hooks.BeforeSubmitPrompt, cursorHookCommand(HookNameBeforeSubmitPrompt))
+	assertEntryCommand(t, hooksFile.Hooks.PreCompact, cursorHookCommand(HookNamePreCompact))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStart, cursorHookCommand(HookNameSubagentStart))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, cursorHookCommand(HookNameSubagentStop))
 }
 
-// TestInstallHooks_WindowsProbeSuccessKeepsShWrappers verifies that on a
-// Windows host where a POSIX sh is runnable, Cursor keeps the sh-based wrappers
-// (parity with non-Windows). Mutates the shared probe, so no t.Parallel().
-func TestInstallHooks_WindowsProbeSuccessKeepsShWrappers(t *testing.T) {
-	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
-		return true // sh works
-	}))
+// TestInstallHooks_WindowsInstallsCmdWrappersWhateverTheProbeSays is the
+// regression test for the gate change: on a Windows host Cursor installs the
+// native cmd.exe wrappers, and a runnable POSIX sh does not change that.
+//
+// The probe is driven both ways precisely because its answer must not matter.
+// It reports whether sh runs in THIS process; the hook runs in a PowerShell
+// Cursor spawns, whose PATH is a different thing entirely — see
+// silentHookCommand. Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsInstallsCmdWrappersWhateverTheProbeSays(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		shWorks bool
+	}{
+		{"sh runs in this process", true},
+		{"no runnable sh", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+				return tc.shWorks
+			}))
 
-	tempDir := t.TempDir()
-	// Installing hooks anchors a process-wide os.Root on the worktree root
-	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
-	// cannot remove a directory while a handle to it is open, so the registry
-	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
-	// TempDir registered its removal first, so this runs before it.
-	t.Cleanup(osroot.ResetShared)
-	t.Chdir(tempDir)
+			tempDir := t.TempDir()
+			// Installing hooks anchors a process-wide os.Root on the worktree root
+			// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+			// cannot remove a directory while a handle to it is open, so the registry
+			// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+			// TempDir registered its removal first, so this runs before it.
+			t.Cleanup(osroot.ResetShared)
+			t.Chdir(tempDir)
 
-	ag := &CursorAgent{}
-	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
+			ag := &CursorAgent{}
+			if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+				t.Fatalf("InstallHooks() error = %v", err)
+			}
+
+			hooksFile := readHooksFile(t, tempDir)
+			assertEntryCommand(t, hooksFile.Hooks.SessionStart, cursorWindowsHookCommand(HookNameSessionStart))
+			assertEntryCommand(t, hooksFile.Hooks.Stop, cursorWindowsHookCommand(HookNameStop))
+			assertEntryCommand(t, hooksFile.Hooks.SubagentStop, cursorWindowsHookCommand(HookNameSubagentStop))
+		})
 	}
-
-	hooksFile := readHooksFile(t, tempDir)
-	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapProductionSilentHookCommand("entire hooks cursor session-start"))
-	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
 }
 
-// TestInstallHooks_WindowsProbeFailureUsesCmdWrappers verifies that on a Windows
-// host with no runnable POSIX sh, Cursor installs the native cmd.exe wrappers so
-// hooks actually fire (issue #1424). Mutates the shared probe, so no t.Parallel().
-func TestInstallHooks_WindowsProbeFailureUsesCmdWrappers(t *testing.T) {
-	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
-		return false // no working sh
-	}))
-
-	tempDir := t.TempDir()
-	// Installing hooks anchors a process-wide os.Root on the worktree root
-	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
-	// cannot remove a directory while a handle to it is open, so the registry
-	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
-	// TempDir registered its removal first, so this runs before it.
-	t.Cleanup(osroot.ResetShared)
-	t.Chdir(tempDir)
-
-	ag := &CursorAgent{}
-	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-
-	hooksFile := readHooksFile(t, tempDir)
-	assertEntryCommand(t, hooksFile.Hooks.SessionStart, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor session-start"))
-	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor stop"))
-	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor subagent-stop"))
-}
-
-// TestInstallHooks_WindowsProbeFlipMigratesCleanly verifies that when a host's
-// sh availability changes between installs, a non-force reinstall REPLACES the
-// stale sh-wrapped hooks with cmd.exe ones rather than leaving both (which would
-// double-fire). Mirrors the codex migration test. Mutates the shared probe, so
-// no t.Parallel().
-func TestInstallHooks_WindowsProbeFlipMigratesCleanly(t *testing.T) {
-	shWorks := true
-	t.Cleanup(agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
-		return shWorks
+// TestInstallHooks_WindowsMigratesShWrappers verifies that a repo enabled
+// before this change — carrying sh-wrapped hooks — is migrated by a non-force
+// reinstall on a Windows host, rather than gaining a second entry beside the
+// stale one. Two entries for one hook type double-fire, which is why the count
+// is asserted per type and not just the command.
+//
+// The sh config is seeded by installing as a non-Windows host, which is exactly
+// what wrote it. Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsMigratesShWrappers(t *testing.T) {
+	t.Cleanup(agent.SetWindowsHookProbeForTesting("linux", func(context.Context, string) bool {
+		return true
 	}))
 
 	tempDir := t.TempDir()
@@ -142,13 +132,18 @@ func TestInstallHooks_WindowsProbeFlipMigratesCleanly(t *testing.T) {
 	t.Chdir(tempDir)
 	ag := &CursorAgent{}
 
-	// First install with a working sh → sh-based wrappers.
+	// Seed the sh-wrapped config an earlier version installed.
 	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
-		t.Fatalf("first InstallHooks() error = %v", err)
+		t.Fatalf("seed InstallHooks() error = %v", err)
 	}
+	assertEntryCommand(t, readHooksFile(t, tempDir).Hooks.Stop,
+		agent.WrapProductionSilentHookCommand("entire hooks cursor "+HookNameStop))
 
-	// sh stops working; reinstall WITHOUT force.
-	shWorks = false
+	// Same repo, now on a Windows host; reinstall WITHOUT force.
+	restore := agent.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return true
+	})
+	t.Cleanup(restore)
 	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("second InstallHooks() error = %v", err)
 	}
@@ -161,7 +156,7 @@ func TestInstallHooks_WindowsProbeFlipMigratesCleanly(t *testing.T) {
 	if len(hooksFile.Hooks.SessionStart) != 1 {
 		t.Errorf("SessionStart hooks = %d after wrapper migration, want 1 (no duplicate)", len(hooksFile.Hooks.SessionStart))
 	}
-	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor stop"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, cursorWindowsHookCommand(HookNameStop))
 
 	// No sh-based Entire wrapper may survive the migration.
 	data, err := os.ReadFile(filepath.Join(tempDir, ".cursor", HooksFileName))
@@ -345,14 +340,14 @@ func TestInstallHooks_PreservesExistingHooks(t *testing.T) {
 		t.Errorf("Stop hooks = %d, want 2 (user + entire)", len(hooksFile.Hooks.Stop))
 	}
 	assertEntryCommand(t, hooksFile.Hooks.Stop, "echo user hook")
-	assertEntryCommand(t, hooksFile.Hooks.Stop, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
+	assertEntryCommand(t, hooksFile.Hooks.Stop, cursorHookCommand(HookNameStop))
 
 	// SubagentStop should have user Write hook + Entire hook
 	if len(hooksFile.Hooks.SubagentStop) != 2 {
 		t.Errorf("SubagentStop hooks = %d, want 2 (user Write + Entire)", len(hooksFile.Hooks.SubagentStop))
 	}
 	assertEntryWithMatcher(t, hooksFile.Hooks.SubagentStop, "Write", "echo file written")
-	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks cursor subagent-stop"))
+	assertEntryCommand(t, hooksFile.Hooks.SubagentStop, cursorHookCommand(HookNameSubagentStop))
 }
 
 func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
@@ -363,7 +358,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 
 	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".cursor", HooksFileName),
-		agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx)),
+		cursorHookCommand(HookNameStop),
 		testutil.LegacyLocalDevCommand("hooks cursor stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
@@ -441,7 +436,7 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 		t.Errorf("stop hooks = %d, want 2 (user + entire)", len(stopHooks))
 	}
 	assertEntryCommand(t, stopHooks, "echo user stop")
-	assertEntryCommand(t, stopHooks, agent.WrapProductionSilentHookCommand("entire hooks cursor stop"))
+	assertEntryCommand(t, stopHooks, cursorHookCommand(HookNameStop))
 }
 
 func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
@@ -553,6 +548,22 @@ func writeHooksFile(t *testing.T, tempDir string, hooksFile CursorHooksFile) {
 	}
 }
 
+// cursorHookCommand is the silent hook command InstallHooks writes on THIS
+// host. Assertions use it so the suite passes on a Windows host, where the
+// installed wrapper is the cmd.exe one.
+func cursorHookCommand(verb string) string {
+	return silentHookCommand(verb, agent.HookHostIsWindows())
+}
+
+// cursorWindowsHookCommand states the Windows wrapper outright rather than
+// delegating to silentHookCommand. It is the only assertion pinning the
+// `entire hooks cursor <verb>` prefix and every verb: cursorHookCommand asks
+// the implementation what it writes, so it cannot catch the prefix changing.
+// Do not collapse the two.
+func cursorWindowsHookCommand(verb string) string {
+	return agent.WrapWindowsProductionSilentHookCommand("entire hooks cursor " + verb)
+}
+
 func assertEntryCommand(t *testing.T, entries []CursorHookEntry, command string) {
 	t.Helper()
 	for _, entry := range entries {
@@ -583,7 +594,7 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 	ag := &CursorAgent{}
 
 	configPath := filepath.Join(tempDir, ".cursor", HooksFileName)
-	current := agent.WrapProductionSilentHookCommandForOS("entire hooks cursor stop", agent.UseWindowsProductionHooks(ctx))
+	current := cursorHookCommand(HookNameStop)
 	legacy := testutil.LegacyLocalDevCommand("hooks cursor stop")
 
 	testutil.AssertStaleHookDroppedAlongsideCurrent(t, configPath, current, legacy,
@@ -617,6 +628,14 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 // InstallHooks writes. A stale committed config is how the pi extension ended up
 // invoking a launcher script that had been deleted.
 func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
+	// The committed file can only carry one wrapper form, and it carries the sh
+	// one — correct for this repo's own CI, which runs on Linux and macOS. On a
+	// Windows host InstallHooks writes the cmd.exe form, so the comparison would
+	// fail on a difference that is the intended behaviour. Codex has the same
+	// condition for the same reason.
+	if agent.HookHostIsWindows() {
+		t.Skip("committed .cursor/hooks.json holds the sh wrappers; a Windows host installs the cmd.exe ones")
+	}
 	testutil.AssertCommittedDogfoodConfigStable(t, ".cursor/hooks.json", func(t *testing.T, dir string) (int, error) {
 		t.Helper()
 		t.Chdir(dir)

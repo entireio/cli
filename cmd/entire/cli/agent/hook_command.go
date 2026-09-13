@@ -375,6 +375,44 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 	return cmd.Run() == nil
 }
 
+// HookHostIsWindows reports whether hook commands will run on a Windows host,
+// without asking whether a POSIX sh is reachable there.
+//
+// It is the predicate for an agent whose Windows hook runner the sh wrapper
+// cannot survive, and two independent mechanisms put an agent in that group.
+// Both were established by reading the shipped per-platform binaries; neither
+// is detectable by a probe run from this process.
+//
+// The first is the shell mangling the wrapper. Factory Droid's Windows build
+// runs each hook command as an argument of cmd.exe, while its macOS/Linux build
+// runs the same string under sh. cmd.exe reads the sh wrapper's `>` and `&` as
+// its own redirections and separators, so the line is cut apart before any sh
+// sees it.
+//
+// The second is the wrapper's own dependency not being reachable where the hook
+// actually runs. Cursor spawns hooks through PowerShell, which passes the sh
+// wrapper through intact — single quotes are literal there — and then cannot
+// resolve `sh`, because Git for Windows keeps sh.exe off the machine PATH. See
+// cursor's silentHookCommand.
+//
+// In both cases UseWindowsProductionHooks answers a question that is not the
+// one being asked. Its probe establishes that `sh -c 'exit 0'` runs in THIS
+// process: a command carrying no cmd.exe metacharacters, resolved against this
+// process's PATH. So a host with Git Bash reports success while droid's real
+// wrapper is still cut apart, and `entire enable` run from Git Bash reports
+// success while Cursor's PowerShell child cannot find sh at all. The general
+// statement is that we cannot vouch for the environment of the process the
+// agent runs the hook in, so a probe of ours is not evidence about it.
+//
+// Codex keeps UseWindowsProductionHooks, and on evidence rather than on a
+// belief about its composition: it demonstrably passes the Windows nightly with
+// the sh wrapper installed, so whatever its runner does, the wrapper survives
+// it. Establish the same before changing any remaining gate — by reading the
+// runner, which is how both mechanisms above were found.
+func HookHostIsWindows() bool {
+	return hookCommandOS == hookWrapperOSWindows
+}
+
 // WrapProductionSilentHookCommandForOS picks the sh-based or native Windows
 // silent wrapper based on useWindows (typically from UseWindowsProductionHooks).
 func WrapProductionSilentHookCommandForOS(command string, useWindows bool) string {
