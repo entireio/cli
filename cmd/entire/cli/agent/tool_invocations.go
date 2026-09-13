@@ -26,13 +26,19 @@ type ToolInvocation struct {
 // aggregate.
 //
 // "No walker yet" is the only reason any agent is absent — do not read it as
-// "impossible". Cursor in particular shares this JSONL shape (see the
-// transcript package doc) and does record tool_use blocks; the "contains no
-// tool_use blocks" comments in cmd/entire/cli/agent/cursor date to 2026-03,
-// are pinned by no test, and are stale. What blocks a Cursor implementation is
-// narrower: its input key for a shell command is unconfirmed, so reusing
-// ToolInvocation.Command would risk the very false negative this interface
-// exists to prevent. A name-based matcher (subagent dispatch) would work today.
+// "impossible". Claude Code and Cursor both implement it, sharing one walk via
+// transcript.ScanToolUseBlocks; an agent whose transcript records tool calls
+// structurally can join them by decoding its own input keys. Confirm those keys
+// against a real captured session first: guessing one produces the silent false
+// negative this interface exists to prevent, which is why Cursor waited for its
+// `Shell`/`command` mapping to be verified rather than borrowing Claude's.
+//
+// Codex is the next candidate and carries a live trap worth recording. Its
+// rollout does record shell calls structurally, but the command arrives wrapped
+// (`/bin/zsh -lc "…"`), and a caller that matches shell commands may sanitize
+// quoted spans away before matching — so yielding the wrapper verbatim as
+// Command can report a confident negative for a command that did run. Unwrap
+// before yielding, or leave Codex unimplemented and honestly unsupported.
 type ToolInvocationScanner interface {
 	// ScanToolInvocations calls visit for each recorded tool invocation and
 	// returns true as soon as visit does, stopping the walk.
