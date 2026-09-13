@@ -43,8 +43,11 @@ type apiCheckpointReader struct {
 	client *api.Client
 	// repoID is the repo's Entire ULID; cell checkpoint routes key on it.
 	repoID string
-	// ownerRepo is the display coordinate ("owner/name") used in errors.
-	ownerRepo string
+	// ownerRepo is the explicit, forge-qualified display coordinate used in
+	// errors. repoFullName is the canonical identity entire-api returns: legacy
+	// GitHub mirror rows use owner/name, while native rows use et/project/repo.
+	ownerRepo    string
+	repoFullName string
 
 	// detail caches the checkpoint envelope. Every read tier is derived from
 	// this one response, and explain reads the summary and then each session,
@@ -54,9 +57,11 @@ type apiCheckpointReader struct {
 }
 
 // newAPICheckpointReader returns a reader for repoID's checkpoints on the cell
-// that client is already pointed at.
-func newAPICheckpointReader(client *api.Client, repoID, ownerRepo string) *apiCheckpointReader {
-	return &apiCheckpointReader{client: client, repoID: repoID, ownerRepo: ownerRepo}
+// that client is already pointed at. ownerRepo is only for user-facing text;
+// repoFullName is kept separate so display formatting cannot weaken or break
+// the response identity check.
+func newAPICheckpointReader(client *api.Client, repoID, ownerRepo, repoFullName string) *apiCheckpointReader {
+	return &apiCheckpointReader{client: client, repoID: repoID, ownerRepo: ownerRepo, repoFullName: repoFullName}
 }
 
 // --- wire shapes ------------------------------------------------------
@@ -417,10 +422,10 @@ func (r *apiCheckpointReader) verifyResponseIdentity(checkpointID id.CheckpointI
 	// entire-api (repoFullNameOr) legitimately falls back to echoing the bare
 	// repo ULID when the repo's metadata has not resolved a display name yet,
 	// so either form is an honest claim to be the requested repo. EqualFold is
-	// right for ownerRepo -- forge owner/repo names are case-insensitive -- and
+	// right for repoFullName -- forge owner/repo names are case-insensitive -- and
 	// the repo ULID is compared byte-for-byte, canonical uppercase like any
 	// other ULID.
-	if got := env.RepoFullName; !strings.EqualFold(got, r.ownerRepo) && got != r.repoID {
+	if got := env.RepoFullName; !strings.EqualFold(got, r.repoFullName) && got != r.repoID {
 		return fmt.Errorf("checkpoint identity mismatch: requested checkpoint %s from %s, but the server returned data for repo %q; refusing to display possibly-mismatched data (this looks like a server-side bug, please report it)",
 			checkpointID, r.ownerRepo, got)
 	}

@@ -76,7 +76,7 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 // repository and returns its repo_id for repo-addressed trail reads. It is a
 // package seam so tests can substitute a client pointed at a stub server.
 var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, string, error) {
-	placement, err := resolveTrailRepoCellPlacement(ctx, forge, owner, repo)
+	placement, err := resolveForgeRepoCellPlacement(ctx, forge, owner, repo)
 	if err != nil {
 		return nil, "", err
 	}

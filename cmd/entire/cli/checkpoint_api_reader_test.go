@@ -83,7 +83,7 @@ func newTestAPIReader(t *testing.T, handler http.HandlerFunc) (*apiCheckpointRea
 	}))
 	t.Cleanup(srv.Close)
 	client := api.NewClientWithBaseURL("test-token", srv.URL)
-	return newAPICheckpointReader(client, testAPIRepoID, testAPIOwnerRep), &paths
+	return newAPICheckpointReader(client, testAPIRepoID, testAPIOwnerRep, testAPIOwnerRep), &paths
 }
 
 // defaultAPIHandler serves the envelope and a raw transcript per session index.
@@ -103,7 +103,7 @@ func defaultAPIHandler(w http.ResponseWriter, r *http.Request) {
 func TestAPICheckpointReader_ReadMapsEnvelope(t *testing.T) {
 	t.Parallel()
 
-	reader, _ := newTestAPIReader(t, defaultAPIHandler)
+	reader, paths := newTestAPIReader(t, defaultAPIHandler)
 	summary, err := reader.Read(context.Background(), testAPICheckpointID)
 	require.NoError(t, err)
 
@@ -118,6 +118,20 @@ func TestAPICheckpointReader_ReadMapsEnvelope(t *testing.T) {
 	assert.Equal(t, 70839522, summary.TokenUsage.CacheReadTokens)
 	assert.Equal(t, 197680, summary.TokenUsage.OutputTokens)
 	assert.Equal(t, 252, summary.TokenUsage.APICallCount)
+	require.Len(t, *paths, 1)
+	assert.Equal(t, "/api/v1/repos/"+testAPIRepoID+"/checkpoints/"+testAPICheckpointID.String(), (*paths)[0],
+		"cell checkpoint reads must be addressed by the resolved Entire repo ID")
+}
+
+func TestAPICheckpointReader_DisplayRefIsSeparateFromResponseIdentity(t *testing.T) {
+	t.Parallel()
+
+	reader, _ := newTestAPIReader(t, defaultAPIHandler)
+	reader.ownerRepo = "gh/acme/widgets"
+	reader.repoFullName = "acme/widgets"
+
+	_, err := reader.Read(context.Background(), testAPICheckpointID)
+	require.NoError(t, err, "the explicit forge in display text must not change the server's canonical repo_full_name")
 }
 
 // The cell reports branches CONTAINING the commit, which is a different fact
@@ -478,7 +492,7 @@ func TestAPICheckpointReader_ListUnsupported(t *testing.T) {
 func TestAPICheckpointReader_IsNotAWriter(t *testing.T) {
 	t.Parallel()
 
-	var anyReader any = newAPICheckpointReader(nil, testAPIRepoID, testAPIOwnerRep)
+	var anyReader any = newAPICheckpointReader(nil, testAPIRepoID, testAPIOwnerRep, testAPIOwnerRep)
 	_, isWriter := anyReader.(checkpoint.Writer)
 	assert.False(t, isWriter, "apiCheckpointReader must not implement checkpoint.Writer")
 	_, isStore := anyReader.(checkpoint.PersistentStore)

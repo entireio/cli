@@ -179,7 +179,7 @@ func withFakeCellCore(t *testing.T, f *fakeCellCore) {
 	})
 }
 
-func TestResolveTrailRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(t *testing.T) {
+func TestResolveForgeRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(t *testing.T) {
 	const (
 		projectID  = "01NATIVEPROJECT00000000000"
 		nativeID   = "01NATIVEREPOSITORY00000000"
@@ -203,7 +203,7 @@ func TestResolveTrailRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(
 			placementFixture{id: legacyGHID, slug: usClusterSlug})),
 	})
 
-	got, err := resolveTrailRepoCellPlacement(t.Context(), nativeCloneForge, "entirehq", "marvin")
+	got, err := resolveForgeRepoCellPlacement(t.Context(), nativeCloneForge, "entirehq", "marvin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +212,21 @@ func TestResolveTrailRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(
 	}
 	if got.Target.BaseURL != euCellAPIURL || got.Target.Jurisdiction != "eu" {
 		t.Fatalf("Target = %+v, want EU native repo cell", got.Target)
+	}
+}
+
+func TestResolveForgeRepoCellPlacement_RequiresSupportedForge(t *testing.T) {
+	t.Parallel()
+
+	for _, forge := range []string{"", "github", "entire", "gl"} {
+		t.Run(forge, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := resolveForgeRepoCellPlacement(t.Context(), forge, "acme", "widgets")
+			if err == nil || !strings.Contains(err.Error(), "unsupported forge") {
+				t.Fatalf("resolveForgeRepoCellPlacement(%q) error = %v, want unsupported forge", forge, err)
+			}
+		})
 	}
 }
 
