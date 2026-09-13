@@ -955,7 +955,7 @@ func TestStagedFilesOverlapWithContent_ModifiedFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// Modified file should count as overlap regardless of content
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"test.txt"}, []string{"test.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, stagedChangesFromIndex(t, repo, []string{"test.txt"}), []string{"test.txt"})
 	assert.True(t, result, "Modified file should always count as overlap")
 }
 
@@ -992,7 +992,7 @@ func TestStagedFilesOverlapWithContent_NewFile_ContentMatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// New file with matching content should count as overlap
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"newfile.txt"}, []string{"newfile.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, stagedChangesFromIndex(t, repo, []string{"newfile.txt"}), []string{"newfile.txt"})
 	assert.True(t, result, "New file with matching content should count as overlap")
 }
 
@@ -1028,7 +1028,7 @@ func TestStagedFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
 	require.NoError(t, err)
 
 	// New file with different content should NOT count as overlap
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"newfile.txt"}, []string{"newfile.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, stagedChangesFromIndex(t, repo, []string{"newfile.txt"}), []string{"newfile.txt"})
 	assert.False(t, result, "New file with mismatched content should not count as overlap")
 }
 
@@ -1064,7 +1064,7 @@ func TestStagedFilesOverlapWithContent_NoOverlap(t *testing.T) {
 	require.NoError(t, err)
 
 	// Staged file "other.txt" is not in filesTouched "session.txt"
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"other.txt"}, []string{"session.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, stagedChangesFromIndex(t, repo, []string{"other.txt"}), []string{"session.txt"})
 	assert.False(t, result, "Non-overlapping files should return false")
 }
 
@@ -1117,7 +1117,7 @@ func TestStagedFilesOverlapWithContent_DeletedFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// Deleted file SHOULD count as overlap - the agent's deletion is being committed
-	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, []string{"to_delete.txt"}, []string{"to_delete.txt"})
+	result := stagedFilesOverlapWithContent(context.Background(), repo, shadowTree, stagedChangesFromIndex(t, repo, []string{"to_delete.txt"}), []string{"to_delete.txt"})
 	assert.True(t, result, "Deleted file should count as overlap (agent's deletion being committed)")
 }
 
@@ -1452,4 +1452,15 @@ func TestTrimLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+func stagedChangesFromIndex(t *testing.T, repo *git.Repository, paths []string) stagedChanges {
+	t.Helper()
+	idx, err := repo.Storer.Index()
+	require.NoError(t, err)
+	staged := stagedChanges{paths: paths, hashes: make(map[string]plumbing.Hash)}
+	for _, entry := range idx.Entries {
+		staged.hashes[entry.Name] = entry.Hash
+	}
+	return staged
 }

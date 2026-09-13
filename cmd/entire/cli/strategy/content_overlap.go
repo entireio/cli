@@ -193,9 +193,10 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 // is editing the session's work. For new files (don't exist in HEAD), we require
 // content match to detect the "reverted and replaced" scenario.
 //
-// This is used in PrepareCommitMsg for carry-forward scenarios.
-func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowTree *object.Tree, stagedFiles, filesTouched []string) bool {
+// PrepareCommitMsg uses the same snapshot for fresh and carry-forward sessions.
+func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowTree *object.Tree, staged stagedChanges, filesTouched []string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
+	stagedFiles := staged.paths
 
 	// Build set of filesTouched for quick lookup
 	touchedSet := make(map[string]bool)
@@ -226,21 +227,6 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		return hasOverlappingFiles(stagedFiles, filesTouched)
 	}
 
-	// Get the git index to access staged file hashes
-	idx, err := repo.Storer.Index()
-	if err != nil {
-		logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to get index, falling back to filename check",
-			slog.String("error", err.Error()),
-		)
-		return hasOverlappingFiles(stagedFiles, filesTouched)
-	}
-
-	// Build a map of index entries for O(1) lookup (avoid O(n*m) nested loop)
-	indexEntries := make(map[string]plumbing.Hash, len(idx.Entries))
-	for _, entry := range idx.Entries {
-		indexEntries[entry.Name] = entry.Hash
-	}
-
 	// Check each staged file
 	for _, stagedPath := range stagedFiles {
 		if !touchedSet[stagedPath] {
@@ -265,9 +251,9 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		}
 
 		// For new files, check content against shadow branch
-		stagedHash, found := indexEntries[stagedPath]
+		stagedHash, found := staged.hashes[stagedPath]
 		if !found {
-			continue // Not in index (shouldn't happen but be safe)
+			continue
 		}
 
 		// Get file from shadow branch tree
