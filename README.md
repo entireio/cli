@@ -67,6 +67,10 @@ curl -fsSL https://entire.io/install.sh | bash                          # stable
 # curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly  # or nightly
 ```
 
+The installer is a Bash script. Fish users should run the command unchanged,
+including the trailing `| bash`; the installer will provide Fish-specific PATH
+setup when needed.
+
 ### Windows
 
 Install with Windows PowerShell 5.1 or later:
