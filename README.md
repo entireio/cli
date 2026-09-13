@@ -10,6 +10,71 @@ With Entire, you can:
 - **Onboard faster** — show the path from prompt → change → commit
 - **Maintain traceability** — support audit and compliance requirements when needed
 
+## AgentCheck
+
+> **"You test your software before shipping it. AgentCheck tests the work your AI coding agent just produced before you trust it."**
+
+AgentCheck is a checkpoint-native quality gate and verification system built
+directly into the Entire CLI. While Entire preserves the full context and
+decision provenance of an AI coding session, AgentCheck evaluates the resulting
+work against explicit developer intent, boundary constraints, quality signals,
+and test verification to determine whether the output deserves trust.
+
+### One-Sentence Summary
+
+AgentCheck is an AI coding-agent verification layer for the Entire CLI that
+evaluates agent-generated code against developer intent, strict boundaries, and
+test runs to provide evidence-backed trust verdicts (**TRUSTED**,
+**REVIEW REQUIRED**, or **FAIL**).
+
+### Problem, Intended User, and Why It Matters
+
+As developers increasingly delegate complex coding tasks to AI agents, a critical
+trust gap emerges:
+
+- **Silent scope creep and boundary violations:** AI coding agents can introduce unrequested refactors, alter database schemas, add unnecessary dependencies, or touch protected files outside their task scope.
+- **Incomplete verification:** Agents can claim a task is complete or that tests pass without actually executing verification suites in the target environment.
+- **Loss of context:** Standard code review tools inspect only the final `git diff`, losing the rich context of why choices were made, what prompt constraints were set, and what intermediate iterations failed.
+
+AgentCheck is intended for software developers, tech leads, and DevOps engineers
+who use autonomous or interactive AI coding agents and need an automated,
+reliable quality gate before merging agent-produced commits.
+
+AgentCheck transforms code review from a manual, high-overhead diff inspection
+into an automated, context-aware trust check. By validating that agents stay
+within explicit boundaries and produce verifiable work, teams can safely
+accelerate AI-driven software development.
+
+### Selected Entire Track and Why Entire is Essential
+
+- **Selected Track:** **Track 1 - Checkpoint-Native Developer Experience**
+
+A standard Git diff shows what changed, but it lacks the prompt constraints,
+intermediate agent iterations, and architectural intent behind the change.
+AgentCheck relies on Entire checkpoints as an essential input:
+
+1. **Intent recovery:** AgentCheck extracts explicit constraints such as "Do NOT modify the database schema" from preserved Entire checkpoint prompts and session context.
+2. **Contextual evaluation:** It evaluates whether code changes violate the original intent captured in the checkpoint, which is not possible from Git diff alone.
+3. **Session continuity across interruptions:** Entire checkpoint context lets later sessions reconstruct the development memory and proceed safely.
+
+### Architecture and Main Workflow
+
+The current AgentCheck implementation is deliberately small and contract-driven:
+
+```text
+Entire checkpoint
+    -> agentcheck.Context
+    -> Evaluate()
+    -> EvaluationResult
+    -> terminal renderer or future CLI integration
+```
+
+`agentcheck.Context` is the boundary between Entire checkpoint/session internals
+and the evaluation engine. The evaluator consumes only that context, combines
+intent/boundary findings with quality/bloat findings, preserves evidence, orders
+findings deterministically, and produces one of three verdicts:
+**TRUSTED**, **REVIEW REQUIRED**, or **FAIL**.
+
 ## Why Entire
 
 - **Understand why code changed, not just what** — Transcripts, prompts, files touched, token usage, tool calls, and more are captured alongside every commit.
@@ -19,6 +84,7 @@ With Entire, you can:
 
 ## Table of Contents
 
+- [AgentCheck](#agentcheck)
 - [Why Entire](#why-entire)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
