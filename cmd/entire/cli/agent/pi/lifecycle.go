@@ -414,17 +414,77 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	return filepath.Join(worktreeRoot, paths.EntireDir, filepath.FromSlash(name))
 }
 
-// extractSessionIDFromPath extracts the UUID from a Pi session filename.
-// Pattern: <timestamp>_<uuid>.jsonl → returns <uuid>
-// Falls back to the basename without extension if the pattern doesn't match.
+// piSubagentLeafBasename is the fixed filename Pi gives every subagent
+// transcript leaf, regardless of which subagent or run produced it — see
+// extractSubagentSessionID.
+const piSubagentLeafBasename = "session"
+
+// extractSessionIDFromPath extracts a stable identifier from a Pi session
+// transcript path.
+//
+// A Pi parent transcript is a flat file named by identity:
+// <timestamp>_<uuid>.jsonl → returns <uuid>.
+//
+// A Pi subagent transcript is nested and named by role instead:
+// .../<subagentID>/run-<n>/session.jsonl. Every subagent run's basename is
+// therefore the literal string "session", so the plain-basename rule below
+// would collapse every concurrent or sequential subagent run onto the same
+// ID and the same staged transcript file (issue #1870 — a checkpoint could
+// end up storing an entirely different subagent's transcript). When the
+// basename is that literal leaf name, extractSubagentSessionID combines the
+// two directory segments above it with the parent session's own UUID into a
+// per-invocation-unique ID instead.
+//
+// Falls back to the basename without extension if neither pattern matches.
 func extractSessionIDFromPath(p string) string {
 	if p == "" {
 		return ""
 	}
 	base := filepath.Base(p)
 	base = strings.TrimSuffix(base, ".jsonl")
+	if base == piSubagentLeafBasename {
+		if id := extractSubagentSessionID(p); id != "" {
+			return id
+		}
+		// Not enough path structure to disambiguate (e.g. a bare
+		// "session.jsonl" with no parent directories) — fall through to the
+		// generic rule below, which reproduces the pre-fix behavior rather
+		// than inventing an ID from nothing.
+	}
 	if i := strings.LastIndex(base, "_"); i >= 0 {
 		return base[i+1:]
 	}
 	return base
+}
+
+// isUsableDirSegment reports whether name is a real, non-degenerate
+// directory-name component — not empty, ".", or an OS path separator, all of
+// which filepath.Base/Dir return once a path runs out of real components.
+func isUsableDirSegment(name string) bool {
+	return name != "" && name != "." && name != string(filepath.Separator)
+}
+
+// extractSubagentSessionID parses Pi's nested subagent transcript shape,
+// .../<parent-dir>/<subagentID>/run-<n>/session.jsonl, and returns a
+// per-invocation-unique identifier combining the parent session's UUID, the
+// subagent ID, and the run number: "<parentUUID>_<subagentID>_run-<n>".
+// Returns "" if p doesn't have at least that much directory structure.
+func extractSubagentSessionID(p string) string {
+	runDir := filepath.Dir(p) // .../<subagentID>/run-<n>
+	runSeg := filepath.Base(runDir)
+	subagentDir := filepath.Dir(runDir) // .../<subagentID>
+	subagentSeg := filepath.Base(subagentDir)
+	parentDir := filepath.Dir(subagentDir) // .../<timestamp>_<uuid>
+	parentSeg := filepath.Base(parentDir)
+
+	if !isUsableDirSegment(runSeg) || !isUsableDirSegment(subagentSeg) || !isUsableDirSegment(parentSeg) {
+		return ""
+	}
+
+	parentID := parentSeg
+	if i := strings.LastIndex(parentSeg, "_"); i >= 0 {
+		parentID = parentSeg[i+1:]
+	}
+
+	return parentID + "_" + subagentSeg + "_" + runSeg
 }
