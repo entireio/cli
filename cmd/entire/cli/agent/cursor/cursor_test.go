@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // sampleTranscriptLines returns JSONL lines matching real Cursor transcript format.
@@ -623,9 +625,35 @@ func TestChunkTranscript_PreservesLineOrder(t *testing.T) {
 
 // --- DetectPresence ---
 
+// isolateHome points os.UserHomeDir() at a throwaway directory so
+// DetectPresence cannot read (or be influenced by) the developer's real
+// ~/.cursor while tests run. Returns the fake home.
+func isolateHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)        // unix
+	t.Setenv("USERPROFILE", home) // windows
+	return home
+}
+
+// cursorProjectStateDirFor returns the ~/.cursor/projects entry Cursor would
+// use for the repo currently rooted at the process CWD. It resolves the root
+// through paths.WorktreeRoot rather than reusing the t.TempDir() value, because
+// on macOS a temp dir is /var/... while the resolved root is /private/var/...,
+// and the two sanitize to different directory names.
+func cursorProjectStateDirFor(t *testing.T, home string) string {
+	t.Helper()
+	root, err := paths.WorktreeRoot(context.Background())
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	return filepath.Join(home, ".cursor", "projects", sanitizePathForCursor(root))
+}
+
 func TestDetectPresence_NoCursorDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	isolateHome(t)
 
 	ag := &CursorAgent{}
 	present, err := ag.DetectPresence(context.Background())
@@ -634,6 +662,104 @@ func TestDetectPresence_NoCursorDir(t *testing.T) {
 	}
 	if present {
 		t.Error("DetectPresence() = true, want false")
+	}
+}
+
+// TestDetectPresence_CursorProjectStateDir is the regression test for Cursor
+// being undetectable in the common case: the user drives the repo from Cursor
+// but has no repo-local .cursor/ directory, because project rules are optional
+// and Cursor's real per-project state lives under ~/.cursor/projects/. Before
+// this signal existed, `entire enable` left Cursor with no hooks installed and
+// still reported success, so nothing was ever captured.
+func TestDetectPresence_CursorProjectStateDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	initGitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	home := isolateHome(t)
+
+	// Deliberately NO repo-local .cursor/ directory.
+	if _, err := os.Stat(filepath.Join(tmpDir, ".cursor")); err == nil {
+		t.Fatal("test setup: repo-local .cursor must not exist")
+	}
+
+	ag := &CursorAgent{}
+
+	present, err := ag.DetectPresence(context.Background())
+	if err != nil {
+		t.Fatalf("DetectPresence() error = %v", err)
+	}
+	if present {
+		t.Fatal("DetectPresence() = true before Cursor state exists, want false")
+	}
+
+	if err := os.MkdirAll(cursorProjectStateDirFor(t, home), 0o755); err != nil {
+		t.Fatalf("failed to create Cursor project state dir: %v", err)
+	}
+
+	present, err = ag.DetectPresence(context.Background())
+	if err != nil {
+		t.Fatalf("DetectPresence() error = %v", err)
+	}
+	if !present {
+		t.Error("DetectPresence() = false with a Cursor project state dir, want true")
+	}
+}
+
+// TestDetectPresence_ProjectStateDirEmptyStillCounts pins the deliberate
+// false-positive tolerance: a project dir Cursor created on workspace open,
+// with no transcripts in it yet, still counts as "uses Cursor here". Installing
+// hooks that never fire is harmless; failing to install them is silent data loss.
+func TestDetectPresence_ProjectStateDirEmptyStillCounts(t *testing.T) {
+	tmpDir := t.TempDir()
+	initGitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	home := isolateHome(t)
+
+	stateDir := cursorProjectStateDirFor(t, home)
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("failed to create Cursor project state dir: %v", err)
+	}
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("failed to read state dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("test setup: state dir should be empty, has %d entries", len(entries))
+	}
+
+	ag := &CursorAgent{}
+	present, err := ag.DetectPresence(context.Background())
+	if err != nil {
+		t.Fatalf("DetectPresence() error = %v", err)
+	}
+	if !present {
+		t.Error("DetectPresence() = false for an empty project state dir, want true")
+	}
+}
+
+// TestDetectPresence_ProjectStateDirIsFile guards the IsDir() check: a stray
+// regular file at the project-dir path must not read as presence.
+func TestDetectPresence_ProjectStateDirIsFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	initGitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	home := isolateHome(t)
+
+	stateDir := cursorProjectStateDirFor(t, home)
+	if err := os.MkdirAll(filepath.Dir(stateDir), 0o755); err != nil {
+		t.Fatalf("failed to create projects dir: %v", err)
+	}
+	if err := os.WriteFile(stateDir, []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("failed to write file at state dir path: %v", err)
+	}
+
+	ag := &CursorAgent{}
+	present, err := ag.DetectPresence(context.Background())
+	if err != nil {
+		t.Fatalf("DetectPresence() error = %v", err)
+	}
+	if present {
+		t.Error("DetectPresence() = true for a file at the project dir path, want false")
 	}
 }
 
@@ -689,14 +815,32 @@ func TestSanitizePathForCursor(t *testing.T) {
 
 // --- helpers ---
 
+// initGitRepo creates a real repository in dir.
+//
+// A hand-written .git/HEAD is not something the git CLI accepts, so
+// paths.WorktreeRoot — which shells out to git rev-parse — failed with exit 128
+// on the previous fake. Tests that only need "some .git exists" were unaffected
+// because DetectPresence falls back to CWD, but any test asserting on the
+// resolved worktree root needs a repo git will actually open.
+//
+// This package cannot use testutil.InitRepo: architecture_test.go deliberately
+// forbids agent packages from importing cli internals.
 func initGitRepo(t *testing.T, dir string) {
 	t.Helper()
-	gitDir := filepath.Join(dir, ".git")
-	if err := os.MkdirAll(gitDir, 0o755); err != nil {
-		t.Fatalf("failed to create .git: %v", err)
-	}
-	// Minimal HEAD file so go-git / paths.RepoRoot() can find it
-	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("failed to write HEAD: %v", err)
+	cmd := exec.CommandContext(t.Context(), "git", "init", "-q")
+	cmd.Dir = dir
+	// Keep the repo self-contained: no reliance on the developer's git config
+	// (core.hooksPath or init templates would otherwise leak in). Point both
+	// config vars at paths inside a temp dir rather than a null device — git
+	// treats a missing config file as empty, and a real filesystem path is
+	// portable, whereas /dev/null does not exist on Windows. Matches the
+	// GIT_CONFIG_GLOBAL convention in gitrepo/reftable_test.go.
+	emptyCfg := t.TempDir()
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(emptyCfg, "gitconfig"),
+		"GIT_CONFIG_SYSTEM="+filepath.Join(emptyCfg, "gitconfig-system"),
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
 	}
 }
