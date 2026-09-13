@@ -773,7 +773,7 @@ func envToMap(env []string) map[string]string {
 // gitConfigBool reads a local git config key and reports whether it is set to a
 // true value. Missing keys and read errors report false.
 func gitConfigBool(ctx context.Context, dir, key string) bool {
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key)
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key) //nolint:forbidigo // returns false (not *testing.T fatal) on a missing key, so it can't use testutil.RunGit; isolated via GitIsolatedEnv() below
 	cmd.Env = testutil.GitIsolatedEnv()
 	if dir != "" {
 		cmd.Dir = dir
@@ -1259,7 +1259,7 @@ func TestFormatGitCommandError_RedactsRemoteURL(t *testing.T) {
 
 	remote := "https://user:hunter2@github.com/org/repo.git"
 	// Output() populates ExitError.Stderr (Run() does not).
-	cmd := exec.CommandContext(context.Background(), "sh", "-c",
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", //nolint:forbidigo // fakes a git failure via /bin/sh, doesn't invoke git itself
 		fmt.Sprintf(`printf 'fatal: repository "%s" not found\n' >&2; exit 128`, remote))
 	_, err := cmd.Output()
 	require.Error(t, err)

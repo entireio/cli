@@ -506,7 +506,7 @@ func (env *TestEnv) RunResumeForce(branchName string) (string, error) {
 	env.T.Helper()
 
 	ctx := env.T.Context()
-	cmd := exec.CommandContext(ctx, getTestBinary(), "session", "resume", "--force", branchName)
+	cmd := exec.CommandContext(ctx, getTestBinary(), "session", "resume", "--force", branchName) //nolint:forbidigo // spawns the compiled entire binary, not git; cmd.Env below still isolates it
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
