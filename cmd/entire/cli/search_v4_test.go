@@ -164,6 +164,12 @@ func v4CellErr(err error) cellCallResult[*search.Response] {
 	return cellCallResult[*search.Response]{err: err}
 }
 
+// v4CellErrIn is v4CellErr for a named cell, so tests can assert which region
+// a message blames (the zero cellGroup labels itself "home").
+func v4CellErrIn(cell string, err error) cellCallResult[*search.Response] {
+	return cellCallResult[*search.Response]{group: cellGroup{cell: cell}, err: err}
+}
+
 func v4ResultIDs(t *testing.T, results []search.Result) []string {
 	t.Helper()
 	ids := make([]string, len(results))
@@ -619,6 +625,89 @@ func TestMergeSemanticV4Responses_AllCellsUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not yet available") {
 		t.Errorf("error = %q, want a 'not yet available' explanation", err.Error())
+	}
+}
+
+// TestMergeSemanticV4Responses_AllCellsUnauthorized covers the EU-jurisdiction
+// failure that motivated the classification (entireio/cli#2121,
+// entirehq/entire-search#196): every cell answers and refuses the token. The
+// user must be told their credentials were rejected — not that their region
+// lacks semantic search, which would be false and would age out on its own.
+func TestMergeSemanticV4Responses_AllCellsUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErrIn("aws-eu-central-1", fmt.Errorf("%w (HTTP 401): Unauthorized", search.ErrCellUnauthorized)),
+		v4CellErrIn("aws-us-east-2", fmt.Errorf("%w (HTTP 401): Unauthorized", search.ErrCellUnauthorized)),
+	})
+	if err == nil {
+		t.Fatal("expected an error when every cell rejected the credentials")
+	}
+	got := err.Error()
+	for _, want := range []string{"credentials were rejected", "aws-eu-central-1", "aws-us-east-2", "doctor bundle"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error = %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "not yet available") {
+		t.Errorf("error = %q, must not blame regional availability for a rejected credential", got)
+	}
+	if strings.Contains(got, "--code") {
+		t.Errorf("error = %q, must not offer code search as a fix — it answers a different question", got)
+	}
+}
+
+// TestMergeSemanticV4Responses_UnauthorizedOutranksOtherExplanations pins the
+// priority when nothing answered: a rejected credential is the only outcome
+// certain to repeat, so it wins over a transient cell failure, over a
+// repo-filter miss elsewhere, and over an undeployed region.
+func TestMergeSemanticV4Responses_UnauthorizedOutranksOtherExplanations(t *testing.T) {
+	t.Parallel()
+
+	_, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErrIn("aws-eu-central-1", fmt.Errorf("%w (HTTP 401): Unauthorized", search.ErrCellUnauthorized)),
+		v4CellErrIn("aws-us-east-2", errors.New("cell down")),
+		v4CellErrIn("aws-ap-southeast-2", fmt.Errorf("%w: repo not indexed", search.ErrRepoFilterUnmatched)),
+		v4CellErrIn("aws-eu-west-1", search.ErrCellUnavailable),
+	})
+	if err == nil {
+		t.Fatal("expected an error when no cell answered")
+	}
+	if got := err.Error(); !strings.Contains(got, "credentials were rejected") {
+		t.Errorf("error = %q, want the credential rejection to outrank the other explanations", got)
+	}
+}
+
+// TestMergeSemanticV4Responses_PartialUnauthorized covers one cell refusing
+// the token while another answers: the results still come back, and the
+// warnings say both that coverage is incomplete and which region rejected the
+// credentials — a rejection is not a transient regional failure, so the
+// generic count alone would understate it.
+func TestMergeSemanticV4Responses_PartialUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	ok := &search.Response{Results: []search.Result{
+		v4Ckpt("ok", 1, search.Meta{Score: 0.5}),
+	}, Total: 1}
+
+	resp, err := mergeSemanticV4Responses(context.Background(), 0, 0, []cellCallResult[*search.Response]{
+		v4CellErrIn("aws-eu-central-1", fmt.Errorf("%w (HTTP 401): Unauthorized", search.ErrCellUnauthorized)),
+		v4CellOK(ok),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 {
+		t.Errorf("results = %d, want the answering cell's 1 result", len(resp.Results))
+	}
+	if !resp.Partial || !resp.CoverageIncomplete {
+		t.Errorf("partial=%v coverage_incomplete=%v, want both true when a cell rejected the credentials", resp.Partial, resp.CoverageIncomplete)
+	}
+	joined := strings.Join(resp.Warnings, "\n")
+	for _, want := range []string{"1 of 2 regions", "credentials rejected in aws-eu-central-1"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings = %v, want one containing %q", resp.Warnings, want)
+		}
 	}
 }
 

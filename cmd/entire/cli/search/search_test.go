@@ -133,30 +133,89 @@ func TestParseGitHubRemote_EntireMirror(t *testing.T) {
 
 // -- Search() tests --
 
+// TestCellV4_Unauthorized covers the credential-rejection classification: a
+// cell that answers the route but refuses the token is ErrCellUnauthorized, so
+// the fan-out can say so instead of leaking a bare "search service error
+// (401): Unauthorized" (entireio/cli#2121). 403 joins it — the service
+// verifies the token and then declines it — while the status and the service's
+// own message stay in the text — and the typed status stays in the chain — for
+// debug logs and outcome telemetry.
+func TestCellV4_Unauthorized(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "401 with json error", status: http.StatusUnauthorized, body: `{"error":"Unauthorized"}`, want: "search service error (401): Unauthorized"},
+		{name: "403 with json error", status: http.StatusForbidden, body: `{"error":"Forbidden"}`, want: "search service error (403): Forbidden"},
+		{name: "401 with raw body", status: http.StatusUnauthorized, body: "authorization required", want: "search service returned 401: authorization required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body)) //nolint:errcheck // test helper response
+			}))
+			defer srv.Close()
+
+			_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
+			if !errors.Is(err, ErrCellUnauthorized) {
+				t.Fatalf("error = %v, want ErrCellUnauthorized", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+			// A rejected credential must never read as a cell that lacks the
+			// route: the two need opposite responses from the user.
+			if errors.Is(err, ErrCellUnavailable) {
+				t.Error("ErrCellUnauthorized must not also match ErrCellUnavailable")
+			}
+			// The typed status must survive alongside the sentinel — outcome
+			// telemetry classifies auth from it (ENT-1938).
+			var statusErr *HTTPStatusError
+			if !errors.As(err, &statusErr) {
+				t.Fatal("want an *HTTPStatusError in the chain")
+			}
+			if statusErr.StatusCode != tc.status {
+				t.Errorf("StatusCode = %d, want %d", statusErr.StatusCode, tc.status)
+			}
+		})
+	}
+}
+
+// TestCellV4_ErrorJSON pins the generic non-2xx wording, which every status
+// outside the classified ones (404 route/repo, 401/403 credentials) still
+// gets.
 func TestCellV4_ErrorJSON(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid token"}) //nolint:errcheck // test helper response
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Search failed"}) //nolint:errcheck // test helper response
 	}))
 	defer srv.Close()
 
 	_, err := CellV4(context.Background(), api.NewClientWithBaseURL("tok", srv.URL), Config{Query: "q"}, nil)
 	if err == nil {
-		t.Fatal("expected error for 401")
+		t.Fatal("expected error for 500")
 	}
-	if got := err.Error(); got != "search service error (401): Invalid token" {
-		t.Errorf("error = %q, want 'search service error (401): Invalid token'", got)
+	if got := err.Error(); got != "search service error (500): Search failed" {
+		t.Errorf("error = %q, want 'search service error (500): Search failed'", got)
+	}
+	if errors.Is(err, ErrCellUnauthorized) {
+		t.Error("a 500 must not classify as a credential rejection")
 	}
 	// Outcome telemetry classifies by status code, so the error must be typed.
 	var statusErr *HTTPStatusError
 	if !errors.As(err, &statusErr) {
 		t.Fatalf("error is %T, want *HTTPStatusError", err)
 	}
-	if statusErr.StatusCode != http.StatusUnauthorized {
-		t.Errorf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusUnauthorized)
+	if statusErr.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusInternalServerError)
 	}
 }
 

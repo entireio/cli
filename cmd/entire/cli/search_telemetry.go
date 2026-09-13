@@ -24,6 +24,12 @@ func classifySearchError(err error) string {
 		return telemetry.SearchErrClassAuth
 	case errors.Is(err, auth.ErrNoCellForJurisdiction):
 		return telemetry.SearchErrClassCellSkip
+	case errors.Is(err, search.ErrCellUnauthorized):
+		// A cell that answered and refused the bearer. The 401/403
+		// HTTPStatusError is still in the chain (and would classify the same
+		// way), but keep the sentinel case: it fixes the class even for a
+		// rejection that arrives without one.
+		return telemetry.SearchErrClassAuth
 	case errors.Is(err, search.ErrCellUnavailable), errors.Is(err, errNoRegionAvailable):
 		return telemetry.SearchErrClassRegionUnavailable
 	case errors.Is(err, search.ErrRepoFilterUnmatched), errors.Is(err, errNoRepoAvailable):

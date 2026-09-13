@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -78,7 +79,7 @@ func TestClassifySemanticCells_SkipCausesClassify(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pages, _, lastErr := classifySemanticCells(context.Background(), tc.results)
+			pages, _, _, lastErr := classifySemanticCells(context.Background(), tc.results)
 			if len(pages) != 0 || lastErr == nil {
 				t.Fatalf("pages = %d, lastErr = %v; want no pages and an error", len(pages), lastErr)
 			}
@@ -89,6 +90,35 @@ func TestClassifySemanticCells_SkipCausesClassify(t *testing.T) {
 				t.Errorf("classifySearchError = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// Pins the same contract for a rejected credential: the user-facing message
+// swaps in (naming the regions, no bare "search service error (401)"), while
+// the chain still classifies as auth rather than falling through to "other" —
+// which is what a plain fmt.Errorf here would have done.
+func TestClassifySemanticCells_UnauthorizedClassifiesAsAuth(t *testing.T) {
+	t.Parallel()
+	cell := func(name string, err error) cellCallResult[*search.Response] {
+		return cellCallResult[*search.Response]{group: cellGroup{cell: name}, err: err}
+	}
+	unauthorized := fmt.Errorf("%w: %w", search.ErrCellUnauthorized, &search.HTTPStatusError{StatusCode: 401, Message: "search service error (401): Unauthorized"})
+
+	pages, _, unauth, lastErr := classifySemanticCells(context.Background(), []cellCallResult[*search.Response]{
+		cell("aws-eu-central-1", unauthorized),
+		cell("aws-us-east-2", unauthorized),
+	})
+	if len(pages) != 0 || lastErr == nil {
+		t.Fatalf("pages = %d, lastErr = %v; want no pages and an error", len(pages), lastErr)
+	}
+	if len(unauth) != 2 {
+		t.Errorf("unauthorized cells = %v, want both named", unauth)
+	}
+	if got := lastErr.Error(); !strings.Contains(got, "aws-eu-central-1") || strings.Contains(got, "search service error") {
+		t.Errorf("user-facing message = %q, want the regions named and the raw service error gone", got)
+	}
+	if got := classifySearchError(lastErr); got != telemetry.SearchErrClassAuth {
+		t.Errorf("classifySearchError = %q, want %q", got, telemetry.SearchErrClassAuth)
 	}
 }
 
