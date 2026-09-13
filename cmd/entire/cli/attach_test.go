@@ -35,6 +35,7 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAttach_MissingSessionID(t *testing.T) {
@@ -2015,6 +2016,69 @@ func TestAttach_NonInteractivePrintsTrailerForManualPaste(t *testing.T) {
 	if !re.MatchString(out.String()) {
 		t.Errorf("expected Entire-Checkpoint trailer for manual paste, got:\n%s", out.String())
 	}
+}
+
+func TestAttachIgnoresCheckpointShapedBodyText(t *testing.T) {
+	testAttachDoesNotReuseUnauthorizedCheckpoint(t,
+		"Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\nSigned-off-by: Test User <test@example.com>\n")
+}
+
+func TestAttachIgnoresIndentedCheckpoint(t *testing.T) {
+	testAttachDoesNotReuseUnauthorizedCheckpoint(t,
+		"Subject\n\n  Entire-Checkpoint: a1b2c3d4e5f6\n")
+}
+
+func testAttachDoesNotReuseUnauthorizedCheckpoint(t *testing.T, commitMessage string) {
+	t.Helper()
+	setupAttachTestRepo(t)
+	ctx := context.Background()
+	const forgedID = "a1b2c3d4e5f6"
+	forgedCheckpointID := id.MustCheckpointID(forgedID)
+
+	repo, err := git.PlainOpen(mustGetwd(t))
+	require.NoError(t, err)
+	store := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs())
+	require.NoError(t, store.Write(ctx, cpkg.Session{
+		CheckpointID: forgedCheckpointID,
+		SessionID:    "unrelated-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("unrelated transcript\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+	}))
+
+	repoDir := mustGetwd(t)
+	testutil.WriteFile(t, repoDir, "forged.txt", "forged")
+	testutil.GitAdd(t, repoDir, "forged.txt")
+	testutil.GitCommit(t, repoDir, commitMessage)
+
+	const attachedSessionID = "test-attach-unauthorized-checkpoint"
+	setupClaudeTranscript(t, attachedSessionID, `{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"hi"},"uuid":"a1"}
+`)
+
+	var out bytes.Buffer
+	require.NoError(t, runAttach(ctx, &out, &out, attachedSessionID, agent.AgentNameClaudeCode, attachOptions{Force: true}))
+
+	stateStore, err := session.NewStateStore(ctx)
+	require.NoError(t, err)
+	state, err := stateStore.Load(ctx, attachedSessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotEqual(t, forgedCheckpointID, state.LastCheckpointID,
+		"unauthorized checkpoint text must not select the write target")
+
+	forgedSummary, err := store.Read(ctx, forgedCheckpointID)
+	require.NoError(t, err)
+	require.NotNil(t, forgedSummary)
+	require.Len(t, forgedSummary.Sessions, 1)
+	forgedContent, err := store.ReadSessionContent(ctx, forgedCheckpointID, 0)
+	require.NoError(t, err)
+	require.Equal(t, "unrelated-session", forgedContent.Metadata.SessionID)
+
+	attachedContent, err := store.ReadSessionContent(ctx, state.LastCheckpointID, 0)
+	require.NoError(t, err)
+	require.Equal(t, attachedSessionID, attachedContent.Metadata.SessionID)
 }
 
 // setupAttachTestRepo creates a temp git repo with one commit and enables Entire.
