@@ -71,3 +71,7 @@ tmp/
 entire-external-cp-test/
 /skills/
 /git-remote-entire
+
+# entire recall: derived memory rebuilt from checkpoints, never committed
+.entire/recall/
+recall/target/

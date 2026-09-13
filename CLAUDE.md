@@ -165,7 +165,18 @@ and the inferred one is the common path.
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`investigate`, `blame`, `why`, `experts`, `runner`, and `checkpoint policy`.
+`investigate`, `blame`, `why`, `experts`, `recall`, `runner`, and `checkpoint policy`.
+`recall` (`recall_cmd.go`, `recall_collect.go`) is a shim over the Rust crate in
+`recall/`: `recall ingest` walks trailered commits, reads each checkpoint's
+transcript and diff through the persistent store, and pipes JSON to the
+`recall` binary; `recall <question>` renders the binary's ranked hits. Every
+ranking decision lives in the crate — see `docs/recall/`. The shim never drops
+a checkpoint it cannot read: the commit record is ingested with the missing
+fields declared in `unavailable`, the crate answers `unverifiable` for any
+check that needed one of them, and every answer opens with a coverage line
+that says `complete` only when nothing was missing (`recall/README.md`,
+"Privacy boundary"). `--no-transcripts` never opens a transcript;
+`recall/scripts/verify-offline.sh` proves the binary makes no network calls.
 `tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,

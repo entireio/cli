@@ -188,8 +188,9 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newDisableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newStatusCmd(), groupSetup))
-	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
-	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
+	experimental.Register(cmd, newBlameCmd())  // 'blame' (experimental)
+	experimental.Register(cmd, newWhyCmd())    // 'why' (experimental)
+	experimental.Register(cmd, newRecallCmd()) // 'recall' (experimental); checkpoint history as associative memory
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newLoginCmd(), groupAccount)))
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newLogoutCmd(), groupAccount)))
 	cmd.AddCommand(exemptFromEntireDirCheck(newVersionCmd()))
