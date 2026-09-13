@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/changelog"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/mdrender"
 	"github.com/spf13/cobra"
 )
@@ -35,7 +36,16 @@ func newChangelogCmdWithClient(client *changelog.Client) *cobra.Command {
 				return fmt.Errorf("create changelog client: %w", err)
 			}
 		}
+		stop := func(bool) {}
+		if !asJSON && !IsAccessibleMode() && interactive.ShouldStyle(cmd.OutOrStdout()) {
+			message := "Loading changelog"
+			if query != "" {
+				message = "Searching changelog"
+			}
+			stop = startSpinner(cmd.ErrOrStderr(), message)
+		}
 		entries, err := client.Read(cmd.Context(), limit, query)
+		stop(false)
 		if err != nil {
 			return fmt.Errorf("read product changelog: %w", err)
 		}
