@@ -5,27 +5,28 @@ import (
 	"strings"
 )
 
-// repoOverrideEnvVars are git's repo-selector environment variables. Git
-// exports them to its hooks, and they take precedence over a child process's
-// working directory — so `exec.Command("git", ...)` with cmd.Dir set still
-// resolves the *hook's* repository, not the directory named, and
-// GIT_INDEX_FILE redirects index reads and writes to a different file
-// entirely.
+// Inherited repository selectors can redirect Git even when cmd.Dir is explicit.
+// GIT_COMMON_DIR redirects shared repository data, including configuration;
+// GIT_INDEX_FILE redirects index reads and writes.
 var repoOverrideEnvVars = []string{
 	"GIT_DIR=",
+	"GIT_COMMON_DIR=",
 	"GIT_WORK_TREE=",
 	"GIT_INDEX_FILE=",
 }
 
 // EnvWithoutRepoOverrides returns the current environment minus git's
-// repo-selector variables (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE), so a git
-// subprocess resolves its repository from cmd.Dir as the call site intends.
+// repo-selector variables (GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE, GIT_INDEX_FILE),
+// so a git subprocess resolves its repository from cmd.Dir as the call site intends.
 //
-// Use this for any git subprocess that can run inside a git hook and that
-// names its target with cmd.Dir or `-C`. Inheriting these variables makes the
+// Use this for git subprocesses that must resolve their target independently
+// of the enclosing hook, using cmd.Dir or `-C`. Inheriting these variables makes the
 // child silently operate on the hook's repository instead: `git -C <other>
 // rev-parse` reports the hook's repo, and an index-touching command reads and
 // writes whatever GIT_INDEX_FILE names.
+//
+// Commands inspecting the commit being prepared must retain Git's temporary
+// GIT_INDEX_FILE rather than use this helper.
 //
 // Deliberately not applied to user-invoked commands that operate on the
 // current directory (`entire status`, `entire doctor`, `entire review`): there
