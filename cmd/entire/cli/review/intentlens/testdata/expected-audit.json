@@ -1,0 +1,38 @@
+{
+  "summary": "Valid password login is implemented, rate limiting is disconnected, and session preservation lacks verification.",
+  "requirements": [
+    {
+      "id": "R1",
+      "requirement": "Users can log in with a valid email and password.",
+      "status": "IMPLEMENTED",
+      "confidence": 0.95,
+      "evidence": [
+        {"type": "code", "file": "demo/auth/login.go", "symbol": "Login", "explanation": "Synthetic source evidence shows credential verification is called by Login."},
+        {"type": "graph", "reference": "route:/login -> Login", "explanation": "Synthetic graph evidence connects the login route to Login."},
+        {"type": "test", "test_name": "TestLoginValidCredentials", "result": "passed", "explanation": "Synthetic test result verifies valid login."}
+      ],
+      "recommendation": ""
+    },
+    {
+      "id": "R2",
+      "requirement": "Login is locked after five failed attempts.",
+      "status": "INCOMPLETE",
+      "confidence": 0.91,
+      "evidence": [
+        {"type": "git_diff", "file": "demo/auth/routes.go", "explanation": "Synthetic diff evidence does not add rate-limit middleware to the login route."},
+        {"type": "graph", "reference": "rateLimit -> (unconnected)", "explanation": "Synthetic graph evidence shows rateLimit is not connected to the login route."}
+      ],
+      "recommendation": "Connect rateLimit to the login route and add a test covering lockout after exactly five failures."
+    },
+    {
+      "id": "R3",
+      "requirement": "Existing sessions remain valid after a password change.",
+      "status": "UNCERTAIN",
+      "confidence": 0.35,
+      "evidence": [
+        {"type": "checkpoint", "reference": "synthetic-checkpoint-001", "explanation": "The checkpoint states this intent, but the package contains no relevant source, graph, diff, or test evidence."}
+      ],
+      "recommendation": "Supply session invalidation code paths and a passing password-change session test."
+    }
+  ]
+}
