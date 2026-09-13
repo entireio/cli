@@ -38,9 +38,12 @@ const KillWaitDelay = 10 * time.Second
 // group lets Cancel SIGKILL the whole tree; WaitDelay is the backstop that
 // force-closes the pipes if a descendant escapes the group.
 //
-// cmd must be created with exec.CommandContext so Cancel runs on ctx-done. Do
-// not combine with NonInteractive on the same cmd: NonInteractive sets Setsid,
-// which conflicts with the Setpgid this sets.
+// cmd must be created with exec.CommandContext so Cancel runs on ctx-done —
+// exec rejects a non-nil Cancel on a cmd built with plain exec.Command.
+//
+// Safe to combine with NonInteractive: the Setsid it sets already makes the
+// child its own process-group leader, so this skips the conflicting Setpgid
+// (see killProcessGroupOnCancel) and the group kill still works.
 func TerminateOnCancel(cmd *exec.Cmd) {
 	cmd.WaitDelay = KillWaitDelay
 	killProcessGroupOnCancel(cmd)

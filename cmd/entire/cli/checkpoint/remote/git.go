@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -547,7 +548,10 @@ func newCommand(ctx context.Context, args ...string) *exec.Cmd {
 	mkCmd := func(finalArgs []string) *exec.Cmd {
 		c := exec.CommandContext(ctx, "git", finalArgs...)
 		c.Stdin = nil // Disconnect stdin to prevent hanging in hook context
-		terminateOnCancel(c)
+		// A transport-helper grandchild (e.g. git-remote-entire) can keep the
+		// output pipe open after `git` is SIGKILLed, otherwise blocking
+		// CombinedOutput indefinitely.
+		execx.TerminateOnCancel(c)
 		// Fail fast on interactive SSH prompts (e.g. a key passphrase with no
 		// ssh-agent) when the caller marked ctx non-interactive. HTTPS token
 		// auth rebuilds cmd.Env below (SSH is not used there), so this only
