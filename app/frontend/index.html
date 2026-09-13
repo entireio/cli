@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Entire Checkpoint Intelligence Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="logo-icon">⚡</div>
+                <div class="brand-text">
+                    <h2>Entire Intelligence</h2>
+                    <span class="badge">Checkpoints v1.0</span>
+                </div>
+            </div>
+
+            <nav class="nav-menu">
+                <button class="nav-item active" data-tab="overview">
+                    <span class="icon">📊</span> Overview & Workspace
+                </button>
+                <button class="nav-item" data-tab="intelligence">
+                    <span class="icon">⚡</span> Checkpoint Intelligence
+                </button>
+                <button class="nav-item" data-tab="architecture">
+                    <span class="icon">🏗️</span> Architecture
+                </button>
+                <button class="nav-item" data-tab="checkpoints">
+                    <span class="icon">🔖</span> Entire Checkpoints
+                </button>
+                <button class="nav-item" data-tab="requirements">
+                    <span class="icon">📋</span> Requirements Matrix
+                </button>
+                <button class="nav-item" data-tab="graph">
+                    <span class="icon">🕸️</span> Entire Graph Impact
+                </button>
+                <button class="nav-item" data-tab="handoff">
+                    <span class="icon">🤝</span> Handoff Package
+                </button>
+            </nav>
+
+            <div class="system-status">
+                <div class="status-indicator online"></div>
+                <div class="status-info">
+                    <span class="status-title">API Foundation</span>
+                    <span class="status-sub" id="health-status">Checking REST API...</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="top-header">
+                <div class="header-title">
+                    <h1 id="page-title">Workspace Repository Overview</h1>
+                    <p class="subtitle">Preserving intent, structural graph evidence, and risk analysis across checkpoints</p>
+                </div>
+                <div class="repo-selector">
+                    <span class="label">Active Workspace:</span>
+                    <select id="repo-select">
+                        <option value="">Loading repositories...</option>
+                    </select>
+                    <button class="btn btn-primary" id="btn-open-add-modal">+ Add Repository</button>
+                </div>
+            </header>
+
+            <div class="content-body">
+                <!-- Tab 1: Overview -->
+                <section id="tab-overview" class="tab-pane active">
+                    <div class="metrics-grid">
+                        <div class="metric-card glass">
+                            <div class="metric-header">
+                                <span>Release Readiness</span>
+                                <span class="metric-badge success">GRADE A</span>
+                            </div>
+                            <div class="metric-value">95<span class="total">/100</span></div>
+                            <div class="metric-footer">Production Ready</div>
+                        </div>
+
+                        <div class="metric-card glass">
+                            <div class="metric-header">
+                                <span>Active Checkpoints</span>
+                            </div>
+                            <div class="metric-value" id="checkpoint-count">2</div>
+                            <div class="metric-footer">Across current branch history</div>
+                        </div>
+
+                        <div class="metric-card glass">
+                            <div class="metric-header">
+                                <span>Requirements Verified</span>
+                            </div>
+                            <div class="metric-value">100<span class="total">%</span></div>
+                            <div class="metric-footer">All prompt goals satisfied</div>
+                        </div>
+                    </div>
+
+                    <!-- Integration Readiness Section -->
+                    <div class="card glass margin-top">
+                        <h3>Integration & Readiness Status</h3>
+                        <div class="readiness-grid" id="integration-status-grid">
+                            <div class="spinner">Checking integration readiness...</div>
+                        </div>
+                    </div>
+
+                    <!-- Repository Baseline Card -->
+                    <div class="card glass margin-top">
+                        <h3>Active Repository Details</h3>
+                        <div class="details-grid" id="repo-details">
+                            <div class="spinner">Loading repository baseline...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab: Checkpoint Intelligence HERO View -->
+                <section id="tab-intelligence" class="tab-pane">
+                    <div class="card glass hero-intel-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <div>
+                                <h3 style="margin: 0;">Checkpoint Intelligence Engine</h3>
+                                <p style="margin-top: 4px; color: var(--text-secondary); font-size: 0.9rem;">Synthesizing Entire Checkpoints, Git commits, source tree diffs, unit tests, and structural graph evidence</p>
+                            </div>
+                            <div class="commit-selector-box">
+                                <label style="font-size: 0.85rem; color: var(--text-secondary); margin-right: 8px;">Select Commit / Checkpoint:</label>
+                                <select id="intel-commit-select" style="padding: 6px 12px; border-radius: 4px; background: rgba(30, 41, 59, 0.8); color: var(--text-primary); border: 1px solid var(--border-color);">
+                                    <option value="">Loading history...</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="intelligence-hero-content">
+                            <div class="spinner">Generating evidence-oriented Checkpoint Intelligence...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab: Architecture -->
+                <section id="tab-architecture" class="tab-pane">
+                    <div class="card glass">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <h3 style="margin: 0;">Repository Architecture Summary</h3>
+                            <button id="regenerate-arch-btn" style="padding: 8px 16px; border-radius: 4px; background: var(--accent-blue); color: white; border: none; cursor: pointer;">Regenerate</button>
+                        </div>
+                        <div id="architecture-content">
+                            <div class="spinner">Loading architecture analysis...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab 2: Checkpoints -->
+                <section id="tab-checkpoints" class="tab-pane">
+                    <div class="card glass">
+                        <h3>Preserved Entire Checkpoints</h3>
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Checkpoint ID</th>
+                                        <th>Commit Ref</th>
+                                        <th>Timestamp</th>
+                                        <th>Intent / Prompt Context</th>
+                                        <th>Verification State</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="checkpoints-table-body">
+                                    <tr><td colspan="5" class="text-center">Loading checkpoints...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab 3: Requirements -->
+                <section id="tab-requirements" class="tab-pane">
+                    <div class="card glass margin-bottom">
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                            <div>
+                                <h3 style="margin: 0;">GitHub Milestone Requirements Workflow</h3>
+                                <p style="color: var(--text-secondary); margin: 4px 0 0 0; font-size: 0.9em;">Convert GitHub milestones & issues into actionable Checkpoint Intelligence requirements</p>
+                            </div>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <label for="milestone-select" style="font-weight: 500;">Select Milestone:</label>
+                                <select id="milestone-select" style="padding: 8px 12px; border-radius: 6px; background: rgba(30,41,59,0.9); color: white; border: 1px solid var(--border-light);">
+                                    <option value="">Loading milestones...</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="github-status-banner" style="margin-top: 12px; display: none;"></div>
+                    </div>
+
+                    <div class="card glass">
+                        <h3>Requirement & Milestone Verification Matrix</h3>
+                        <div class="table-container">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Ref #</th>
+                                        <th>Title & Goal</th>
+                                        <th>Milestone</th>
+                                        <th>State / Status</th>
+                                        <th>Verification Evidence</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="requirements-table-body">
+                                    <tr><td colspan="5" class="text-center">Loading requirements...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab 4: Graph -->
+                <section id="tab-graph" class="tab-pane">
+                    <div class="card glass">
+                        <h3>Entire Graph Structural Findings & Impact Analysis</h3>
+                        <div id="graph-findings-list">
+                            <div class="spinner">Loading graph findings...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab 5: Handoff -->
+                <section id="tab-handoff" class="tab-pane">
+                    <div class="card glass">
+                        <h3>Agent & Developer Handoff Package</h3>
+                        <div id="handoff-content">
+                            <div class="spinner">Loading handoff briefing...</div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <!-- Add Repository Modal -->
+    <div class="modal-overlay" id="add-repo-modal">
+        <div class="modal-box glass">
+            <div class="modal-header">
+                <h3>Add New GitHub Repository</h3>
+                <button class="close-btn" id="btn-close-modal">&times;</button>
+            </div>
+            <form id="add-repo-form">
+                <div class="form-group">
+                    <label for="repo-url-input">GitHub Repository URL / Name</label>
+                    <input type="text" id="repo-url-input" placeholder="e.g. https://github.com/owner/repo or owner/repo" required>
+                    <span class="hint">Accepts GitHub HTTPS, SSH, or owner/repo shorthand</span>
+                </div>
+                <div class="form-group">
+                    <label for="local-path-input">Local Path (Optional)</label>
+                    <input type="text" id="local-path-input" placeholder="e.g. . or d:\projects\repo">
+                </div>
+                <div class="error-banner" id="modal-error" style="display:none;"></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" id="btn-cancel-modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Repository</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
