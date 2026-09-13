@@ -548,6 +548,11 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	}
 	stop("")
 
+	if reportHTTPCheckpointAuthFailure(batchErr) {
+		fmt.Fprintf(os.Stderr, "[entire] %d checkpoint ref(s) remain queued locally.\n", len(existing))
+		return 0, batchErr
+	}
+
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
@@ -575,6 +580,10 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	var firstErr error
 	for _, ref := range existing {
 		if err := pushCheckpointRefWithRecovery(pushCtx, dest.target, ref); err != nil {
+			if isHTTPCheckpointAuthFailure(err) {
+				firstErr = err
+				break // No remaining ref can fix authentication; keep them queued.
+			}
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
 			if nonInteractiveSSHAuthFailure(pushCtx, err) {
@@ -588,6 +597,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 		pushed = append(pushed, ref)
 	}
 	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
+	reportHTTPCheckpointAuthFailure(firstErr)
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))

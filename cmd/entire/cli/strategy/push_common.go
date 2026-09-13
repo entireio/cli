@@ -87,6 +87,8 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 
 	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}); err == nil {
 		return nil
+	} else if isHTTPCheckpointAuthFailure(err) {
+		return err
 	}
 	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
 		return fmt.Errorf("sync diverged checkpoint ref %s: %w", ref, err)
@@ -183,6 +185,10 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	}
 	stop("")
 
+	if reportHTTPCheckpointAuthFailure(err) {
+		return false, nil
+	}
+
 	// Protected refs cannot be fixed by syncing and retrying.
 	var protectedErr *protectedRefError
 	if errors.As(err, &protectedErr) {
@@ -212,6 +218,9 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	fetchRebaseSpan.End()
 	if syncErr != nil {
 		stop("")
+		if reportHTTPCheckpointAuthFailure(syncErr) {
+			return false, nil
+		}
 		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't sync %s: %v\n", refLabel, syncErr)
 		if nonInteractiveSSHAuthFailure(ctx, syncErr) {
 			printNonInteractiveSSHAuthHint()
@@ -228,6 +237,9 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	result, retryErr := tryPushRefCommon(ctx, target, ref)
 	if retryErr != nil {
 		stop("")
+		if reportHTTPCheckpointAuthFailure(retryErr) {
+			return false, nil
+		}
 		fmt.Fprintf(os.Stderr, "[entire] Warning: failed to push %s after sync: %v\n", refLabel, retryErr)
 		if nonInteractiveSSHAuthFailure(ctx, retryErr) {
 			printNonInteractiveSSHAuthHint()
@@ -431,6 +443,10 @@ func classifyPushOutput(output string) error {
 }
 
 func classifyPushFailure(ctx context.Context, output string, pushErr error) error {
+	// Keep the remote layer's safe, typed auth cause; raw output can carry PATs.
+	if isHTTPCheckpointAuthFailure(pushErr) {
+		return pushErr
+	}
 	if strings.TrimSpace(output) != "" {
 		if pushErr != nil {
 			logging.Debug(ctx, "git push failed",
@@ -507,6 +523,9 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	fetchSpan.RecordError(fetchErr)
 	fetchSpan.End()
 	if fetchErr != nil {
+		if isHTTPCheckpointAuthFailure(fetchErr) {
+			return fmt.Errorf("fetch failed: %w", fetchErr)
+		}
 		return fmt.Errorf("fetch failed: %s", fetchOutput)
 	}
 
