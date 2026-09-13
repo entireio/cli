@@ -39,6 +39,7 @@ Examples:
 	cmd.AddCommand(newCheckpointListCmd())
 	cmd.AddCommand(newCheckpointResumeCmd())
 	cmd.AddCommand(newExplainCmd())
+	cmd.AddCommand(newCheckpointAuditCmd())
 	cmd.AddCommand(newCheckpointTokensCmd())
 	experimental.Register(cmd, newCheckpointPolicyCmd()) // 'checkpoint policy' (experimental)
 	cmd.AddCommand(newCheckpointSearchCmd())
