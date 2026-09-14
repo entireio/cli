@@ -36,7 +36,9 @@ func RefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
 // when it has the CheckpointRefPrefix, exactly a <shard>/<id> tail, and the
 // shard matches the ID's own ShardFor — so refs the resolver did not write
 // (mismatched shard, extra path segments) are rejected rather than silently
-// resolved to the wrong bucket. It does not require the ID to be a recognized
+// resolved to the wrong bucket. The shard match is case-insensitive because a
+// case-insensitive filesystem can spell a shard differently from ShardFor.
+// It does not require the ID to be a recognized
 // kind, so a future ID format still parses as long as it shards consistently.
 func ParseRef(name plumbing.ReferenceName) (id.CheckpointID, bool) {
 	s := name.String()
@@ -53,7 +55,15 @@ func ParseRef(name plumbing.ReferenceName) (id.CheckpointID, bool) {
 		return id.EmptyCheckpointID, false
 	}
 	cid := id.CheckpointID(rest)
-	if cid.ShardFor() != shard {
+	// Compare case-insensitively: on a case-insensitive filesystem (macOS APFS,
+	// Windows NTFS) a ULID checkpoint whose shard is "6B" is written into a
+	// pre-existing legacy-hex "6b" directory, and git resolves both to the same
+	// physical directory. An exact comparison would reject the ref and make the
+	// checkpoint permanently invisible even though its git object is intact.
+	// Folding only the case keeps the original guard intact — a ref pointing at
+	// a genuinely different bucket (e.g. "a1" vs "f6") is still rejected.
+	// Shards are ASCII hex or Crockford base32, so folding is unambiguous.
+	if !strings.EqualFold(cid.ShardFor(), shard) {
 		return id.EmptyCheckpointID, false
 	}
 	return cid, true
