@@ -160,7 +160,8 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"runner":   {agentHelpAudienceTaskDriven, false},
 
 	// The user's to start. review and investigate are not destructive but spawn
-	// paid multi-agent runs, so an uninvited one spends the user's money.
+	// paid multi-agent runs, so an uninvited one spends the user's money; trust
+	// records egress consent, which only the user can give.
 	"agent":       {agentHelpAudienceUserOwned, false},
 	"auth":        {agentHelpAudienceUserOwned, false},
 	"clean":       {agentHelpAudienceUserOwned, false},
@@ -176,6 +177,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"project":     {agentHelpAudienceUserOwned, false},
 	"repo":        {agentHelpAudienceUserOwned, false},
 	"review":      {agentHelpAudienceUserOwned, false},
+	"trust":       {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,

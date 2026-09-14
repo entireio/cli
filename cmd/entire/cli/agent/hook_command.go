@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
@@ -113,7 +114,9 @@ var legacyHookCommandPrefixes = []string{
 	`"$(git rev-parse --show-toplevel)"/scripts/entire-dev hooks `,
 	"${CLAUDE_PROJECT_DIR}/scripts/entire-dev hooks ",
 	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks `,
+	"go run $(git rev-parse --show-toplevel)/cmd/entire/main.go hooks ",
 	"go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks ",
+	"go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go hooks ",
 }
 
 // WrapProductionSilentHookCommand exits successfully without output when the
@@ -258,6 +261,9 @@ func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, want []
 // could silently omit — and omitting the legacy entries is precisely what leaves
 // an old hook installed forever.
 func IsManagedHookCommand(command string) bool {
+	if globalhooks.IsCommand(command) {
+		return true
+	}
 	if hasManagedHookPrefix(command) {
 		return true
 	}

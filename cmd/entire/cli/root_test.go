@@ -2,14 +2,45 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
+
+func TestShouldOfferRootSetup_GlobalActivation(t *testing.T) {
+	t.Parallel()
+
+	enabled := &settings.UserSettings{Global: &settings.GlobalConfig{Enabled: true}}
+	tests := []struct {
+		name   string
+		policy repopolicy.RepoPolicy
+		want   bool
+	}{
+		{name: "active global repo stays global", policy: repopolicy.RepoPolicy{Active: true}, want: false},
+		{name: "excluded repo may opt into local setup", policy: repopolicy.RepoPolicy{InactiveReason: repopolicy.InactiveReasonGlobalExcluded}, want: true},
+		{name: "other fail-closed result does not pin repo", policy: repopolicy.RepoPolicy{InactiveReason: repopolicy.InactiveReasonGlobalOff}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := repopolicy.WithRepoPolicy(context.Background(), tt.policy)
+			if got := shouldOfferRootSetup(ctx, enabled); got != tt.want {
+				t.Fatalf("shouldOfferRootSetup() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	if !shouldOfferRootSetup(context.Background(), &settings.UserSettings{}) {
+		t.Fatal("a disabled global tier must offer repo setup")
+	}
+}
 
 func TestVersionFlag_OutputMatchesVersionCmd(t *testing.T) {
 	t.Parallel()

@@ -45,6 +45,22 @@ func setupOPFAttack(t *testing.T, env *TestEnv) (marker, command string) {
 	return marker, command
 }
 
+// setupOPFShimOutsideRepo stages the developer's own opf shim OUTSIDE the
+// worktree — the shape the location rule allows — and returns its absolute
+// path as the command. An executable inside the repository is deliverable by
+// the repository, so the gate never runs one, however the settings file that
+// names it was verified.
+func setupOPFShimOutsideRepo(t *testing.T) (marker, command string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker = filepath.Join(dir, "PWNED")
+	command = filepath.Join(dir, "opf")
+	if err := os.WriteFile(command, []byte(opfAttackPayload(marker)), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+	return marker, command
+}
+
 // A pull request can carry both a payload and a .entire/settings.json naming
 // it, because that file is version-controlled. Pushing must not execute it.
 //
@@ -98,16 +114,14 @@ func TestOPFCommandTrust_UntrackedLocalCommandIsExecuted(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 	env.SetupBareRemote()
 
-	marker, command := setupOPFAttack(t, env)
+	marker, command := setupOPFShimOutsideRepo(t)
 
 	// Not committed, and .entire/.gitignore already excludes it: this is the
-	// developer's own machine-local choice.
+	// developer's own machine-local choice, naming a binary installed outside
+	// the repository.
 	env.WriteFile(".entire/settings.local.json",
 		`{"redaction":{"openai_privacy_filter":{"enabled":true,"prompt_default":"always",`+
-			`"categories":{"private_person":true},"command":"`+command+`"}}}`)
-
-	env.GitAdd(".entire/opf")
-	env.GitCommit("Add local opf shim")
+			`"categories":{"private_person":true},"command":"`+filepath.ToSlash(command)+`"}}}`)
 
 	_ = createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
 
@@ -120,6 +134,34 @@ func TestOPFCommandTrust_UntrackedLocalCommandIsExecuted(t *testing.T) {
 	if _, statErr := os.Stat(marker); statErr != nil {
 		t.Fatal("a developer-owned local command must still be honored; " +
 			"if this fails the negative test above proves nothing")
+	}
+}
+
+// Ownership is one gate, location the other: even a genuinely untracked local
+// file must not run a binary that lives inside the worktree, because whatever
+// probe shape a clone used to make that file look locally owned (a symlink, a
+// submodule mounted at .entire), the binary itself arrived with the repository.
+// This is the shape the positive test above used to rely on; it must now hold.
+func TestOPFCommandTrust_UntrackedLocalCommandInsideWorktreeIsNotExecuted(t *testing.T) {
+	t.Parallel()
+
+	env := NewFeatureBranchEnv(t)
+	env.SetupBareRemote()
+
+	marker, command := setupOPFAttack(t, env)
+	env.WriteFile(".entire/settings.local.json",
+		`{"redaction":{"openai_privacy_filter":{"enabled":true,"prompt_default":"always",`+
+			`"categories":{"private_person":true},"command":"`+command+`"}}}`)
+
+	_ = createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
+	// With the command rejected, OPF falls back to "opf" on $PATH; whether that
+	// push succeeds depends on the machine. What matters is which binary ran.
+	if pushErr := env.GitPushWithHooksAllowError("origin", "HEAD"); pushErr != nil {
+		t.Logf("push failed after the command was rejected (expected without opf on $PATH): %v", pushErr)
+	}
+
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("a command inside the worktree was executed from an untracked local file")
 	}
 }
 

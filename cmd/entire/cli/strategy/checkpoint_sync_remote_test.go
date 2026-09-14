@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	git "github.com/go-git/go-git/v6"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
@@ -806,4 +811,157 @@ func TestCaptureCheckpointSyncRemote_OnlyOnDelivery(t *testing.T) {
 		assert.False(t, checkpointSyncAllowedForRemote(ctx, "other", "fork"),
 			"a pending capture only admits the remote it names")
 	})
+}
+
+// Granted-at-the-prompt seam (unreachable from the integration test): the
+// SAME PrePush call must re-evaluate the gate and sync. Not parallel.
+func TestPrePush_TrustGrantedAtPromptSyncsInSameCall(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	// No origin means trust is path-scoped. Use a separate delivery remote so
+	// the hermetic bare path is not mistaken for an invalid configured origin.
+	testutil.AddRemote(t, workDir, "sync", bareDir)
+	t.Chdir(workDir)
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
+	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
+	prompted := 0
+	oldResolve := resolveTrustDecisionFn
+	resolveTrustDecisionFn = func(ctx context.Context, _ io.Writer) (TrustDecision, error) {
+		prompted++
+		_, err := settings.TrustCurrentRepo(ctx)
+		require.NoError(t, err)
+		return TrustGranted, nil
+	}
+	t.Cleanup(func() { resolveTrustDecisionFn = oldResolve })
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	enqueueRefs(t, repo, refs)
+	stderr := captureStderrWriter(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "sync"))
+
+	require.Equal(t, 1, prompted, "the closed gate must consult the resolver exactly once")
+	require.NotContains(t, stderr.String(), heldMessageFragment)
+	remoteRefs := lsRemoteOutput(t, bareDir)
+	for _, ref := range refs {
+		assert.Contains(t, remoteRefs, ref.String(), "consent at the prompt must sync in that same PrePush call")
+	}
+}
+
+// A push that would elect a new sync remote by evidence asks consent for THAT
+// remote on the same push: origin's grant does not cover fork, the hold names
+// `entire trust --remote fork`, nothing is captured because nothing was
+// delivered, and trusting fork by the override releases both the checkpoints
+// and the election in the next push.
+// Not parallel: uses t.Chdir()
+func TestPrePush_PendingCaptureAsksConsentForTheNewRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	testutil.AddRemote(t, workDir, "origin", "https://github.com/acme/widgets.git")
+	testutil.AddRemote(t, workDir, "fork", bareDir)
+	setGitConfig(t, workDir, "branch."+currentBranchName(t, workDir)+".remote", "fork")
+	t.Chdir(workDir)
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
+	enrollRepoGlobally(t, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
+	prompted := 0
+	oldResolve := resolveTrustDecisionFn
+	resolveTrustDecisionFn = func(context.Context, io.Writer) (TrustDecision, error) {
+		prompted++
+		return TrustHeld, nil
+	}
+	t.Cleanup(func() { resolveTrustDecisionFn = oldResolve })
+	ctx := context.Background()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+	stderr := captureStderrWriter(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePush(ctx, "fork"))
+
+	require.Equal(t, 1, prompted, "the closed gate consults the resolver once")
+	assert.Contains(t, stderr.String(), "trusted for fork")
+	assert.Contains(t, stderr.String(), "entire trust --remote fork")
+	assert.Empty(t, loadCapturedSyncRemotes(ctx), "a held push delivered nothing, so it must not elect fork")
+	assert.NotContains(t, lsRemoteOutput(t, bareDir), refs[0].String(), "held refs never leave the machine")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held push leaves refs queued")
+	enqueueRefs(t, repo, refs)
+
+	// fork's URL is a bare path, so the override records a path key.
+	_, err = settings.TrustCurrentRepo(WithSyncRemoteOverride(ctx, "fork"))
+	require.NoError(t, err)
+	stderr.Reset()
+	require.NoError(t, NewManualCommitStrategy().PrePush(ctx, "fork"))
+
+	assert.Equal(t, 1, prompted, "a trusted repo is not asked again")
+	assert.NotContains(t, stderr.String(), heldMessageFragment)
+	remoteRefs := lsRemoteOutput(t, bareDir)
+	for _, ref := range refs {
+		assert.Contains(t, remoteRefs, ref.String(), "trusting fork releases the queued checkpoints to it")
+	}
+	assert.Equal(t, []string{"fork"}, loadCapturedSyncRemotes(ctx), "delivery captures the election")
+}
+
+// A trusted repo keeps main's pre-push flow: the consent resolver is never
+// consulted, whether or not anything is pending.
+// Not parallel: uses t.Chdir()
+func TestPrePush_TrustedRepoNeverConsultsResolver(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	testutil.AddRemote(t, workDir, "sync", bareDir)
+	t.Chdir(workDir)
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
+	enrollRepoGlobally(t, `{"global":{"enabled":true,"trust_all":true}}`)
+	oldResolve := resolveTrustDecisionFn
+	resolveTrustDecisionFn = func(context.Context, io.Writer) (TrustDecision, error) {
+		t.Fatal("resolver consulted for a trusted repo")
+		return TrustHeld, nil
+	}
+	t.Cleanup(func() { resolveTrustDecisionFn = oldResolve })
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	enqueueRefs(t, repo, refs)
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "sync"))
+	remoteRefs := lsRemoteOutput(t, bareDir)
+	for _, ref := range refs {
+		assert.Contains(t, remoteRefs, ref.String())
+	}
+	// Nothing pending now: still no prompt, still no error.
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "sync"))
+}
+
+// A "granted" answer whose trust write did not actually take (nothing recorded,
+// or recorded under a key the election does not resolve to) must still hold:
+// the gate re-derives the decision from a fresh classification and never
+// hands a fresh-policy context to the caller on a hold.
+// Not parallel: uses t.Chdir()
+func TestPrePush_GrantWithoutRecordedTrustStillHolds(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	testutil.AddRemote(t, workDir, "sync", bareDir)
+	t.Chdir(workDir)
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
+	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
+	oldResolve := resolveTrustDecisionFn
+	resolveTrustDecisionFn = func(context.Context, io.Writer) (TrustDecision, error) {
+		return TrustGranted, nil // claims a grant, records nothing
+	}
+	t.Cleanup(func() { resolveTrustDecisionFn = oldResolve })
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+	stderr := captureStderrWriter(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "sync"))
+
+	assert.Contains(t, stderr.String(), "the gate still holds")
+	assert.NotContains(t, lsRemoteOutput(t, bareDir), refs[0].String(), "an unrecorded grant must not release checkpoints")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held refs stay queued")
 }

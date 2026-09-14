@@ -63,7 +63,21 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 				outPath = filepath.Join(os.TempDir(), fmt.Sprintf("entire-bundle-%s.zip", time.Now().UTC().Format("20060102-150405")))
 			}
 
-			if err := writeDoctorBundle(ctx, repoRoot, outPath, rawFlag); err != nil {
+			// The routed runtime root (entiredir): globally tracked repos
+			// contribute their common-dir logs. A resolution failure must not
+			// abort the bundle — this command exists to debug exactly such
+			// broken setups — so it degrades to a bundle without .entire
+			// entries, with a warning.
+			entireRoot, rootErr := entiredir.OpenForRead(ctx)
+			switch {
+			case errors.Is(rootErr, fs.ErrNotExist):
+				entireRoot = nil
+			case rootErr != nil:
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not open the runtime directory (%v); bundling without logs and settings.\n", rootErr)
+				entireRoot = nil
+			}
+
+			if err := writeDoctorBundle(ctx, repoRoot, entireRoot, outPath, rawFlag); err != nil {
 				return err
 			}
 
@@ -82,7 +96,11 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 	return cmd
 }
 
-func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) error {
+// writeDoctorBundle writes the diagnostic zip. entireRoot is the caller's
+// (routed) runtime root, or nil for none — resolved by the caller so tests
+// can hand in a fixture's root; repoRoot anchors the git commands, which are
+// worktree-resolved by design.
+func writeDoctorBundle(ctx context.Context, repoRoot string, entireRoot *os.Root, outPath string, raw bool) error {
 	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // user-provided output path is intentional
 	if err != nil {
 		return fmt.Errorf("create bundle: %w", err)
@@ -108,15 +126,10 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 
 	// Everything the bundle collects from .entire is read through the shared
 	// root, so a symlink under .entire cannot pull an arbitrary file into a
-	// bundle the user is about to send somewhere. A repo with no .entire
-	// contributes no log or settings entries and is not an error.
-	entireRoot, err := entiredir.OpenAtForRead(repoRoot)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		entireRoot = nil
-	case err != nil:
-		return fmt.Errorf("open %s: %w", paths.EntireDir, err)
-	}
+	// bundle the user is about to send somewhere. The root is the caller's
+	// ROUTED runtime base, so a globally tracked repo contributes its
+	// common-dir logs; a repo with no runtime data contributes no log or
+	// settings entries and is not an error.
 	if entireRoot != nil {
 		if err := addDirToZip(zw, entireRoot, logging.LogsName, "logs", raw); err != nil {
 			return err

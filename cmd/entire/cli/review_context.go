@@ -159,8 +159,10 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 //
 //	<sessionID[:8]> <agent-name> [(touched: N file(s))] prompt: <latest prompt>
 //
-// where latest prompt is read from <worktree>/.entire/metadata/<sessionID>/prompt.txt
-// (the on-filesystem path lifecycle.go appends to on every turn), passed through
+// where latest prompt is read from .entire/metadata/<sessionID>/prompt.txt
+// resolved through paths.AbsPath (the on-filesystem path lifecycle.go appends
+// to on every turn; rerouted under the git common dir for globally tracked
+// repos), passed through
 // the existing reviewPromptText helper to match the committed-pipeline fallback
 // format (loops backwards for the newest non-empty prompt, collapses whitespace,
 // truncates).
@@ -211,7 +213,7 @@ func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) str
 		if st.Kind == session.KindAgentReview {
 			continue
 		}
-		line := formatReviewSessionLine(worktreeRoot, st)
+		line := formatReviewSessionLine(ctx, st)
 		if line == "" {
 			continue
 		}
@@ -237,9 +239,13 @@ func canonicalisePath(p string) string {
 }
 
 // formatReviewSessionLine renders one entry of the in-progress section.
-// Returns "" when the session has no prompt content to report.
-func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
-	root, err := entiredir.OpenAtForRead(worktreeRoot)
+// Returns "" when the session has no prompt content to report. The root is
+// the ROUTED runtime base (entiredir): globally tracked repos keep
+// .entire-class metadata under the git common dir, and the sessions rendered
+// here are already filtered to the current worktree, which is what the routed
+// base belongs to.
+func formatReviewSessionLine(ctx context.Context, st *session.State) string {
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		return ""
 	}
@@ -258,7 +264,7 @@ func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
 	}
 	agentName := string(st.AgentType)
 	if agentName == "" {
-		agentName = "agent"
+		agentName = agentIdentifier
 	}
 
 	parts := []string{"  " + short, agentName}

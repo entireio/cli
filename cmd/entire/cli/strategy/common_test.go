@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -994,6 +995,30 @@ func TestEnsurePrimaryRef(t *testing.T) {
 		}
 	})
 
+	// Pins the hook-leak fix: every bootstrap notice must go to the injected
+	// writer, so hook-context callers (EnsureSetupForHook,
+	// MaybeEnsureGlobalSetup) passing io.Discard produce no stderr output
+	// during an agent hook. A regression back to fmt.Fprintf(os.Stderr, ...)
+	// leaves this buffer empty.
+	t.Run("bootstrap notices go to the provided writer", func(t *testing.T) {
+		t.Parallel()
+		bareDir := initBareWithMetadataBranch(t)
+		cloneDir := filepath.Join(t.TempDir(), "clone")
+		cmd := exec.CommandContext(context.Background(), "git", "clone", bareDir, cloneDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("clone failed: %v\n%s", err, out)
+		}
+		repo, err := git.PlainOpen(cloneDir)
+		if err != nil {
+			t.Fatalf("failed to open repo: %v", err)
+		}
+
+		var buf bytes.Buffer
+		require.NoError(t, EnsurePrimaryRefTo(t.Context(), repo, &buf))
+		require.Contains(t, buf.String(), "✓ Created local ref",
+			"the created-from-origin notice must be written to the injected writer")
+	})
+
 	t.Run("skips empty orphan when primary is git-refs", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -1686,6 +1711,39 @@ func TestEnsureEntireGitignore_IncludesRedactorsLocal(t *testing.T) {
 	if !strings.Contains(string(body), "redactors/local/") {
 		t.Errorf(".entire/.gitignore missing redactors/local/ entry; got:\n%s", body)
 	}
+}
+
+// enrollRepoGlobally enrolls the current repo via the user-global tier (no
+// repo-level setup). Call after the final chdir. Not parallel-safe: t.Setenv.
+func enrollRepoGlobally(t *testing.T, userSettingsJSON string) {
+	t.Helper()
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(userSettingsJSON), 0o600))
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+	})
+}
+
+// writeEnabledRepoSettings gives a fixture repo explicit repo-level activation
+// intent (consent under the egress trust gate).
+func writeEnabledRepoSettings(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"enabled": true}`), 0o600))
+}
+
+const heldMessageFragment = "checkpoint sync held"
+
+// lsRemoteOutput returns `git ls-remote <bareDir>`.
+func lsRemoteOutput(t *testing.T, bareDir string) string {
+	t.Helper()
+	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)
+	lsCmd.Env = testutil.GitIsolatedEnv()
+	out, err := lsCmd.CombinedOutput()
+	require.NoError(t, err, "ls-remote failed: %s", out)
+	return string(out)
 }
 
 // writeSettingsJSON creates .entire/settings.json in dir with the given body.

@@ -19,6 +19,7 @@ const (
 	EntireDir         = ".entire"
 	EntireTmpDir      = ".entire/tmp"
 	EntireMetadataDir = ".entire/metadata"
+	EntireLogsDir     = ".entire/logs"
 
 	osWindows = "windows"
 	osDarwin  = "darwin"
@@ -232,6 +233,16 @@ func ClearWorktreeRootCache() {
 // AbsPath returns the absolute path for a relative path within the repository.
 // If the path is already absolute, it is returned as-is.
 // Uses WorktreeRoot() to resolve paths relative to the worktree root.
+//
+// Exception: runtime-data paths (.entire/metadata, .entire/logs, .entire/tmp)
+// resolve through the sticky repository policy route. A policy snapshot in ctx
+// wins; otherwise a read-only classification provides compatibility behavior.
+//
+// When the global tier owns the repo but the git-side location cannot be
+// resolved, runtime-data paths return an error carrying
+// ErrUnroutableRuntimePath instead of a worktree path: tier-owned + unroutable
+// must never produce worktree writes. Callers detect it with
+// IsUnroutableRuntimePath and skip the operation.
 func AbsPath(ctx context.Context, relPath string) (string, error) {
 	if filepath.IsAbs(relPath) {
 		return relPath, nil
@@ -240,6 +251,14 @@ func AbsPath(ctx context.Context, relPath string) (string, error) {
 	root, err := WorktreeRoot(ctx)
 	if err != nil {
 		return "", err
+	}
+
+	if sub, ok := runtimeDataSubpath(relPath); ok {
+		base, baseErr := runtimeRootForPath(ctx, root)
+		if baseErr != nil {
+			return "", fmt.Errorf("resolving runtime path %s: %w", relPath, baseErr)
+		}
+		return filepath.Join(base, filepath.FromSlash(sub)), nil
 	}
 
 	return filepath.Join(root, relPath), nil

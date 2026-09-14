@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -742,6 +743,139 @@ func TestCheckpointSyncRemote_DedicatedCheckpointRemoteExemptFromGate(t *testing
 	if env.BranchExistsOnRemote(mainBare, paths.MetadataBranchName) {
 		t.Error("origin must not receive the checkpoint branch in dedicated mode")
 	}
+}
+
+// heldSyncMessageFragment identifies the pre-push hold explanation on stderr.
+const heldSyncMessageFragment = "checkpoint sync held"
+
+// gitPushHeadWithHooksOutput pushes HEAD to origin with the real pre-push
+// hook installed and returns the combined output (git surfaces hook stderr
+// there).
+func gitPushHeadWithHooksOutput(t *testing.T, env *TestEnv) string {
+	t.Helper()
+	env.InstallRealPrePushHook()
+	cmd := execx.NonInteractive(t.Context(), "git", "push", "origin", "HEAD")
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git push (with hooks) origin HEAD failed: %v\n%s", err, output)
+	}
+	return string(output)
+}
+
+// routeHermeticOrigin gives trust policy a production-shaped origin identity
+// while keeping Git transport entirely local. Trust reads the raw remote URL;
+// Git applies insteadOf only when it opens the transport.
+func routeHermeticOrigin(t *testing.T, env *TestEnv, bareOrigin string) {
+	t.Helper()
+	const originURL = "https://github.com/entireio/global-trust-integration.git"
+	localURL := "file://" + filepath.ToSlash(bareOrigin)
+	for _, args := range [][]string{
+		{"remote", "set-url", "origin", originURL},
+		{"config", "url." + localURL + ".insteadOf", originURL},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = env.RepoDir
+		cmd.Env = testutil.GitIsolatedEnv()
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+		}
+	}
+	env.setGitConfigBaseline()
+}
+
+// commitGlobalSession produces a checkpoint through the global lazy-enable
+// flow (agent hooks fire; the commit condenses the session).
+func commitGlobalSession(t *testing.T, env *TestEnv, extraEnv []string, sessionID, file, content, prompt string) {
+	t.Helper()
+	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": "",
+		"prompt":          prompt,
+	})
+	env.WriteFile(file, content)
+	builder := NewTranscriptBuilder()
+	builder.AddUserMessage(prompt)
+	toolID := builder.AddToolUse("mcp__acp__Write", file, content)
+	builder.AddToolResult(toolID)
+	builder.AddAssistantMessage("Done!")
+	transcriptPath := filepath.Join(env.ClaudeProjectDir, sessionID+".jsonl")
+	if err := builder.WriteToFile(transcriptPath); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	runClaudeHook(t, env, extraEnv, "stop", map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+	})
+	env.GitCommitWithShadowHooksAsAgent(prompt, file)
+}
+
+// TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted: end-to-end trust
+// gate through the real binary and a real `git push`, on both backends:
+// hold (branch lands, checkpoints stay home) → trust → drain → revoke → re-hold.
+func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env, extraEnv, _ := newGloballyTrackedEnv(t, true)
+		env.CheckpointStore = backend
+		bareOrigin := env.SetupEmptyNamedBareRemote("origin")
+		routeHermeticOrigin(t, env, bareOrigin)
+
+		commitGlobalSession(t, env, extraEnv, "trust-gate-session-1", "gate.txt", "held until trusted\n", "Create gate file")
+
+		checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+		if checkpointID == "" {
+			t.Fatal("commit has no Entire-Checkpoint trailer; nothing to hold")
+		}
+
+		output := gitPushHeadWithHooksOutput(t, env)
+		if got := strings.Count(output, heldSyncMessageFragment); got != 1 {
+			t.Errorf("held push should print exactly one hold explanation, got %d in:\n%s", got, output)
+		}
+		if !env.BranchExistsOnRemote(bareOrigin, env.GetCurrentBranch()) {
+			t.Error("the user's branch must land on the remote despite the hold")
+		}
+		if anyRefUnderPrefix(t, bareOrigin) {
+			t.Error("no refs/entire/* may reach the remote while the repo is untrusted")
+		}
+		if env.BranchExistsOnRemote(bareOrigin, paths.MetadataBranchName) {
+			t.Error("the v1 branch may not reach the remote while the repo is untrusted")
+		}
+		if env.usingGitRefs() && queuedCheckpointRefCount(t, env) == 0 {
+			t.Error("a held push must leave the push queue undrained")
+		}
+
+		trustOut := env.RunCLI("trust")
+		if !strings.Contains(trustOut, "Trusted") {
+			t.Fatalf("entire trust did not confirm trust, got:\n%s", trustOut)
+		}
+		env.WriteFile("after-trust.txt", "synced\n")
+		env.GitAdd("after-trust.txt")
+		env.GitCommit("Add after-trust file")
+
+		output = gitPushHeadWithHooksOutput(t, env)
+		if strings.Contains(output, heldSyncMessageFragment) {
+			t.Errorf("a trusted push is silent about holds, got:\n%s", output)
+		}
+		if !env.CheckpointExistsOnRemote(bareOrigin, checkpointID) {
+			t.Errorf("checkpoint %s held while untrusted should drain to origin on the first trusted push", checkpointID)
+		}
+
+		// Revoke: a new checkpoint stays home; the synced remote state is untouched.
+		env.RunCLI("trust", "--revoke")
+		syncedState := env.RemoteCheckpointState(bareOrigin)
+
+		commitGlobalSession(t, env, extraEnv, "trust-gate-session-2", "revoked.txt", "held again after revoke\n", "Create revoked file")
+
+		output = gitPushHeadWithHooksOutput(t, env)
+		if got := strings.Count(output, heldSyncMessageFragment); got != 1 {
+			t.Errorf("a post-revoke push should print exactly one hold explanation, got %d in:\n%s", got, output)
+		}
+		if got := env.RemoteCheckpointState(bareOrigin); got != syncedState {
+			t.Errorf("no new checkpoint refs/objects may reach the remote after revoke:\nbefore:\n%s\nafter:\n%s", syncedState, got)
+		}
+	})
 }
 
 // initUnregisteredBareRepo creates a bare repo that is deliberately NOT added
