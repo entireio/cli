@@ -504,6 +504,7 @@ func TestResolveRemoteV1Tip_NamedRemoteFetchesLatestTip(t *testing.T) {
 	got, err := resolveRemoteV1Tip(context.Background(), localRepo, "origin")
 	require.NoError(t, err)
 	require.Equal(t, latestRemoteTip, got)
+	assertNoFetchTmpRefsWithPurpose(t, localRepo, opfRewriteFetchPurpose)
 }
 
 // Bootstrap cap: a single table-driven test covers both the over-limit

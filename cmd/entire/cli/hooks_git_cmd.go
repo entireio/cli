@@ -304,7 +304,8 @@ func newHooksGitPrePushCmd() *cobra.Command {
 		Short: "Handle pre-push git hook",
 		Args:  cobra.ExactArgs(1),
 		// SilenceUsage/Errors so non-zero exits from privacy-critical
-		// failures (OPF rewrite errors) print only the error message,
+		// failures (OPF or checkpoint-metadata rewrite errors) print only
+		// the error message,
 		// not cobra's usage banner. The error message itself already
 		// includes user guidance (see ErrV1Diverged / ErrBootstrapTooLarge /
 		// ErrV1RefMoved in strategy/manual_commit_opf_rewrite.go).
@@ -326,7 +327,8 @@ func newHooksGitPrePushCmd() *cobra.Command {
 
 			// Propagate the error so the hook script exits non-zero and
 			// git push aborts the entire batch. PrePush itself only
-			// returns errors for privacy-critical failures (OPF rewrite —
+			// returns errors for privacy-critical failures (OPF or oversized
+			// checkpoint-metadata rewrite —
 			// e.g., V1DivergedError, BootstrapTooLargeError,
 			// V1RefMovedError, OPFRuntimeFailedError,
 			// OPFNoCategoriesError); transient

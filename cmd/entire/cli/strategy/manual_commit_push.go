@@ -54,6 +54,15 @@ func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote st
 }
 
 func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
+	return s.prePushWithMetadataThreshold(ctx, remote, protectFirstUserBranch, OversizedCheckpointMetadataThreshold)
+}
+
+func (s *ManualCommitStrategy) prePushWithMetadataThreshold(
+	ctx context.Context,
+	remote string,
+	protectFirstUserBranch bool,
+	metadataThreshold int64,
+) error {
 	// This runs inside the user's `git push` pre-push hook. Every checkpoint
 	// git subprocess spawned here (metadata fetch, policy sync, checkpoint
 	// push and its recovery fetch) must fail fast rather than block on an
@@ -133,6 +142,14 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		if !checkpointPolicyAllowsGitHook(ctx, repo) {
 			// Policy failures should skip checkpoint pushes, not abort the user's push.
 			return nil
+		}
+		if err := prepareOversizedV1ForPush(
+			ctx, repo, ps.pushTarget(), metadataThreshold,
+		); err != nil {
+			logging.Warn(ctx, "checkpoint metadata cleanup failed; aborting push",
+				slog.String("error", err.Error()),
+			)
+			return err
 		}
 	}
 

@@ -79,16 +79,18 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if err != nil {
 		return err //nolint:wrapcheck // already contextual; a bare %w only changes the concrete type
 	}
+	setupIssue := inspectWorktreeSetup(ctx)
 
 	if !projectExists && !localExists {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		writeWorktreeSetupIssue(w, setupIssue)
 		return nil
 	}
 
 	sty := newStatusStyles(w)
 
 	if detailed {
-		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
+		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists, setupIssue)
 	}
 
 	// Short output: just show the effective/merged state
@@ -98,6 +100,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
+	writeWorktreeSetupIssue(w, setupIssue)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
@@ -121,13 +124,14 @@ func writeAgentHelpHint(w io.Writer, sty statusStyles) {
 }
 
 // runStatusDetailed shows the effective status plus detailed status for each settings file.
-func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
+func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, settingsPath, localSettingsPath string, projectExists, localExists bool, setupIssue *worktreeSetupIssue) error {
 	// First show the effective/merged status
 	effectiveSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
+	writeWorktreeSetupIssue(w, setupIssue)
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -1042,6 +1046,9 @@ type statusJSON struct {
 	// CodexHooks reports effective discovery/trust warnings separately from
 	// current-checkout installation and freshness semantics.
 	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
+	// WorktreeSetup reports missing Entire settings or shared Claude project
+	// hook config only when a configured sibling proves the portable setup.
+	WorktreeSetup *worktreeSetupStatusJSON `json:"worktree_setup,omitempty"`
 	// CheckpointPushDisabled is emitted only when Entire is enabled and the
 	// effective push_sessions setting is false. Its absence does not guarantee
 	// that a push can succeed.
@@ -1082,6 +1089,25 @@ type statusJSON struct {
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
+}
+
+type worktreeSetupStatusJSON struct {
+	State              string   `json:"state"`
+	Agent              string   `json:"agent"`
+	Missing            []string `json:"missing"`
+	ConfiguredWorktree string   `json:"configured_worktree"`
+}
+
+func worktreeSetupStatusFromIssue(issue *worktreeSetupIssue) *worktreeSetupStatusJSON {
+	if issue == nil {
+		return nil
+	}
+	return &worktreeSetupStatusJSON{
+		State:              "incomplete",
+		Agent:              claudeCodeAgentName,
+		Missing:            issue.missingJSONFields(),
+		ConfiguredWorktree: issue.ConfiguredWorktree,
+	}
 }
 
 type codexHooksStatusJSON struct {
@@ -1131,9 +1157,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	if presenceErr != nil {
 		return writeJSON(statusJSON{Error: presenceErr.Error()})
 	}
+	setupIssue := inspectWorktreeSetup(ctx)
 
 	if !projectExists && !localExists {
-		return writeJSON(statusJSON{Error: "not set up"})
+		return writeJSON(statusJSON{Error: "not set up", WorktreeSetup: worktreeSetupStatusFromIssue(setupIssue)})
 	}
 
 	s, err := LoadEntireSettings(ctx)
@@ -1146,6 +1173,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		Agents:         []string{},
 		ActiveSessions: []sessionBriefJSON{},
 		AgentHelp:      agentHelpCommand,
+		WorktreeSetup:  worktreeSetupStatusFromIssue(setupIssue),
 	}
 
 	if s.Enabled {

@@ -111,6 +111,10 @@ func claudeHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 	return agent.OpenHookConfig(repoRoot, (&ClaudeCodeAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
+func claudeHookConfigForWorktreeRoot(worktreeRoot string) (*agent.HookConfigFile, error) {
+	return agent.OpenHookConfig(worktreeRoot, (&ClaudeCodeAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
+
 // resolveInstallRepoRoot locates the repo root InstallHooks writes under,
 // falling back to CWD when not in a git repo (e.g. during tests).
 func resolveInstallRepoRoot(ctx context.Context) (string, error) {
@@ -430,6 +434,10 @@ func loadClaudeSettings(ctx context.Context) (ClaudeSettings, error) {
 	if err != nil {
 		return ClaudeSettings{}, err
 	}
+	return loadClaudeSettingsFromConfig(ctx, cfg)
+}
+
+func loadClaudeSettingsFromConfig(ctx context.Context, cfg *agent.HookConfigFile) (ClaudeSettings, error) {
 	data, err := cfg.Read()
 	// No settings file means no hooks, which is an answer; anything else means we
 	// could not read the answer.
@@ -460,6 +468,21 @@ func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	// Check for at least one of our hooks (new, wrapped, or legacy format)
+	return hasEntireHook(settings.Hooks.Stop), nil
+}
+
+// AreProjectHooksInstalledInWorktree checks an explicit worktree's shared
+// .claude/settings.json for Entire hooks. Claude user and local settings are
+// outside this portability check because they do not travel with the checkout.
+func AreProjectHooksInstalledInWorktree(ctx context.Context, worktreeRoot string) (bool, error) {
+	cfg, err := claudeHookConfigForWorktreeRoot(worktreeRoot)
+	if err != nil {
+		return false, err
+	}
+	settings, err := loadClaudeSettingsFromConfig(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
 	return hasEntireHook(settings.Hooks.Stop), nil
 }
 

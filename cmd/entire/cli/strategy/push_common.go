@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
 
@@ -101,6 +102,10 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 // handle the no-op case.
 // Does not check any settings — callers are responsible for gating.
 func pushRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered bool, err error) {
+	return pushRefIfNeededWithMetadataThreshold(ctx, target, ref, OversizedCheckpointMetadataThreshold)
+}
+
+func pushRefIfNeededWithMetadataThreshold(ctx context.Context, target string, ref plumbing.ReferenceName, metadataThreshold int64) (delivered bool, err error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Debug(ctx, "push skipped: open repository failed",
@@ -124,7 +129,7 @@ func pushRefIfNeeded(ctx context.Context, target string, ref plumbing.ReferenceN
 		return true, nil
 	}
 
-	return doPushRef(ctx, target, ref)
+	return doPushRefWithMetadataThreshold(ctx, target, ref, metadataThreshold)
 }
 
 // hasUnpushedBranchRef checks if the local branch differs from the remote.
@@ -166,6 +171,10 @@ var checkpointPushBudget = 2 * time.Minute
 // delivery, such as latching the captured checkpoint sync remote, must read
 // delivered and not err.
 func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (delivered bool, err error) {
+	return doPushRefWithMetadataThreshold(ctx, target, ref, OversizedCheckpointMetadataThreshold)
+}
+
+func doPushRefWithMetadataThreshold(ctx context.Context, target string, ref plumbing.ReferenceName, metadataThreshold int64) (delivered bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
@@ -207,7 +216,7 @@ func doPushRef(ctx context.Context, target string, ref plumbing.ReferenceName) (
 	stop = startProgressDots(os.Stderr)
 
 	frCtx, fetchRebaseSpan := perf.Start(ctx, "fetch_and_rebase")
-	syncErr := fetchAndRebaseRefCommon(frCtx, target, ref)
+	syncErr := fetchAndRebaseRefWithMetadataThreshold(frCtx, target, ref, metadataThreshold)
 	fetchRebaseSpan.RecordError(syncErr)
 	fetchRebaseSpan.End()
 	if syncErr != nil {
@@ -468,6 +477,10 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 // apply cleanly.
 // The target can be a remote name or a URL.
 func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+	return fetchAndRebaseRefWithMetadataThreshold(ctx, target, ref, OversizedCheckpointMetadataThreshold)
+}
+
+func fetchAndRebaseRefWithMetadataThreshold(ctx context.Context, target string, ref plumbing.ReferenceName, metadataThreshold int64) error {
 	// No timeout: runs under doPushRef's shared budget.
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
@@ -481,12 +494,22 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	var refSpec string
 	usedTempRef := remote.IsURL(fetchTarget) || !ref.IsBranch()
 	if usedTempRef {
-		tmpRef := "refs/entire-fetch-tmp/" + strings.TrimPrefix(ref.String(), "refs/")
-		refSpec = fmt.Sprintf("+%s:%s", ref.String(), tmpRef)
-		fetchedRefName = plumbing.ReferenceName(tmpRef)
+		fetchedRefName, err = newFetchTmpRef("push-recovery")
+		if err != nil {
+			return err
+		}
+		refSpec = fmt.Sprintf("+%s:%s", ref.String(), fetchedRefName)
 	} else {
 		refSpec = fmt.Sprintf("+%s:refs/remotes/%s/%s", ref.String(), target, ref.Short())
 		fetchedRefName = plumbing.NewRemoteReferenceName(target, ref.Short())
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+	if usedTempRef {
+		defer func() { _ = repo.Storer.RemoveReference(fetchedRefName) }() //nolint:errcheck // cleanup is best-effort
 	}
 
 	// Use git CLI for fetch (go-git's fetch can be tricky with auth).
@@ -510,23 +533,9 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("fetch failed: %s", fetchOutput)
 	}
 
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	// Reconcile disconnected metadata branches before rebasing.
-	// The fetch above updated the remote-tracking ref, so reconciliation
-	// can compare fresh local vs remote. If disconnected (empty-orphan bug),
-	// this cherry-picks local commits onto remote tip, updating the local ref.
-	// If reconciliation fails, abort — proceeding to rebase on disconnected
-	// refs would silently combine unrelated histories.
-	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
-		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
-	}
-
-	// Get local ref (re-read after potential reconciliation update)
+	// Read the exact local and fetched tips used by metadata cleanup. Cleanup
+	// must run before generic disconnected-history recovery because independently
+	// repaired histories can be hash-disconnected while sharing checkpoint trees.
 	localRef, err := repo.Reference(ref, true)
 	if err != nil {
 		return fmt.Errorf("failed to get local ref: %w", err)
@@ -537,15 +546,32 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	if err != nil {
 		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
+	if ref == plumbing.NewBranchReferenceName(paths.MetadataBranchName) {
+		_, handled, reconcileErr := reconcileOversizedV1ForPush(
+			ctx, repo, localRef.Hash(), remoteRef.Hash(), metadataThreshold,
+		)
+		if reconcileErr != nil {
+			return fmt.Errorf("reconcile oversized checkpoint metadata: %w", reconcileErr)
+		}
+		if handled {
+			return nil
+		}
+	}
 
+	// If the content-aware repair did not apply, retain the general recovery for
+	// legacy disconnected-orphan histories and non-v1 checkpoint refs.
+	if reconcileErr := ReconcileDisconnectedMetadataRef(ctx, repo, ref, fetchedRefName, os.Stderr); reconcileErr != nil {
+		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
+	}
+	localRef, err = repo.Reference(ref, true)
+	if err != nil {
+		return fmt.Errorf("failed to get local ref after metadata reconciliation: %w", err)
+	}
 	advance := func(hash plumbing.Hash) error {
-		if err := setRefHash(repo, ref, hash); err != nil {
-			return err
+		if ref == plumbing.NewBranchReferenceName(paths.MetadataBranchName) {
+			return atomicSetV1Ref(ctx, repo, localRef.Hash(), hash)
 		}
-		if usedTempRef {
-			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
-		}
-		return nil
+		return setRefHash(repo, ref, hash)
 	}
 
 	// If local is already at or behind remote, fast-forward

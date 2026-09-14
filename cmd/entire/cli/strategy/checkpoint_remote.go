@@ -3,6 +3,8 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +22,18 @@ import (
 // checkpointRemoteFetchTimeout bounds checkpoint-remote fetches made from the
 // push hot path, where the user's own `git push` is blocked for the duration.
 const checkpointRemoteFetchTimeout = 30 * time.Second
+
+func newFetchTmpRef(purpose string) (plumbing.ReferenceName, error) {
+	var suffix [12]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", fmt.Errorf("generate temporary fetch ref: %w", err)
+	}
+	ref := plumbing.ReferenceName(FetchTmpRefPrefix + purpose + "/" + hex.EncodeToString(suffix[:]))
+	if err := ref.Validate(); err != nil {
+		return "", fmt.Errorf("build temporary fetch ref: %w", err)
+	}
+	return ref, nil
+}
 
 // checkpointRemoteForegroundFetchTimeout bounds checkpoint-remote fetches made
 // by user-initiated foreground commands (enable, resume, explain). It matches
@@ -146,14 +160,27 @@ func fetchMetadataBranchWithin(ctx context.Context, remoteURL string, timeout ti
 		return fmt.Errorf("primary metadata ref %s is not a branch", refs.Primary)
 	}
 	branchName := refs.Primary.Short()
-	tmpRef := FetchTmpRefPrefix + branchName
-	srcRef := refs.Primary.String()
-
-	if err := fetchURLIntoTmpRef(ctx, "", remoteURL, srcRef, tmpRef, "metadata branch", true, timeout); err != nil {
+	tmpRef, err := newFetchTmpRef("metadata-branch")
+	if err != nil {
 		return err
 	}
-	if err := PromoteTmpRefSafely(ctx, plumbing.ReferenceName(tmpRef), refs.Primary, branchName); err != nil {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open repository for %s fetch: %w", branchName, err)
+	}
+	defer repo.Close()
+	defer func() { _ = repo.Storer.RemoveReference(tmpRef) }() //nolint:errcheck // cleanup is best-effort
+	srcRef := refs.Primary.String()
+
+	if err := fetchURLIntoTmpRef(ctx, "", remoteURL, srcRef, tmpRef.String(), "metadata branch", true, timeout); err != nil {
 		return err
+	}
+	fetchedRef, err := repo.Reference(tmpRef, true)
+	if err != nil {
+		return fmt.Errorf("%s not found after fetch (tmp ref %s missing): %w", branchName, tmpRef, err)
+	}
+	if err := SafelyAdvanceLocalRef(ctx, repo, refs.Primary, fetchedRef.Hash()); err != nil {
+		return fmt.Errorf("failed to advance local %s: %w", branchName, err)
 	}
 
 	return nil

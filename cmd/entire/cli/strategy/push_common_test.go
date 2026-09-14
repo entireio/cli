@@ -1038,8 +1038,7 @@ func TestFetchAndRebase_URLTarget_ReconcilesFetchedTempRef(t *testing.T) {
 	assert.Contains(t, entries, "aa/aaaaaaaaaa/metadata.json", "remote checkpoint should be preserved")
 	assert.Contains(t, entries, "cc/cccccccccc/metadata.json", "local checkpoint should be preserved")
 
-	_, err = repo.Reference(plumbing.ReferenceName("refs/entire-fetch-tmp/"+branchName), true)
-	assert.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "temporary fetched ref should be cleaned up")
+	assertNoFetchTmpRefsWithPurpose(t, repo, "push-recovery")
 }
 
 // TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef verifies that enabling
@@ -1139,8 +1138,7 @@ func TestFetchAndRebase_FlaggedOriginTarget_UsesTempRef(t *testing.T) {
 	assert.Contains(t, entries, "aa/aaaaaaaaaa/metadata.json", "remote checkpoint should be preserved")
 	assert.Contains(t, entries, "cc/cccccccccc/metadata.json", "local checkpoint should be preserved")
 
-	_, err = repo.Reference(plumbing.ReferenceName("refs/entire-fetch-tmp/"+branchName), true)
-	assert.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "temporary fetched ref should be cleaned up")
+	assertNoFetchTmpRefsWithPurpose(t, repo, "push-recovery")
 }
 
 // TestIsCheckpointRemoteCommitted verifies that the discoverability check reads

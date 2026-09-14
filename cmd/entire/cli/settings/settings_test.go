@@ -1536,6 +1536,64 @@ func TestIsSetUpAndEnabled_FalseOnInvalidScannerConfig(t *testing.T) {
 	}
 }
 
+func TestIsSetUpAndEnabledForWorktreeRoot(t *testing.T) {
+	t.Parallel()
+
+	enabledRoot := t.TempDir()
+	testutil.InitRepo(t, enabledRoot)
+	enabledDir := filepath.Join(enabledRoot, ".entire")
+	if err := os.MkdirAll(enabledDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(enabledDir, SettingsName), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	disabledRoot := t.TempDir()
+	testutil.InitRepo(t, disabledRoot)
+	disabledDir := filepath.Join(disabledRoot, ".entire")
+	if err := os.MkdirAll(disabledDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(disabledDir, SettingsLocalName), []byte(`{"enabled":false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !IsSetUpAndEnabledForWorktreeRoot(t.Context(), enabledRoot) {
+		t.Error("enabled explicit worktree reported inactive")
+	}
+	if IsSetUpAndEnabledForWorktreeRoot(t.Context(), disabledRoot) {
+		t.Error("disabled explicit worktree reported active")
+	}
+	if IsSetUpAndEnabledForWorktreeRoot(t.Context(), t.TempDir()) {
+		t.Error("unconfigured explicit worktree reported active")
+	}
+}
+
+func TestProjectSettingsEnabledForWorktreeRoot_IgnoresLocalOverride(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	settingsDir := filepath.Join(root, ".entire")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, SettingsName), []byte(`{"enabled":false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, SettingsLocalName), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if ProjectSettingsEnabledForWorktreeRoot(root) {
+		t.Error("disabled project settings reported enabled through local override")
+	}
+	if !IsSetUpAndEnabledForWorktreeRoot(t.Context(), root) {
+		t.Error("effective worktree settings reported disabled despite local override")
+	}
+}
+
 func TestGetCheckpointPushRemote(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
