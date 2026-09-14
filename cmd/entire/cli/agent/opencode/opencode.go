@@ -67,10 +67,18 @@ func (a *OpenCodeAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	return data, nil
 }
 
+// rawExportSession preserves an OpenCode export without interpreting it, so
+// chunking and reassembly round-trip whatever shape the running OpenCode wrote —
+// including the OpenCode 2 fields the typed v1 ExportSession drops.
+type rawExportSession struct {
+	Info     json.RawMessage   `json:"info"`
+	Messages []json.RawMessage `json:"messages"`
+}
+
 // ChunkTranscript splits an OpenCode export JSON transcript by distributing messages across chunks.
 // OpenCode uses JSON format with {"info": {...}, "messages": [...]} structure.
 func (a *OpenCodeAgent) ChunkTranscript(_ context.Context, content []byte, maxSize int) ([][]byte, error) {
-	var session ExportSession
+	var session rawExportSession
 	if err := json.Unmarshal(content, &session); err != nil {
 		return nil, fmt.Errorf("failed to parse export session for chunking: %w", err)
 	}
@@ -79,29 +87,19 @@ func (a *OpenCodeAgent) ChunkTranscript(_ context.Context, content []byte, maxSi
 		return [][]byte{content}, nil
 	}
 
-	// Marshal info to calculate accurate base size
-	infoBytes, err := json.Marshal(session.Info)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal session info for chunking: %w", err)
-	}
 	// Base JSON structure size: {"info":<info>,"messages":[ ... ]}
-	baseSize := len(`{"info":`) + len(infoBytes) + len(`,"messages":[]}`)
+	baseSize := len(`{"info":`) + len(session.Info) + len(`,"messages":[]}`)
 
 	var chunks [][]byte
-	var currentMessages []ExportMessage
+	var currentMessages []json.RawMessage
 	currentSize := baseSize
 
 	for _, msg := range session.Messages {
-		// Marshal message to get its size
-		msgBytes, err := json.Marshal(msg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal message for chunking: %w", err)
-		}
-		msgSize := len(msgBytes) + 1 // +1 for comma separator
+		msgSize := len(msg) + 1 // +1 for comma separator
 
 		if currentSize+msgSize > maxSize && len(currentMessages) > 0 {
 			// Save current chunk
-			chunkData, err := json.Marshal(ExportSession{Info: session.Info, Messages: currentMessages})
+			chunkData, err := marshalRawExport(session.Info, currentMessages)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal chunk: %w", err)
 			}
@@ -118,7 +116,7 @@ func (a *OpenCodeAgent) ChunkTranscript(_ context.Context, content []byte, maxSi
 
 	// Add the last chunk
 	if len(currentMessages) > 0 {
-		chunkData, err := json.Marshal(ExportSession{Info: session.Info, Messages: currentMessages})
+		chunkData, err := marshalRawExport(session.Info, currentMessages)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal final chunk: %w", err)
 		}
@@ -138,11 +136,11 @@ func (a *OpenCodeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 		return nil, errors.New("no chunks to reassemble")
 	}
 
-	var allMessages []ExportMessage
-	var sessionInfo SessionInfo
+	var allMessages []json.RawMessage
+	var sessionInfo json.RawMessage
 
 	for i, chunk := range chunks {
-		var session ExportSession
+		var session rawExportSession
 		if err := json.Unmarshal(chunk, &session); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal chunk %d: %w", i, err)
 		}
@@ -152,11 +150,24 @@ func (a *OpenCodeAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 		allMessages = append(allMessages, session.Messages...)
 	}
 
-	result, err := json.Marshal(ExportSession{Info: sessionInfo, Messages: allMessages})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal reassembled transcript: %w", err)
+	return marshalRawExport(sessionInfo, allMessages)
+}
+
+// marshalRawExport renders a session object, preserving info exactly and
+// defaulting a missing info to an empty object so the output keeps the
+// {"info":...,"messages":[...]} shape the format detectors rely on.
+func marshalRawExport(info json.RawMessage, messages []json.RawMessage) ([]byte, error) {
+	if len(info) == 0 {
+		info = json.RawMessage("{}")
 	}
-	return result, nil
+	if messages == nil {
+		messages = []json.RawMessage{}
+	}
+	out, err := json.Marshal(rawExportSession{Info: info, Messages: messages})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal export session: %w", err)
+	}
+	return out, nil
 }
 
 // --- Legacy methods ---
