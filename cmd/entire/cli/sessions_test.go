@@ -1102,16 +1102,18 @@ func TestTokensCmd_TextOutputWithRecommendations(t *testing.T) {
 func TestRecommendationRulesSubagentHeavyAvoidsOverflow(t *testing.T) {
 	t.Parallel()
 
+	// The share arithmetic must not overflow at the extreme. The breakdown is
+	// supplied because the rule now cites the row it renders: no row, no
+	// citation, no recommendation.
 	maxInt := int(^uint(0) >> 1)
-	recs := recommendationRules(tokenRecommendationSignals{
-		Tokens: &sessionTokensUsage{
-			Total:         maxInt,
-			SubagentTotal: maxInt,
-		},
-	})
+	recs := recommendationRules(sessionTokenRecommendationSignals(
+		&sessionTokensUsage{Total: maxInt, SubagentTotal: maxInt},
+		&tokenClassBreakdown{Total: maxInt},
+		nil, 0, 0,
+	))
 
 	for _, rec := range recs {
-		if rec.ID == "subagent-heavy" {
+		if rec.ID == recSubagentHeavy {
 			return
 		}
 	}
@@ -3808,4 +3810,62 @@ func TestUsageLineCarriesPerCall(t *testing.T) {
 	if strings.Contains(out.String(), "Per call") {
 		t.Errorf("expected no per-call figure without API calls, got:\n%s", out.String())
 	}
+}
+
+// TestSubagentRecommendationFollowsItsRow pins that the subagent-heavy
+// recommendation cites the row the breakdown actually prints, and stays quiet
+// when that row is suppressed.
+//
+// The subagent total comes from an unbounded walk while the breakdown is
+// depth-flattened, so the total can exceed the breakdown's. writeTokenClasses
+// suppresses the row in that case (subagentShareFitsBlock). Without the same
+// guard the recommendation printed figures found in no row, and
+// self-contradictory on their face: "Subagents used 15k of 10k tokens (100%)".
+func TestSubagentRecommendationFollowsItsRow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("silent when the row is suppressed", func(t *testing.T) {
+		t.Parallel()
+
+		tokens := &sessionTokensUsage{Total: 10_000, CacheRead: 9_000, SubagentTotal: 15_000, APICalls: 3}
+		classes := &tokenClassBreakdown{
+			CacheRead: tokenClassShare{Tokens: 9_000, VolumePercent: 90},
+			Total:     10_000,
+		}
+		if subagentShareFitsBlock(classes, tokens.SubagentTotal) {
+			t.Fatal("fixture should suppress the subagent row")
+		}
+
+		for _, rec := range recommendationRules(sessionTokenRecommendationSignals(tokens, classes, nil, 0, 0)) {
+			if rec.ID == recSubagentHeavy {
+				t.Errorf("subagent-heavy fired without a row to cite: %q", rec.Message)
+			}
+		}
+	})
+
+	t.Run("cites the breakdown's total, not the usage total", func(t *testing.T) {
+		t.Parallel()
+
+		tokens := &sessionTokensUsage{Total: 900_000, CacheRead: 500_000, SubagentTotal: 200_000, APICalls: 3}
+		classes := &tokenClassBreakdown{
+			CacheRead: tokenClassShare{Tokens: 500_000, VolumePercent: 50},
+			Total:     1_000_000,
+		}
+
+		var msg string
+		for _, rec := range recommendationRules(sessionTokenRecommendationSignals(tokens, classes, nil, 0, 0)) {
+			if rec.ID == recSubagentHeavy {
+				msg = rec.Message
+			}
+		}
+		if msg == "" {
+			t.Fatal("expected subagent-heavy to fire")
+		}
+		if !strings.Contains(msg, formatTokenCount(1_000_000)) {
+			t.Errorf("message must cite the breakdown total the row prints, got %q", msg)
+		}
+		if strings.Contains(msg, formatTokenCount(900_000)) {
+			t.Errorf("message cites the usage total, which the row does not print: %q", msg)
+		}
+	})
 }

@@ -522,18 +522,28 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 			Signals:  []string{"api_call_count"},
 		})
 	}
-	if signals.Tokens != nil && tokenShareAtLeastOneTenth(signals.Tokens.SubagentTotal, signals.Tokens.Total) {
+	// Gated on the row existing, not just on the share. The subagent total
+	// comes from an unbounded walk while the breakdown is depth-flattened, so
+	// it can exceed the breakdown's total; writeTokenClasses suppresses the row
+	// in that case. Without the same guard this printed figures that appear in
+	// no row and contradict themselves — "Subagents used 15k of 10k tokens
+	// (100%)".
+	if signals.Tokens != nil && subagentShareFitsBlock(signals.Classes, signals.Tokens.SubagentTotal) &&
+		tokenShareAtLeastOneTenth(signals.Tokens.SubagentTotal, signals.Classes.Total) {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       recSubagentHeavy,
 			Severity: trailReviewSeverityMedium,
 			Message: fmt.Sprintf(
 				"Subagents used %s of %s tokens (%s). Give each a narrower objective and expected output.",
 				formatTokenCount(signals.Tokens.SubagentTotal),
-				formatTokenCount(signals.Tokens.Total),
+				// The breakdown's total, not the usage total: the row is
+				// rendered against the breakdown, and the two differ whenever
+				// the subagent walk and the flattening disagree.
+				formatTokenCount(signals.Classes.Total),
 				// The row's own share, through the row's own formatter, so the
 				// two strings match rather than merely agreeing to a rounding.
 				formatSharePercent(signals.Tokens.SubagentTotal,
-					roundedPercent(signals.Tokens.SubagentTotal, signals.Tokens.Total)),
+					roundedPercent(signals.Tokens.SubagentTotal, signals.Classes.Total)),
 			),
 			Signals: []string{"subagent_tokens"},
 		})
