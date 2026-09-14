@@ -20,6 +20,7 @@ func newChangelogCmd() *cobra.Command {
 func newChangelogCmdWithClient(client *changelog.Client) *cobra.Command {
 	var limit int
 	var asJSON bool
+	var onlyCLI bool
 	run := func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
 		if limit <= 0 {
@@ -44,7 +45,7 @@ func newChangelogCmdWithClient(client *changelog.Client) *cobra.Command {
 			}
 			stop = startSpinner(cmd.ErrOrStderr(), message)
 		}
-		entries, err := client.Read(cmd.Context(), limit, query)
+		entries, err := client.Read(cmd.Context(), limit, query, onlyCLI)
 		stop(false)
 		if err != nil {
 			return fmt.Errorf("read product changelog: %w", err)
@@ -54,17 +55,18 @@ func newChangelogCmdWithClient(client *changelog.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "changelog",
 		Short:   "Read Entire product updates",
-		Long:    "Read full product announcements from entire.io, covering all Entire products.\nNo login, Git repository, or Entire setup is required.",
+		Long:    "Read full product announcements from entire.io and CLI releases from GitHub, newest first.\nNo login, Git repository, or Entire setup is required.",
 		Example: "  entire changelog\n  entire changelog --limit 10 --json\n  entire changelog search \"git network\"",
 		Args:    cobra.NoArgs,
 		RunE:    run,
 	}
-	cmd.PersistentFlags().IntVar(&limit, "limit", 5, "Maximum number of posts (positive integer)")
-	cmd.PersistentFlags().BoolVar(&asJSON, "json", false, "Output full posts as a JSON array")
+	cmd.PersistentFlags().IntVar(&limit, "limit", 5, "Maximum number of entries (positive integer)")
+	cmd.PersistentFlags().BoolVar(&onlyCLI, "only-cli", false, "Show only CLI releases")
+	cmd.PersistentFlags().BoolVar(&asJSON, "json", false, "Output full entries as a JSON array")
 	cmd.AddCommand(&cobra.Command{
 		Use:     "search <query>",
 		Short:   "Search the complete product changelog",
-		Long:    "Find a case-insensitive literal phrase in titles, descriptions, or full Markdown bodies.\nResults are newest first. A no-match search may fetch every published changelog post.",
+		Long:    "Find a case-insensitive literal phrase in titles, descriptions, or full Markdown bodies.\nResults are newest first. Search covers product posts and CLI releases. A no-match search may fetch every published changelog post.",
 		Example: "  entire changelog search subagent\n  entire changelog search \"git network\" --limit 10 --json",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.ExactArgs(1)(cmd, args); err != nil {

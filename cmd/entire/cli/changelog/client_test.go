@@ -39,7 +39,13 @@ func indexFixture(origin string, count int) string {
 
 func testClient(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/CHANGELOG.md" {
+			fmt.Fprint(w, "# Changelog\n\n## [Unreleased]\n")
+			return
+		}
+		handler(w, r)
+	}))
 	t.Cleanup(server.Close)
 	client, err := NewClient(server.Client(), server.URL)
 	require.NoError(t, err)
@@ -163,7 +169,7 @@ func TestReadSelection(t *testing.T) {
 				}
 				fmt.Fprint(w, "---\ncategory: Changelog\n---\n"+body)
 			})
-			entries, err := client.Read(t.Context(), tc.limit, tc.query)
+			entries, err := client.Read(t.Context(), tc.limit, tc.query, false)
 			require.NoError(t, err)
 			require.Len(t, entries, tc.want)
 			for i, e := range entries {
@@ -220,7 +226,7 @@ func TestReadFailures(t *testing.T) {
 				}
 				fmt.Fprint(w, tc.body)
 			})
-			entries, err := client.Read(t.Context(), 5, "match")
+			entries, err := client.Read(t.Context(), 5, "match", false)
 			require.Error(t, err)
 			require.Nil(t, entries, "required failures must discard earlier matches")
 		})
@@ -255,7 +261,7 @@ func TestRedirectRestrictions(t *testing.T) {
 				}
 				http.Redirect(w, r, other.URL+"/blog/redirect.md", http.StatusFound)
 			})
-			_, err := client.Read(t.Context(), 1, "")
+			_, err := client.Read(t.Context(), 1, "", false)
 			require.ErrorContains(t, err, "disallowed changelog URL")
 			require.Zero(t, received.Load())
 		})
@@ -276,7 +282,7 @@ func TestReadCancellationAndTimeout(t *testing.T) {
 			} else {
 				go func() { <-started; cancel() }()
 			}
-			_, err := client.Read(ctx, 1, "")
+			_, err := client.Read(ctx, 1, "", false)
 			require.Error(t, err)
 			if timeout {
 				require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -308,7 +314,7 @@ func TestReadStopsOutstandingWork(t *testing.T) {
 		<-r.Context().Done()
 		stopped.Add(1)
 	})
-	entries, err := client.Read(t.Context(), 1, "match")
+	entries, err := client.Read(t.Context(), 1, "match", false)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	require.Equal(t, int32(fetchConcurrency), started.Load())
@@ -319,12 +325,12 @@ func TestReadRejectsLimitBeforeNetwork(t *testing.T) {
 	t.Parallel()
 	client := testClient(t, func(http.ResponseWriter, *http.Request) { t.Error("unexpected request") })
 	for _, limit := range []int{0, -1} {
-		_, err := client.Read(t.Context(), limit, "")
+		_, err := client.Read(t.Context(), limit, "", false)
 		require.Error(t, err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := client.Read(ctx, 1, "")
+	_, err := client.Read(ctx, 1, "", false)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -345,7 +351,7 @@ func TestSameOriginRedirects(t *testing.T) {
 					t.Error("followed a disallowed redirect")
 				}
 			})
-			entries, err := client.Read(t.Context(), 1, "")
+			entries, err := client.Read(t.Context(), 1, "", false)
 			if target != "/blog/renamed.md" {
 				require.ErrorContains(t, err, "disallowed changelog URL")
 				return

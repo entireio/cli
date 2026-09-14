@@ -26,6 +26,10 @@ func changelogTestClient(t *testing.T, fail bool) (*changelog.Client, *atomic.In
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		if r.URL.Path == "/CHANGELOG.md" {
+			fmt.Fprint(w, "# Changelog\n\n## [Unreleased]\n")
+			return
+		}
 		if r.URL.Path == "/blog.md" {
 			fmt.Fprint(w, "# Blog\n\nPublished Entire blog posts in Changelog, newest first.\n\n")
 			for i := range 7 {
@@ -203,4 +207,50 @@ func TestChangelogAgentHelp(t *testing.T) {
 	root.SetArgs([]string{"--help"})
 	require.NoError(t, root.ExecuteContext(t.Context()))
 	require.Contains(t, out.String(), "changelog")
+}
+
+func TestChangelogOnlyCLI(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		slugs []string
+	}{
+		{"list", []string{"--only-cli", "--limit", "2", "--json"}, []string{"cli-2.0.0", "cli-1.0.0"}},
+		{"limit", []string{"--only-cli", "--limit", "1", "--json"}, []string{"cli-2.0.0"}},
+		{"search", []string{"search", "older FIX", "--only-cli", "--limit", "1", "--json"}, []string{"cli-1.0.0"}},
+		{"inherited", []string{"--only-cli", "search", "older fix", "--json"}, []string{"cli-1.0.0"}},
+		{"no match", []string{"search", "absent", "--only-cli", "--json"}, []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.URL.Path != "/CHANGELOG.md" {
+					t.Errorf("CLI-only request fetched product feed: %s", r.URL.Path)
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				fmt.Fprint(w, "# Changelog\n\n## [1.0.0] - 2026-08-01\n\nOlder fix\n\n## [2.0.0] - 2026-09-01\n\nNew feature\n")
+			}))
+			t.Cleanup(server.Close)
+			client, err := changelog.NewClient(server.Client(), server.URL)
+			require.NoError(t, err)
+			cmd := newChangelogCmdWithClient(client)
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(tc.args)
+			require.NoError(t, cmd.ExecuteContext(t.Context()))
+			var entries []changelog.Entry
+			require.NoError(t, json.Unmarshal(out.Bytes(), &entries))
+			slugs := make([]string, 0, len(entries))
+			for _, entry := range entries {
+				slugs = append(slugs, entry.Slug)
+			}
+			require.Equal(t, tc.slugs, slugs)
+			require.Equal(t, int32(1), requests.Load())
+		})
+	}
 }

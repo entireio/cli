@@ -15,10 +15,12 @@ import (
 )
 
 const (
-	productionOrigin = "https://entire.io"
-	maxResponseBytes = 2 << 20
-	requestTimeout   = 20 * time.Second
-	fetchConcurrency = 4
+	changelogCategory = "Changelog"
+	productionOrigin  = "https://entire.io"
+	cliChangelogURL   = "https://raw.githubusercontent.com/entireio/cli/refs/heads/main/CHANGELOG.md"
+	maxResponseBytes  = 2 << 20
+	requestTimeout    = 20 * time.Second
+	fetchConcurrency  = 4
 )
 
 // Entry is a published product update. Content preserves the source Markdown/MDX.
@@ -35,11 +37,13 @@ type Entry struct {
 
 // Client owns an unauthenticated HTTP client and its permitted origin.
 type Client struct {
-	http   http.Client
-	origin *url.URL
+	http       http.Client
+	origin     *url.URL
+	releaseURL string
 }
 
-// NewClient defaults to entire.io. Tests can supply a client and origin.
+// NewClient defaults to the public product and CLI feeds. A custom origin
+// serves the product index, posts, and /CHANGELOG.md for tests.
 func NewClient(httpClient *http.Client, origin string) (*Client, error) {
 	if origin == "" {
 		origin = productionOrigin
@@ -51,7 +55,11 @@ func NewClient(httpClient *http.Client, origin string) (*Client, error) {
 	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, errors.New("invalid changelog origin")
 	}
-	c := &Client{origin: u}
+	releaseURL := cliChangelogURL
+	if origin != productionOrigin {
+		releaseURL = strings.TrimRight(origin, "/") + "/CHANGELOG.md"
+	}
+	c := &Client{origin: u, releaseURL: releaseURL}
 	if httpClient != nil {
 		c.http = *httpClient
 	}
@@ -59,6 +67,12 @@ func NewClient(httpClient *http.Client, origin string) (*Client, error) {
 	c.http.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return errors.New("too many changelog redirects")
+		}
+		if via[0].URL.String() == c.releaseURL {
+			if req.URL.String() != c.releaseURL {
+				return fmt.Errorf("disallowed changelog URL: %s", req.URL.Redacted())
+			}
+			return nil
 		}
 		return c.validateURL(req.URL, via[0].URL.Path == "/blog.md")
 	}
@@ -81,8 +95,10 @@ func (c *Client) fetch(ctx context.Context, address string, index bool) ([]byte,
 	if err != nil {
 		return nil, fmt.Errorf("parse changelog URL: %w", err)
 	}
-	if err := c.validateURL(u, index); err != nil {
-		return nil, err
+	if address != c.releaseURL || index {
+		if err := c.validateURL(u, index); err != nil {
+			return nil, err
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -113,19 +129,33 @@ func (c *Client) fetch(ctx context.Context, address string, index bool) ([]byte,
 }
 
 // Read returns up to limit posts matching a case-insensitive literal substring,
-// newest first. An empty query lists posts without filtering.
-func (c *Client) Read(ctx context.Context, limit int, query string) ([]Entry, error) {
+// newest first. An empty query lists entries without text filtering.
+// onlyCLI skips the product feed and returns only CLI releases.
+func (c *Client) Read(ctx context.Context, limit int, query string, onlyCLI bool) ([]Entry, error) {
 	if limit <= 0 {
 		return nil, errors.New("--limit must be positive")
 	}
-	index, err := c.fetch(ctx, strings.TrimRight(c.origin.String(), "/")+"/blog.md?category=Changelog", true)
+	var entries []Entry
+	if !onlyCLI {
+		index, err := c.fetch(ctx, strings.TrimRight(c.origin.String(), "/")+"/blog.md?category=Changelog", true)
+		if err != nil {
+			return nil, err
+		}
+		entries, err = c.parseIndex(index)
+		if err != nil {
+			return nil, err
+		}
+	}
+	releases, err := c.fetch(ctx, c.releaseURL, false)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := c.parseIndex(index)
+	cliEntries, err := parseReleases(releases, c.releaseURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("CLI changelog: %w", err)
 	}
+	entries = append(entries, cliEntries...)
+	sortEntries(entries)
 	if query == "" {
 		entries = entries[:min(limit, len(entries))]
 	}
@@ -151,9 +181,13 @@ func (c *Client) selectEntries(ctx context.Context, entries []Entry, limit int, 
 		pending[i] = make(chan fetchResult, 1)
 		workers.Go(func() {
 			entry := entries[i]
-			body, err := c.fetch(ctx, entry.MarkdownURL, false)
-			if err == nil {
-				entry.Content, err = parsePost(body)
+			var err error
+			if entry.Content == "" {
+				var body []byte
+				body, err = c.fetch(ctx, entry.MarkdownURL, false)
+				if err == nil {
+					entry.Content, err = parsePost(body)
+				}
 			}
 			if err != nil {
 				err = fmt.Errorf("changelog post %s: %w", entry.Slug, err)

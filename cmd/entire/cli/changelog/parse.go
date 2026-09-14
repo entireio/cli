@@ -40,7 +40,7 @@ func (c *Client) parseIndex(source []byte) ([]Entry, error) {
 					return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 				})
 				for _, word := range words {
-					categoryFound = categoryFound || strings.EqualFold(word, "Changelog")
+					categoryFound = categoryFound || strings.EqualFold(word, changelogCategory)
 				}
 			}
 			continue
@@ -65,13 +65,17 @@ func (c *Client) parseIndex(source []byte) ([]Entry, error) {
 	if !categoryFound {
 		return nil, errors.New("malformed changelog index: expected Changelog category")
 	}
-	sort.Slice(entries, func(i, j int) bool {
+	sortEntries(entries)
+	return entries, nil
+}
+
+func sortEntries(entries []Entry) {
+	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].Date != entries[j].Date {
 			return entries[i].Date > entries[j].Date
 		}
 		return entries[i].Slug < entries[j].Slug
 	})
-	return entries, nil
 }
 
 func (c *Client) parseItem(item ast.Node, source []byte) (Entry, error) {
@@ -117,7 +121,7 @@ func (c *Client) parseItem(item ast.Node, source []byte) (Entry, error) {
 	if entry.Slug == "" {
 		return entry, errors.New("missing post slug")
 	}
-	entry.Category = "Changelog"
+	entry.Category = changelogCategory
 	return entry, nil
 }
 
@@ -164,7 +168,7 @@ func parsePost(source []byte) (string, error) {
 			if err := yaml.Unmarshal(source[start:len(source)-len(rest)], &metadata); err != nil {
 				return "", fmt.Errorf("invalid post frontmatter: %w", err)
 			}
-			if metadata.Category != "Changelog" {
+			if metadata.Category != changelogCategory {
 				return "", fmt.Errorf("unexpected post category %q", metadata.Category)
 			}
 			if len(bytes.TrimSpace(remaining)) == 0 {
