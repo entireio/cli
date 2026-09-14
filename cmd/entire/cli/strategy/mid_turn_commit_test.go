@@ -23,7 +23,7 @@ import (
 // from the transcript to repo-relative paths before comparing with staged files.
 //
 // Bug: ExtractModifiedFilesFromOffset returns absolute paths (e.g., /tmp/repo/src/main.go)
-// but getStagedFiles returns repo-relative paths (e.g., src/main.go). The exact-string
+// but getStagedChanges returns repo-relative paths (e.g., src/main.go). The exact-string
 // comparison in hasOverlappingFiles never matches, causing "no content to link".
 func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testing.T) {
 	dir := setupGitRepo(t)
@@ -88,9 +88,9 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 
 	// Call sessionHasNewContent — should fall through to live transcript check
 	// since there's no shadow branch. Pass staged files via contentCheckOpts.
-	stagedFiles, err := getStagedFiles(context.Background())
+	staged, err := getStagedChanges(context.Background())
 	require.NoError(t, err)
-	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{stagedFiles: stagedFiles})
+	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{staged: staged})
 	require.NoError(t, err)
 	assert.True(t, hasNew,
 		"sessionHasNewContent should return true when transcript has absolute paths "+
@@ -201,9 +201,9 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 	// Call sessionHasNewContent — should fall through to live transcript check
 	// since there's no shadow branch, and should detect subagent file modifications.
 	// Pass staged files via contentCheckOpts.
-	stagedFiles, err := getStagedFiles(context.Background())
+	staged, err := getStagedChanges(context.Background())
 	require.NoError(t, err)
-	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{stagedFiles: stagedFiles})
+	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{staged: staged})
 	require.NoError(t, err)
 	assert.True(t, hasNew,
 		"sessionHasNewContent should return true when subagent transcript "+

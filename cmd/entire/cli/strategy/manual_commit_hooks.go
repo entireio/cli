@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1742,22 +1741,20 @@ func truncateHash(h string) string {
 // declines to write. Note the record is NOT rescued by this commit's own
 // PostCommit: withholding the trailer means PostCommit returns at its
 // no-trailer early exit before reaching any session.
-// Computes the staged files list once and reuses it across all sessions to avoid
-// redundant `git diff --cached` calls (previously called up to 3 times per session).
+// Reuses one staged-change snapshot across all sessions.
 func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState) []*SessionState {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
 	var result []*SessionState
 
-	// Compute staged files once for all sessions.
-	// On error, pass nil — sessionHasNewContent treats nil stagedFiles as
-	// "unavailable" and skips overlap checks, falling through to other heuristics.
-	stagedFiles, err := getStagedFiles(ctx)
+	// Read one commit-index snapshot for all sessions. A failed read keeps
+	// the existing fallback to transcript and carry-forward heuristics.
+	staged, err := getStagedChanges(ctx)
 	if err != nil {
 		logging.Debug(logCtx,
-			"filterSessionsWithNewContent: getStagedFiles failed, skipping overlap checks",
+			"filterSessionsWithNewContent: getStagedChanges failed, skipping overlap checks",
 			slog.String("error", err.Error()),
 		)
-		stagedFiles = nil
+		staged = stagedChanges{}
 	}
 
 	for _, state := range sessions {
@@ -1768,7 +1765,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 			)
 			continue
 		}
-		hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{stagedFiles: stagedFiles})
+		hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{staged: staged})
 		if err != nil {
 			logging.Debug(logCtx, "filterSessionsWithNewContent: error checking session, skipping it",
 				slog.String("session_id", state.SessionID),
@@ -1784,7 +1781,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 			)
 			continue
 		}
-		if s.staleRecordIsOnlyContent(ctx, repo, state, stagedFiles) {
+		if s.staleRecordIsOnlyContent(ctx, repo, state, staged) {
 			logging.Debug(logCtx, "filterSessionsWithNewContent: session's only content is a stale task record, not stamping a trailer",
 				slog.String("session_id", state.SessionID),
 				slog.String("phase", string(state.Phase)),
@@ -1804,7 +1801,7 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 // transcript, tracked files, or steps is never excluded; it is reached only for
 // the rare record-bearing session that already failed the freshness bound, so
 // the common path pays nothing. Errors fail open toward stamping.
-func (s *ManualCommitStrategy) staleRecordIsOnlyContent(ctx context.Context, repo *git.Repository, state *SessionState, stagedFiles []string) bool {
+func (s *ManualCommitStrategy) staleRecordIsOnlyContent(ctx context.Context, repo *git.Repository, state *SessionState, staged stagedChanges) bool {
 	if !state.HasTaskContent() ||
 		(state.Phase.IsActive() && isRecentInteraction(state.LastInteractionTime)) ||
 		idleWithTaskContent(state, time.Now()) {
@@ -1812,19 +1809,16 @@ func (s *ManualCommitStrategy) staleRecordIsOnlyContent(ctx context.Context, rep
 	}
 	withoutRecords := *state
 	withoutRecords.TaskRecords = nil
-	hasOther, err := s.sessionHasNewContent(ctx, repo, &withoutRecords, contentCheckOpts{stagedFiles: stagedFiles})
+	hasOther, err := s.sessionHasNewContent(ctx, repo, &withoutRecords, contentCheckOpts{staged: staged})
 	return err == nil && !hasOther
 }
 
 // contentCheckOpts holds pre-computed values for sessionHasNewContent to avoid
 // redundant work across multiple sessions in a single hook invocation.
 type contentCheckOpts struct {
-	// stagedFiles is the pre-computed list of staged files (from getStagedFiles).
-	// nil means staged files are unavailable (error or PostCommit context where
-	// files are already committed) — callers skip overlap checks and fall through
-	// to other heuristics (e.g., transcript growth).
-	// Non-nil empty means successfully resolved but no files are staged.
-	stagedFiles []string
+	// A zero snapshot means unavailable (read error or PostCommit context).
+	// A successful read with no staged changes has non-nil empty paths.
+	staged stagedChanges
 
 	// shadowTree, when non-nil, is used directly to avoid redundant shadow branch
 	// resolution (the shadow ref/commit/tree were already resolved by the caller).
@@ -1860,7 +1854,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 				slog.String("session_id", state.SessionID),
 				slog.String("shadow_branch", shadowBranchName),
 			)
-			return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.stagedFiles)
+			return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.staged.paths)
 		}
 
 		commit, err := repo.CommitObject(ref.Hash())
@@ -1895,13 +1889,13 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 		if len(state.FilesTouched) > 0 {
 			// Shadow branch has files from carry-forward - check if staged files overlap
 			// AND have matching content (content-aware check).
-			if len(opts.stagedFiles) > 0 {
+			if len(opts.staged.paths) > 0 {
 				// PrepareCommitMsg context: check staged files overlap with content
-				result := stagedFilesOverlapWithContent(ctx, repo, tree, opts.stagedFiles, state.FilesTouched)
+				result := stagedFilesOverlapWithContent(ctx, repo, tree, opts.staged, state.FilesTouched)
 				logging.Debug(logCtx, "sessionHasNewContent: no transcript, carry-forward with staged files",
 					slog.String("session_id", state.SessionID),
 					slog.Int("files_touched", len(state.FilesTouched)),
-					slog.Int("staged_files", len(opts.stagedFiles)),
+					slog.Int("staged_files", len(opts.staged.paths)),
 					slog.Bool("result", result),
 				)
 				return result, nil
@@ -1918,7 +1912,7 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 		logging.Debug(logCtx, "sessionHasNewContent: no transcript and no files touched, checking live transcript",
 			slog.String("session_id", state.SessionID),
 		)
-		return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.stagedFiles)
+		return s.sessionHasNewContentFromLiveTranscript(ctx, state, opts.staged.paths)
 	}
 
 	// Check if there's new content to condense. Two cases:
@@ -1962,11 +1956,11 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 
 	// Check if staged files overlap with session's files with content-aware matching.
 	// This is primarily for PrepareCommitMsg; in PostCommit, stagedFiles is nil/empty.
-	if len(opts.stagedFiles) > 0 {
-		result := stagedFilesOverlapWithContent(ctx, repo, tree, opts.stagedFiles, state.FilesTouched)
+	if len(opts.staged.paths) > 0 {
+		result := stagedFilesOverlapWithContent(ctx, repo, tree, opts.staged, state.FilesTouched)
 		logging.Debug(logCtx, "sessionHasNewContent: staged files overlap check",
 			slog.String("session_id", state.SessionID),
-			slog.Int("staged_files", len(opts.stagedFiles)),
+			slog.Int("staged_files", len(opts.staged.paths)),
 			slog.Bool("result", result),
 		)
 		return result, nil
@@ -2223,7 +2217,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 
 	// Normalize to repo-relative paths.
 	// Transcript tool_use entries contain absolute paths (e.g., /Users/alex/project/src/main.go)
-	// but getStagedFiles/committedFiles use repo-relative paths (e.g., src/main.go).
+	// but getStagedChanges/committedFiles use repo-relative paths (e.g., src/main.go).
 	basePath := state.WorktreePath
 	if basePath == "" {
 		if wp, wpErr := paths.WorktreeRoot(ctx); wpErr == nil {
@@ -2874,38 +2868,6 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	result = CalculatePromptAttribution(baseTree, lastCheckpointTree, changedFiles, nextCheckpointNum)
 
 	return result
-}
-
-// getStagedFiles returns a list of files staged for commit using native git CLI.
-// This is much faster than go-git's worktree.Status() which scans the entire
-// working tree. `git diff --cached --name-only` uses native git's optimized index
-// and filesystem monitors.
-//
-// Returns (non-nil empty slice, nil) when no files are staged — callers can
-// distinguish "no staged files" from "error resolving staged files" (nil, err).
-func getStagedFiles(ctx context.Context) ([]string, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("resolve worktree root: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
-	cmd.Dir = repoRoot
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git diff --cached: %w", err)
-	}
-
-	staged := []string{}
-	trimmed := strings.TrimSpace(string(output))
-	// Normalize Windows line endings (\r\n) to Unix (\n) for cross-platform git output
-	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
-	for _, line := range strings.Split(trimmed, "\n") {
-		if line != "" {
-			staged = append(staged, filepath.ToSlash(line))
-		}
-	}
-	return staged, nil
 }
 
 // getLastPrompt retrieves the most recent user prompt from a session's shadow branch.
