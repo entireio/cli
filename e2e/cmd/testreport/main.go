@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -36,9 +37,19 @@ type parentTest struct {
 	children []*subtest
 }
 
+func completedParent(p *parentTest) bool {
+	switch p.action {
+	case "pass", "fail", "skip":
+		return true
+	default:
+		return false
+	}
+}
+
 func main() {
 	colorFlag := flag.Bool("color", false, "Force color output (default: auto-detect TTY)")
 	outputFile := flag.String("o", "", "Write output to file (ANSI + .nocolor.txt)")
+	failOnEmpty := flag.Bool("fail-on-empty", false, "Fail after writing the report if no parent tests completed")
 	flag.Parse()
 
 	useColor := *colorFlag || interactive.IsTerminalWriter(os.Stdout)
@@ -66,6 +77,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", noColorFile, err)
 			os.Exit(1)
 		}
+	}
+	// Require a terminal parent event; skipped parents still count as completed.
+	if *failOnEmpty && !slices.ContainsFunc(parents, completedParent) {
+		fmt.Fprintf(os.Stderr, "no tests completed in %q: check the test filter and the test output for build, regex, preflight errors, or an interrupted run\n", flag.Arg(0))
+		os.Exit(1)
 	}
 }
 
@@ -104,6 +120,10 @@ func parseEvents(r io.Reader) []*parentTest {
 		}
 
 		switch ev.Action {
+		case "run":
+			// A retry needs its own terminal event before it can count as complete.
+			info.action = ""
+			info.elapsed = 0
 		case "pass", "fail", "skip":
 			info.action = ev.Action
 			info.elapsed = ev.Elapsed
@@ -168,7 +188,7 @@ func renderReport(parents []*parentTest, color bool) string {
 	var b strings.Builder
 
 	// Count totals
-	var total, passed, failed, skipped int
+	var total, passed, failed, skipped, incomplete int
 	for _, p := range parents {
 		total++
 		switch p.action {
@@ -178,13 +198,19 @@ func renderReport(parents []*parentTest, color bool) string {
 			failed++
 		case "skip":
 			skipped++
+		default:
+			incomplete++
 		}
 	}
 
 	// Header
 	b.WriteString("E2E Test Report\n")
 	b.WriteString("═══════════════\n\n")
-	fmt.Fprintf(&b, "Total: %d  Passed: %d  Failed: %d  Skipped: %d\n\n", total, passed, failed, skipped)
+	fmt.Fprintf(&b, "Total: %d  Passed: %d  Failed: %d  Skipped: %d\n", total, passed, failed, skipped)
+	if incomplete > 0 {
+		fmt.Fprintf(&b, "Incomplete: %d\n", incomplete)
+	}
+	b.WriteString("\n")
 
 	for _, p := range parents {
 		icon := statusIcon(p.action, color)
@@ -243,14 +269,19 @@ func renderReport(parents []*parentTest, color bool) string {
 	}
 
 	// Footer banner
-	if failed > 0 {
+	switch {
+	case incomplete > 0:
+		fmt.Fprintf(&b, "INCOMPLETE (%d/%d tests completed)\n", total-incomplete, total)
+	case total == 0:
+		b.WriteString("NO TESTS RAN\n")
+	case failed > 0:
 		banner := fmt.Sprintf("💥 FAILED (%d/%d passed) 💥", passed, total)
 		if color {
 			fmt.Fprintf(&b, "%s%s%s\n", colorRed, banner, colorReset)
 		} else {
 			b.WriteString(banner + "\n")
 		}
-	} else {
+	default:
 		banner := fmt.Sprintf("🎉 ALL %d TESTS PASSED 🎉", total)
 		if color {
 			fmt.Fprintf(&b, "%s%s%s\n", colorGreen, banner, colorReset)
