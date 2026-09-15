@@ -58,13 +58,18 @@ func awaitRepoActive(ctx context.Context, c repoLifecycleGetter, result *coreapi
 	interval := repoPollInterval
 	var failures repoPollFailures
 	started := false
+	authoritative := false
 	for {
 		if result.Foreign.Or(false) {
 			return errors.New("repository readiness unconfirmed: server returned a foreign registry snapshot")
 		}
 		switch result.State.Or("") {
 		case repoStateActive:
-			return nil
+			// POST may report registry state. Only a successful authoritative
+			// read can confirm readiness, including after transient read errors.
+			if authoritative {
+				return nil
+			}
 		case repoStateFailed:
 			return fmt.Errorf("repository provisioning failed: %s", result.ProvisionReason.Or("no reason supplied"))
 		case repoStateProvisioning:
@@ -114,6 +119,7 @@ func awaitRepoActive(ctx context.Context, c repoLifecycleGetter, result *coreapi
 			}
 			failures = repoPollFailures{}
 			retainRepoCreation(result, snapshot)
+			authoritative = true
 			// Observe terminal or incompatible state before sleeping.
 			if result.State.Or("") != repoStateProvisioning || result.Foreign.Or(false) {
 				continue

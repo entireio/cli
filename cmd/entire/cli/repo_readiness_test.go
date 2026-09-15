@@ -106,7 +106,12 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 		wantErr              bool
 		foreign, mismatched  bool
 	}{
-		{name: "already active", initial: "active"},
+		{name: "already active", initial: "active", final: "active", polls: 1},
+		{name: "active creation but region still provisioning", initial: "active", final: "active", polls: 3},
+		{name: "active creation but failed region", initial: "active", final: "failed", polls: 1, wantErr: true},
+		{name: "active creation but unavailable region", initial: "active", pollStatus: 503, polls: 6, wantErr: true},
+		{name: "active creation but foreign snapshot", initial: "active", final: "active", foreign: true, polls: 1, wantErr: true},
+		{name: "active creation but missing lifecycle", initial: "active", final: "", polls: 1, wantErr: true},
 		{name: "multiple pending", initial: "provisioning", final: "active", polls: 3},
 		{name: "failed snapshot with restored access", initial: "provisioning", final: "failed", polls: 1, wantErr: true},
 		{name: "old server missing state", initial: "", wantErr: true},
@@ -149,6 +154,7 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 							fmt.Fprintf(w, `{"status":%d,"title":%q,"detail":%q}`, tc.pollStatus, http.StatusText(tc.pollStatus), detail)
 							return
 						}
+						state = "provisioning"
 						if int(n) >= tc.polls {
 							state = tc.final
 						}
@@ -569,7 +575,7 @@ func TestAwaitRepoActivePollingCallback(t *testing.T) {
 					}
 					return &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString(state)}, nil
 				}), result, func() { started++ })
-				if initial == "provisioning" {
+				if initial == "provisioning" || initial == "active" {
 					require.NoError(t, err)
 					require.Equal(t, 1, started)
 					require.Equal(t, 2, reads)

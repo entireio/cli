@@ -282,25 +282,29 @@ func serveRepoCreate(t *testing.T) <-chan []byte {
 	t.Helper()
 	bodyCh := make(chan []byte, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/repos" {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos":
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read create body: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			bodyCh <- raw
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/01KS6KFJR2XS6PZ188MVYE07AN" && r.URL.Query().Get("authoritative") == "true":
+			w.Header().Set("Content-Type", "application/json")
+		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read create body: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		bodyCh <- raw
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
 		if err := printJSON(w, &coreapi.Repo{
 			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
 			Name:            "web",
 			OwningProjectId: testProjectULID,
-			// Already active so this creation fixture does not enter the readiness poll.
+			// The authoritative GET confirms the creation fixture is active.
 			State: coreapi.NewOptString("active"),
 		}); err != nil {
 			t.Errorf("encode create response: %v", err)
