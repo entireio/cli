@@ -293,9 +293,9 @@ To choose the file store explicitly on any platform:
 ENTIRE_TOKEN_STORE=file entire login
 ```
 
-The choice is remembered after that login. `ENTIRE_TOKEN_STORE=keyring entire login` moves back to the keyring and clears the remembered choice. Tokens are written with `0600` permissions to `tokens.json` in your Entire config directory (`~/.config/entire` by default); override the location with `ENTIRE_TOKEN_STORE_PATH`.
+The choice is remembered after that login. `ENTIRE_TOKEN_STORE=keyring entire login` moves back to the keyring, clears the remembered choice, and removes the superseded copy of that credential from `tokens.json`. Tokens are written with `0600` permissions to `tokens.json` in your Entire config directory (`~/.config/entire` by default). You can override the location with `ENTIRE_TOKEN_STORE_PATH`, but then the choice is not remembered (the marker cannot carry a path): keep both variables set for every command.
 
-`entire auth status` and `entire auth token` tell the two states apart: "Not logged in" (exit 0) means no credential is stored, while a store that cannot be read is reported as an error (exit 1) naming the store and the failure. A script that probes login state with `entire auth status` will see the failure exit on a broken keyring, which is the intended signal.
+`entire auth status` tells the two states apart: "Not logged in" (exit 0) means no credential is stored, while a store that cannot be read is reported as an error (exit 1) naming the store and the failure, so a script that probes login state with `entire auth status` sees the failure exit on a broken keyring. `entire auth token` exits non-zero in both cases, as before, but its message now says which one you are in.
 
 ### Non-interactive automation (CI, workload identity)
 
