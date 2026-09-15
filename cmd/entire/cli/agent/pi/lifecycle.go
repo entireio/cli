@@ -45,7 +45,7 @@ func (a *PiAgent) HookNames() []string {
 //   - session_start       → SessionStart
 //   - before_agent_start  → TurnStart
 //   - agent_end           → TurnEnd
-//   - session_shutdown    → (cleanup-only, no lifecycle event — see ParseHookEvent)
+//   - session_shutdown    → (no lifecycle event — see ParseHookEvent)
 func (a *PiAgent) GetSupportedHooks() []agent.HookType {
 	return []agent.HookType{
 		agent.HookSessionStart,
@@ -162,14 +162,14 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 
 	now := time.Now()
 
-	// A sessionless payload names no session we can track, and must not be resolved
-	// against the per-repo session-ID cache: doing so handed the caller whichever
-	// session happened to be cached — see docs/architecture/agent-guide.md for how a
-	// nested `pi --no-session` subagent thereby claimed its parent's session.
+	// A sessionless payload names no session we can track. It must not borrow a
+	// repo-global session identity — see docs/architecture/agent-guide.md for how
+	// a nested `pi --no-session` subagent thereby claimed its parent's session.
 	//
 	// session_shutdown is exempt: the extension sends it with no session identity at
-	// all, and it must still clear the cache. Same shape as Copilot CLI's
-	// subordinate-session guard (copilotcli/lifecycle.go).
+	// all, and the no-op handler below preserves the contract that it is not a
+	// SessionEnd event. Same shape as Copilot CLI's subordinate-session guard
+	// (copilotcli/lifecycle.go).
 	if hookName != HookNameSessionShutdown && sessionID == "" {
 		logging.Debug(ctx, "pi: skipping lifecycle event for sessionless (nested) Pi invocation",
 			slog.String("hook", hookName))
@@ -178,7 +178,6 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 
 	switch hookName {
 	case HookNameSessionStart:
-		cacheSessionID(ctx, sessionID)
 		return &agent.Event{
 			Type:      agent.SessionStart,
 			SessionID: sessionID,
@@ -186,7 +185,6 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameBeforeAgentStart:
-		cacheSessionID(ctx, sessionID)
 		// Provide the live Pi session file as SessionRef so state.TranscriptPath
 		// is populated before any mid-turn commits. Without this, the
 		// post-commit hook cannot condense when no shadow branch exists yet.
@@ -214,9 +212,6 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		}, nil
 
 	case HookNameSessionShutdown:
-		// Cleanup-only: clear the cached session ID. We intentionally do NOT
-		// emit SessionEnd here.
-		//
 		// Pi fires session_shutdown and agent_end on session teardown, and the
 		// TypeScript extension dispatches both via separate `entire hooks pi …`
 		// child processes (execFile is non-blocking). Child-process startup
@@ -230,8 +225,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		// effectively "session over" for any single-turn `pi -p` invocation).
 		// SessionEnd is left for the framework to derive from idle timeout or
 		// the next SessionStart's stale-state cleanup.
-		clearCachedSessionID(ctx)
-		return nil, nil //nolint:nilnil // intentional: cleanup-only, no lifecycle event
+		return nil, nil //nolint:nilnil // intentional: session_shutdown is not a lifecycle event
 
 	default:
 		// Unknown / future hooks have no lifecycle significance.
@@ -239,36 +233,14 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 	}
 }
 
-// --- session ID cache ---
-//
-// This cached the active session ID so a later hook arriving without one could
-// recover it. The sessionless guard in ParseHookEvent removed the only two reads:
-// a payload with no resolvable session ID is now skipped rather than resolved
-// against this file, because the file is a single per-repo slot and handing its
-// contents to an unrelated caller is what let a nested subagent claim its parent's
-// session.
-//
-// The recovery it promised was never reachable anyway — a payload with no session
-// file also has no transcript, so captureTranscript returns "" and the event dies
-// downstream regardless of the ID.
-//
-// What remains is write-only: session_start/before_agent_start write it,
-// session_shutdown clears it, and only tests read it. Removing it outright is
-// deliberately left as a follow-up: the write/clear pair and its test predate this
-// change, and a single-slot per-repo identity store is separately unsound for two
-// concurrent Pi sessions in one worktree, which deserves its own change.
-
-const activeSessionFile = "pi-active-session"
-
 // piHookCacheSubdir is the subdirectory under .entire/tmp/ where hook
-// flow caches the active-session ID file and the agent_end transcript
-// snapshot. Agent-specific (not just .entire/tmp/) so other agents'
+// flow caches the agent_end transcript snapshot. Agent-specific (not just
+// .entire/tmp/) so other agents'
 // integration tests and tooling don't shadow each other under the cache
 // root.
 const piHookCacheSubdir = "pi"
 
 // resolveSessionDir returns the per-repo hook cache directory used by
-// cacheSessionID / readCachedSessionID / clearCachedSessionID and
 // captureTranscript.
 //
 // This is intentionally distinct from PiAgent.GetSessionDir, which
@@ -295,43 +267,23 @@ func resolveSessionDir(ctx context.Context) (worktreeRoot string, ok bool) {
 var sessionCacheDir = entiredir.MustName(paths.EntireTmpDir) + "/" + piHookCacheSubdir
 
 // openSessionCache returns the shared .entire root for the repo this hook is
-// running in, with the pi/ cache directory created under it when create is set.
-// A repo that cannot be resolved yields ok=false and every caller degrades: the
-// cache is an optimization, never the only copy of anything.
-func openSessionCache(ctx context.Context, create bool) (root *os.Root, ok bool) {
+// running in, with the pi/ cache directory created under it. A repo that cannot
+// be resolved yields ok=false and every caller degrades: the cache is an
+// optimization, never the only copy of anything.
+func openSessionCache(ctx context.Context) (root *os.Root, ok bool) {
 	worktreeRoot, ok := resolveSessionDir(ctx)
 	if !ok {
 		return nil, false
 	}
-	open := entiredir.OpenAtForRead
-	if create {
-		open = entiredir.OpenAt
-	}
-	root, err := open(worktreeRoot)
+	root, err := entiredir.OpenAt(worktreeRoot)
 	if err != nil {
 		return nil, false
 	}
-	if create {
-		if err := osroot.MkdirAllNoSymlink(root, sessionCacheDir, 0o750); err != nil {
-			logging.Debug(ctx, "pi: session cache mkdir", slog.String("err", err.Error()))
-			return nil, false
-		}
+	if err := osroot.MkdirAllNoSymlink(root, sessionCacheDir, 0o750); err != nil {
+		logging.Debug(ctx, "pi: session cache mkdir", slog.String("err", err.Error()))
+		return nil, false
 	}
 	return root, true
-}
-
-func cacheSessionID(ctx context.Context, id string) {
-	if id == "" {
-		return
-	}
-	root, ok := openSessionCache(ctx, true)
-	if !ok {
-		return
-	}
-
-	if err := entiredir.WriteFile(root, sessionCacheDir+"/"+activeSessionFile, []byte(id), 0o600); err != nil {
-		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
-	}
 }
 
 func extractModelFromPiSessionFile(path string) string {
@@ -349,26 +301,6 @@ func extractModelFromPiSessionFile(path string) string {
 	return model
 }
 
-func readCachedSessionID(ctx context.Context) string {
-	root, ok := openSessionCache(ctx, false)
-	if !ok {
-		return ""
-	}
-	data, err := entiredir.ReadFile(root, sessionCacheDir+"/"+activeSessionFile)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-func clearCachedSessionID(ctx context.Context) {
-	root, ok := openSessionCache(ctx, false)
-	if !ok {
-		return
-	}
-	_ = osroot.RemoveNoSymlinks(root, sessionCacheDir+"/"+activeSessionFile) //nolint:errcheck // best-effort cache clear; a stale id is re-resolved next hook
-}
-
 // captureTranscript copies the Pi JSONL session file to
 // <repo>/.entire/tmp/pi/<id>.json so Entire has a stable transcript
 // reference. Returns the path to the cached file, or "" if either input is
@@ -378,10 +310,10 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	if sessionID == "" || piSessionFile == "" {
 		return ""
 	}
-	// sessionID comes from the hook payload (or the locally cached active
-	// session) and is used to build dst below, before the lifecycle dispatcher
-	// validates it. Validate here at the choke point so an unsafe ID cannot
-	// write the transcript outside the cache directory; "" signals no capture.
+	// sessionID comes from the hook payload and is used to build dst below,
+	// before the lifecycle dispatcher validates it. Validate here at the choke
+	// point so an unsafe ID cannot write the transcript outside the cache
+	// directory; "" signals no capture.
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		logging.Warn(ctx, "pi: refusing to capture transcript for unsafe session ID",
 			slog.String("session_id", sessionID), slog.String("err", err.Error()))
@@ -391,7 +323,7 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 	if !ok {
 		return ""
 	}
-	root, ok := openSessionCache(ctx, true)
+	root, ok := openSessionCache(ctx)
 	if !ok {
 		return ""
 	}
