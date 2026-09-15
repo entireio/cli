@@ -157,14 +157,47 @@ func WrapProductionJSONWarningHookCommand(command string, format WarningFormat) 
 //   - entire absent   → `where.exe` fails (errorlevel ≥ 1) → the if branch runs
 //     (silently via `ver>nul`, or echoing the warning) and the line exits 0.
 
+// windowsEntireGuard is the "is entire on PATH?" test every Windows wrapper
+// opens with, up to and including the `if errorlevel 1 ` that the caller
+// completes with its two branches.
+//
+// It carries two defences that the POSIX wrapper needs none of, because cmd.exe
+// searches the CURRENT DIRECTORY ahead of PATH and the directory a hook runs in
+// is the worktree. Without them a `where.exe` or an `entire.bat` committed to a
+// repository is what fires when the agent starts a session — no user action, no
+// prompt. `sh` has no equivalent: `command -v` and `exec` read PATH only.
+//
+//   - where.exe is named absolutely under %SystemRoot%, so the guard itself
+//     cannot be the repository's program. This one is true by construction.
+//   - NoDefaultCurrentDirectoryInExePath removes the current directory from the
+//     search cmd.exe performs for everything after it on the line, which is what
+//     covers the bare `entire` in the else branch. `entire` has no absolute
+//     spelling here — resolving it through PATH IS the check — so this is the
+//     only lever for that half. Documented under NeedCurrentDirectoryForExePath,
+//     which names cmd.exe as the reason the variable exists; only its EXISTENCE
+//     is tested, never its value.
+//
+// `/d` does not help with any of this: it disables AutoRun, not the search
+// order.
+//
+// The guard deliberately leaves where.exe's OWN search alone, which still
+// includes the current directory — so a repository that plants an `entire.bat`
+// can still make the guard answer "present" when entire is genuinely absent.
+// What follows is then a command cmd.exe refuses to resolve, so the hook fails
+// loudly instead of running the planted file: an accuracy loss in a repository
+// that tried to attack you, not an execution. Scoping the search with
+// where.exe's `"$PATH:entire"` form would fix that too, and must not be used —
+// Cursor composes its hook command into a double-quoted PowerShell string,
+// where `$PATH` is expanded as a PowerShell variable and the guard silently
+// becomes `where.exe ":entire"`.
+const windowsEntireGuard = `set NoDefaultCurrentDirectoryInExePath=1&` +
+	`%SystemRoot%\System32\where.exe entire >nul 2>nul & if errorlevel 1 `
+
 // WrapWindowsProductionSilentHookCommand exits successfully without output when
 // the Entire CLI is missing from PATH. It avoids sh so Codex hooks still work
 // from native Windows shells.
 func WrapWindowsProductionSilentHookCommand(command string) string {
-	return fmt.Sprintf(
-		`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)"`,
-		command,
-	)
+	return `cmd.exe /d /s /c "` + windowsEntireGuard + `(ver>nul) else (` + command + `)"`
 }
 
 // WrapWindowsProductionJSONWarningHookCommand emits a JSON hook response with a
@@ -182,21 +215,13 @@ func WrapWindowsProductionJSONWarningHookCommand(command string, format WarningF
 		return WrapWindowsProductionPlainTextWarningHookCommand(command, format)
 	}
 
-	return fmt.Sprintf(
-		`where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)`,
-		escapeWindowsCMD(string(payload)),
-		command,
-	)
+	return windowsEntireGuard + `(echo ` + escapeWindowsCMD(string(payload)) + `) else (` + command + `)`
 }
 
 // WrapWindowsProductionPlainTextWarningHookCommand is the direct-shell fallback
 // for WrapWindowsProductionJSONWarningHookCommand when JSON marshaling fails.
 func WrapWindowsProductionPlainTextWarningHookCommand(command string, format WarningFormat) string {
-	return fmt.Sprintf(
-		`where.exe entire >nul 2>nul & if errorlevel 1 (echo %s) else (%s)`,
-		escapeWindowsCMD(windowsPlainTextWarning(format)),
-		command,
-	)
+	return windowsEntireGuard + `(echo ` + escapeWindowsCMD(windowsPlainTextWarning(format)) + `) else (` + command + `)`
 }
 
 // WrapProductionPlainTextWarningHookCommand emits the warning as plain
@@ -210,8 +235,21 @@ func WrapProductionPlainTextWarningHookCommand(command string, format WarningFor
 }
 
 const productionHookWrapperPrefix = `sh -c 'if ! command -v entire >/dev/null 2>&1; then `
-const windowsProductionHookWrapperPrefix = `where.exe entire >nul 2>nul & if errorlevel 1 `
-const nestedWindowsProductionHookWrapperPrefix = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `
+
+// windowsHookWrapperPrefixes are the opening texts of every Windows wrapper
+// Entire has written, in both the bare and the nested-in-cmd.exe form.
+//
+// The unhardened pair is DETECTION-ONLY and must stay: a repo enabled before
+// windowsEntireGuard carries those commands, and a form we no longer recognise
+// is not replaced on the next install — it is left beside the new one, and both
+// fire. They are listed rather than folded into one loose pattern so that what
+// counts as ours stays an exact set.
+var windowsHookWrapperPrefixes = []string{
+	windowsEntireGuard,
+	`cmd.exe /d /s /c "` + windowsEntireGuard,
+	`where.exe entire >nul 2>nul & if errorlevel 1 `,
+	`cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 `,
+}
 
 // DropStaleManagedHooks removes Entire-owned entries whose command is not one of
 // want, leaving foreign entries and the wanted commands untouched. commandOf
@@ -269,8 +307,9 @@ func IsManagedHookCommand(command string) bool {
 
 		return hasManagedHookPrefix(wrappedCommand)
 	}
-	if strings.HasPrefix(command, windowsProductionHookWrapperPrefix) ||
-		strings.HasPrefix(command, nestedWindowsProductionHookWrapperPrefix) {
+	if slices.ContainsFunc(windowsHookWrapperPrefixes, func(prefix string) bool {
+		return strings.HasPrefix(command, prefix)
+	}) {
 		// The wrapped command lives in the `else (<command>)` branch. Take the
 		// last ` else (` so a warning string containing the marker can't fool us.
 		const elseMarker = " else ("
