@@ -97,6 +97,13 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
+	// Follow the agent into a linked worktree before any handler resolves a
+	// repo-relative path. Placed after the ownership filter so a forwarded hook
+	// never moves anything, and before the switch so every capture-path handler
+	// sees one consistent root instead of each re-deriving its own. Settings
+	// are pinned rather than moved — see withEventWorktree.
+	ctx = withEventWorktree(ctx, event)
+
 	switch event.Type {
 	case agent.SessionStart:
 		return handleLifecycleSessionStart(ctx, ag, event)
