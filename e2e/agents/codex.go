@@ -88,7 +88,7 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 		o(cfg)
 	}
 
-	timeout, err := promptTimeout(60*time.Second, cfg)
+	timeout, err := promptTimeout(c, 60*time.Second, cfg)
 	if err != nil {
 		return Output{}, err
 	}
