@@ -8,8 +8,9 @@ import { spawn, spawnSync } from "node:child_process"
 import type { Plugin } from "@opencode-ai/plugin"
 
 export const EntirePlugin: Plugin = async ({ directory }) => {
-  // Track seen user messages to fire turn-start only once per message
   const seenUserMessages = new Set<string>()
+  // Metadata-only fallbacks require one prompt update when their text arrives.
+  const promptlessTurnStarts = new Set<string>()
   // Track current session ID for message events (which don't include sessionID)
   let currentSessionID: string | null = null
   // Track the model used by the most recent assistant message
@@ -113,12 +114,19 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     }
   }
 
+  function clearSessionMessages(sessionID: string) {
+    for (const [messageID, message] of messageStore) {
+      if (message?.sessionID !== sessionID) continue
+      seenUserMessages.delete(messageID)
+      promptlessTurnStarts.delete(messageID)
+      messageStore.delete(messageID)
+    }
+  }
+
   function resetSessionTracking(sessionID: string) {
     if (currentSessionID === sessionID) {
       return false
     }
-    seenUserMessages.clear()
-    messageStore.clear()
     currentModel = null
     currentSessionID = sessionID
     // Drop any turn-start injection captured for the prior session so it
@@ -175,6 +183,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
+                promptlessTurnStarts.add(msg.id)
                 fireTurnStart({
                   session_id: sessionID,
                   prompt: "",
@@ -185,20 +194,37 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             break
           }
 
+          case "message.removed": {
+            const messageID = (event as any).properties?.messageID
+            if (!messageID) break
+            seenUserMessages.delete(messageID)
+            promptlessTurnStarts.delete(messageID)
+            messageStore.delete(messageID)
+            break
+          }
+
           case "message.part.updated": {
             const part = (event as any).properties?.part
             if (!part?.messageID) break
 
             // Fire turn-start on the first text part of a new user message
             const msg = messageStore.get(part.messageID)
-            if (msg?.role === "user" && part.type === "text" && !seenUserMessages.has(msg.id)) {
-              seenUserMessages.add(msg.id)
+            if (msg?.role === "user" && part.type === "text") {
               const sessionID = msg.sessionID ?? currentSessionID
-              if (sessionID) {
-                fireTurnStart({
+              if (!seenUserMessages.has(msg.id)) {
+                seenUserMessages.add(msg.id)
+                if (sessionID) {
+                  fireTurnStart({
+                    session_id: sessionID,
+                    prompt: part.text ?? "",
+                    model: currentModel ?? "",
+                  })
+                }
+              } else if (promptlessTurnStarts.has(msg.id) && part.text && sessionID) {
+                promptlessTurnStarts.delete(msg.id)
+                callHookSync("prompt-update", {
                   session_id: sessionID,
-                  prompt: part.text ?? "",
-                  model: currentModel ?? "",
+                  prompt: part.text,
                 })
               }
             }
@@ -233,10 +259,12 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
           case "session.deleted": {
             const session = (event as any).properties?.info
             if (!session?.id) break
-            seenUserMessages.clear()
-            messageStore.clear()
-            currentSessionID = null
-            pendingInjection = null
+            clearSessionMessages(session.id)
+            if (currentSessionID === session.id) {
+              currentSessionID = null
+              currentModel = null
+              pendingInjection = null
+            }
             // Use sync variant: session-end may fire during shutdown.
             callHookSync("session-end", {
               session_id: session.id,
@@ -248,12 +276,14 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             // Fires when OpenCode shuts down (TUI close or `opencode run` exit).
             // session.deleted only fires on explicit user deletion, not on quit,
             // so this is the only reliable way to end sessions on exit.
-            if (!currentSessionID) break
             const sessionID = currentSessionID
             seenUserMessages.clear()
+            promptlessTurnStarts.clear()
             messageStore.clear()
             currentSessionID = null
+            currentModel = null
             pendingInjection = null
+            if (!sessionID) break
             // Use sync variant: this is the last event before process exit.
             callHookSync("session-end", {
               session_id: sessionID,
