@@ -690,6 +690,14 @@ func worktreeSettingsPaths(worktreeRoot string) (base, local string) {
 	return filepath.Join(worktreeRoot, EntireSettingsFile), filepath.Join(worktreeRoot, EntireSettingsLocalFile)
 }
 
+// LoadForWorktreeRoot is Load for an explicit worktree root instead of the
+// process working directory. Code that already holds a repository — a doctor
+// repair, a test fixture — must read that repository's settings, not whatever
+// the current directory happens to be inside.
+func LoadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSettings, error) {
+	return loadForWorktreeRoot(ctx, worktreeRoot)
+}
+
 func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSettings, error) {
 	settingsFileAbs, localSettingsFileAbs := worktreeSettingsPaths(worktreeRoot)
 	preferencesFileAbs := ""

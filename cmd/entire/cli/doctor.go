@@ -47,29 +47,38 @@ Checks performed:
      entire/checkpoints/v1 branches share no common ancestor (caused by a
      previous bug). Fixes by cherry-picking local checkpoints onto remote tip.
 
-  2. Operational logs: warn when .entire/logs cannot be written. Every other
+  2. Oversized checkpoint metadata: detects metadata.json blobs on
+     entire/checkpoints/v1 over 50 MiB (GitHub refuses blobs over 100 MiB, so
+     the branch cannot be pushed or mirrored there). Caused by CLI versions
+     before v0.10.1 recording nested git checkouts in the prompt_attributions
+     diagnostic field. Interactively offers to rewrite the branch without that
+     field and update the checkpoint sync remote (lease-guarded); --force does
+     NOT apply this one, because it rewrites history and pushes. Use
+     'entire doctor shrink-checkpoint-metadata' to apply it non-interactively.
+
+  3. Operational logs: warn when .entire/logs cannot be written. Every other
      diagnostic is delivered by writing there, and that write is silent about
      its own failure, so an unwritable log directory looks exactly like a repo
      where nothing ran.
 
   When Codex hooks are installed:
-  3. Codex hook trust: warn when hooks declared in .codex/hooks.json
+  4. Codex hook trust: warn when hooks declared in .codex/hooks.json
      lack a trusted_hash entry in the user's Codex config (i.e. /hooks
      review hasn't run yet on this machine, or a newer entire release
      added a hook the user hasn't approved yet).
 
   For each installed agent that reports hook-config drift:
-  4. Hook config: warn when the installed hooks no longer match what this
+  5. Hook config: warn when the installed hooks no longer match what this
      CLI writes (e.g. an older release wrote Claude Code tool matchers that
      no longer fire, or a committed Pi/OpenCode extension has gone stale).
      Fix by re-running 'entire enable --force'.
 
-  5. Summary provider: warn when summary_generation.provider names a registered
+  6. Summary provider: warn when summary_generation.provider names a registered
      agent that cannot generate text (e.g. opencode), which makes
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 
-  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -115,6 +124,7 @@ points at --force instead of prompting.`,
 	cmd.AddCommand(newDoctorLogsCmd())
 	cmd.AddCommand(newDoctorBundleCmd())
 	cmd.AddCommand(newDoctorMigrateCheckpointsCmd())
+	cmd.AddCommand(newDoctorShrinkCheckpointMetadataCmd())
 
 	return cmd
 }
@@ -137,6 +147,16 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	if metadataErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: metadata check failed: %v\n", metadataErr)
 		finalErr = NewSilentError(fmt.Errorf("metadata check failed: %w", metadataErr))
+	}
+
+	// Check 2: metadata.json blobs GitHub refuses. After the disconnection
+	// check, which may have advanced the local branch from the remote, so the
+	// scan sees the reconciled history. Deliberately not given `force`: the
+	// fix rewrites history and pushes, and only an interactive yes or the
+	// dedicated subcommand may trigger that.
+	if sizeErr := checkOversizedCheckpointMetadata(cmd); sizeErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: checkpoint metadata size check failed: %v\n", sizeErr)
+		finalErr = NewSilentError(fmt.Errorf("checkpoint metadata size check failed: %w", sizeErr))
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout())
