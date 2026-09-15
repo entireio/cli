@@ -194,7 +194,7 @@ func (f *fallbackStore) switchTo(fs store, keyringErr error) {
 		if remembered {
 			fmt.Fprintf(fallbackNoticeW, "This choice is remembered; run %s=%s entire login to switch back.\n", BackendEnvVar, backendKeyring)
 		} else {
-			fmt.Fprintf(fallbackNoticeW, "%s is set, so this choice is not remembered; keep it set for later commands.\n", PathEnvVar)
+			fmt.Fprintf(fallbackNoticeW, "%s is set, so this choice is not remembered; keep it set for later commands, and set %s=%s as well to skip the keyring check.\n", PathEnvVar, BackendEnvVar, backendFile)
 		}
 	})
 	if remembered {

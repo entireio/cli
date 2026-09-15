@@ -146,6 +146,55 @@ func TestRecordingStore_SetRemembersTheExplicitBackend(t *testing.T) {
 	}
 }
 
+// Switching back to the keyring must not leave the previous bearer in
+// tokens.json: that plaintext copy is exactly what the fallback would
+// re-adopt on the next transient keyring failure. Only the entry just
+// superseded goes; other entries and the file itself stay.
+func TestRecordingStore_KeyringWriteRemovesTheSupersededFileCopy(t *testing.T) {
+	isolateConfigDir(t)
+	file := defaultFileStore()
+	if err := file.Set("svc", "alice", "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Set("svc", "bob", "keep"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rememberBackend(backendFile); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("marker = %q, want cleared by the explicit keyring write", got)
+	}
+	if _, err := file.Get("svc", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the superseded file copy should be gone, got %v", err)
+	}
+	if got, err := file.Get("svc", "bob"); err != nil || got != "keep" {
+		t.Fatalf("other entries must survive, got (%q, %v)", got, err)
+	}
+}
+
+// A store named through ENTIRE_TOKEN_STORE_PATH is the user's to manage: an
+// explicit keyring write must not reach into it.
+func TestRecordingStore_KeyringWriteLeavesAnExplicitPathStoreAlone(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
+	file := defaultFileStore()
+	if err := file.Set("svc", "alice", "mine"); err != nil {
+		t.Fatal(err)
+	}
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := file.Get("svc", "alice"); err != nil || got != "mine" {
+		t.Fatalf("a store named through %s must be left alone, got (%q, %v)", PathEnvVar, got, err)
+	}
+}
+
 func TestRecordingStore_ReadsAndDeletesRememberNothing(t *testing.T) {
 	isolateConfigDir(t)
 	inner := newScriptedStore()
