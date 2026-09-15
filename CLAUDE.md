@@ -185,7 +185,10 @@ in stable releases, always runnable): `tokens`, `import`, `review`,
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`, `api`, `search`. `search` is the canonical
+`configure`, `agent-help`, `api`, `search`, `changelog`. `changelog` reads public
+Entire product updates, and `changelog search` matches literal phrases across
+full posts; both support `--limit` and `--json` without login or a repository.
+See [Product changelog](docs/changelog-command.md). `search` is the canonical
 spelling (visible in every build, grouped with Sessions & Checkpoints);
 `checkpoint search` stays a working alias of the same command.
 

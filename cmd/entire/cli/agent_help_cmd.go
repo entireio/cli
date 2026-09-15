@@ -95,6 +95,8 @@ type agentHelpFacts struct {
 // top-level command — or a new child of a listed group — lands unclassified, so
 // the fallback is a backstop rather than the normal path.
 var agentHelpClassification = map[string]agentHelpFacts{
+	"changelog":        {agentHelpAudienceReadOnly, false},
+	"changelog search": {agentHelpAudienceReadOnly, false},
 	// ---- Listed: the commands that bear on an agent's work mid-task. -------
 	"status": {agentHelpAudienceReadOnly, true},
 	"why":    {agentHelpAudienceReadOnly, true},

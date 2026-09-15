@@ -11,7 +11,7 @@ import (
 )
 
 func ShouldCheckCheckpointPolicyWarning(cmd *cobra.Command) bool {
-	if cmd == nil {
+	if cmd == nil || isChangelogCommand(cmd) {
 		return false
 	}
 	for c := cmd; c != nil; c = c.Parent() {

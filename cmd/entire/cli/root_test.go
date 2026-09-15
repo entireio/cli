@@ -268,10 +268,11 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 	t.Parallel()
 
 	// Commands intentionally left out of any group. version, labs, agent-help,
-	// and help render under cobra's "Additional Commands"; completion is
+	// changelog, and help render under cobra's "Additional Commands"; completion is
 	// allowlisted for completeness but never renders (hidden via
 	// CompletionOptions.HiddenDefaultCmd in NewRootCmd).
 	ungrouped := map[string]bool{
+		"changelog":  true,
 		"version":    true,
 		"labs":       true,
 		"agent-help": true,

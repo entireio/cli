@@ -35,6 +35,7 @@ import (
 // list. `entire <command> --help` is unaffected either way — cobra returns
 // flag.ErrHelp before it runs any PersistentPreRunE.
 var entireDirCheckExemptions = map[string]string{
+	"entire changelog":  "public product updates over HTTP; no repository or account state",
 	"entire auth":       "reads ~/.config/entire and the OS keyring, never the repo",
 	"entire login":      "control-plane login; user-level credentials only",
 	"entire logout":     "control-plane logout; user-level credentials only",

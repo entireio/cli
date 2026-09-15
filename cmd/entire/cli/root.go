@@ -99,7 +99,7 @@ func NewRootCmd() *cobra.Command {
 		// cobra.EnableTraverseRunHooks (set in init) runs parent hooks before
 		// child ones, so this fires ahead of the group pre-runs and every RunE.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			if isShellCompletion(cmd) {
+			if isShellCompletion(cmd) || isChangelogCommand(cmd) {
 				return nil
 			}
 			safe, err := checkEntireDirBeforeRun(cmd)
@@ -116,6 +116,10 @@ func NewRootCmd() *cobra.Command {
 			return nil
 		},
 		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			// Public product updates do not depend on repository or account state.
+			if isChangelogCommand(cmd) {
+				return
+			}
 			// Skip for hidden commands (walk parent chain — Cobra doesn't propagate Hidden)
 			for c := cmd; c != nil; c = c.Parent() {
 				if c.Hidden {
@@ -193,6 +197,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newLoginCmd(), groupAccount)))
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newLogoutCmd(), groupAccount)))
 	cmd.AddCommand(exemptFromEntireDirCheck(newVersionCmd()))
+	cmd.AddCommand(exemptFromEntireDirCheck(newChangelogCmd()))
 	cmd.AddCommand(inGroup(newDispatchCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newActivityCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newRecapCmd(), groupSessions))
