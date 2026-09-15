@@ -190,6 +190,13 @@ func TestLoginTokenForContext(t *testing.T) {
 	if _, err := LoginTokenForContext(nil); err == nil {
 		t.Fatal("expected error for nil context")
 	}
+
+	// A context with no slot cannot hold a token: that is "not logged in",
+	// and resolveStatusTarget classifies it by errors.Is(ErrNotFound), so
+	// the wrap is load-bearing.
+	if _, err := LoginTokenForContext(&contexts.Context{Name: "x"}); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("empty slot must read as ErrNotFound, got %v", err)
+	}
 }
 
 func TestRemoveCurrentContext(t *testing.T) {
