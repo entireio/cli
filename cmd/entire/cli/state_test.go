@@ -924,6 +924,46 @@ func TestFilterToUncommittedFiles_ReallyModified(t *testing.T) {
 	}
 }
 
+// TestFilterToUncommittedFiles_AutocrlfNormalizedWorkingTree pins that the
+// filter agrees with git about what is committed: under core.autocrlf=true the
+// committed blob is LF-normalized while the working tree keeps CRLF, and git
+// reports the file clean.
+func TestFilterToUncommittedFiles_AutocrlfNormalizedWorkingTree(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir) // enables core.autocrlf
+
+	const content = "# Blue\r\n\r\nBlue is a colour.\r\n"
+	testutil.WriteFile(t, tmpDir, "blue.md", content)
+	testutil.WriteFile(t, tmpDir, "changed.md", content)
+	testutil.RunGit(t, tmpDir, "add", "--", "blue.md", "changed.md")
+	testutil.WriteFile(t, tmpDir, "legacy.md", content)
+	testutil.RunGit(t, tmpDir, "-c", "core.autocrlf=false", "add", "--", "legacy.md")
+	testutil.RunGit(t, tmpDir, "commit", "-m", "Add blue")
+
+	require.NotContains(t, testutil.RunGit(t, tmpDir, "cat-file", "-p", "HEAD:blue.md"), "\r",
+		"native git add must normalize the committed blob to LF")
+	disk, err := os.ReadFile(filepath.Join(tmpDir, "blue.md"))
+	require.NoError(t, err)
+	require.Equal(t, content, string(disk), "the working tree must retain CRLF bytes")
+	testutil.RunGit(t, tmpDir, "diff", "--exit-code", "--", "blue.md")
+
+	result := filterToUncommittedFiles(context.Background(), []string{"blue.md"}, tmpDir)
+	require.Empty(t, result, "autocrlf-only working tree differences are not uncommitted changes")
+
+	testutil.WriteFile(t, tmpDir, "changed.md", "# Changed\r\n")
+	files := []string{"changed.md", "blue.md", "missing.md", "legacy.md"}
+	result = filterToUncommittedFiles(t.Context(), files, tmpDir)
+	require.Equal(t, []string{"changed.md", "missing.md"}, result,
+		"keep real changes and missing paths, preserving raw matches and input order")
+
+	testutil.RunGit(t, tmpDir, "add", "--", "changed.md")
+	result = filterToUncommittedFiles(t.Context(), files, tmpDir)
+	require.Equal(t, []string{"changed.md", "missing.md"}, result,
+		"staged changes must still be compared against HEAD")
+}
+
 // TestFilterToUncommittedFiles_CleanFilteredFileIsDropped pins the condition
 // that left a stale shadow branch behind after every commit on Windows.
 //

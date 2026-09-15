@@ -12,8 +12,10 @@ import (
 )
 
 // WorktreeContentHashBudget bounds native Git clean-filter processing on the
-// post-commit hook path. A broken or hanging custom filter must not leave the
-// hook process blocked indefinitely.
+// hook paths that compare the working tree with a commit: post-commit
+// carry-forward, and the turn-end and subagent-capture committed-file filter.
+// A broken or hanging custom filter must not leave the hook process blocked
+// indefinitely.
 const WorktreeContentHashBudget = 5 * time.Second
 
 // HashWorktreeFiles returns the Git blob hash of each regular working-tree file

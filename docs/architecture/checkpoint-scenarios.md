@@ -226,6 +226,12 @@ representation comparison and records a warning. Symlink blobs always take the
 confined path because `git hash-object` follows the link rather than hashing its
 target-path string.
 
+At turn end, the committed-file filter first compares raw bytes with HEAD.
+Regular files whose bytes differ get an additional batched native Git hash
+comparison, so a CRLF working copy of an LF blob is not added back to the
+session after a mid-turn commit. Unreadable files and failed hashes remain
+uncommitted candidates. This does not change post-commit carry-forward logic.
+
 This enables splitting changes within a single file across multiple commits (see Scenario 7).
 
 ---
