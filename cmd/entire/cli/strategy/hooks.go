@@ -713,8 +713,19 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	}
 	specs := buildHookSpecs(cmdPrefix)
 	installedCount := 0
+	// In a Lefthook repo the hooks Lefthook owns already run Entire from its
+	// own config; see installSkipsHook.
+	// Resolved from settings, not from this call's absolutePath: the question
+	// is what the repository's own installed integration says.
+	lefthookDelivers := lefthookDeliversHooks(ctx)
+
+	skipped := 0
 
 	for _, spec := range specs {
+		if installSkipsHook(root, spec.name, lefthookDelivers) {
+			skipped++
+			continue
+		}
 		backupName := spec.name + backupSuffix
 		backupExists := hookFileExists(root, backupName)
 
@@ -758,8 +769,14 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	}
 
 	if !silent {
-		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
-		fmt.Println("  Hooks delegate to the current strategy at runtime")
+		// Claiming an install Entire deliberately skipped is the same kind of
+		// false report this integration exists to stop.
+		if skipped == len(specs) {
+			fmt.Printf("✓ Git hooks run through %s (Entire is registered in its config)\n", LefthookManagerName)
+		} else {
+			fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
+			fmt.Println("  Hooks delegate to the current strategy at runtime")
+		}
 	}
 
 	return installedCount, nil

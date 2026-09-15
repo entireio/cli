@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
@@ -3197,5 +3198,61 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	}
 	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
 		t.Errorf("status does not name where the setting must live:\n%s", got)
+	}
+}
+
+// #2264: status named a checkpoint destination while no hook existed to reach
+// it. The delivery line is the answer, and in a Lefthook repo it must be
+// judged on Entire's registration rather than on .git/hooks/*, which Lefthook
+// owns and rewrites.
+func TestRunStatus_HookDeliveryLine(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	if err := os.WriteFile("lefthook.yml", []byte("pre-commit: {}\n"), 0o644); err != nil {
+		t.Fatalf("write lefthook.yml: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	if out := stdout.String(); !strings.Contains(out, "Checkpoints are NOT being captured") {
+		t.Errorf("unregistered Lefthook repo must warn, got:\n%s", out)
+	}
+
+	if _, err := strategy.EnsureLefthookIntegration(context.Background()); err != nil {
+		t.Fatalf("EnsureLefthookIntegration() error = %v", err)
+	}
+	// Registering is not delivery on its own: git runs a hook only if the file
+	// exists, and Lefthook creates one per hook it knew about at its last
+	// install. The native install fills the paths Lefthook has not taken.
+	if _, err := strategy.ReinstallGitHooks(context.Background()); err != nil {
+		t.Fatalf("ReinstallGitHooks() error = %v", err)
+	}
+	strategy.ClearHooksDirCache()
+
+	stdout.Reset()
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Git hooks · via Lefthook") {
+		t.Errorf("registered Lefthook repo must report delivery, got:\n%s", out)
+	}
+	if strings.Contains(out, "NOT being captured") {
+		t.Errorf("registered Lefthook repo must not warn, got:\n%s", out)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runStatusJSON(context.Background(), &jsonOut); err != nil {
+		t.Fatalf("runStatusJSON() error = %v", err)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status JSON: %v", err)
+	}
+	if !got.HooksDeliver || got.HooksManager != "Lefthook" || got.HooksDeliverReason != "" {
+		t.Errorf("hooks fields = %+v, want delivering via Lefthook: %s", got, jsonOut.String())
 	}
 }
