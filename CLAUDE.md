@@ -195,7 +195,18 @@ themselves. `--to core` (default) hits the control plane; `--to cell` hits an
 entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 (cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
-via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
+via `auth.CellTarget`). **The cell path acts as the same login `--to core`
+does** — `ENTIRE_TOKEN` when set, else the selected context: with no
+`ENTIRE_API_BASE_URL`, the cell `apiUrl` is read from the cluster catalog of
+that login's core, so a staging login lands on a staging cell and a local-dev
+login on the cell its local core advertises (never on the core itself); only an
+explicit `ENTIRE_API_BASE_URL` switches to discovering a login against that
+named data host (`auth.resolveCellClientSubject` has the history, COR-1634). A
+`-j` slug the environment has no cell for fails naming the core consulted and
+the jurisdictions it does serve. `activity`/`recap` fall back from the cell to
+the data API only when `auth.DataAPIServesSelectedLogin` says both are in the
+same environment; otherwise the cell error is reported rather than production
+being asked about a staging login. `{owner}`/`{repo}`/`{repo_id}` in the path are filled
 from the current repo's origin remote. It is an escape hatch, so it is absent
 from `agent-help`'s curated listing but stays in `entire help` and agent-help's
 footer — an agent that needs raw access must find it rather than hand-roll curl
