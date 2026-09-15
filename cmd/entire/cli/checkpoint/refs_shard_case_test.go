@@ -315,3 +315,42 @@ func TestGitRefsStore_FetchFailureDoesNotRetryFoldedSpelling(t *testing.T) {
 	require.NotErrorIs(t, err, ErrCheckpointNotFound, "an outage must not be reported as absence")
 	assert.Equal(t, 1, asked, "a transport failure ends the lookup; it does not try the other spelling")
 }
+
+// TestGitRefsStore_RemoteDiscoverySkipsForkedLocalCheckpoint pins the
+// interaction between the folded-spelling collapse and remote discovery: a
+// checkpoint the listing already collapsed from two local refs is present, so
+// the remote's copy — under either spelling — must not be appended as a second,
+// unhydratable stub. One map answers both questions, which is what keeps the
+// two halves from disagreeing.
+func TestGitRefsStore_RemoteDiscoverySkipsForkedLocalCheckpoint(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	canonical := mustRefName(t, foldableULID)
+	foldedName, ok := FoldedRefName(foldableULID)
+	require.True(t, ok)
+
+	refsWrite(t, store, foldableULID, "sess-1", "transcript")
+	ref, err := store.repo.Reference(canonical, true)
+	require.NoError(t, err)
+	// A local fork: both spellings name this checkpoint.
+	require.NoError(t, store.repo.Storer.SetReference(plumbing.NewHashReference(foldedName, ref.Hash())))
+
+	// The remote lists the folded spelling, plus a checkpoint held only there.
+	remoteOnly := id.CheckpointID("01M2DCHJCHTR9T9MZTSB7WV77C")
+	remoteOnlyRef, err := RefName(remoteOnly)
+	require.NoError(t, err)
+	store.SetRemoteRefLister(func(context.Context) ([]plumbing.ReferenceName, error) {
+		return []plumbing.ReferenceName{foldedName, canonical, remoteOnlyRef}, nil
+	})
+
+	infos, err := store.List(WithRemoteListDiscovery(context.Background()))
+	require.NoError(t, err)
+
+	counts := map[id.CheckpointID]int{}
+	for _, info := range infos {
+		counts[info.CheckpointID]++
+	}
+	assert.Equal(t, 1, counts[foldableULID], "a forked local checkpoint stays one entry, whatever the remote lists")
+	assert.Equal(t, 1, counts[remoteOnly], "a genuinely remote-only checkpoint is still discovered")
+	assert.Len(t, infos, 2)
+}

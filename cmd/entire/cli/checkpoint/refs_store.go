@@ -605,7 +605,13 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	defer refs.Close()
 
 	var checkpoints []CheckpointInfo
-	seen := make(map[id.CheckpointID]struct{})
+	// indexByID's keys are exactly the checkpoint IDs in checkpoints, and its
+	// values index them. Both halves are relied on: the keys answer "is this
+	// checkpoint already listed" for the folded-spelling collapse below and for
+	// remote discovery, and the index lets a canonical ref replace the entry a
+	// folded one contributed. Keeping that in one map is deliberate — a
+	// separate presence set has to be written on exactly the paths that append,
+	// and the two drifting apart lists a checkpoint twice.
 	indexByID := make(map[id.CheckpointID]int)
 	err = refs.ForEach(func(ref *plumbing.Reference) error {
 		cid, ok := ParseRef(ref.Name())
@@ -637,7 +643,6 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		}
 		indexByID[cid] = len(checkpoints)
 		checkpoints = append(checkpoints, info)
-		seen[cid] = struct{}{}
 		return nil
 	})
 	if err != nil {
@@ -645,7 +650,7 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	}
 
 	if s.remoteRefLister != nil && remoteListDiscoveryEnabled(ctx) {
-		checkpoints = s.appendRemoteDiscovered(ctx, checkpoints, seen)
+		checkpoints = s.appendRemoteDiscovered(ctx, checkpoints, indexByID)
 	}
 
 	sortCheckpointInfosByRecency(checkpoints)
@@ -653,13 +658,15 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 }
 
 // appendRemoteDiscovered enumerates checkpoint refs on the configured checkpoint
-// remote and appends any that are not present locally (tracked in seen) as
-// not-yet-hydrated CheckpointInfos. It never fetches objects: the ref name
+// remote and appends any that are not present locally (tracked in indexByID) as
+// not-yet-hydrated CheckpointInfos. A remote listing both spellings of one
+// checkpoint's shard is deduplicated by the same map, so the second is skipped
+// exactly as a locally-present one is. It never fetches objects: the ref name
 // yields the checkpoint ID, and a ULID ID yields its creation time, so a
 // discovered checkpoint sorts and displays correctly before its first read
 // hydrates the rest. Best-effort: an enumeration failure logs, warns on stderr,
 // and returns the unchanged local list.
-func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints []CheckpointInfo, seen map[id.CheckpointID]struct{}) []CheckpointInfo {
+func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints []CheckpointInfo, indexByID map[id.CheckpointID]int) []CheckpointInfo {
 	remoteRefs, err := s.remoteRefLister(ctx)
 	if err != nil {
 		logging.Warn(ctx, "git-refs: remote checkpoint enumeration failed; listing local refs only",
@@ -674,10 +681,10 @@ func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints [
 		if !ok {
 			continue
 		}
-		if _, dup := seen[cid]; dup {
+		if _, dup := indexByID[cid]; dup {
 			continue
 		}
-		seen[cid] = struct{}{}
+		indexByID[cid] = len(checkpoints)
 		checkpoints = append(checkpoints, remoteDiscoveredInfo(cid))
 	}
 	return checkpoints
