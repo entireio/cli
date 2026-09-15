@@ -44,10 +44,14 @@ func windowsPowerShellPath(t *testing.T) string {
 }
 
 // setWrapperPATH scrubs PATH down to System32 — which supplies cmd.exe,
-// where.exe, findstr.exe and powershell.exe — plus, when entirePresent, a
-// directory holding an `entire.bat` with the given body. Nothing else is on
-// PATH, so an `entire` installed on the host machine cannot leak into the
-// "absent" case, and neither can an `sh` from Git for Windows.
+// where.exe and findstr.exe — plus, when entirePresent, a directory holding an
+// `entire.bat` with the given body. Nothing else is on PATH, so an `entire`
+// installed on the host machine cannot leak into the "absent" case, and neither
+// can an `sh` from Git for Windows.
+//
+// PowerShell is NOT one of them: it lives in System32\WindowsPowerShell\v1.0,
+// a separate directory this scrub removes. A runner that needs it names it
+// absolutely — see windowsPowerShellPath.
 //
 // Returns the stub directory, or "" when entirePresent is false.
 func setWrapperPATH(t *testing.T, entirePresent bool, stubBody string) string {
@@ -90,9 +94,8 @@ func cursorHookScript(payloadPath, wrapper string) string {
 // The shell is Windows PowerShell 5.1, pinned by construction: the runner names
 // its absolute path (see windowsPowerShellPath) rather than resolving whatever
 // a runner happens to have. Cursor prefers pwsh when it is on PATH, so that
-// branch of its resolution chain is NOT exercised here — see the PR's Not
-// covered. 5.1 is the interesting one anyway: it is where the payload acquires
-// a BOM.
+// branch of its resolution chain is NOT exercised here. 5.1 is the interesting
+// one anyway: it is where the payload acquires a BOM.
 func runCursorWrapper(t *testing.T, wrapper string, entirePresent bool) (stdout, stderr, argvSeen, stdinSeen string, code int) {
 	t.Helper()
 
