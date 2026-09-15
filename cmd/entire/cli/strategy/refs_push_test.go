@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,6 +145,21 @@ func TestBatchPushRefs_RejectsNonFastForward(t *testing.T) {
 	require.Error(t, err, "a non-fast-forward update must be rejected, not force-pushed")
 	assert.Equal(t, original, remoteRefHash(t, bareDir, refs[0]),
 		"remote ref must be unchanged after a rejected non-fast-forward push")
+
+	// The reason must survive as far as the log attributes. This is the wiring
+	// that actually broke — batchPushRefs discarded PushResult.Output, so every
+	// caller saw only "exit status 1" — and a unit test over hand-built errors
+	// cannot pin it: it passes whether or not the real call site keeps the
+	// output. A genuine rejected push is the only thing that can.
+	attrs := pushOutputAttrs(err)
+	require.Len(t, attrs, 1, "a rejected push must carry git's output into the log attributes")
+	got, ok := attrs[0].(slog.Attr)
+	require.True(t, ok, "attribute should be a slog.Attr, got %#v", attrs[0])
+	assert.Equal(t, "git_output", got.Key)
+	assert.Contains(t, got.Value.String(), "non-fast-forward",
+		"git's own reason for the rejection should reach the log")
+	assert.NotContains(t, err.Error(), "non-fast-forward",
+		"the output must stay out of the error text, which reaches users")
 }
 
 // TestPushCheckpointRefWithRecovery_MergesDivergedRef: when a checkpoint ref has

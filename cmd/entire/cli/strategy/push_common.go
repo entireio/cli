@@ -65,23 +65,49 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 	}
 	res, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs})
 	if err != nil {
-		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), &pushOutputError{output: res.Output, err: err})
+		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), &pushOutputError{output: scrubPushOutput(res.Output, target), err: err})
 	}
 	return nil
 }
 
-// pushOutputError carries git's own output alongside its exit status. The push
-// runs with --porcelain, so that output holds a per-ref verdict and the reason
-// a ref was refused, while the error says only "exit status 1".
+// maxLoggedPushOutput bounds what one failure writes to .entire/logs. --porcelain
+// emits a status line per ref and the queue is undrained, so a backfill pushing
+// thousands of refs at once would otherwise put a megabyte in a single record.
+// The distinct reasons all appear in the first lines; the rest is repetition.
+const maxLoggedPushOutput = 8 << 10
+
+// scrubPushOutput prepares git's output for a log: it replaces the target with
+// its redacted form and bounds the length.
 //
-// Keeping the two separate is the point. The user-facing retry banner
-// deliberately names no cause — a batch fails on divergence about as often as
-// on an unreachable or unauthorized remote, and guessing sends people after
-// the wrong problem — but a LOG that records only "exit status 1" leaves a
-// failed push undiagnosable after the fact. That is not hypothetical: a single
-// checkpoint ref failed on every push for days, and neither the queue, the
-// logs, nor a support bundle could say why, because the answer was captured
-// and then dropped one layer below the log line.
+// git anonymizes userinfo in the URLs it prints, so `https://user:pw@host/x`
+// comes back as `https://host/x` — but it preserves a query string verbatim,
+// and a credential can live there. RedactURL clears both, and this is the same
+// scrub FetchBlobs applies to git output before embedding it in an error. The
+// `remote:` lines are whatever the server chose to say, which is the diagnostic
+// payload and is kept.
+func scrubPushOutput(output, target string) string {
+	out := strings.TrimSpace(output)
+	if out == "" {
+		return ""
+	}
+	if target != "" {
+		out = strings.ReplaceAll(out, target, remote.RedactURLOrPath(target))
+	}
+	if len(out) > maxLoggedPushOutput {
+		out = out[:maxLoggedPushOutput] + "\n… truncated"
+	}
+	return out
+}
+
+// pushOutputError carries git's combined output alongside its exit status. The
+// push runs with --porcelain, so stdout holds a per-ref verdict; stderr holds
+// the `remote:` and `fatal:` lines that say WHY, and CombinedOutput folds both
+// into the same field. The error itself says only "exit status 1", because
+// CombinedOutput (unlike Output) leaves ExitError.Stderr empty.
+//
+// Keeping the two separate is the point: the user-facing retry banner
+// deliberately names no cause, while a log recording only "exit status 1"
+// leaves a failed push undiagnosable after the fact.
 type pushOutputError struct {
 	output string
 	err    error
@@ -90,10 +116,25 @@ type pushOutputError struct {
 func (e *pushOutputError) Error() string { return e.err.Error() }
 func (e *pushOutputError) Unwrap() error { return e.err }
 
+// pushFailureAttrs builds the log attributes for a failed push: the caller's
+// own attributes, the error, and git's output when there is any.
+func pushFailureAttrs(err error, extra ...any) []any {
+	attrs := make([]any, 0, len(extra)+3)
+	attrs = append(attrs, extra...)
+	attrs = append(attrs, slog.String("error", err.Error()))
+	return append(attrs, pushOutputAttrs(err)...)
+}
+
 // pushOutputAttrs returns a git_output log attribute when git said anything
 // beyond its exit status, and nothing when it did not — an empty attribute on
-// every push failure is noise, and the absence is itself informative (git
-// produced no output, so the failure is the transport rather than the remote).
+// every push failure is noise.
+//
+// Absence does NOT mean the remote stayed silent, and a reader should not treat
+// it as a diagnosis: git may never have run (PushWithOptions returns an empty
+// result when it cannot resolve the push target), our own checkpointPushBudget
+// may have killed the child before it flushed, or the error may not be a push
+// failure at all — a fetch failure from fetchAndRebaseRefCommon reaches the
+// per-ref log site and carries its output in the message instead.
 func pushOutputAttrs(err error) []any {
 	var poe *pushOutputError
 	if !errors.As(err, &poe) {
@@ -288,7 +329,24 @@ func refDisplayName(ref plumbing.ReferenceName) string {
 // failure under a BatchMode (non-interactive) context. Used to print the
 // actionable ssh-agent hint and skip useless recovery retries.
 func nonInteractiveSSHAuthFailure(ctx context.Context, err error) bool {
-	return err != nil && remote.IsNonInteractiveSSH(ctx) && remote.LooksLikeSSHAuthFailure(err.Error())
+	if err == nil || !remote.IsNonInteractiveSSH(ctx) {
+		return false
+	}
+	if remote.LooksLikeSSHAuthFailure(err.Error()) {
+		return true
+	}
+	// git puts its auth text in its output, not in its exit status:
+	// PushWithOptions uses CombinedOutput, so ExitError.Stderr is empty and the
+	// message is only "exit status 1". Until the output was carried on the
+	// error this predicate could not fire for a git-refs push at all, which
+	// made the hint at the batch-push site dead code on what is now the
+	// default backend — the hint fired only on the v1 path, which folds git's
+	// output into the error message instead.
+	var poe *pushOutputError
+	if errors.As(err, &poe) {
+		return remote.LooksLikeSSHAuthFailure(poe.output)
+	}
+	return false
 }
 
 // printCheckpointRemoteHint prints a hint when a push to a checkpoint URL fails.

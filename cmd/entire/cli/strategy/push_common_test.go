@@ -1643,6 +1643,44 @@ func TestNonInteractiveSSHAuthFailure(t *testing.T) {
 		"interactive context must not treat auth errors as BatchMode hints")
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, errors.New("non-fast-forward")))
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, nil))
+
+	// The shape an actual git-refs push failure has. PushWithOptions uses
+	// CombinedOutput, so ExitError.Stderr is empty and the auth text exists
+	// ONLY in the captured output — matching on err.Error() alone made the hint
+	// at the batch-push site unreachable on that backend. This case is the
+	// difference between the hint firing and not existing.
+	realShape := fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{
+		output: "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+		err:    errors.New("git push: exit status 128"),
+	})
+	assert.True(t, nonInteractiveSSHAuthFailure(ctx, realShape),
+		"auth failure carried in git's output must be detected, not just one in the message")
+	assert.False(t, nonInteractiveSSHAuthFailure(context.Background(), realShape),
+		"an interactive context must still opt out")
+	assert.False(t, nonInteractiveSSHAuthFailure(ctx, fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{
+		output: " ! refs/x:refs/x [rejected] (non-fast-forward)", err: errors.New("git push: exit status 1"),
+	})), "an ordinary rejection must not be read as an auth failure")
+}
+
+// git anonymizes userinfo in the URLs it prints but leaves a query string
+// intact, so a credential passed that way in a user-supplied checkpoint_remote
+// would otherwise reach .entire/logs verbatim.
+func TestScrubPushOutput(t *testing.T) {
+	t.Parallel()
+	const target = "https://example.test/org/checkpoints.git?token=SUPERSECRET"
+	got := scrubPushOutput("fatal: unable to access '"+target+"': 403\n", target)
+	assert.NotContains(t, got, "SUPERSECRET", "a credential in the target URL must not reach the log")
+	assert.Contains(t, got, "403", "the diagnostic payload must survive redaction")
+
+	assert.Empty(t, scrubPushOutput("   \n\t ", target), "whitespace-only output carries nothing")
+
+	// One record per failure, and the queue is undrained: a backfill pushing
+	// thousands of refs must not put a megabyte in a single log line.
+	long := strings.Repeat("! refs/entire/checkpoints/AA/x [rejected]\n", 5000)
+	bounded := scrubPushOutput(long, target)
+	assert.Less(t, len(bounded), len(long), "oversized output must be truncated")
+	assert.Contains(t, bounded, "truncated")
+	assert.Contains(t, bounded, "[rejected]", "the head of the output, where the reasons are, must survive")
 }
 
 // A push failure's cause must survive the wrapping between where git reports it
