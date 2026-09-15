@@ -135,7 +135,7 @@ func TestRepoMirrorCreate_WaitTimeoutHelp(t *testing.T) {
 
 	flag := newRepoMirrorCreateCmd().Flags().Lookup("wait-timeout")
 	require.NotNil(t, flag)
-	require.Equal(t, "How long to wait for mirror request submission, placement, and clone readiness", flag.Usage)
+	require.Equal(t, "How long to wait for mirror request submission, placement, and clone readiness (0 waits indefinitely)", flag.Usage)
 }
 
 // TestReportOneShotMirror exercises the one-shot create's presentation across

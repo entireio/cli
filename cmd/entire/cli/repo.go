@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -340,17 +339,18 @@ func newRepoGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <repo>",
 		Short: "Show a repository by /et/<project>/<repo> path, name, or ULID",
-		Long: `Read one authoritative repository snapshot. This command does not
-wait for activation. A readable provisioning or failed state exits
-successfully; inspect state in --json to determine readiness. Older
-servers may omit lifecycle state, which does not confirm readiness.
+		Long: `Show repository details. Use --authoritative to also check provisioning
+status. This command does not wait: it exits successfully when it can
+read the repository, even if provisioning is still in progress or has failed.
+Use --authoritative --json and inspect state for scripting; active means
+provisioning has completed.
 
-Use --authoritative=false to allow a registry-only snapshot when the
-core cannot serve or route a lifecycle read. This can show registration
-metadata but cannot confirm readiness. There is no automatic fallback.`,
+The default read cannot confirm readiness. If the server cannot provide
+readiness information, --authoritative reports an error or a missing state;
+neither confirms readiness.`,
 		Example: "  entire repo get /et/acme/web\n" +
 			"  entire repo get /et/acme/web --json\n" +
-			"  entire repo get /et/acme/web --authoritative=false",
+			"  entire repo get /et/acme/web --authoritative",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, repoDetailColumns, repoDetailRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
@@ -363,19 +363,18 @@ metadata but cannot confirm readiness. There is no automatic fallback.`,
 					params.Authoritative = coreapi.NewOptBool(true)
 				}
 				repo, err := c.GetRepo(ctx, params)
-				var problem *coreapi.ErrorModelStatusCode
-				if authoritative && errors.As(err, &problem) && problem.StatusCode == http.StatusServiceUnavailable {
+				if authoritative && err != nil {
 					// A registry-only fallback cannot answer the readiness question.
 					// Keep that choice explicit, and print here so renderCoreError
 					// cannot strip the recovery hint with the API error wrapper.
-					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo get %s --authoritative=false to read registration metadata from the registry; this cannot confirm readiness.\n", renderCoreError(err), repoID)
+					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo get %s --authoritative=false to inspect repository details without a readiness check.\n", renderRepoReadError(err), repoID)
 					return nil, NewSilentError(err)
 				}
 				return repo, err
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&authoritative, "authoritative", true, "Require regional lifecycle state (false allows a registry-only snapshot)")
+	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Check repository provisioning status")
 	bindRepoProjectFlag(cmd, &project)
 	addJSONFlag(cmd)
 	return cmd

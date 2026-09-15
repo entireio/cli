@@ -74,7 +74,7 @@ func awaitRepoActive(ctx context.Context, c repoLifecycleGetter, result *coreapi
 			return fmt.Errorf("repository provisioning failed: %s", result.ProvisionReason.Or("no reason supplied"))
 		case repoStateProvisioning:
 		case "":
-			return errors.New("repository readiness unconfirmed: server omitted lifecycle state; use --no-wait with an older core, or upgrade to a server supporting GET /repos/{id}?authoritative=true and Repo.state")
+			return errors.New("the server did not return repository readiness information")
 		default:
 			return fmt.Errorf("repository readiness unconfirmed: unsupported lifecycle state %q", result.State.Or(""))
 		}
@@ -173,8 +173,8 @@ func (f *repoPollFailures) expired() bool {
 func (f *repoPollFailures) record(err error) bool {
 	if f.last == nil {
 		f.first = time.Now()
-		f.deadline = f.first.Add(time.Minute)
 	}
+	f.deadline = f.first.Add(time.Minute)
 	f.last = err
 	f.count++
 	limit := 6
@@ -182,9 +182,7 @@ func (f *repoPollFailures) record(err error) bool {
 	if errors.As(err, &problem) && problem.StatusCode >= 400 && problem.StatusCode < 500 &&
 		problem.StatusCode != http.StatusRequestTimeout && problem.StatusCode != http.StatusTooManyRequests {
 		limit = 2
-		if deadline := f.first.Add(10 * time.Second); deadline.Before(f.deadline) {
-			f.deadline = deadline
-		}
+		f.deadline = f.first.Add(10 * time.Second)
 	}
 	return f.count >= limit || f.expired()
 }
@@ -194,9 +192,9 @@ func (f *repoPollFailures) record(err error) bool {
 // owning project identify the successful POST; cluster host, path and the remote
 // additional property let the user recover the clone URL if later enrichment
 // fails (including after cleanup; remote coordinates follow COR-699).
-// Preserve only those fields: keeping stale lifecycle, reason, permissions or
-// foreign markers could falsely claim readiness or access. Whole-struct
-// assignment deliberately replaces everything else.
+// Preserve omitted additional properties too, including create-only fields
+// such as commitToken. Fresh snapshot properties win collisions. Typed lifecycle,
+// reason, permissions and foreign fields are replaced to avoid stale readiness.
 func retainRepoCreation(result, snapshot *coreapi.Repo) {
 	if snapshot.Name == "" {
 		snapshot.Name = result.Name
@@ -210,12 +208,12 @@ func retainRepoCreation(result, snapshot *coreapi.Repo) {
 	if snapshot.Path.Or("") == "" {
 		snapshot.Path = result.Path
 	}
-	if remote, ok := result.AdditionalProps["remote"]; ok {
+	for key, value := range result.AdditionalProps {
 		if snapshot.AdditionalProps == nil {
 			snapshot.AdditionalProps = make(coreapi.RepoAdditional)
 		}
-		if _, set := snapshot.AdditionalProps["remote"]; !set {
-			snapshot.AdditionalProps["remote"] = remote
+		if _, set := snapshot.AdditionalProps[key]; !set {
+			snapshot.AdditionalProps[key] = value
 		}
 	}
 	*result = *snapshot
@@ -242,12 +240,27 @@ func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, noWait bool, w
 		}
 	}
 	if waitErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Repository creation succeeded: %s (%s). Readiness was not confirmed: %v\n", result.Name, result.ID, renderCoreError(waitErr))
-		fmt.Fprintf(cmd.ErrOrStderr(), "Inspect with: entire repo get %s\nWhen state is active, retry the intended push or mirror creation. If inspection is unavailable (including 403/404), contact your operator or support with this ID; this is not evidence that creating again is safe.\n", result.ID)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Repository creation succeeded: %s (%s). Readiness was not confirmed: %v\n", result.Name, result.ID, renderRepoReadError(waitErr))
+		fmt.Fprintf(cmd.ErrOrStderr(), "Inspect repository details with: entire repo get %s\nCheck readiness with: entire repo get %s --authoritative\nWhen that command reports active, retry the intended push or mirror creation. If readiness remains unavailable, contact support with this repository ID. Do not create the repository again. For future creates, --no-wait skips readiness checks.\n", result.ID, result.ID)
 		return NewSilentError(errors.Join(waitErr, outputErr))
 	}
 	if noWait && (result.State.Or("") != repoStateActive || result.Foreign.Or(false)) {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Repository readiness is unconfirmed (--no-wait). Inspect with: entire repo get %s\n", result.ID)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Repository readiness is unconfirmed (--no-wait). Check readiness with: entire repo get %s --authoritative\n", result.ID)
 	}
 	return outputErr
+}
+
+// renderRepoReadError keeps compatibility diagnostics local to readiness reads.
+// Match the structured validation location and message, not a generic 422:
+// unrelated validation failures must not be described as an older core.
+func renderRepoReadError(err error) error {
+	var problem *coreapi.ErrorModelStatusCode
+	if errors.As(err, &problem) && problem.StatusCode == http.StatusUnprocessableEntity {
+		for _, detail := range problem.Response.Errors {
+			if detail.Location.Or("") == "query.authoritative" && detail.Message.Or("") == "unknown query parameter" {
+				return fmt.Errorf("%w: query.authoritative: unknown query parameter; the server does not support repository readiness checks", renderCoreError(err))
+			}
+		}
+	}
+	return renderCoreError(err)
 }

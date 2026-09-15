@@ -483,10 +483,9 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			"  entire repo mirror create github.com/octocat/hello-world aws-us-east-2.entire.io",
 		Args: cobra.RangeArgs(0, 2),
 		PreRunE: func(_ *cobra.Command, _ []string) error {
-			// Match repo create and malformed duration flags: invalid values
-			// show usage. CLI waits must be bounded, including wizard mode.
-			if waitTimeout <= 0 {
-				return errors.New("--wait-timeout must be positive")
+			// Preserve zero as an unbounded wait for existing callers.
+			if waitTimeout < 0 {
+				return errors.New("--wait-timeout must be zero or positive")
 			}
 			return nil
 		},
@@ -535,7 +534,7 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return once the placement is registered, without waiting for the initial clone")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "How long to wait for mirror request submission, placement, and clone readiness")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "How long to wait for mirror request submission, placement, and clone readiness (0 waits indefinitely)")
 	return cmd
 }
 
@@ -576,8 +575,7 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 	}
 
 	waitCtx := ctx
-	// Zero remains an internal seam for callers that supply their own context
-	// deadline. The CLI rejects it: an unbounded wait can hang automation.
+	// Zero preserves the caller context without adding a timeout.
 	if opts.timeout > 0 {
 		var cancel context.CancelFunc
 		waitCtx, cancel = context.WithTimeout(ctx, opts.timeout)

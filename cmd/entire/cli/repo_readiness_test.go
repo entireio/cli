@@ -36,7 +36,7 @@ func TestRepoGetAuthoritativeSnapshot(t *testing.T) {
 			}))
 			defer srv.Close()
 			for _, args := range [][]string{{testDeleteULID}, {testDeleteULID, "--json"}} {
-				out, _, err := runCoreCmd(t, newRepoGetCmd, srv.URL, args...)
+				out, _, err := runCoreCmd(t, newRepoGetCmd, srv.URL, append(args, "--authoritative")...)
 				require.NoError(t, err)
 				require.Contains(t, out, "max retries exhausted")
 				if len(args) > 1 {
@@ -124,6 +124,7 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 		{name: "missing home host", initial: "provisioning", pollStatus: 500, polls: 6, wantErr: true},
 		{name: "foreign on poll", initial: "provisioning", final: "active", foreign: true, polls: 1, wantErr: true},
 		{name: "mismatched ID", initial: "provisioning", final: "active", mismatched: true, polls: 1, wantErr: true},
+		{name: "rejected parameter", initial: "provisioning", pollStatus: 422, polls: 2, wantErr: true},
 		{name: "rate limited", initial: "provisioning", pollStatus: 429, polls: 6, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,7 +137,7 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 						posts.Add(1)
 						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusCreated)
-						fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":%q,"clusterHost":"cell.example","path":"/et/project/web","capabilities":{"canManage":true,"canPush":true,"canPull":true}}`, testDeleteULID, testProjectULID, state)
+						fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":%q,"commitToken":"tok-abc","clusterHost":"cell.example","path":"/et/project/web","capabilities":{"canManage":true,"canPush":true,"canPull":true}}`, testDeleteULID, testProjectULID, state)
 						return
 					case http.MethodGet:
 						n := gets.Add(1)
@@ -151,7 +152,11 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 							w.Header().Set("Content-Type", "application/problem+json")
 							w.WriteHeader(tc.pollStatus)
 							detail := map[int]string{403: "permission denied", 404: "repo not found", 503: "repository lifecycle unavailable on this core", 500: `cluster jurisdiction "eu" has no auth host wired on this core`}[tc.pollStatus]
-							fmt.Fprintf(w, `{"status":%d,"title":%q,"detail":%q}`, tc.pollStatus, http.StatusText(tc.pollStatus), detail)
+							if tc.pollStatus == 422 {
+								fmt.Fprint(w, `{"detail":"validation failed","errors":[{"message":"unknown query parameter","location":"query.authoritative"}]}`)
+							} else {
+								fmt.Fprintf(w, `{"status":%d,"title":%q,"detail":%q}`, tc.pollStatus, http.StatusText(tc.pollStatus), detail)
+							}
 							return
 						}
 						state = "provisioning"
@@ -185,6 +190,12 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 					require.Contains(t, stderr, "creation succeeded")
 					require.Contains(t, stderr, "repo get "+testDeleteULID)
 					require.Contains(t, stderr, "support")
+					require.Contains(t, stderr, "--authoritative")
+					if tc.pollStatus == 422 {
+						require.Contains(t, stderr, "query.authoritative")
+						require.Contains(t, stderr, "unknown query parameter")
+						require.Contains(t, stderr, "--no-wait")
+					}
 					if tc.pollStatus == http.StatusForbidden {
 						var statusErr *coreapi.ErrorModelStatusCode
 						require.ErrorAs(t, err, &statusErr)
@@ -207,6 +218,7 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 				if asJSON {
 					var obj map[string]any
 					require.NoError(t, json.Unmarshal([]byte(out), &obj))
+					require.Equal(t, "tok-abc", obj["commitToken"])
 					require.Equal(t, testProjectULID, obj["owningProjectId"])
 					require.Equal(t, testDeleteULID, obj["id"])
 					expectedState := tc.initial
@@ -331,7 +343,7 @@ func TestRepoCreateInterruptedAfterCreation(t *testing.T) {
 					posts.Add(1)
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusCreated)
-					fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":"provisioning","clusterHost":"cell.example","path":"/et/project/web","capabilities":{"canManage":true,"canPush":true,"canPull":true}}`, testDeleteULID, testProjectULID)
+					fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":"provisioning","commitToken":"tok-abc","clusterHost":"cell.example","path":"/et/project/web","capabilities":{"canManage":true,"canPush":true,"canPull":true}}`, testDeleteULID, testProjectULID)
 					return
 				}
 				gets.Add(1)
@@ -472,7 +484,7 @@ func TestAwaitRepoActiveErrorBudget(t *testing.T) {
 
 func TestRepoCreateMirrorReadinessFlags(t *testing.T) {
 	t.Parallel()
-	for _, value := range []string{"0", "-1s", "oops"} {
+	for _, value := range []string{"-1s", "oops"} {
 		t.Run(value, func(t *testing.T) {
 			t.Parallel()
 			for _, constructor := range []func() *cobra.Command{newRepoCreateCmd, newRepoMirrorCreateCmd} {
@@ -499,10 +511,12 @@ func TestRepoGetAuthoritativeFlag(t *testing.T) {
 		name, flag, query string
 		status            int
 	}{
-		{name: "default", query: "true"},
+		{name: "default"},
 		{name: "explicit", flag: "--authoritative=true", query: "true"},
 		{name: "plain", flag: "--authoritative=false"},
-		{name: "unavailable", query: "true", status: 503},
+		{name: "unavailable", flag: "--authoritative", query: "true", status: 503},
+		{name: "rejected parameter", flag: "--authoritative", query: "true", status: 422},
+		{name: "forbidden", flag: "--authoritative", query: "true", status: 403},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
@@ -513,7 +527,11 @@ func TestRepoGetAuthoritativeFlag(t *testing.T) {
 				if tc.status != 0 {
 					w.Header().Set("Content-Type", "application/problem+json")
 					w.WriteHeader(tc.status)
-					fmt.Fprint(w, `{"status":503,"detail":"repository lifecycle unavailable on this core"}`)
+					if tc.status == 422 {
+						fmt.Fprint(w, `{"detail":"validation failed","errors":[{"message":"unknown query parameter","location":"query.authoritative"}]}`)
+					} else {
+						fmt.Fprintf(w, `{"status":%d,"detail":"repository lifecycle unavailable on this core"}`, tc.status)
+					}
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -532,8 +550,12 @@ func TestRepoGetAuthoritativeFlag(t *testing.T) {
 					stderr += err.Error()
 				}
 				require.Contains(t, stderr, "--authoritative=false")
-				require.Contains(t, stderr, "registry")
-				require.Contains(t, stderr, "cannot confirm readiness")
+				if tc.status == 422 {
+					require.Contains(t, stderr, "query.authoritative")
+					require.Contains(t, stderr, "unknown query parameter")
+				}
+				require.Contains(t, stderr, "without a readiness check")
+				require.NotContains(t, stderr, "--no-wait")
 			} else {
 				require.NoError(t, err)
 			}
@@ -584,8 +606,7 @@ func TestAwaitRepoActivePollingCallback(t *testing.T) {
 					require.Zero(t, reads)
 				}
 				if initial == "" {
-					require.ErrorContains(t, err, "--no-wait")
-					require.ErrorContains(t, err, "GET /repos/{id}?authoritative=true and Repo.state")
+					require.ErrorContains(t, err, "the server did not return repository readiness information")
 				}
 			})
 		})
@@ -644,4 +665,62 @@ func TestAwaitRepoActiveRetainsOnlyCreationCoordinates(t *testing.T) {
 	require.Equal(t, "active", result.State.Or(""))
 	require.False(t, result.ProvisionReason.IsSet(), "do not preserve stale lifecycle enrichment")
 	require.Equal(t, *snapshot, *result)
+}
+
+func TestRepoMirrorZeroTimeout(t *testing.T) {
+	t.Parallel()
+	cmd := newRepoMirrorCreateCmd()
+	called := false
+	cmd.RunE = func(*cobra.Command, []string) error { called = true; return nil }
+	cmd.SetArgs([]string{"foo", "--wait-timeout=0"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	require.True(t, called)
+}
+
+func TestRepoPollMixedErrors(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var failures repoPollFailures
+		require.False(t, failures.record(&coreapi.ErrorModelStatusCode{StatusCode: 404}))
+		time.Sleep(2 * time.Second)
+		require.False(t, failures.record(&coreapi.ErrorModelStatusCode{StatusCode: 503}))
+		time.Sleep(9 * time.Second)
+		require.False(t, failures.expired(), "transient response restores the longer window")
+		time.Sleep(49 * time.Second)
+		require.True(t, failures.expired(), "window still starts at the first failure")
+	})
+}
+
+func TestRetainRepoAdditionalProperties(t *testing.T) {
+	t.Parallel()
+	result := &coreapi.Repo{AdditionalProps: coreapi.RepoAdditional{
+		"commitToken": []byte(`"tok-abc"`), "future": []byte(`{"version":1}`),
+	}}
+	snapshot := &coreapi.Repo{AdditionalProps: coreapi.RepoAdditional{
+		"future": []byte(`{"version":2}`),
+	}}
+	retainRepoCreation(result, snapshot)
+	require.JSONEq(t, `"tok-abc"`, string(result.AdditionalProps["commitToken"]))
+	require.JSONEq(t, `{"version":2}`, string(result.AdditionalProps["future"]))
+}
+
+func TestRepoReadErrorUnrelatedValidation(t *testing.T) {
+	t.Parallel()
+	problem := &coreapi.ErrorModelStatusCode{StatusCode: 422, Response: coreapi.ErrorModel{
+		Detail: coreapi.NewOptString("invalid repository ID"),
+		Errors: []coreapi.ErrorDetail{{Location: coreapi.NewOptString("path.repoId"),
+			Message: coreapi.NewOptString("invalid value")}},
+	}}
+	require.EqualError(t, renderRepoReadError(problem), "invalid repository ID")
+}
+
+func TestRepoPollTransientThenOrdinaryError(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var failures repoPollFailures
+		require.False(t, failures.record(&coreapi.ErrorModelStatusCode{StatusCode: 503}))
+		time.Sleep(2 * time.Second)
+		require.True(t, failures.record(&coreapi.ErrorModelStatusCode{StatusCode: 404}),
+			"ordinary failures still enforce the two-attempt limit")
+	})
 }
