@@ -17,8 +17,8 @@ import (
 // ResolveContextForCluster picks the local login context to authenticate
 // git operations against clusterHost.
 //
-// It separates two concerns that used to be conflated in a single
-// cluster→context binding:
+// It keeps two concerns separate rather than binding cluster→context
+// directly:
 //
 //   - Which control plane(s) front the cluster — an objective infra fact.
 //     Discovered from the cluster's /.well-known/entire-cluster.json and
@@ -359,9 +359,11 @@ var autoSelectNoticeW io.Writer = os.Stderr
 // chosen. Auto-selection settles a single candidate only: picking among several
 // would make the acting identity depend on what else happens to be stored, so
 // the user picks. Names are sorted, so the message is stable across saves.
+// The per-command remedy is named alongside `auth use`, which changes the
+// machine-wide default.
 func ambiguousContextError(subject string, eligible []*contexts.Context) error {
-	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); choose one with `entire auth use <context>` and re-run",
-		subject, strings.Join(contextNames(eligible), ", "))
+	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); choose one for this command with `entire --context <context> …` (or %s=<context>), or switch the default with `entire auth use <context>`, and re-run",
+		subject, strings.Join(contextNames(eligible), ", "), contexts.EnvContextVar)
 }
 
 // describeSelection labels a resolved identity for debug output, naming the
