@@ -171,27 +171,7 @@ func newLoginCmd() *cobra.Command {
 		Use:   "login",
 		Short: "Log in to Entire",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			loginServer, err := parseLoginServer(server)
-			if err != nil {
-				return fmt.Errorf("invalid --server: %w", err)
-			}
-			if err := requireSecureLoginServer(loginServer, insecureHTTPAuth); err != nil {
-				return err
-			}
-			client := auth.NewClient(loginServer, nil, insecureHTTPAuth)
-			// Closure adapts the concrete *auth.BrowserAuthFlow result to the
-			// browserAuthFlow interface (func types are invariant, so the
-			// method value alone won't do). On error the flow is a typed nil,
-			// which is fine — runLoginAuto checks err before touching it.
-			startBrowser := func(ctx context.Context) (browserAuthFlow, error) {
-				return client.StartBrowserAuth(ctx)
-			}
-			return runLoginAuto(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				client, startBrowser, defaultLoginURLInteractor(cmd.ErrOrStderr()), loginFlowFacts{
-					useDevice:  useDevice,
-					canPrompt:  interactive.CanPromptInteractively(),
-					sshSession: isSSHSession(),
-				})
+			return runLoginCommand(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), server, insecureHTTPAuth, useDevice)
 		},
 	}
 	cmd.Flags().StringVar(&server, "server", api.DefaultAuthBaseURL,
@@ -199,6 +179,28 @@ func newLoginCmd() *cobra.Command {
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	cmd.Flags().BoolVar(&useDevice, "device", false, "Use the device-code flow (enter a code in your browser) instead of the default browser redirect")
 	return cmd
+}
+
+func runLoginCommand(ctx context.Context, outW, errW io.Writer, server string, insecureHTTPAuth, useDevice bool) error {
+	loginServer, err := parseLoginServer(server)
+	if err != nil {
+		return fmt.Errorf("invalid --server: %w", err)
+	}
+	if err := requireSecureLoginServer(loginServer, insecureHTTPAuth); err != nil {
+		return err
+	}
+	client := auth.NewClient(loginServer, nil, insecureHTTPAuth)
+	// Closure adapts the concrete *auth.BrowserAuthFlow result to the
+	// browserAuthFlow interface (func types are invariant, so the method value
+	// alone won't do).
+	startBrowser := func(ctx context.Context) (browserAuthFlow, error) {
+		return client.StartBrowserAuth(ctx)
+	}
+	return runLoginAuto(ctx, outW, errW, client, startBrowser, defaultLoginURLInteractor(errW), loginFlowFacts{
+		useDevice:  useDevice,
+		canPrompt:  interactive.CanPromptInteractively(),
+		sshSession: isSSHSession(),
+	})
 }
 
 // parseLoginServer validates and canonicalises the --server value: an

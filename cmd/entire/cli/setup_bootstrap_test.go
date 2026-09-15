@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -379,146 +380,6 @@ func gitArgsMatch(args []string) func(fakeCall) bool {
 	}
 }
 
-func TestEnsureGitIdentity_AlreadyConfigured(t *testing.T) {
-	t.Parallel()
-	r := newFakeRunner()
-	r.setIdentityConfigured()
-
-	err := ensureGitIdentity(context.Background(), io.Discard, r, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// No git config writes should have occurred.
-	if r.hasCall(func(c fakeCall) bool {
-		return c.name == cmdGit && len(c.args) >= 2 && c.args[0] == gitCmdConfig && (c.args[1] == "user.name" || c.args[1] == "user.email")
-	}) {
-		t.Fatal("did not expect identity writes when already configured")
-	}
-}
-
-func TestEnsureGitIdentity_SourcedFromGh(t *testing.T) {
-	t.Parallel()
-	r := newFakeRunner()
-	// Identity missing locally (empty stdout).
-	r.set("git", []string{"config", "--get", "user.name"}, "", errors.New("not set"))
-	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
-	// gh available and authenticated.
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"octo","name":"Octo Cat","email":"octo@example.com"}`, nil)
-	// Expect writes with values from gh.
-	r.set("git", []string{"config", "user.name", "Octo Cat"}, "", nil)
-	r.set("git", []string{"config", "user.email", "octo@example.com"}, "", nil)
-
-	err := ensureGitIdentity(context.Background(), io.Discard, r, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestEnsureGitIdentity_GhNoreplyFallback(t *testing.T) {
-	t.Parallel()
-	r := newFakeRunner()
-	r.set("git", []string{"config", "--get", "user.name"}, "", errors.New("not set"))
-	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	// email is null/missing: should fall back to id+login noreply.
-	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"octo","name":"","email":null}`, nil)
-	r.set("git", []string{"config", "user.name", "octo"}, "", nil)
-	r.set("git", []string{"config", "user.email", "42+octo@users.noreply.github.com"}, "", nil)
-
-	err := ensureGitIdentity(context.Background(), io.Discard, r, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// TestEnsureGitIdentity_PreservesExistingName covers the partial-config
-// case: `user.name` is set globally but `user.email` is missing. We must
-// source only the email (from gh) and leave the name untouched — we
-// never want to silently replace the user's configured name with a
-// gh-derived login.
-func TestEnsureGitIdentity_PreservesExistingName(t *testing.T) {
-	t.Parallel()
-	r := newFakeRunner()
-	// Name is set globally, email is not.
-	r.set("git", []string{"config", "--get", "user.name"}, "John Doe\n", nil)
-	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
-	// gh available and returns both values.
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"johndoe","name":"Johnny Dough","email":"john@example.com"}`, nil)
-	// Only the email should be written locally — the name must stay
-	// at the user's global value.
-	r.set("git", []string{"config", "user.email", "john@example.com"}, "", nil)
-
-	err := ensureGitIdentity(context.Background(), io.Discard, r, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// No `git config user.name ...` call should have been made.
-	if r.hasCall(func(c fakeCall) bool {
-		return c.name == cmdGit && len(c.args) >= 2 && c.args[0] == gitCmdConfig && c.args[1] == "user.name"
-	}) {
-		t.Fatal("ensureGitIdentity should not write user.name when it's already set globally")
-	}
-}
-
-// TestEnsureGitIdentity_PreservesExistingEmail mirrors the above for the
-// other direction: email set, name missing.
-func TestEnsureGitIdentity_PreservesExistingEmail(t *testing.T) {
-	t.Parallel()
-	r := newFakeRunner()
-	r.set("git", []string{"config", "--get", "user.name"}, "", errors.New("not set"))
-	r.set("git", []string{"config", "--get", "user.email"}, "john@example.com\n", nil)
-	r.set("gh", []string{"--version"}, "gh", nil)
-	r.set("gh", []string{"auth", "status"}, "ok", nil)
-	r.set("gh", []string{"api", "user"}, `{"id":42,"login":"johndoe","name":"Johnny","email":"other@example.com"}`, nil)
-	r.set("git", []string{"config", "user.name", "Johnny"}, "", nil)
-
-	err := ensureGitIdentity(context.Background(), io.Discard, r, t.TempDir())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if r.hasCall(func(c fakeCall) bool {
-		return c.name == cmdGit && len(c.args) >= 2 && c.args[0] == gitCmdConfig && c.args[1] == "user.email"
-	}) {
-		t.Fatal("ensureGitIdentity should not write user.email when it's already set globally")
-	}
-}
-
-func TestEnsureGitIdentity_NonInteractiveNoGh_Errors(t *testing.T) {
-	r := newFakeRunner()
-	r.set("git", []string{"config", "--get", "user.name"}, "", errors.New("not set"))
-	r.set("git", []string{"config", "--get", "user.email"}, "", errors.New("not set"))
-	r.set("gh", []string{"--version"}, "", errors.New("not found"))
-
-	err := ensureGitIdentity(context.Background(), io.Discard, r, t.TempDir())
-	if err == nil {
-		t.Fatal("expected error when identity missing and gh unavailable")
-	}
-	if !strings.Contains(err.Error(), "git config --global user.name") {
-		t.Fatalf("expected guidance to set git config, got %v", err)
-	}
-}
-
-func TestGhUserIdentity_NameFallsBackToLogin(t *testing.T) {
-	t.Parallel()
-	r := newFakeRunner()
-	r.set("gh", []string{"api", "user"}, `{"id":7,"login":"dev","name":"","email":"dev@example.com"}`, nil)
-	name, email, err := ghUserIdentity(context.Background(), r)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if name != "dev" {
-		t.Fatalf("name = %q", name)
-	}
-	if email != "dev@example.com" {
-		t.Fatalf("email = %q", email)
-	}
-}
-
 // TestBootstrap_FreshMachine_RealGit is an integration-style test that runs
 // real git via execRunner on a temp dir isolated from the user's global git
 // config. Regression guard for the issue where bootstrap commits failed
@@ -572,69 +433,29 @@ func writeTempFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
-// ghFailingRunner wraps another bootstrapRunner and forces all `gh`
-// invocations to fail, while letting real `git` calls through. This
-// lets tests deterministically exercise the "gh unavailable" path
-// regardless of whether `gh` is installed/authenticated on the host.
-type ghFailingRunner struct {
-	inner bootstrapRunner
-}
-
-func (r ghFailingRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if name == "gh" {
-		return "", errors.New("gh not available (test)")
-	}
-	return r.inner.Run(ctx, name, args...)
-}
-
-func (r ghFailingRunner) RunInDir(ctx context.Context, dir, name string, args ...string) (string, error) {
-	if name == "gh" {
-		return "", errors.New("gh not available (test)")
-	}
-	return r.inner.RunInDir(ctx, dir, name, args...)
-}
-
-// TestBootstrap_FreshMachine_NoIdentity_RealGit verifies that a fresh
-// machine without any git identity configured fails cleanly in
-// non-interactive mode with a helpful error message, instead of letting
-// `git commit` fail with a confusing "please tell me who you are" stderr.
-//
-// Uses a gh-failing runner wrapper rather than PATH manipulation so the
-// test isn't sensitive to whether `gh` + GH_TOKEN/GITHUB_TOKEN are set
-// on the host.
-func TestBootstrap_FreshMachine_NoIdentity_RealGit(t *testing.T) {
-	emptyHome := t.TempDir()
-	t.Setenv("HOME", emptyHome)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	// Empty global config: no user.name/user.email.
-	globalCfg := filepath.Join(emptyHome, ".gitconfig")
-	if err := writeTempFile(globalCfg, ""); err != nil {
-		t.Fatalf("write global gitconfig: %v", err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
-	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
-	// Belt-and-suspenders: unset any GitHub tokens so a wrapper bypass
-	// would still not find credentials.
-	t.Setenv("GH_TOKEN", "")
-	t.Setenv("GITHUB_TOKEN", "")
-
+// Bootstrap no longer resolves the git identity: that moved to the enable
+// command, which runs the preflight after agent selection and before the
+// initial commit (needsIdentity covers the bootstrap-with-commit case). This
+// asserts the deferral — init succeeds with no identity configured and leaves
+// the commit decision for later — replacing the test that asserted bootstrap
+// itself failed here.
+func TestBootstrapInit_DefersGitIdentity(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
 	projectDir := t.TempDir()
 	restoreCwd(t, projectDir)
 	if err := writeTempFile(filepath.Join(projectDir, "README.md"), "hi\n"); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 
-	opts := BootstrapOptions{
+	state, err := runBootstrapInitWith(context.Background(), io.Discard, BootstrapOptions{
 		InitRepo:             true,
 		InitialCommitMessage: "x",
+	}, execRunner{})
+	if err != nil {
+		t.Fatalf("bootstrap init: %v", err)
 	}
-	runner := ghFailingRunner{inner: execRunner{}}
-	err := runBootstrapWith(context.Background(), io.Discard, opts, runner)
-	if err == nil {
-		t.Fatal("expected error when identity missing and gh unavailable")
-	}
-	if !strings.Contains(err.Error(), "git config --global user.name") {
-		t.Fatalf("expected guidance to set git config, got: %v", err)
+	if state == nil || !state.commit {
+		t.Fatalf("bootstrap state = %+v, want deferred initial commit", state)
 	}
 }
 

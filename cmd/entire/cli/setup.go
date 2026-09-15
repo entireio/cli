@@ -416,9 +416,14 @@ func parseCheckpointRemoteFlag(value string) (provider, repo string, err error) 
 	return provider, repo, nil
 }
 
-// runSetupFlow runs the first-time setup flow (agent selection + hooks + settings).
-// Shared by root command (no args), `entire configure`, and `entire enable` on fresh repos.
-func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
+// selectAgentsForSetup is the agent-selection half of first-time setup, split
+// out so the bare-enable path can run the identity preflight between selection
+// and runEnableInteractive — which is the whole point of the split, since the
+// preflight has to sit after the user has chosen agents but before anything
+// writes hooks or settings. Kept as one implementation because the alternative
+// is two copies that drift, and it is small enough to sit under dupl's
+// threshold where lint would not notice.
+func selectAgentsForSetup(ctx context.Context, w io.Writer, opts EnableOptions) ([]agent.Agent, error) {
 	// Discover external agent plugins so they appear in agent selection.
 	// Use DiscoverAndRegisterAlways to bypass the external_agents setting —
 	// during setup the setting doesn't exist yet.
@@ -431,10 +436,68 @@ func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
 
 	agents, err := detectOrSelectAgent(ctx, w, selectFn)
 	if err != nil {
-		return fmt.Errorf("agent selection failed: %w", err)
+		return nil, fmt.Errorf("agent selection failed: %w", err)
+	}
+	return agents, nil
+}
+
+// runSetupFlow runs the first-time setup flow (agent selection + identity +
+// hooks + settings). Shared by the root command (no args), `entire configure`,
+// and `entire agent`.
+//
+// The identity preflight belongs here, not only in `entire enable`: these
+// callers reach the same end state — hooks installed, settings written, commits
+// flowing — for the same "existing repo, not set up yet" case, so a repo
+// onboarded by bare `entire` would otherwise keep attributing commits to an
+// unknown author, which is the bug the preflight exists to fix.
+func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
+	return runSetupFlowWithPreflight(ctx, w, opts, defaultIdentityPreflight(ctx, w))
+}
+
+// runSetupFlowWithPreflight is runSetupFlow with the identity step injected, so
+// tests can drive the ordering without reaching the network. The ordering is
+// the point: select agents, resolve identity, then write. The preflight sits
+// between the two because it may fail or start a login, and neither should
+// happen after hooks and settings are already on disk.
+//
+// `entire enable` deliberately does not route through here. It has to install
+// its logger between the preflight and the writes — late enough that a rejected
+// enable leaves no .entire/logs behind, and its context has to be re-read after
+// that — so it spells the same three steps out itself, sharing
+// selectAgentsForSetup rather than this wrapper.
+func runSetupFlowWithPreflight(ctx context.Context, w io.Writer, opts EnableOptions, preflight func() error) error {
+	agents, err := selectAgentsForSetup(ctx, w, opts)
+	if err != nil {
+		return err
+	}
+	if preflight != nil {
+		if err := preflight(); err != nil {
+			return err
+		}
 	}
 
 	return runEnableInteractive(ctx, w, agents, opts)
+}
+
+// defaultIdentityPreflight builds the identity step for callers that have no
+// command flags to thread through. It resolves the worktree root itself and is
+// a no-op when that fails: these entry points only run inside a git repo, so a
+// failure here means something is wrong that setup will report in its own
+// terms rather than as an identity error.
+func defaultIdentityPreflight(ctx context.Context, w io.Writer) func() error {
+	return func() error {
+		repoRoot, rootErr := paths.WorktreeRoot(ctx)
+		if rootErr != nil {
+			// Callers reach here only from inside a git repo (root.go checks
+			// first), so this is unreachable in practice. If it ever is not,
+			// setup's own prerequisite handling gives the accurate message —
+			// failing here instead would report a missing identity for what is
+			// really a missing repo.
+			return nil //nolint:nilerr // deliberate skip; see above
+		}
+		return ensureGitIdentity(ctx, w, execRunner{}, repoRoot,
+			newEntireGitIdentityResolver(w, os.Stderr, false))
+	}
 }
 
 // selectAllAgents is a selectFn that selects all available agents.
@@ -475,6 +538,24 @@ func hookAgentOptions(selected map[types.AgentName]struct{}) []huh.Option[string
 // runManageAgents shows which agents are currently enabled and lets the user
 // add or remove agents. Deselecting an installed agent removes its hooks.
 func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selectFn func(available []string) ([]string, error)) error {
+	return runManageAgentsWithPreflight(ctx, w, opts, selectFn, nil)
+}
+
+func runManageAgentsWithPreflight(
+	ctx context.Context,
+	w io.Writer,
+	opts EnableOptions,
+	selectFn func(available []string) ([]string, error),
+	preflight func() error,
+) error {
+	runPreflight := func() error {
+		if preflight == nil {
+			return nil
+		}
+		fn := preflight
+		preflight = nil
+		return fn()
+	}
 	installedNames := GetAgentsWithHooksInstalled(ctx)
 
 	// Show currently installed agents
@@ -503,6 +584,9 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 				for _, name := range installedNames {
 					discoverNamedExternalAgent(ctx, name)
 					selectedAgentNames = append(selectedAgentNames, string(name))
+				}
+				if err := runPreflight(); err != nil {
+					return err
 				}
 				return applyAgentChanges(ctx, w, selectedAgentNames, installedNames, opts)
 			}
@@ -556,6 +640,9 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 		if err := form.Run(); err != nil {
 			return fmt.Errorf("agent selection cancelled: %w", err)
 		}
+	}
+	if err := runPreflight(); err != nil {
+		return err
 	}
 
 	// Nothing selected and nothing installed — no-op.
@@ -806,6 +893,10 @@ Examples:
 }
 
 func newEnableCmd() *cobra.Command {
+	return newEnableCmdWithIdentityResolverFactory(newEntireGitIdentityResolver)
+}
+
+func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFactory) *cobra.Command {
 	var opts EnableOptions
 	var ignoreUntracked bool
 	var agentName string
@@ -866,13 +957,15 @@ publish the repository yourself when you're ready.`,
 			// bootstrap one (git init, local only). If the user declines,
 			// fall back to the legacy prerequisite error.
 			//
-			// The bootstrap runs in two phases: phase 1 (git init + identity
-			// + the initial-commit decision) before agent setup, phase 2
-			// (the initial commit itself) after agent setup so that commit
-			// captures the .entire/, .claude/, hooks, and settings files
-			// that setup writes.
+			// The bootstrap runs in two phases: phase 1 (git init + the
+			// initial-commit decision) before agent setup and identity
+			// recovery, phase 2 (the initial commit itself) after agent setup
+			// so that commit captures the .entire/, .claude/, hooks, and
+			// settings files that setup writes.
 			var bootstrap *bootstrapState
-			if _, err := paths.WorktreeRoot(ctx); err != nil {
+			repoRoot, repoErr := paths.WorktreeRoot(ctx)
+			repoExisted := repoErr == nil
+			if repoErr != nil {
 				bootstrapOpts.Yes = opts.Yes
 				state, bootstrapErr := runBootstrapInit(ctx, cmd.OutOrStdout(), bootstrapOpts)
 				if errors.Is(bootstrapErr, errBootstrapDeclined) {
@@ -891,8 +984,10 @@ publish the repository yourself when you're ready.`,
 				// "done" summary from the bootstrap finalize step.
 				opts.SuppressDoneMessage = true
 				// Re-check after bootstrap.
-				if _, err := paths.WorktreeRoot(ctx); err != nil {
-					return fmt.Errorf("bootstrap finished but no git repository detected: %w", err)
+				var rootErr error
+				repoRoot, rootErr = paths.WorktreeRoot(ctx)
+				if rootErr != nil {
+					return fmt.Errorf("bootstrap finished but no git repository detected: %w", rootErr)
 				}
 				// Visual separator between bootstrap init and agent setup.
 				printBootstrapSection(cmd.OutOrStdout(), "Enabling Entire")
@@ -940,28 +1035,9 @@ publish the repository yourself when you're ready.`,
 				selectedAgent = ag
 			}
 
-			// enable runs before the repo is set up, which is exactly when the
-			// root pre-run's IsSetUpAny gate declines to build a logger. Placed
-			// after every check that can still reject this invocation, so a
-			// rejected enable leaves an untouched repo untouched.
-			ensureLogger(cmd)
-			ctx = cmd.Context()
-
-			if selectedAgent != nil {
-				// --agent is a targeted operation: set up this specific agent without
-				// affecting other agents. Unlike the interactive path, it does not
-				// uninstall hooks for other previously-enabled agents.
-				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), selectedAgent, opts)
-			}
-
-			// Any setup-mutating flags should behave like `configure` on repos that
-			// are already set up. Bare `enable` remains the lightweight re-enable path.
-			if settings.IsSetUpAny(ctx) {
-				return runEnableOnConfiguredRepo(ctx, cmd, opts)
-			}
-
-			// Fresh repo — run full setup flow
-			return runSetupFlow(ctx, cmd.OutOrStdout(), opts)
+			needsIdentity := repoExisted || (bootstrap != nil && bootstrap.commit)
+			return continueEnableAfterAgentValidation(ctx, cmd, opts, selectedAgent, repoRoot, needsIdentity,
+				identityFactory(cmd.OutOrStdout(), cmd.ErrOrStderr(), insecureHTTPAuth))
 		},
 	}
 
@@ -1003,6 +1079,51 @@ publish the repository yourself when you're ready.`,
 	})
 
 	return cmd
+}
+
+func continueEnableAfterAgentValidation(
+	ctx context.Context,
+	cmd *cobra.Command,
+	opts EnableOptions,
+	selectedAgent agent.Agent,
+	repoRoot string,
+	needsIdentity bool,
+	resolveIdentity gitIdentityResolver,
+) error {
+	if selectedAgent != nil {
+		if err := runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity); err != nil {
+			return err
+		}
+		ensureLogger(cmd)
+		return setupAgentHooksNonInteractive(cmd.Context(), cmd.OutOrStdout(), selectedAgent, opts)
+	}
+
+	if settings.IsSetUpAny(ctx) {
+		preflight := func() error {
+			return runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity)
+		}
+		return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, preflight)
+	}
+
+	// First-time bare enable owns agent selection here so authentication can be
+	// placed after selection but before runEnableInteractive mutates hooks or
+	// settings.
+	agents, err := selectAgentsForSetup(ctx, cmd.OutOrStdout(), opts)
+	if err != nil {
+		return err
+	}
+	if err := runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity); err != nil {
+		return err
+	}
+	ensureLogger(cmd)
+	return runEnableInteractive(cmd.Context(), cmd.OutOrStdout(), agents, opts)
+}
+
+func runEnableIdentityPreflight(ctx context.Context, cmd *cobra.Command, repoRoot string, needed bool, resolve gitIdentityResolver) error {
+	if !needed {
+		return nil
+	}
+	return ensureGitIdentity(ctx, cmd.OutOrStdout(), execRunner{}, repoRoot, resolve)
 }
 
 // reportRepoEnabled records the `entire enable` against the backend so the web
@@ -1177,7 +1298,19 @@ was not fully uninstalled.`,
 // management) behave like `configure`; a bare re-enable just flips the enabled
 // flag or reports current status.
 func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
+	return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, nil)
+}
+
+func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Command, opts EnableOptions, preflight func() error) error {
 	w := cmd.OutOrStdout()
+	runPreflight := func() error {
+		if preflight == nil {
+			return nil
+		}
+		fn := preflight
+		preflight = nil
+		return fn()
+	}
 	// This path is by definition not a first run, so it never reaches the
 	// import offer. Say so rather than dropping the flag silently.
 	if opts.ImportHistory {
@@ -1185,6 +1318,29 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 	}
 	usedSetupFlow := enableUsesSetupFlow(cmd, "")
 	if usedSetupFlow {
+		// Agent management runs before the strategy and checkpoint-backend
+		// writes below, which reverses the order on main. That is load-bearing,
+		// not incidental: the identity preflight is invoked from inside
+		// runManageAgentsWithPreflight, so moving the settings writes back ahead
+		// of it would persist them before authentication is known to succeed —
+		// exactly what TestEnableCmd_IdentityFailurePreservesConfiguredSettings
+		// asserts must not happen. Do not "restore" the original order.
+		if enableNeedsAgentManagement(cmd) {
+			var selectFn func(available []string) ([]string, error)
+			if opts.Yes {
+				selectFn = selectAllAgents
+			}
+			if err := runManageAgentsWithPreflight(ctx, w, opts, selectFn, runPreflight); err != nil {
+				return err
+			}
+		}
+		// Some noninteractive agent-management paths return without a picker or
+		// applying agent changes. Ensure the preflight still runs before the
+		// settings/strategy work below; this is a no-op when the picker path
+		// already invoked it.
+		if err := runPreflight(); err != nil {
+			return err
+		}
 		if hasStrategyFlags(cmd) {
 			if err := updateStrategyOptions(ctx, w, opts); err != nil {
 				return err
@@ -1195,15 +1351,8 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 				return err
 			}
 		}
-		if enableNeedsAgentManagement(cmd) {
-			var selectFn func(available []string) ([]string, error)
-			if opts.Yes {
-				selectFn = selectAllAgents
-			}
-			if err := runManageAgents(ctx, w, opts, selectFn); err != nil {
-				return err
-			}
-		}
+	} else if err := runPreflight(); err != nil {
+		return err
 	}
 
 	// `entire enable` is an explicit, user-initiated recovery point. A repo
