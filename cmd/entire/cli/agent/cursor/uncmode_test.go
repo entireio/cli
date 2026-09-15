@@ -1,0 +1,108 @@
+package cursor
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// mkProjectDir creates <usersRoot>/<user>/.cursor/projects/<name>[/agent-transcripts].
+// withTranscripts controls whether the agent-transcripts dir exists at all
+// ("browsed only" leaves it absent). withEvidence controls whether that dir
+// gets one child entry, timestamped evidenceAge before fixedNow (negative
+// ages land in the future) — the caller controls whether the entry lands
+// inside, outside, or absent from the evidence window.
+func mkProjectDir(t *testing.T, usersRoot, user, name string, withTranscripts, withEvidence bool, fixedNow time.Time, evidenceAge time.Duration) {
+	t.Helper()
+	dir := filepath.Join(usersRoot, user, ".cursor", "projects", name)
+	if withTranscripts {
+		dir = filepath.Join(dir, "agent-transcripts")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !withTranscripts || !withEvidence {
+		return
+	}
+	evidence := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(evidence, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mtime := fixedNow.Add(-evidenceAge)
+	if err := os.Chtimes(evidence, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDetectUNCProjectDirs(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	usersRoot := t.TempDir()
+
+	// Real observed fingerprint for \\wsl$\Ubuntu\root\probe-repo with agent use.
+	mkProjectDir(t, usersRoot, "peyton", "wsl-Ubuntu-root-probe-repo", true, true, now, time.Hour)
+	// wsl.localhost spelling, also used.
+	mkProjectDir(t, usersRoot, "peyton", "wsl-localhost-Ubuntu-root-probe-repo", true, true, now, time.Hour)
+	// Lowercase Explorer spelling of the same fingerprint — must match
+	// case-insensitively. A distinct user dir avoids colliding with the
+	// mixed-case directory above on case-insensitive filesystems (default
+	// macOS APFS).
+	mkProjectDir(t, usersRoot, "explorer-user", "wsl-ubuntu-root-probe-repo", true, true, now, time.Hour)
+	// Same repo but never used by an agent: browsed only, must NOT match.
+	mkProjectDir(t, usersRoot, "other", "wsl-Ubuntu-root-probe-repo", false, false, now, 0)
+	// A different repo: must NOT match.
+	mkProjectDir(t, usersRoot, "peyton", "wsl-Ubuntu-root-other-repo", true, true, now, time.Hour)
+	// A native Windows project: must NOT match.
+	mkProjectDir(t, usersRoot, "peyton", "C--code-probe-repo", true, true, now, time.Hour)
+	// Matching name, but agent-transcripts is empty: no evidence, must NOT match.
+	mkProjectDir(t, usersRoot, "empty-evidence", "wsl-Ubuntu-root-probe-repo", true, false, now, 0)
+	// Matching name, but the only evidence is 30 days old: stale, must NOT match.
+	mkProjectDir(t, usersRoot, "stale", "wsl-Ubuntu-root-probe-repo", true, true, now, 30*24*time.Hour)
+	// Evidence timestamped 1h in the future (negative age): within the WSL/DrvFs
+	// clock-skew tolerance, must MATCH — a live session's newest entry can look
+	// "in the future" right after the Windows host wakes from sleep.
+	mkProjectDir(t, usersRoot, "clock-skew", "wsl-Ubuntu-root-probe-repo", true, true, now, -time.Hour)
+	// Evidence timestamped 30 days in the future: far beyond any plausible clock
+	// skew, must NOT match — a bogus/corrupt mtime shouldn't count as evidence.
+	mkProjectDir(t, usersRoot, "bogus-future", "wsl-Ubuntu-root-probe-repo", true, true, now, -30*24*time.Hour)
+
+	got := DetectUNCProjectDirs(usersRoot, "Ubuntu", "/root/probe-repo", now)
+	if len(got) != 4 {
+		t.Fatalf("matches = %v, want the three fresh-evidence wsl-spelling dirs plus the clock-skew one", got)
+	}
+	for _, m := range got {
+		base := filepath.Base(m)
+		switch base {
+		case "wsl-Ubuntu-root-probe-repo", "wsl-localhost-Ubuntu-root-probe-repo", "wsl-ubuntu-root-probe-repo":
+		default:
+			t.Errorf("unexpected match %q", m)
+		}
+	}
+
+	if got := DetectUNCProjectDirs(usersRoot, "", "/root/probe-repo", now); got != nil {
+		t.Errorf("empty distro must detect nothing, got %v", got)
+	}
+	if got := DetectUNCProjectDirs(filepath.Join(usersRoot, "missing"), "Ubuntu", "/root/probe-repo", now); got != nil {
+		t.Errorf("missing users root must detect nothing, got %v", got)
+	}
+
+	// Adjacent non-alphanumerics in the repo path (a leading-dot directory)
+	// collapse to a single "-" the same way Cursor's own sanitizer does,
+	// rather than producing a double dash that would never match a real
+	// on-disk fingerprint.
+	dottedRoot := t.TempDir()
+	mkProjectDir(t, dottedRoot, "peyton", "wsl-Ubuntu-root-work-probe", true, true, now, time.Hour)
+	if got := DetectUNCProjectDirs(dottedRoot, "Ubuntu", "/root/.work/probe", now); len(got) != 1 || filepath.Base(got[0]) != "wsl-Ubuntu-root-work-probe" {
+		t.Errorf("dotted repo path: matches = %v, want the one wsl-Ubuntu-root-work-probe dir", got)
+	}
+
+	// The distro name is sanitized the same way the repo path is: "Ubuntu-22.04"
+	// must match the "Ubuntu-22-04" fragment Cursor's own UNC-path transform
+	// produces, not the raw "Ubuntu-22.04" string.
+	versionedRoot := t.TempDir()
+	mkProjectDir(t, versionedRoot, "peyton", "wsl-Ubuntu-22-04-root-probe-repo", true, true, now, time.Hour)
+	if got := DetectUNCProjectDirs(versionedRoot, "Ubuntu-22.04", "/root/probe-repo", now); len(got) != 1 || filepath.Base(got[0]) != "wsl-Ubuntu-22-04-root-probe-repo" {
+		t.Errorf("versioned distro: matches = %v, want the one wsl-Ubuntu-22-04-root-probe-repo dir", got)
+	}
+}
