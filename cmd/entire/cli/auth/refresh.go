@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 // token carries no usable ExpiresAt. The server is the real authority; this
 // only governs when local readers consider the cached token stale.
 const defaultSavedTokenTTL = time.Hour
+
+const authLockDirEnvVar = "ENTIRE_AUTH_LOCK_DIR"
 
 // contextTokenStore adapts one login context's keyring slots to auth-go's
 // tokenstore.Store, so tokenmanager can load, refresh, and persist that
@@ -143,7 +146,9 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 // advisory lock file. Empty means auth-go's own default,
 // os.UserCacheDir()/auth-go, which is what production wants.
 //
-// Under `go test` that default is the developer's real user cache directory
+// A test harness that spawns the real binary sets ENTIRE_AUTH_LOCK_DIR because
+// testing.Testing is false in the child. Under `go test`, the default is the
+// developer's real user cache directory
 // (~/Library/Caches/auth-go on macOS, which os.UserCacheDir resolves without
 // consulting XDG_CACHE_HOME), so every test that builds a per-context manager
 // litters it with lock files keyed on (ClientID, Issuer). Route it to the same
@@ -155,6 +160,9 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 // is not ours to write to, and sharing a cross-process lock with whatever else
 // is running.
 func tokenManagerLockDir() string {
+	if dir := os.Getenv(authLockDirEnvVar); dir != "" {
+		return dir
+	}
 	if dir, ok := testdirs.Dir("authlock"); ok {
 		return dir
 	}

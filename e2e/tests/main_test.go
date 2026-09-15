@@ -35,13 +35,14 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TOKEN_STORE", "file")
 	os.Setenv("ENTIRE_TOKEN_STORE_PATH", filepath.Join(runDir, "e2e-tokenstore.json"))
 
-	// Same for the CLI's config and cache directories: contexts.json,
-	// version_check.json, and the discovery caches must never resolve to the
-	// developer's real ~/.config/entire or ~/.cache/entire from a spawned
-	// binary (testing.Testing() is false there, so the internal/testdirs
-	// fallback cannot protect it).
+	// Same for the CLI's config, cache, and auth lock directories: contexts.json,
+	// version_check.json, discovery caches, and auth-go lock files must never
+	// resolve to the developer's real ~/.config/entire or ~/.cache/entire from
+	// a spawned binary. testing.Testing() is false there, so the
+	// internal/testdirs fallback cannot protect it.
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(runDir, "entire-config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(runDir, "entire-cache"))
+	os.Setenv("ENTIRE_AUTH_LOCK_DIR", filepath.Join(runDir, "auth-locks"))
 
 	// And clear the agents' caller-session variables. E2E is usually run from
 	// inside an agent, which publishes its session ID into this process's

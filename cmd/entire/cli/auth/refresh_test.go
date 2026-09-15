@@ -494,3 +494,13 @@ func TestTokenManagerLockDir_NeverRealUserCache(t *testing.T) {
 		t.Fatalf("tokenManagerLockDir() = %q, which resolves under the real %q", dir, realLockDir)
 	}
 }
+
+func TestTokenManagerLockDir_UsesExplicitOverride(t *testing.T) {
+	// Not parallel: it sets process-wide environment.
+	want := t.TempDir()
+	t.Setenv(authLockDirEnvVar, want)
+
+	if got := tokenManagerLockDir(); got != want {
+		t.Fatalf("tokenManagerLockDir() = %q, want explicit override %q", got, want)
+	}
+}
