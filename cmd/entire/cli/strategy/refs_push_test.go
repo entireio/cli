@@ -51,6 +51,46 @@ func TestPartitionLocalRefs(t *testing.T) {
 	assert.Equal(t, []plumbing.ReferenceName{stale}, missing, "absent ref is stale")
 }
 
+// TestPushQueuedCheckpointRefs_PushesFoldedShardRef covers a queue entry whose
+// ref is stored under its case-folded shard spelling: the queued name no longer
+// resolves once git has packed the ref, so partitionCheckpointRefPushes used to
+// classify it stale, prune it, and leave the checkpoint unpushed forever.
+func TestPushQueuedCheckpointRefs_PushesFoldedShardRef(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(folded, head.Hash())))
+	// Packing is what removes the filesystem's case-insensitive rescue, so the
+	// canonical name stops resolving on every platform rather than only on a
+	// case-sensitive one.
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	// Reopen after packing: this models a later pre-push process holding only
+	// the canonical spelling in its queue.
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, 1, pushed)
+	assert.NotEmpty(t, remoteRefHash(t, bareDir, folded), "the folded ref must reach the remote")
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "a pushed entry is pruned by its token, whatever spelling resolved")
+}
+
 func TestBatchPushCheckpointRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
