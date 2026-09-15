@@ -14,23 +14,60 @@ import (
 // Used to validate IDs that will be used in file paths.
 var pathSafeRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+var windowsReservedDeviceNameRegex = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³]) *(?:\..*)?$`)
+
+// ValidateFileNameComponent rejects names whose meaning can change when used as
+// one filesystem component on a supported platform. It deliberately does not
+// apply identifier-only rules such as rejecting leading dashes or glob syntax.
+func ValidateFileNameComponent(name string) error {
+	if name == "" {
+		return errors.New("file name component cannot be empty")
+	}
+	if strings.Contains(name, ":") {
+		return fmt.Errorf("invalid file name component %q: contains volume separator", name)
+	}
+	if reason := unsafeFileNameComponentReason(name); reason != "" {
+		return fmt.Errorf("invalid file name component %q: %s", name, reason)
+	}
+	return nil
+}
+
+func unsafeFileNameComponentReason(name string) string {
+	switch {
+	case strings.ContainsFunc(name, func(r rune) bool { return r <= '\x1f' || r == '\x7f' }):
+		return "contains control character"
+	case name == "." || name == "..":
+		return "reserved path segment"
+	case strings.HasSuffix(name, " "):
+		return "ends with space"
+	case strings.HasSuffix(name, "."):
+		return "ends with period"
+	case windowsReservedDeviceNameRegex.MatchString(name):
+		return "reserved Windows device name"
+	default:
+		return ""
+	}
+}
+
 // ValidateSessionID validates that a session ID doesn't contain path separators
 // or other unsafe characters for use in file paths.
 // This prevents path traversal attacks when session IDs are used in file paths.
 func ValidateSessionID(id string) error {
-	if strings.TrimSpace(id) == "" {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
 		return errors.New("session ID cannot be empty")
+	}
+	if trimmed != id {
+		return fmt.Errorf("invalid session ID %q: contains surrounding whitespace", id)
+	}
+	if reason := unsafeFileNameComponentReason(id); reason != "" {
+		return fmt.Errorf("invalid session ID %q: %s", id, reason)
 	}
 	if strings.HasPrefix(id, "-") {
 		return fmt.Errorf("invalid session ID %q: starts with dash", id)
 	}
 	if strings.ContainsAny(id, "/\\") {
 		return fmt.Errorf("invalid session ID %q: contains path separators", id)
-	}
-	// A bare "." or ".." is separator-free but still traverses when used as a
-	// path segment (e.g. an agent that uses the ID as a directory component).
-	if id == "." || id == ".." {
-		return fmt.Errorf("invalid session ID %q: reserved path segment", id)
 	}
 	// Reject the Windows volume separator. A drive-relative path like "C:foo" is
 	// separator-free and filepath.IsAbs reports it as non-absolute, yet
@@ -85,6 +122,9 @@ func ValidateAgentSessionID(id string) error {
 	}
 	if strings.HasPrefix(id, "-") {
 		return fmt.Errorf("invalid agent session ID %q: starts with dash", id)
+	}
+	if windowsReservedDeviceNameRegex.MatchString(id) {
+		return fmt.Errorf("invalid agent session ID %q: reserved Windows device name", id)
 	}
 	if !pathSafeRegex.MatchString(id) {
 		return fmt.Errorf("invalid agent session ID %q: must be alphanumeric with underscores/hyphens only", id)

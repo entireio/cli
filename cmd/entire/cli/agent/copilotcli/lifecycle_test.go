@@ -2,6 +2,7 @@ package copilotcli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,6 +222,48 @@ func TestParseHookEvent_AgentStop_ExtractsModel(t *testing.T) {
 	if event.Model != "claude-sonnet-4.6" {
 		t.Errorf("expected model 'claude-sonnet-4.6', got %q", event.Model)
 	}
+}
+
+func TestParseHookEvent_UnsafeSessionIDSkipsTranscriptReads(t *testing.T) {
+	sessionDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", sessionDir)
+	const (
+		unsafeSessionID = "session. "
+		childID         = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+	)
+	transcriptPath := filepath.Join(sessionDir, unsafeSessionID, "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o750))
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(strings.Join([]string{
+		`{"type":"session.model_change","data":{"newModel":"should-not-be-read"}}`,
+		`{"type":"subagent.started","agentId":"` + childID + `","data":{"toolCallId":"toolu_unsafe","agentType":"general-purpose"}}`,
+	}, "\n")), 0o600))
+	hookInput := func(fields map[string]any) string {
+		raw, err := json.Marshal(fields)
+		require.NoError(t, err)
+		return string(raw)
+	}
+
+	t.Run("agent stop", func(t *testing.T) {
+		input := hookInput(map[string]any{
+			"timestamp": 1771480085412, "cwd": "/repo", "sessionId": unsafeSessionID,
+			"transcriptPath": transcriptPath, "stopReason": "end_turn",
+		})
+		event, err := (&CopilotCLIAgent{}).ParseHookEvent(context.Background(), HookNameAgentStop, strings.NewReader(input))
+		require.NoError(t, err)
+		require.NotNil(t, event)
+		require.Equal(t, agent.TurnEnd, event.Type)
+		require.Empty(t, event.Model)
+	})
+
+	t.Run("subagent stop", func(t *testing.T) {
+		input := hookInput(map[string]any{
+			"timestamp": 1771480085412, "cwd": "/repo", "sessionId": unsafeSessionID,
+			"transcriptPath": transcriptPath, "agentId": childID,
+		})
+		event, err := (&CopilotCLIAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+		require.NoError(t, err)
+		require.Nil(t, event)
+	})
 }
 
 func TestParseHookEvent_AgentStop_NoTranscript_EmptyModel(t *testing.T) {

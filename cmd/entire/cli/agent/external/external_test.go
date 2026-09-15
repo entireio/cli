@@ -3,6 +3,7 @@ package external
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // testBinaryDir creates a temp directory with a mock entire-agent-test binary.
@@ -146,6 +148,43 @@ const validInfoJSON = `{
   }
 }`
 
+func newWriteRecordingAgent(t *testing.T) (*Agent, string, string) {
+	t.Helper()
+	var script string
+	if runtime.GOOS == osWindows {
+		script = strings.ReplaceAll(`@echo off
+if "%1"=="info" goto info
+if "%1"=="get-session-dir" goto sessiondir
+if "%1"=="write-session" goto writesession
+exit /b 1
+:info
+echo {"protocol_version":1,"name":"test","type":"Test Agent","description":"A test agent"}
+exit /b 0
+:sessiondir
+set "session_dir=%~dp0sessions"
+set "session_dir=%session_dir:\=\\%"
+echo {"session_dir":"%session_dir%"}
+exit /b 0
+:writesession
+more > "%~dp0write-session-input"
+exit /b 0
+`, "\n", "\r\n")
+	} else {
+		script = strings.Replace(mockInfoScript(validInfoJSON),
+			`echo '{"session_dir": "/tmp/sessions"}'`,
+			`printf '{"session_dir":"%s/sessions"}\n' "$(dirname "$0")"`, 1)
+		script = strings.Replace(script,
+			"  write-session)\n    exit 0\n    ;;",
+			"  write-session)\n    cat > \"$(dirname \"$0\")/write-session-input\"\n    ;;", 1)
+	}
+	binPath := testBinaryDir(t, script)
+	sessionDir := filepath.Join(filepath.Dir(binPath), "sessions")
+	if err := os.Mkdir(sessionDir, 0o750); err != nil {
+		t.Fatalf("create session directory: %v", err)
+	}
+	return newExternalAgent(t, binPath), sessionDir, filepath.Join(filepath.Dir(binPath), "write-session-input")
+}
+
 func TestRun_AppliesTimeoutWhenNoDeadline(t *testing.T) {
 	// Not parallel: mutates package-level defaultRunTimeout.
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -234,6 +273,168 @@ func TestNew_Valid(t *testing.T) {
 	}
 	if ea.info.ProtocolVersion != 1 {
 		t.Errorf("ProtocolVersion = %d, want 1", ea.info.ProtocolVersion)
+	}
+}
+
+func TestWriteSession_RejectsUnsafeReferenceBeforeSubprocess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		wantErr    error
+		sessionRef func(t *testing.T, sessionDir, outsideDir string) string
+	}{
+		{
+			name:    "absolute outside store",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(_ *testing.T, _, outsideDir string) string {
+				return filepath.Join(outsideDir, "session.jsonl")
+			},
+		},
+		{
+			name:    "rooted path",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(_ *testing.T, _, _ string) string {
+				return string(os.PathSeparator) + "outside.jsonl"
+			},
+		},
+		{
+			name:    "relative parent traversal",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(_ *testing.T, _, _ string) string {
+				return filepath.Join("..", "outside.jsonl")
+			},
+		},
+		{
+			name:    "relative nested traversal",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(_ *testing.T, _, _ string) string {
+				return filepath.FromSlash("nested/../../outside.jsonl")
+			},
+		},
+		{
+			name:    "symlinked leaf",
+			wantErr: osroot.ErrSymlinkedPath,
+			sessionRef: func(t *testing.T, sessionDir, outsideDir string) string {
+				t.Helper()
+				ref := filepath.Join(sessionDir, "session.jsonl")
+				if err := os.Symlink(filepath.Join(outsideDir, "session.jsonl"), ref); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+				return ref
+			},
+		},
+		{
+			name:    "symlinked parent",
+			wantErr: osroot.ErrSymlinkedPath,
+			sessionRef: func(t *testing.T, sessionDir, outsideDir string) string {
+				t.Helper()
+				if err := os.Symlink(outsideDir, filepath.Join(sessionDir, "linked")); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+				return filepath.Join(sessionDir, "linked", "session.jsonl")
+			},
+		},
+		{
+			name:    "symlink plus parent traversal",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(t *testing.T, sessionDir, outsideDir string) string {
+				t.Helper()
+				targetDir := filepath.Join(outsideDir, "child")
+				if err := os.Mkdir(targetDir, 0o750); err != nil {
+					t.Fatalf("create symlink target: %v", err)
+				}
+				linked := filepath.Join(sessionDir, "linked")
+				if err := os.Symlink(targetDir, linked); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+				return linked + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "session.jsonl"
+			},
+		},
+		{
+			name:    "alternate data stream",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(_ *testing.T, sessionDir, _ string) string {
+				return filepath.Join(sessionDir, "session.jsonl:stream")
+			},
+		},
+		{
+			name:    "missing store with Windows-normalized traversal",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(t *testing.T, sessionDir, _ string) string {
+				t.Helper()
+				if err := os.Remove(sessionDir); err != nil {
+					t.Fatalf("remove session directory: %v", err)
+				}
+				return filepath.Join(sessionDir, ".. ", "session.jsonl")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ea, sessionDir, marker := newWriteRecordingAgent(t)
+			outsideDir := t.TempDir()
+			sessionRef := tt.sessionRef(t, sessionDir, outsideDir)
+
+			err := ea.WriteSession(t.Context(), &agent.AgentSession{
+				RepoPath:   t.TempDir(),
+				SessionRef: sessionRef,
+			})
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("WriteSession() error = %v, want %v", err, tt.wantErr)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("write-session subprocess was invoked; marker stat error = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(outsideDir, "session.jsonl")); !os.IsNotExist(err) {
+				t.Fatalf("outside file was created; stat error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWriteSession_PreservesOpaqueRelativeReferenceWithMissingStore(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sessionRef string
+	}{
+		{name: "path-like key", sessionRef: "database/session-key"},
+		{name: "dot component", sessionRef: "tenant/../session-key"},
+		{name: "Windows device basename", sessionRef: "CON"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sessionRef := tt.sessionRef
+
+			ea, sessionDir, marker := newWriteRecordingAgent(t)
+			if err := os.Remove(sessionDir); err != nil {
+				t.Fatalf("remove session directory: %v", err)
+			}
+
+			if err := ea.WriteSession(t.Context(), &agent.AgentSession{
+				RepoPath:   t.TempDir(),
+				SessionRef: sessionRef,
+			}); err != nil {
+				t.Fatalf("WriteSession() error = %v", err)
+			}
+
+			data, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatalf("read write-session input: %v", err)
+			}
+			var got AgentSessionJSON
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("decode write-session input: %v", err)
+			}
+			if got.SessionRef != sessionRef {
+				t.Errorf("session_ref = %q, want %q", got.SessionRef, sessionRef)
+			}
+		})
 	}
 }
 

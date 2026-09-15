@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // SessionStore is one agent's own session directory, held as an *os.Root.
@@ -107,6 +109,12 @@ func (s *SessionStore) openRoot() (*os.Root, error) {
 // openRootForWrite is openRoot with the store directory created first. The
 // directory is the root itself, so it cannot be created through it — this is the
 // one place that reaches it from the outside. The caller closes the result.
+//
+// The store's own location is not a boundary Entire enforces: it comes from the
+// agent (GetSessionDir), not from checkpoint data or a hook payload, and it
+// routinely lives under a symlinked ~/.claude or ~/.codex. What IS enforced is
+// everything below it — see WriteFile, which creates nested directories with
+// MkdirAllNoSymlink and refuses a symlinked leaf.
 func (s *SessionStore) openRootForWrite() (*os.Root, error) {
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create session directory: %w", err)
@@ -123,6 +131,9 @@ func (s *SessionStore) openRootForWrite() (*os.Root, error) {
 // name relative to the store rejects an ID that walked out of the directory,
 // which a plain filepath.Join would have produced silently.
 func (s *SessionStore) SessionFile(agentSessionID string) (name, absPath string, err error) {
+	if err := validation.ValidateSessionID(agentSessionID); err != nil {
+		return "", "", fmt.Errorf("resolve session file: %w: %w", ErrOutsideSessionStore, err)
+	}
 	resolved := s.agent.ResolveSessionFile(s.dir, agentSessionID)
 	name, err = s.Name(resolved)
 	if err != nil {
@@ -160,6 +171,49 @@ func (s *SessionStore) Name(p string) (string, error) {
 	return filepath.ToSlash(rel), nil
 }
 
+// ValidateWritePath rejects an unsafe component in name and a symlink at name
+// itself. A missing store is allowed because the external agent may create it.
+//
+// This is a point-in-time preflight for a path handed to an external
+// subprocess, not a containment boundary: the subprocess can race it, and the
+// store's own location is the agent's to choose. Built-in writes go through
+// WriteFile, which repeats the name check and then writes through an os.Root.
+func (s *SessionStore) ValidateWritePath(name string) error {
+	if err := validateWriteName(name); err != nil {
+		return err
+	}
+
+	root, err := s.openRoot()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect session write path: %w", err)
+	}
+	defer root.Close()
+
+	info, err := osroot.LstatNoSymlinks(root, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect session write path: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: %w", name, osroot.ErrSymlinkedPath)
+	}
+	return nil
+}
+
+func validateWriteName(name string) error {
+	for _, component := range strings.Split(filepath.ToSlash(name), "/") {
+		if err := validation.ValidateFileNameComponent(component); err != nil {
+			return fmt.Errorf("inspect session write path: %w: %w", ErrOutsideSessionStore, err)
+		}
+	}
+	return nil
+}
+
 // ReadFile reads name from the store.
 func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 	root, err := s.openRoot()
@@ -174,6 +228,9 @@ func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 // layouts nest (Gemini keys by project hash, Pi by encoded repo path), so the
 // parents are made here rather than at each call site.
 func (s *SessionStore) WriteFile(name string, data []byte, perm os.FileMode) error {
+	if err := validateWriteName(name); err != nil {
+		return err
+	}
 	root, err := s.openRootForWrite()
 	if err != nil {
 		return err

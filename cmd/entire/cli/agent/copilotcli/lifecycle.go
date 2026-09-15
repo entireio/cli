@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // subagentSessionIDPrefix is the prefix older Copilot releases used when they
@@ -148,11 +149,13 @@ func (c *CopilotCLIAgent) buildSessionStart(env *hookEnvelope) *agent.Event {
 }
 
 func (c *CopilotCLIAgent) buildAgentStop(ctx context.Context, env *hookEnvelope) *agent.Event {
+	sessionIDIsSafe := validation.ValidateSessionID(env.SessionID) == nil
+
 	// Current Copilot children emit their own agentStop with the child UUID as
 	// sessionId but the parent's transcriptPath. A child userPromptSubmitted may
 	// already have created transient Entire state; end that state without
 	// scanning the parent transcript as if it belonged to the child.
-	if c.isSubagentAgentStop(env) {
+	if sessionIDIsSafe && c.isSubagentAgentStop(env) {
 		return &agent.Event{
 			Type:      agent.SessionEnd,
 			SessionID: env.SessionID,
@@ -161,7 +164,7 @@ func (c *CopilotCLIAgent) buildAgentStop(ctx context.Context, env *hookEnvelope)
 	}
 
 	var model string
-	if env.TranscriptPath != "" {
+	if sessionIDIsSafe && env.TranscriptPath != "" {
 		model = ExtractModelFromTranscript(ctx, env.TranscriptPath)
 	}
 
@@ -232,6 +235,9 @@ func (c *CopilotCLIAgent) buildSubagentStop(ctx context.Context, env *hookEnvelo
 
 func (c *CopilotCLIAgent) readSubagentEvidence(ctx context.Context, env *hookEnvelope) (subagentEvidence, bool) {
 	if env.SessionID == "" || (env.AgentID == "" && env.AgentName == "") || env.TranscriptPath == "" {
+		return subagentEvidence{}, false
+	}
+	if validation.ValidateSessionID(env.SessionID) != nil {
 		return subagentEvidence{}, false
 	}
 	store, err := agent.OpenSessionStore(c, env.CWD)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -161,7 +162,11 @@ func (e *Agent) GetSessionID(input *agent.HookInput) string {
 }
 
 func (e *Agent) GetSessionDir(repoPath string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "get-session-dir", "--repo-path", repoPath)
+	return e.getSessionDir(context.Background(), repoPath)
+}
+
+func (e *Agent) getSessionDir(ctx context.Context, repoPath string) (string, error) {
+	stdout, err := e.run(ctx, nil, "get-session-dir", "--repo-path", repoPath)
 	if err != nil {
 		return "", fmt.Errorf("get-session-dir: %w", err)
 	}
@@ -205,6 +210,43 @@ func (e *Agent) WriteSession(ctx context.Context, session *agent.AgentSession) e
 	data, err := marshalAgentSession(session)
 	if err != nil {
 		return fmt.Errorf("write-session: marshal: %w", err)
+	}
+	if session.RepoPath != "" {
+		sessionRef := session.SessionRef
+		if !filepath.IsAbs(sessionRef) && len(sessionRef) > 0 && os.IsPathSeparator(sessionRef[0]) {
+			return fmt.Errorf("write-session: validate session reference: %w: %s is rooted", agent.ErrOutsideSessionStore, sessionRef)
+		}
+		if sessionRef != "" && !filepath.IsAbs(sessionRef) && filepath.VolumeName(sessionRef) == "" {
+			cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(sessionRef)))
+			if cleaned == "." || paths.IsRelativeTraversal(cleaned) {
+				return fmt.Errorf("write-session: validate session reference: %w: %s escapes its relative base", agent.ErrOutsideSessionStore, sessionRef)
+			}
+		}
+		// Relative references are external-agent identifiers and may be opaque
+		// database keys. Only filesystem-shaped references can be preflighted
+		// without changing the external protocol's semantics.
+		if filepath.IsAbs(sessionRef) || filepath.VolumeName(sessionRef) != "" {
+			for _, component := range strings.Split(filepath.ToSlash(sessionRef), "/") {
+				if component == "." || component == ".." {
+					return fmt.Errorf("write-session: validate session reference: %w: %s contains a dot path component", agent.ErrOutsideSessionStore, sessionRef)
+				}
+			}
+			sessionDir, err := e.getSessionDir(ctx, session.RepoPath)
+			if err != nil {
+				return fmt.Errorf("write-session: open session store: %w", err)
+			}
+			store, err := agent.OpenSessionStoreAt(e, sessionDir)
+			if err != nil {
+				return fmt.Errorf("write-session: open session store: %w", err)
+			}
+			name, err := store.Name(sessionRef)
+			if err != nil {
+				return fmt.Errorf("write-session: validate session reference: %w", err)
+			}
+			if err := store.ValidateWritePath(name); err != nil {
+				return fmt.Errorf("write-session: validate session reference: %w", err)
+			}
+		}
 	}
 	_, err = e.run(ctx, data, "write-session")
 	if err != nil {
