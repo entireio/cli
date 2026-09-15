@@ -294,6 +294,23 @@ func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) er
 		unscanned = append(unscanned, "stray agent temp files")
 	}
 
+	if !force && !dryRun {
+		activeSessions, err := activeSessionsInRepository(ctx)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not check for active sessions: %v\n", err)
+			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override.")
+			return nil
+		}
+		if len(activeSessions) > 0 {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Active sessions detected:")
+			for _, s := range activeSessions {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s (phase: %s)\n", s.SessionID, s.Phase)
+			}
+			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override or wait for sessions to finish.")
+			return nil
+		}
+	}
+
 	return runCleanAllWithItems(ctx, cmd, force, dryRun, items, tempFiles, orphanTemps, unscanned)
 }
 
@@ -345,7 +362,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints, redactCaches []strategy.CleanupItem
+	var branches, states, checkpoints, redactCaches, lockFiles []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -356,6 +373,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			checkpoints = append(checkpoints, item)
 		case strategy.CleanupTypeRedactCache:
 			redactCaches = append(redactCaches, item)
+		case strategy.CleanupTypeLockFile:
+			lockFiles = append(lockFiles, item)
 		}
 	}
 
@@ -368,6 +387,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
 		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
+		printSection(w, "Lock files", cleanupItemIDs(lockFiles))
 		printSection(w, "Temp files", tempFiles)
 		printSection(w, "Stray agent temp files", orphanTemps)
 		printUnscannedNote(w, unscanned)
@@ -409,8 +429,9 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	failedTempFiles = append(failedTempFiles, failedOrphans...)
 
 	// Report results
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(deletedTempFiles)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(failedTempFiles)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.RedactCaches) + len(result.LockFiles) + len(deletedTempFiles)
+	totalSkipped := len(result.SkippedLockFiles)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedRedactCache) + len(result.FailedLockFiles) + len(failedTempFiles)
 
 	if totalDeleted > 0 {
 		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
@@ -418,11 +439,18 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(w, "Shadow branches", result.ShadowBranches)
 		printResultSection(w, "Session states", result.SessionStates)
 		printResultSection(w, "Checkpoints", result.Checkpoints)
+		printResultSection(w, "Redaction cache", result.RedactCaches)
+		printResultSection(w, "Lock files", result.LockFiles)
 
 		printResultSection(w, "Temp files", deletedTempFiles)
 		printResultSection(w, "Stray agent temp files", deletedOrphans)
 	}
 	printUnscannedNote(w, unscanned)
+
+	if totalSkipped > 0 {
+		fmt.Fprintf(w, "\nSkipped %d active %s:\n", totalSkipped, itemWord(totalSkipped))
+		printResultSection(w, "Lock files", result.SkippedLockFiles)
+	}
 
 	if totalFailed > 0 {
 		fmt.Fprintf(errW, "\nFailed to delete %d %s:\n", totalFailed, itemWord(totalFailed))
@@ -430,6 +458,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(errW, "Shadow branches", result.FailedBranches)
 		printResultSection(errW, "Session states", result.FailedStates)
 		printResultSection(errW, "Checkpoints", result.FailedCheckpoints)
+		printResultSection(errW, "Redaction cache", result.FailedRedactCache)
+		printResultSection(errW, "Lock files", result.FailedLockFiles)
 
 		if len(failedTempFiles) > 0 {
 			fmt.Fprintf(errW, "\nTemp files:\n")
@@ -646,6 +676,22 @@ func activeSessionsOnCurrentHead(ctx context.Context) ([]*session.State, error) 
 		if state.BaseCommit != currentHead {
 			continue
 		}
+		if state.Phase.IsActive() {
+			active = append(active, state)
+		}
+	}
+
+	return active, nil
+}
+
+func activeSessionsInRepository(ctx context.Context) ([]*session.State, error) {
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list session states: %w", err)
+	}
+
+	var active []*session.State
+	for _, state := range states {
 		if state.Phase.IsActive() {
 			active = append(active, state)
 		}
