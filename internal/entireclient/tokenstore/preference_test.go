@@ -73,6 +73,55 @@ func TestPersistedBackend_UnsetWhenNoMarker(t *testing.T) {
 	}
 }
 
+// A config directory that does not exist yet is the normal state of a machine
+// that has never logged in: no marker, nothing to say.
+func TestPersistedBackend_MissingConfigDirIsSilent(t *testing.T) {
+	dir := isolateConfigDir(t)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	out := captureNotices(t)
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persistedBackend() = %q with no config dir, want empty", got)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a missing config dir must not warn:\n%s", out.String())
+	}
+}
+
+// Any other failure to open the directory — permissions, a file where the
+// directory should be, a refused relative override — is not "no marker", and
+// staying silent about it would reproduce the "not logged in" symptom on the
+// machine that most needs the marker. A relative ENTIRE_CONFIG_DIR is the
+// reproducible instance: userdirs refuses it, and the refusal is not ErrNotExist.
+func TestPersistedBackend_WarnsWhenTheConfigDirCannotBeOpened(t *testing.T) {
+	t.Setenv(userdirs.EnvConfigDir, "relative-dir")
+	t.Setenv(PathEnvVar, "")
+	out := captureNotices(t)
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persistedBackend() = %q with an unopenable config dir, want empty", got)
+	}
+	if !strings.Contains(out.String(), "unusable token store preference") {
+		t.Fatalf("an unopenable config dir must be reported:\n%s", out.String())
+	}
+}
+
+// A marker naming a backend this build does not know is a marker somebody
+// wrote by hand or with a newer CLI; ignoring it silently hides that.
+func TestPersistedBackend_UnknownMarkerValueWarns(t *testing.T) {
+	dir := isolateConfigDir(t)
+	out := captureNotices(t)
+	if err := os.WriteFile(filepath.Join(dir, preferenceFileName), []byte(`{"backend":"keyring"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persistedBackend() = %q for an unknown value, want empty", got)
+	}
+	if !strings.Contains(out.String(), `unknown backend "keyring"`) {
+		t.Fatalf("warning should name the unknown value:\n%s", out.String())
+	}
+}
+
 func TestRememberBackend_FileWritesMarkerAndKeyringClearsIt(t *testing.T) {
 	dir := isolateConfigDir(t)
 

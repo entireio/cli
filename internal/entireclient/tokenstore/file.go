@@ -181,7 +181,7 @@ func (f *fileStore) load() (map[string]map[string]string, error) {
 	}
 	var store map[string]map[string]string
 	if err := json.Unmarshal(data, &store); err != nil {
-		return nil, fmt.Errorf("parsing token store: %w", err)
+		return nil, fmt.Errorf("parsing token store %s: %w", f.path, err)
 	}
 	return store, nil
 }

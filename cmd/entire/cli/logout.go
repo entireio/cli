@@ -73,6 +73,7 @@ func newLogoutCmd() *cobra.Command {
 				fmt.Fprintln(outW, "Not logged in.")
 				return nil
 			}
+			warnRevokeSkipped(errW, target.storeErr)
 			if !applyInsecureHTTPAuth(insecureHTTPAuth) {
 				if err := api.RequireSecureURL(target.coreURL); err != nil {
 					return fmt.Errorf("context login server URL check: %w", err)
@@ -167,6 +168,19 @@ func runLogout(ctx context.Context, outW, errW io.Writer, token string, revoke b
 
 	fmt.Fprintln(outW, "Logged out.")
 	return nil
+}
+
+// warnRevokeSkipped says, on stderr, that the server-side session survives
+// this logout because the stored token could not be read
+// (statusTarget.storeErr). Logout still removes the context — that is the
+// recovery a user with a broken store wants — but a bare "Logged out." would
+// claim more than happened. Nil means the token was read (or was simply
+// absent) and there is nothing to say.
+func warnRevokeSkipped(errW io.Writer, storeErr error) {
+	if storeErr == nil {
+		return
+	}
+	fmt.Fprintf(errW, "Warning: the stored token could not be read (%v); the server-side session was not revoked.\n", storeErr)
 }
 
 // revokeTargetFunc revokes sessions on a specific core. The two production

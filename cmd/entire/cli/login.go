@@ -496,6 +496,12 @@ func persistLogin(outW io.Writer, dialled, adoptedIssuer, token, refreshToken st
 	}
 
 	fmt.Fprintln(outW, loginCompleteLine(token, dialled))
+	// The fallback's notice announces the switch to the file store once per
+	// process; without this, every later login onto the remembered file store
+	// wrote bearer tokens to disk without a word.
+	if tokenstore.FileBackendSelected() {
+		fmt.Fprintf(outW, "Tokens are stored in %s.\n", tokenstore.FileBackendPath())
+	}
 	return nil
 }
 
@@ -529,15 +535,23 @@ func loginCompleteLine(token, dialled string) string {
 // (which the fallback deliberately does not catch); that case is constructed
 // but never shown, because a signalled abort exits before the error is
 // rendered. A fallback whose file write also failed carries
-// ErrFileStoreFailed and gets no hint, since recommending the store that
-// just failed would send the user in a circle. On macOS and Windows, with no
-// fallback, it is reached whenever the keyring write fails.
+// ErrFileStoreFailed and gets a different hint: recommending
+// ENTIRE_TOKEN_STORE=file about the store that just failed would send the
+// user in a circle, so it points at ENTIRE_TOKEN_STORE_PATH as the way to a
+// writable file store instead. On macOS and Windows, with no fallback, it is
+// reached whenever the keyring write fails.
 //
 // The remembered/not-remembered wording follows tokenstore.ChoiceIsRemembered,
 // the same rule the fallback's own notice uses, so the two can never
 // disagree.
 func withHeadlessStoreHint(err error) error {
-	if !errors.Is(err, auth.ErrCredentialStoreWrite) || errors.Is(err, tokenstore.ErrFileStoreFailed) || tokenstore.FileBackendSelected() {
+	if !errors.Is(err, auth.ErrCredentialStoreWrite) {
+		return err
+	}
+	if errors.Is(err, tokenstore.ErrFileStoreFailed) {
+		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed. Point %s at a writable location and run entire login again", err, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+	}
+	if tokenstore.FileBackendSelected() {
 		return err
 	}
 

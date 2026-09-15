@@ -32,7 +32,9 @@ func isSecretServicePlatform(goos string) bool { return secretServicePlatforms[g
 // rather than "no such credential" (ErrNotFound) or "the user interrupted us"
 // (a Ctrl-C surfaces as context.Canceled from callKeyringWithTimeout). A
 // timeout counts as unavailable: a Secret Service that never answers is no
-// better than one that is absent. Everything else a Linux keyring call can
+// better than one that is absent — but a timeout is never remembered, because
+// the abandoned keyring call may still complete; see switchTo. Everything
+// else a Linux keyring call can
 // return — no session bus, no provider on the bus, a collection that will not
 // unlock, ErrUnsupportedPlatform on a cgo-less BSD — is an availability
 // failure, so there is deliberately no string matching here.
@@ -57,26 +59,33 @@ func bothFailed(keyringErr, fileErr error) error {
 }
 
 // setBackend makes s the process backend without re-resolving. Used when the
-// fallback has proven the file store is where the credentials are.
+// fallback has proven the file store is where the credentials are. It also
+// raises adoptedFile, so provenance (selectedBackend) follows the switch even
+// when no marker records it — the ENTIRE_TOKEN_STORE_PATH case.
 func setBackend(s store) {
 	backendMu.Lock()
 	backend = s
 	resolved = true
+	adoptedFile = true
 	backendMu.Unlock()
 }
 
 // fallbackStore fronts the OS keyring on Secret Service platforms. Each
 // operation goes to the keyring first; when the keyring fails for an
-// availability reason, the same operation is retried against the default-path
-// file store. The file store is adopted as the process backend — and, unless
-// ENTIRE_TOKEN_STORE_PATH is set, remembered for future processes — only once
-// it has proven it holds (Get, Delete) or now holds (Set) the credential. A
-// miss in both stores proves nothing about where future tokens should go and
-// leaves no trace.
+// availability reason, the same operation is retried against the file store
+// at FileBackendPath (ENTIRE_TOKEN_STORE_PATH when set, else tokens.json in
+// the config dir). The file store is adopted as the process backend — and,
+// unless ENTIRE_TOKEN_STORE_PATH is set or the keyring merely timed out,
+// remembered for future processes — only once it has proven it holds (Get,
+// Delete) or now holds (Set) the credential. A miss in both stores proves
+// nothing about where future tokens should go and leaves no trace beyond the
+// warning Delete prints.
 //
-// The notice is printed once per process, on stderr, so that "your tokens
-// are in a file now" is never silent. The invariant that makes this safe is
-// in isSecretServicePlatform: the fallback is constructed only where an
+// The transition is announced once per process by the notice on stderr, and
+// every login onto the file store prints where the tokens went (see
+// persistLogin in the cli package), so "your tokens are in a file now" is
+// never silent. The invariant that makes this safe is in
+// isSecretServicePlatform: the fallback is constructed only where an
 // unavailable keyring means the machine has none.
 type fallbackStore struct {
 	primary store
@@ -95,6 +104,10 @@ type fallbackStore struct {
 	// rememberWarn dedupes the could-not-remember warning; the marker write
 	// itself is retried on every adoption (see switchTo).
 	rememberWarn sync.Once
+	// deleteMissWarn dedupes the warning for a Delete that missed in both
+	// stores: logout clears several slots per context, and one warning per
+	// process says everything the repeats would.
+	deleteMissWarn sync.Once
 }
 
 func newFallbackStore(primary store) *fallbackStore {
@@ -158,8 +171,16 @@ func (f *fallbackStore) Delete(service, user string) error {
 		// A miss here is ErrNotFound, deliberately, unlike Get: Delete's
 		// job is "make sure it is gone from wherever we can reach", and
 		// logout must be able to remove a context on a machine whose
-		// keyring has vanished. Any other file error is reported with both.
+		// keyring has vanished. But "cannot reach" is not "gone": the
+		// keyring may be locked, unreachable from this session, or slow,
+		// and still hold the credential — so the miss is warned about once,
+		// even though it is not an error. Any other file error is reported
+		// with both.
 		if errors.Is(ferr, ErrNotFound) {
+			f.deleteMissWarn.Do(func() {
+				fmt.Fprintf(fallbackNoticeW, "Warning: OS keyring (%s) unavailable: %v\nCould not confirm this credential was removed from it. If this machine's keyring still holds Entire credentials, run entire logout again from a session with keyring access.\n",
+					keyringProviderName(), err)
+			})
 			return ErrNotFound
 		}
 		return bothFailed(err, ferr)
@@ -174,33 +195,41 @@ func (f *fallbackStore) Delete(service, user string) error {
 // transient failure on the first attempt should not leave the machine
 // unremembered for the rest of the process.
 //
-// Adopting on a successful Get is deliberate and has a known cost. It is what
-// makes the customer's first command after losing the keyring work without a
-// re-login. But tokens.json is never deleted when a later explicit keyring
-// login clears the marker, and it survives the switch back, so a stale copy
-// lingers and the cycle can recur on the next transient keyring failure until
-// the file itself is removed; if the keyring then fails transiently (a
-// timeout, a locked collection), a Get finds the stale token, adopts it, and
-// re-writes the marker, pinning the machine to it until the user notices 401s
-// and runs ENTIRE_TOKEN_STORE=keyring entire login. The notice is the only
-// signal, which is why the remembered branch always prints the way back; the
-// ENTIRE_TOKEN_STORE_PATH branch remembers nothing, so there is nothing to
-// undo.
+// A keyring that TIMED OUT is adopted for this process only, never
+// remembered. callKeyringWithTimeout abandons the goroutine rather than
+// cancelling it, so the keyring may still complete the write once it answers;
+// pinning the file store through the marker would then orphan that keyring
+// copy for good. The notice says so and names the two variables that avoid
+// the wait.
+//
+// Adopting on a successful Get is deliberate: it is what makes the customer's
+// first command after losing the keyring work without a re-login. It has a
+// known cost. A later explicit keyring login removes that credential's copy
+// from the default-path file (removeSupersededFileCopy), so the re-adopt
+// cycle — a transient keyring failure finds a stale token in the file, adopts
+// it, and re-writes the marker — survives only for other contexts' entries
+// still in the file and for a store named through ENTIRE_TOKEN_STORE_PATH,
+// which is never touched. The notice is the only signal, which is why the
+// remembered branch always prints the way back.
 func (f *fallbackStore) switchTo(fs store, keyringErr error) {
-	remembered := markerApplies()
+	timedOut := errors.Is(keyringErr, context.DeadlineExceeded)
+	remembered := markerApplies() && !timedOut
 	f.notice.Do(func() {
 		fmt.Fprintf(fallbackNoticeW, "Note: OS keyring (%s) unavailable: %v\nStoring Entire tokens in %s instead. ",
 			keyringProviderName(), keyringErr, FileBackendPath())
-		if remembered {
+		switch {
+		case timedOut:
+			fmt.Fprintf(fallbackNoticeW, "The keyring timed out rather than failing, so this choice is not remembered, and the keyring may also have received this credential once it answered. Set %s=%s to skip the keyring check, or %s to wait longer.\n", BackendEnvVar, backendFile, keyringTimeoutEnvVar)
+		case remembered:
 			fmt.Fprintf(fallbackNoticeW, "This choice is remembered; run %s=%s entire login to switch back.\n", BackendEnvVar, backendKeyring)
-		} else {
+		default:
 			fmt.Fprintf(fallbackNoticeW, "%s is set, so this choice is not remembered; keep it set for later commands, and set %s=%s as well to skip the keyring check.\n", PathEnvVar, BackendEnvVar, backendFile)
 		}
 	})
 	if remembered {
 		if err := rememberBackend(backendFile); err != nil {
 			f.rememberWarn.Do(func() {
-				fmt.Fprintf(fallbackNoticeW, "Warning: could not remember the token store choice: %v\n", err)
+				fmt.Fprintf(fallbackNoticeW, "Warning: could not remember the token store choice: %v\nLater commands may not find this login without %s=%s; fix the Entire config directory and run entire login again to remember the choice.\n", err, BackendEnvVar, backendFile)
 			})
 		}
 	}

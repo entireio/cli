@@ -284,7 +284,7 @@ By default `entire login` opens a browser to sign in and stores tokens in the OS
 
 Sign-in itself already handles this: with no interactive terminal, over SSH, or on a Linux or BSD machine with no graphical display, `entire login` switches to the device-code flow on its own and prints an approval URL you can open on any machine. `entire login --device` forces that flow explicitly.
 
-Token storage handles it too. On Linux and the BSDs, when the OS keyring is unavailable (no Secret Service daemon, no session bus, a collection that will not unlock), `entire login` stores tokens in `tokens.json` instead, prints a note saying so, and remembers the choice in `token_store.json` next to `contexts.json`, so every later command uses the file with no variable set. On macOS and Windows the keyring is always present, so a failure there (a denied prompt, a locked store) is reported rather than worked around.
+Token storage handles it too. On Linux and the BSDs, when the OS keyring is unavailable (no Secret Service daemon, no session bus, a collection that will not unlock), `entire login` stores tokens in `tokens.json` instead, prints a note saying so, and remembers the choice in `token_store.json` next to `contexts.json`, so every later command uses the file with no variable set. A keyring that times out rather than fails is used for that command only and not remembered, because it may still answer later. On macOS and Windows the keyring is always present, so a failure there (a denied prompt, a locked store) is reported rather than worked around.
 
 To choose the file store explicitly on any platform:
 

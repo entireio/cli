@@ -113,6 +113,24 @@ func TestRunAuthStatus_StoreReadError_FileSelected(t *testing.T) {
 	}
 }
 
+// When the Linux fallback tried both stores and both failed, the read error
+// carries ErrFileStoreFailed and neither single-store remedy fits: suggesting
+// ENTIRE_TOKEN_STORE=file recommends the store that just failed. The way out
+// is a writable location for the file store.
+func TestStoreReadError_BothStoresFailedPointsAtThePathOverride(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN_STORE", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	target := statusTarget{coreURL: "https://x.test", storeErr: fmt.Errorf("x: %w", tokenstore.ErrFileStoreFailed)}
+	err := storeReadError(target)
+	if !strings.Contains(err.Error(), tokenstore.PathEnvVar) {
+		t.Fatalf("both-stores-failed error should point at %s:\n%v", tokenstore.PathEnvVar, err)
+	}
+	if strings.Contains(err.Error(), "=file entire login") {
+		t.Fatalf("must not recommend the file store that just failed:\n%v", err)
+	}
+}
+
 func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	t.Parallel()
 

@@ -3,10 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 func TestInferFieldValue(t *testing.T) {
@@ -144,6 +151,45 @@ func TestResolveAPIClient_UnknownTarget(t *testing.T) {
 	t.Parallel()
 	if _, err := resolveAPIClient(context.Background(), "banana", "", false); err == nil {
 		t.Error("expected error for unknown --to")
+	}
+}
+
+// A saved login whose credential cannot be READ is a store failure, and
+// `entire api` must say so rather than "not logged in": that message sends a
+// keyring-less user round the `entire login` loop. Mirrors the `auth token`
+// case in auth_token_test.go — Set succeeds and every Get fails, so the
+// context is recorded but unreadable.
+//
+// Not parallel: it manipulates ENTIRE_TOKEN / ENTIRE_CONFIG_DIR and the
+// process-global token store backend.
+func TestResolveAPIClient_StoreReadErrorIsReported(t *testing.T) {
+	if v, ok := os.LookupEnv("ENTIRE_TOKEN"); ok {
+		os.Unsetenv("ENTIRE_TOKEN")
+		t.Cleanup(func() { os.Setenv("ENTIRE_TOKEN", v) }) //nolint:usetesting // restoring a captured value; no t.Unsetenv equivalent
+	}
+	t.Setenv("ENTIRE_TOKEN_STORE", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	restore := tokenstore.UseFailingGetBackendForTesting(
+		filepath.Join(t.TempDir(), "tokens.json"),
+		func(string, string) bool { return true },
+	)
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveAPIClient(context.Background(), "core", "", false)
+	if err == nil {
+		t.Fatal("want an error for an unreadable credential store")
+	}
+	if !strings.Contains(err.Error(), "could not be read from") {
+		t.Fatalf("error should name the store failure, got:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "not logged in") {
+		t.Fatalf("a store failure must not be reported as 'not logged in':\n%v", err)
 	}
 }
 

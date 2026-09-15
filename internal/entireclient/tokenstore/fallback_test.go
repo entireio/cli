@@ -197,13 +197,25 @@ func TestFallbackStore_SuccessfulKeyringCallTouchesNothing(t *testing.T) {
 func TestFallbackStore_DeleteFallsBackAndTreatsFileMissAsNotFound(t *testing.T) {
 	primary := newScriptedStore()
 	primary.delErr = errNoSecretService
-	f, file, _, adopted := newTestFallback(t, primary)
+	f, file, notice, adopted := newTestFallback(t, primary)
 
 	if err := f.Delete("svc", "alice"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Delete with nothing anywhere = %v, want ErrNotFound so logout can finish", err)
 	}
 	if *adopted != nil {
 		t.Fatal("a miss adopts nothing")
+	}
+	// The miss reads as ErrNotFound for logout's sake, but the keyring copy is
+	// unconfirmed — it may sit in a keyring that is merely locked or slow — so
+	// the user is told, once, not on every slot logout clears.
+	if out := notice.String(); !strings.Contains(out, "Could not confirm") || !strings.Contains(out, errNoSecretService.Error()) {
+		t.Fatalf("a miss in both stores must warn that the keyring copy is unconfirmed:\n%s", out)
+	}
+	if err := f.Delete("svc", "bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second miss = %v, want ErrNotFound", err)
+	}
+	if n := strings.Count(notice.String(), "Could not confirm"); n != 1 {
+		t.Fatalf("unconfirmed-removal warning printed %d times, want once per process:\n%s", n, notice.String())
 	}
 
 	if err := file.Set("svc", "alice", "tok"); err != nil {
@@ -244,6 +256,36 @@ func TestFallbackStore_ExplicitPathIsAdoptedButNotRemembered(t *testing.T) {
 	out := notice.String()
 	if strings.Contains(out, "This choice is remembered") || !strings.Contains(out, PathEnvVar+" is set") {
 		t.Fatalf("notice must say the choice is not remembered and why:\n%s", out)
+	}
+}
+
+// A keyring that timed out is fallback-eligible, but callKeyringWithTimeout
+// abandons the goroutine rather than cancelling it, so the keyring may still
+// complete the write later. Remembering the file store then would orphan that
+// keyring copy for good; the adoption is for this process only, and the
+// notice says why.
+func TestFallbackStore_TimeoutAdoptsButDoesNotRemember(t *testing.T) {
+	primary := newScriptedStore()
+	primary.setErr = fmt.Errorf("set timed out: %w", context.DeadlineExceeded)
+	f, file, notice, adopted := newTestFallback(t, primary)
+
+	if err := f.Set("svc", "alice", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if *adopted != store(file) {
+		t.Fatal("the file store must still be adopted for this process")
+	}
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persisted = %q after a keyring timeout, want empty: the keyring may still answer", got)
+	}
+	out := notice.String()
+	for _, want := range []string{"timed out", "not remembered", keyringTimeoutEnvVar, BackendEnvVar + "=" + backendFile} {
+		if !strings.Contains(out, want) {
+			t.Errorf("notice missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "This choice is remembered") {
+		t.Fatalf("notice must not promise a memory a timeout does not keep:\n%s", out)
 	}
 }
 
@@ -298,5 +340,37 @@ func TestSetBackend_ReplacesTheProcessBackend(t *testing.T) {
 	setBackend(s)
 	if currentBackend() != store(s) {
 		t.Fatal("currentBackend() should be the adopted store without re-resolving")
+	}
+}
+
+// With ENTIRE_TOKEN_STORE_PATH set the fallback adopts the file store but
+// writes no marker, so provenance cannot learn the switch from disk: without
+// the adoption flag, `auth status` named the keyring for a token it had just
+// read from the file. The test-only restore must put the flag back too, or one
+// test's adoption would colour every later provenance assertion.
+func TestSetBackend_AdoptionIsVisibleToProvenanceWhenPathIsSet(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv(BackendEnvVar, "")
+	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
+	resetBackendForTesting(t)
+	if FileBackendSelected() {
+		t.Fatal("nothing selected before the adoption")
+	}
+
+	restore := UseFileBackendForTesting(filepath.Join(t.TempDir(), "override.json"))
+	setBackend(defaultFileStore())
+	if !FileBackendSelected() {
+		t.Fatal("an in-process adoption must select the file store for provenance")
+	}
+	if got := BackendDescription(); !strings.HasPrefix(got, "file ") {
+		t.Fatalf("BackendDescription() = %q after adoption, want the file store", got)
+	}
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persisted = %q, want empty: the flag, not a marker, carries the PATH case", got)
+	}
+
+	restore()
+	if FileBackendSelected() {
+		t.Fatal("restoring the test backend must clear the adoption flag")
 	}
 }
