@@ -181,6 +181,14 @@ func (f *repoPollFailures) record(err error) bool {
 	var problem *coreapi.ErrorModelStatusCode
 	if errors.As(err, &problem) && problem.StatusCode >= 400 && problem.StatusCode < 500 &&
 		problem.StatusCode != http.StatusRequestTimeout && problem.StatusCode != http.StatusTooManyRequests {
+		// The window is recomputed from f.first for the CURRENT error's class,
+		// so a 4xx after a transient run moves the deadline into the past. That
+		// is unobservable only because this limit is 2: such a 4xx is always
+		// failure #2-or-later, so count ends the run on this same call, while a
+		// 4xx that is the FIRST failure has f.first == now and nothing to
+		// backdate. Raise the limit and the retroactive expiry becomes
+		// reachable — runs would then end through expired() rather than the
+		// count, so make that a deliberate choice rather than a side effect.
 		limit = 2
 		f.deadline = f.first.Add(10 * time.Second)
 	}
@@ -254,13 +262,39 @@ func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, noWait bool, w
 // Match the structured validation location and message, not a generic 422:
 // unrelated validation failures must not be described as an older core.
 func renderRepoReadError(err error) error {
-	var problem *coreapi.ErrorModelStatusCode
-	if errors.As(err, &problem) && problem.StatusCode == http.StatusUnprocessableEntity {
-		for _, detail := range problem.Response.Errors {
-			if detail.Location.Or("") == "query.authoritative" && detail.Message.Or("") == "unknown query parameter" {
-				return fmt.Errorf("%w: query.authoritative: unknown query parameter; the server does not support repository readiness checks", renderCoreError(err))
-			}
-		}
+	if readinessParameterUnsupported(err) {
+		return fmt.Errorf("%w: query.authoritative: unknown query parameter; the server does not support repository readiness checks", renderCoreError(err))
 	}
 	return renderCoreError(err)
+}
+
+// readinessParameterUnsupported reports whether the server rejected the
+// authoritative query parameter itself. See renderRepoReadError on why the
+// structured location and message are matched rather than a bare 422.
+func readinessParameterUnsupported(err error) bool {
+	var problem *coreapi.ErrorModelStatusCode
+	if !errors.As(err, &problem) || problem.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	for _, detail := range problem.Response.Errors {
+		if detail.Location.Or("") == "query.authoritative" && detail.Message.Or("") == "unknown query parameter" {
+			return true
+		}
+	}
+	return false
+}
+
+// readinessCheckUnavailable reports whether dropping the readiness check would
+// plausibly let the read succeed: the core cannot serve or route the lifecycle
+// read (503), or it does not know the parameter at all (the compatibility 422
+// above). Every other failure — the repository is missing, the caller cannot
+// see it, the ID is malformed — is about the repository rather than about
+// readiness, so a retry without the check answers nothing and the hint is
+// withheld.
+func readinessCheckUnavailable(err error) bool {
+	var problem *coreapi.ErrorModelStatusCode
+	if errors.As(err, &problem) && problem.StatusCode == http.StatusServiceUnavailable {
+		return true
+	}
+	return readinessParameterUnsupported(err)
 }

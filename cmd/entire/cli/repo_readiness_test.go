@@ -507,16 +507,24 @@ func TestRepoCreateMirrorReadinessFlags(t *testing.T) {
 
 // Not parallel: runCoreCmd replaces the shared client constructor.
 func TestRepoGetAuthoritativeFlag(t *testing.T) {
+	// hint marks the failures a plain read could still answer. Every other
+	// status is a statement about the repository, so retrying without the
+	// readiness check changes nothing and the hint must stay away.
 	for _, tc := range []struct {
-		name, flag, query string
-		status            int
+		name, flag, query, body string
+		status                  int
+		hint                    bool
 	}{
 		{name: "default"},
 		{name: "explicit", flag: "--authoritative=true", query: "true"},
 		{name: "plain", flag: "--authoritative=false"},
-		{name: "unavailable", flag: "--authoritative", query: "true", status: 503},
-		{name: "rejected parameter", flag: "--authoritative", query: "true", status: 422},
+		{name: "unavailable", flag: "--authoritative", query: "true", status: 503, hint: true},
+		{name: "rejected parameter", flag: "--authoritative", query: "true", status: 422, hint: true,
+			body: `{"detail":"repository read failed","errors":[{"message":"unknown query parameter","location":"query.authoritative"}]}`},
+		{name: "unrelated validation", flag: "--authoritative", query: "true", status: 422,
+			body: `{"detail":"repository read failed","errors":[{"message":"expected a ULID","location":"path.repo_id"}]}`},
 		{name: "forbidden", flag: "--authoritative", query: "true", status: 403},
+		{name: "missing", flag: "--authoritative", query: "true", status: 404},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
@@ -527,10 +535,10 @@ func TestRepoGetAuthoritativeFlag(t *testing.T) {
 				if tc.status != 0 {
 					w.Header().Set("Content-Type", "application/problem+json")
 					w.WriteHeader(tc.status)
-					if tc.status == 422 {
-						fmt.Fprint(w, `{"detail":"validation failed","errors":[{"message":"unknown query parameter","location":"query.authoritative"}]}`)
+					if tc.body != "" {
+						fmt.Fprint(w, tc.body)
 					} else {
-						fmt.Fprintf(w, `{"status":%d,"detail":"repository lifecycle unavailable on this core"}`, tc.status)
+						fmt.Fprintf(w, `{"status":%d,"detail":"repository read failed"}`, tc.status)
 					}
 					return
 				}
@@ -549,12 +557,21 @@ func TestRepoGetAuthoritativeFlag(t *testing.T) {
 				if !errors.As(err, &silent) {
 					stderr += err.Error()
 				}
-				require.Contains(t, stderr, "--authoritative=false")
-				if tc.status == 422 {
+				// The server's own message reaches the user either way.
+				require.Contains(t, stderr, "repository read failed")
+				if tc.hint {
+					require.Contains(t, stderr, "entire repo get "+testDeleteULID+" to inspect")
+					require.Contains(t, stderr, "without a readiness check")
+				} else {
+					require.NotContains(t, stderr, "readiness check")
+				}
+				if tc.hint && tc.status == 422 {
 					require.Contains(t, stderr, "query.authoritative")
 					require.Contains(t, stderr, "unknown query parameter")
 				}
-				require.Contains(t, stderr, "without a readiness check")
+				// The plain read is the default; naming a flag value would send
+				// the user to restate one they never had to pass.
+				require.NotContains(t, stderr, "--authoritative=false")
 				require.NotContains(t, stderr, "--no-wait")
 			} else {
 				require.NoError(t, err)

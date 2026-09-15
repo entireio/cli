@@ -363,11 +363,13 @@ neither confirms readiness.`,
 					params.Authoritative = coreapi.NewOptBool(true)
 				}
 				repo, err := c.GetRepo(ctx, params)
-				if authoritative && err != nil {
+				if authoritative && readinessCheckUnavailable(err) {
 					// A registry-only fallback cannot answer the readiness question.
 					// Keep that choice explicit, and print here so renderCoreError
 					// cannot strip the recovery hint with the API error wrapper.
-					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo get %s --authoritative=false to inspect repository details without a readiness check.\n", renderRepoReadError(err), repoID)
+					// The plain read is the default, so the hint names no flag: a
+					// value the user would have to restate is not a recovery step.
+					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo get %s to inspect repository details without a readiness check.\n", renderRepoReadError(err), repoID)
 					return nil, NewSilentError(err)
 				}
 				return repo, err
