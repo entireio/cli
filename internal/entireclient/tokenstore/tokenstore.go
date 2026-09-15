@@ -23,6 +23,7 @@ package tokenstore
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -73,13 +74,22 @@ func RefreshService(service string) string {
 	return service + ":refresh"
 }
 
-// backendMu guards `resolved` and `backend`. It serializes the production
-// resolve() against the test-only override path (UseFileBackendForTesting),
-// so the package-level state stays well-defined even when tests reset it.
+// backendMu guards `resolved`, `backend`, and `adoptedFile` across
+// currentBackend's lazy resolve, setBackend's adoption (the fallback moving
+// the process onto the file store), and the test-only overrides in
+// testing.go, so the package-level state stays well-defined even when tests
+// reset it.
 var (
 	backendMu sync.Mutex
 	resolved  bool
 	backend   store
+	// adoptedFile records that the fallback adopted the file store in THIS
+	// process. Provenance reads it where no marker can speak: with
+	// ENTIRE_TOKEN_STORE_PATH set the marker is never written, and without
+	// this flag `auth status` named the keyring for a token it had just read
+	// from the file. Set by setBackend; cleared only by the test-only
+	// overrides' restore functions.
+	adoptedFile bool
 )
 
 type store interface {
@@ -114,10 +124,13 @@ const (
 	PathEnvVar    = "ENTIRE_TOKEN_STORE_PATH"
 )
 
-// selectedBackend reports which backend the environment and the remembered
-// preference pick: BackendEnvVar when set, else the marker. "" means neither
-// said anything and the platform default applies. resolveBackend reads the
-// two inputs separately (an explicit selection is recorded after a write, a
+// selectedBackend reports which backend the environment, this process's own
+// adoption, and the remembered preference pick: BackendEnvVar when set, else
+// the file store if the fallback adopted it in this process (adoptedFile — the
+// only record of the switch when ENTIRE_TOKEN_STORE_PATH stops the marker
+// being written), else the marker. "" means none of them said anything and
+// the platform default applies. resolveBackend reads the environment and the
+// marker separately (an explicit selection is recorded after a write, a
 // remembered one is not); this is the combined view for callers that only
 // ask "which store?".
 func selectedBackend() string {
@@ -127,7 +140,17 @@ func selectedBackend() string {
 		}
 		return backendKeyring
 	}
+	if fileAdopted() {
+		return backendFile
+	}
 	return persistedBackend()
+}
+
+// fileAdopted reads adoptedFile under the backend lock.
+func fileAdopted() bool {
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	return adoptedFile
 }
 
 // FileBackendSelected reports whether the file backend is selected, by the
@@ -138,11 +161,14 @@ func FileBackendSelected() bool {
 	return selectedBackend() == backendFile
 }
 
-// BackendDescription names the credential backend the current environment
-// and remembered preference resolve to, for user-facing provenance lines
-// (e.g. `entire auth status`). It mirrors selectedBackend — the production
-// resolution — rather than introspecting the live backend, so test-only
-// overrides don't leak into user-facing wording.
+// BackendDescription names the credential backend the current environment,
+// this process's adoption, and the remembered preference resolve to, for
+// user-facing provenance lines (e.g. `entire auth status`). It mirrors
+// selectedBackend — the production resolution — rather than introspecting the
+// live backend, so test-only overrides don't leak into user-facing wording;
+// the one piece of live state it reads is the fallback's adoption flag,
+// because that switch is real and, with ENTIRE_TOKEN_STORE_PATH set, is
+// recorded nowhere else.
 func BackendDescription() string {
 	if FileBackendSelected() {
 		return "file " + FileBackendPath()
@@ -264,7 +290,9 @@ func resolveBackendLocked() store {
 // `ENTIRE_TOKEN_STORE=file entire login` sticks for every later process, and
 // an explicit keyring login clears a stale file preference and removes the
 // superseded copy of that credential from the default-path file store. Reads
-// and deletes learn nothing and pass straight through.
+// pass straight through and learn nothing; an explicit-keyring Delete also
+// removes the file copy of the slot it deletes, because a login that carries
+// no refresh token clears the refresh slot by Delete rather than Set.
 type recordingStore struct {
 	inner store
 	name  string
@@ -283,8 +311,10 @@ func (r recordingStore) Set(service, user, password string) error {
 	if err := rememberBackend(r.name); err != nil {
 		// The credential is stored; failing to remember where is a
 		// degradation (the next process may need ENTIRE_TOKEN_STORE), not a
-		// failed login. Say so rather than failing or staying silent.
-		fmt.Fprintf(fallbackNoticeW, "Warning: could not remember the token store choice: %v\n", err)
+		// failed login. Say so rather than failing or staying silent, and
+		// say what it costs: the store that was just written is the one a
+		// later process has to be pointed at by hand.
+		fmt.Fprintf(fallbackNoticeW, "Warning: could not remember the token store choice: %v\nLater commands may not find this login without %s=%s; fix the Entire config directory and run entire login again to remember the choice.\n", err, BackendEnvVar, r.name)
 	}
 	if r.name == backendKeyring {
 		removeSupersededFileCopy(service, user)
@@ -293,24 +323,56 @@ func (r recordingStore) Set(service, user, password string) error {
 }
 
 // removeSupersededFileCopy deletes the (service, user) entry from the
-// default-path file store after an explicit keyring write. Clearing the marker
-// alone would leave a live bearer in tokens.json: a plaintext copy the user
-// just chose to stop using, and one the Linux fallback would re-adopt on the
-// next transient keyring failure (see switchTo in fallback.go). Only the
-// default path is touched — a store named through PathEnvVar is the user's to
-// manage — and a missing entry is the normal case.
+// default-path file store after an explicit keyring write or delete. Clearing
+// the marker alone would leave a live bearer in tokens.json: a plaintext copy
+// the user just chose to stop using, and one the Linux fallback would re-adopt
+// on the next transient keyring failure (see switchTo in fallback.go). Only
+// the default path is touched — a store named through PathEnvVar is the user's
+// to manage — and a missing entry is the normal case.
+//
+// Whether the file exists is checked first, without creating anything: the
+// file store's Delete creates the directory and a tokens.json.lock on its way
+// to finding nothing, and a machine that has never used the file store must
+// not gain either from a keyring login. A missing directory or file is the
+// normal case; any other failure to look is reported like a failed removal,
+// since from the user's side the outcome is the same.
 func removeSupersededFileCopy(service, user string) {
 	if !markerApplies() {
 		return
 	}
+	root, err := userdirs.ConfigRootForRead()
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			warnSupersededCopyNotRemoved(err)
+		}
+		return
+	}
+	if _, err := root.Lstat(tokenStoreFileName); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			warnSupersededCopyNotRemoved(err)
+		}
+		return
+	}
 	if err := defaultFileStore().Delete(service, user); err != nil && !errors.Is(err, ErrNotFound) {
-		fmt.Fprintf(fallbackNoticeW, "Warning: could not remove the superseded copy of this credential from %s: %v\n", FileBackendPath(), err)
+		warnSupersededCopyNotRemoved(err)
 	}
 }
 
+// warnSupersededCopyNotRemoved says what a failed removal leaves behind and
+// what to do about it. The credential itself was stored, so it is a warning.
+func warnSupersededCopyNotRemoved(err error) {
+	fmt.Fprintf(fallbackNoticeW, "Warning: could not remove the superseded copy of this credential from %s: %v\nA plaintext copy of the old token remains there; remove the entry or the file by hand.\n", FileBackendPath(), err)
+}
+
 func (r recordingStore) Delete(service, user string) error {
+	err := r.inner.Delete(service, user)
+	// A slot the keyring never held is still a slot the file may hold, so
+	// ErrNotFound from the keyring does not stop the file cleanup.
+	if r.name == backendKeyring && (err == nil || errors.Is(err, ErrNotFound)) {
+		removeSupersededFileCopy(service, user)
+	}
 	//nolint:wrapcheck // thin wrapper, callers handle errors
-	return r.inner.Delete(service, user)
+	return err
 }
 
 // Get retrieves a credential.

@@ -32,7 +32,9 @@ import (
 // from the platform keystore to a 0600 file, but grants nothing new. It can
 // only select a store that lives in this same directory, and a writer with
 // access here can already repoint contexts.json's core_url at a hostile
-// issuer; if contexts.json ever gains integrity protection, revisit this. The
+// issuer; if contexts.json ever gains integrity protection, revisit this. A
+// login onto the file store always says so on stdout (persistLogin in the cli
+// package), so a planted marker cannot redirect credentials unannounced. The
 // file is created 0600 in a 0700 directory like its neighbours.
 const preferenceFileName = "token_store.json"
 
@@ -53,8 +55,10 @@ type storedPreference struct {
 var markerWarnOnce = new(sync.Once)
 
 // persistedBackend returns the remembered backend, or "" when nothing is
-// remembered. An absent marker is the normal case and is silent. A marker that
-// is present but unusable — unreadable, a refused symlink, corrupt JSON — also
+// remembered. An absent marker — or an absent config directory — is the
+// normal case and is silent. A marker that is present but unusable —
+// unreadable, a refused symlink, corrupt JSON, a backend name this build does
+// not know — or a config directory that exists but cannot be opened, also
 // reads as unset, because the marker is an accelerator and the fallback store
 // recovers the same fact the slow way, but it is reported once on stderr: on a
 // platform with no fallback, silence would reproduce the very "not logged in"
@@ -63,10 +67,15 @@ var markerWarnOnce = new(sync.Once)
 // Deliberately not memoized: switchTo writes the marker mid-process, and the
 // next BackendDescription()/FileBackendSelected() must see it — that is what
 // keeps `auth status`'s provenance line right after an in-process fallback.
-// It is one small root-confined read; do not "optimize" it with a sync.Once.
+// (With ENTIRE_TOKEN_STORE_PATH set no marker is written at all; the adoption
+// flag in tokenstore.go carries that case.) It is one small root-confined
+// read; do not "optimize" it with a sync.Once.
 func persistedBackend() string {
 	root, err := userdirs.ConfigRootForRead()
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			warnUnusableMarker(err)
+		}
 		return ""
 	}
 	data, err := osroot.ReadFileNoFollow(root, preferenceFileName)
@@ -84,18 +93,19 @@ func persistedBackend() string {
 	if p.Backend == backendFile {
 		return backendFile
 	}
+	if p.Backend != "" {
+		warnUnusableMarker(fmt.Errorf("unknown backend %q", p.Backend))
+	}
 	return ""
 }
 
 // warnUnusableMarker names the marker file but not the directory it is in:
-// resolving the directory here would go through the unchecked string
-// resolver that the userdirs consumer ledger guards, and "the Entire config
-// directory" is what a user will search for anyway. The wrapped error may
-// still carry the path (an os.PathError does), which is fine: a marker holds
-// a backend name, never a secret.
+// the wrapped error carries the path when it matters (an os.PathError does),
+// and "the Entire config directory" is what a user will search for anyway.
+// Printing that path is fine — a marker holds a backend name, never a secret.
 func warnUnusableMarker(err error) {
 	markerWarnOnce.Do(func() {
-		fmt.Fprintf(fallbackNoticeW, "Warning: ignoring unusable token store preference %s in the Entire config directory: %v\n", preferenceFileName, err)
+		fmt.Fprintf(fallbackNoticeW, "Warning: ignoring unusable token store preference %s in the Entire config directory: %v\nDelete it, or run entire login to rewrite it.\n", preferenceFileName, err)
 	})
 }
 

@@ -1823,10 +1823,15 @@ the marker cannot carry a path and would point later processes at the default
 one), then the platform default. On Linux/BSD the default keyring is
 fronted by `fallbackStore` (`fallback.go`): a keyring call that fails for an
 availability reason — anything but `ErrNotFound` and Ctrl-C — is retried on the
-default-path file store, and once the file store proves it holds the credential
-it is adopted, announced once on stderr, and remembered. A fallback whose file
-write also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint`
-checks so it never recommends the store that just failed. macOS and Windows never
+file store at `FileBackendPath` (`ENTIRE_TOKEN_STORE_PATH` when set, else
+`tokens.json` in the config dir), and once the file store proves it holds the
+credential it is adopted, announced once on stderr, and remembered — except
+after a keyring *timeout*, which is adopted for this process only: the
+abandoned keyring call may still complete the write once it answers, and a
+marker would orphan that copy. A fallback whose file
+write also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint` and
+`storeReadError` check so they never recommend the store that just failed
+(they point at `ENTIRE_TOKEN_STORE_PATH` instead). macOS and Windows never
 fall back: there the keyring is always present, so a failure is a denied prompt
 or a locked store, and a plaintext file must not be the silent answer to either.
 
@@ -1847,9 +1852,11 @@ and reads a mention as a call.
 
 A Get that misses in both stores returns the keyring error, not `ErrNotFound`,
 and `auth status` renders it as "could not be read from …" rather than "Not
-logged in" (`statusTarget.storeErr`). A Delete that misses returns
-`ErrNotFound`, so `logout` can still remove a context on a machine whose keyring
-has vanished.
+logged in" (`statusTarget.storeErr`). A Delete that misses in both stores
+returns `ErrNotFound`, so `logout` can still remove a context on a machine
+whose keyring has vanished — but it warns once per process that the keyring
+copy is unconfirmed (the keyring may be merely locked or slow), and `logout`
+itself warns when revocation was skipped because the token could not be read.
 
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 

@@ -205,6 +205,11 @@ func TestFileStore_LoadCorruptFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for corrupt file")
 	}
+	// The error is what `auth status` shows a user whose tokens.json is
+	// broken; without the path they have to guess which file to fix.
+	if !strings.Contains(err.Error(), s.path) {
+		t.Fatalf("parse error should name the file, got: %v", err)
+	}
 }
 
 func TestFileStore_CreatesDirectory(t *testing.T) {
@@ -569,6 +574,7 @@ func resetBackendForTesting(t *testing.T) {
 		defer backendMu.Unlock()
 		backend = nil
 		resolved = false
+		adoptedFile = false
 	}
 	reset()
 	t.Cleanup(reset)

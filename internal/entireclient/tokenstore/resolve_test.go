@@ -2,6 +2,7 @@ package tokenstore
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -175,6 +176,74 @@ func TestRecordingStore_KeyringWriteRemovesTheSupersededFileCopy(t *testing.T) {
 	}
 	if got, err := file.Get("svc", "bob"); err != nil || got != "keep" {
 		t.Fatalf("other entries must survive, got (%q, %v)", got, err)
+	}
+}
+
+// An explicit keyring login on a machine that has never used the file store
+// has nothing to remove, and must not create the config directory on the way
+// to finding that out.
+func TestRecordingStore_KeyringWriteWithNoConfigDirCreatesNothing(t *testing.T) {
+	dir := isolateConfigDir(t)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("an explicit keyring write must not create the config dir, stat err = %v", err)
+	}
+}
+
+// With a config directory but no tokens.json, the removal is a no-op and must
+// leave no trace: the file store's Delete takes a flock on tokens.json.lock,
+// which is created and never removed, so reaching it for a file that is not
+// there leaves a stray lock behind.
+func TestRecordingStore_KeyringWriteWithNoTokenFileLeavesNoLockFile(t *testing.T) {
+	dir := isolateConfigDir(t)
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	for _, stray := range []string{tokenStoreFileName + ".lock", tokenStoreFileName} {
+		if _, err := os.Stat(filepath.Join(dir, stray)); !os.IsNotExist(err) {
+			t.Fatalf("%s should not exist after a keyring write with no file store, stat err = %v", stray, err)
+		}
+	}
+}
+
+// A device-flow login carries no refresh token, so RecordLoginContext clears
+// the refresh slot with Delete rather than Set. An explicit keyring login
+// must remove the file copy of that slot too, or the OLD refresh token stays
+// in plaintext in tokens.json after the user chose the keyring. The inner
+// keyring reporting ErrNotFound is the common case (nothing was ever in the
+// keyring) and must not stop the file cleanup; the caller still sees
+// ErrNotFound.
+func TestRecordingStore_KeyringDeleteRemovesTheSupersededFileCopy(t *testing.T) {
+	isolateConfigDir(t)
+	file := defaultFileStore()
+	if err := file.Set("svc:refresh", "alice", "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Set("svc:refresh", "bob", "keep"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Delete("svc:refresh", "alice")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete = %v, want the inner ErrNotFound passed through", err)
+	}
+	if _, err := file.Get("svc:refresh", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the superseded file copy of the refresh slot should be gone, got %v", err)
+	}
+
+	// The file backend's own recordingStore has nothing to supersede: its
+	// Delete is a plain passthrough and touches no other store.
+	err = (recordingStore{inner: newScriptedStore(), name: backendFile}).Delete("svc:refresh", "bob")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("file-backend Delete = %v, want ErrNotFound passed through", err)
+	}
+	if got, err := file.Get("svc:refresh", "bob"); err != nil || got != "keep" {
+		t.Fatalf("a file-backend delete must not reach into the default-path store, got (%q, %v)", got, err)
 	}
 }
 

@@ -297,9 +297,10 @@ type statusTarget struct {
 	envToken      bool
 	// storeErr is set when the active context exists but its credential could
 	// not be READ from the store — a keyring or file failure, as opposed to an
-	// empty slot. token is "" in that case. status and token report it; logout
-	// ignores it and proceeds to remove the context, which is the recovery a
-	// user with a broken store actually wants.
+	// empty slot. token is "" in that case. status, token, api, and the mirror
+	// wizard report it; logout warns that server-side revocation was skipped
+	// (warnRevokeSkipped) and proceeds to remove the context, which is the
+	// recovery a user with a broken store actually wants.
 	storeErr error
 }
 
@@ -430,13 +431,18 @@ func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.
 // storeReadError renders a statusTarget whose credential could not be read.
 // It is an error, not a "Not logged in" line: the login exists and the user
 // needs to know which store failed and what to do about it. The remedy
-// depends on the store, by the same rule withHeadlessStoreHint follows: with
-// the keyring selected the way out is the file store; with the file store
-// already selected, suggesting it again is nonsense, so the error names the
-// file to check.
+// depends on the store, by the same rule withHeadlessStoreHint follows: when
+// the Linux fallback tried both stores and both failed (ErrFileStoreFailed)
+// the way out is a writable location for the file store; with the keyring
+// selected the way out is the file store; with the file store already
+// selected, suggesting it again is nonsense, so the error names the file to
+// check.
 func storeReadError(t statusTarget) error {
 	base := fmt.Errorf("saved login for %s found, but its token could not be read from %s: %w",
 		t.coreURL, tokenstore.BackendDescription(), t.storeErr)
+	if errors.Is(t.storeErr, tokenstore.ErrFileStoreFailed) {
+		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed; the error names both. Fix the file store (or point %s at a writable location) and run `entire login` again", base, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+	}
 	if tokenstore.FileBackendSelected() {
 		return fmt.Errorf("%w\n\nCheck that %s exists and contains valid JSON, or run `entire login` again", base, tokenstore.FileBackendPath())
 	}

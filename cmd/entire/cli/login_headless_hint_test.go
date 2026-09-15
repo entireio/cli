@@ -163,23 +163,66 @@ func TestPersistLogin_HintDoesNotPromiseMemoryWhenPathIsOverridden(t *testing.T)
 }
 
 // When the Linux fallback already tried the file store and it failed as well,
-// the hint must not recommend the store that just failed. The flat two-%w
-// error here is a stand-in: in production ErrFileStoreFailed sits inside the
-// token store's three-%w error and ErrCredentialStoreWrite is added a level
-// above by auth's credStoreWriteError, and errors.Is descends through both
-// levels; that nesting cannot be built here because the wrapper type is
-// unexported.
-func TestWithHeadlessStoreHint_QuietWhenFileStoreAlsoFailed(t *testing.T) {
+// the hint must not recommend the store that just failed; the way forward is
+// a writable location for it, named through the path override. The flat
+// two-%w error here is a stand-in: in production ErrFileStoreFailed sits
+// inside the token store's three-%w error and ErrCredentialStoreWrite is
+// added a level above by auth's credStoreWriteError, and errors.Is descends
+// through both levels; that nesting cannot be built here because the wrapper
+// type is unexported.
+func TestWithHeadlessStoreHint_BothStoresFailedPointsAtThePathOverride(t *testing.T) {
 	// Not parallel: FileBackendSelected() reads env and the config-dir marker.
 	t.Setenv("ENTIRE_TOKEN_STORE", "")
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	err := fmt.Errorf("store refresh token: %w; %w: permission denied", auth.ErrCredentialStoreWrite, tokenstore.ErrFileStoreFailed)
 	got := withHeadlessStoreHint(err)
-	if strings.Contains(got.Error(), "=file entire login") || strings.Contains(got.Error(), "ENTIRE_TOKEN_STORE_PATH") {
+	if strings.Contains(got.Error(), "=file entire login") {
 		t.Fatalf("hint must not suggest the file store that just failed, got:\n%v", got)
 	}
+	if !strings.Contains(got.Error(), tokenstore.PathEnvVar) {
+		t.Fatalf("hint should point at the path override as the way forward, got:\n%v", got)
+	}
 	if !errors.Is(got, auth.ErrCredentialStoreWrite) {
-		t.Fatalf("underlying error must pass through unchanged, got:\n%v", got)
+		t.Fatalf("underlying error must stay reachable, got:\n%v", got)
+	}
+}
+
+// Every login onto the file store says where the tokens went. The fallback's
+// own notice prints only on the first adoption, so a later login onto the
+// remembered file store used to write bearer tokens to disk without a word.
+func TestPersistLogin_OnTheFileStoreSaysWhereTokensWent(t *testing.T) {
+	// Not parallel: mutates env and the process-global token store backend.
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv("ENTIRE_TOKEN_STORE_PATH", path)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	restore := tokenstore.UseFileBackendForTesting(path)
+	t.Cleanup(restore)
+
+	var out bytes.Buffer
+	if err := persistLogin(&out, "https://example.test", "", loginTestJWT(t, "https://example.test"), "refresh-token"); err != nil {
+		t.Fatalf("persistLogin() = %v, want nil", err)
+	}
+	if !strings.Contains(out.String(), "Tokens are stored in "+path) {
+		t.Fatalf("stdout should say where the tokens went:\n%s", out.String())
+	}
+}
+
+// With the keyring selected there is nothing to add: the platform keystore is
+// where a user expects tokens, and the line would only be noise.
+func TestPersistLogin_OnTheKeyringSaysNothingAboutTheFile(t *testing.T) {
+	// Not parallel: mutates env and the process-global token store backend.
+	t.Setenv("ENTIRE_TOKEN_STORE", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	var out bytes.Buffer
+	if err := persistLogin(&out, "https://example.test", "", loginTestJWT(t, "https://example.test"), "refresh-token"); err != nil {
+		t.Fatalf("persistLogin() = %v, want nil", err)
+	}
+	if strings.Contains(out.String(), "Tokens are stored in") {
+		t.Fatalf("a keyring login must not claim the tokens are in a file:\n%s", out.String())
 	}
 }

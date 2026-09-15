@@ -21,6 +21,26 @@ import (
 
 const testLogoutToken = "tok123"
 
+// logout removes the context even when its token could not be read — that is
+// the recovery a user with a broken store wants — but it must not print
+// "Logged out." as if the server-side session were gone too.
+func TestWarnRevokeSkipped(t *testing.T) {
+	t.Parallel()
+	var quiet bytes.Buffer
+	warnRevokeSkipped(&quiet, nil)
+	if quiet.Len() != 0 {
+		t.Fatalf("no store error must print nothing, got %q", quiet.String())
+	}
+
+	var out bytes.Buffer
+	warnRevokeSkipped(&out, errors.New("Secret Service (D-Bus) unavailable"))
+	for _, want := range []string{"could not be read", "Secret Service (D-Bus) unavailable", "was not revoked"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("warning missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestRunLogout_RevokesServerSideThenRemovesLogin(t *testing.T) {
 	t.Parallel()
 
