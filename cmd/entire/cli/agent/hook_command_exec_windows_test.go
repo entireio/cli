@@ -18,6 +18,17 @@ import (
 func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string, string, int) {
 	t.Helper()
 
+	// A clean CWD. cmd.exe searches the current directory before PATH, so every
+	// case about the wrapper's own logic must not be answered by a stray file
+	// next to us — that property has its own test below.
+	return runWindowsWrapperInDir(t, wrapper, entirePresent, t.TempDir())
+}
+
+// runWindowsWrapperInDir is runWindowsWrapper with the working directory named,
+// so a test can stand the wrapper in a worktree with something planted in it.
+func runWindowsWrapperInDir(t *testing.T, wrapper string, entirePresent bool, runDir string) (string, string, int) {
+	t.Helper()
+
 	sysRoot := os.Getenv("SystemRoot")
 	if sysRoot == "" {
 		sysRoot = `C:\Windows`
@@ -34,7 +45,6 @@ func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string
 	}
 	t.Setenv("PATH", strings.Join(pathEntries, ";"))
 
-	runDir := t.TempDir()
 	cmdPath, err := exec.LookPath("cmd.exe")
 	if err != nil {
 		t.Fatalf("find cmd.exe: %v", err)
@@ -44,7 +54,7 @@ func runWindowsWrapper(t *testing.T, wrapper string, entirePresent bool) (string
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CmdLine: `"` + cmdPath + `" /C "` + wrapper + `"`,
 	}
-	cmd.Dir = runDir // clean CWD so `where` can't find a stray entire next to us
+	cmd.Dir = runDir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -141,4 +151,106 @@ func TestWindowsWrappers_Execution(t *testing.T) {
 			t.Fatalf("expected wrapped command exit code 7 to propagate, got %d; stderr=%q", code, stderr)
 		}
 	})
+}
+
+// TestWindowsWrappers_DoNotResolveFromTheWorktree pins the half of the
+// current-directory defence that no string assertion can reach.
+//
+// cmd.exe searches the current directory ahead of PATH, and the directory a
+// hook runs in is the worktree. So an `entire.bat` committed to a repository was
+// what the wrapper executed when the agent started a session — no user action,
+// no prompt. windowsEntireGuard sets NoDefaultCurrentDirectoryInExePath to take
+// the current directory out of that search.
+//
+// Asserted against a real cmd.exe on purpose. The documentation says the
+// variable exists for shells that do their own resolution and names cmd.exe as
+// the example, but it does not say whether cmd.exe re-reads it for commands
+// later on a line that `set` it — which is exactly how the wrapper uses it.
+// Believing that without checking is what this test refuses to do.
+//
+// ALL THREE wrappers, because they do not have one shape. The silent wrapper
+// nests its own `cmd.exe /d /s /c`, so the `set` and the command it protects run
+// in an inner shell; the two warning wrappers are bare lines that the agent runs
+// through its own `cmd.exe /C`, where the `set` lands in the shell the agent
+// started. Whether the variable takes effect could differ between those, and
+// nothing but running them says which.
+//
+// The unhardened cases are POSITIVE CONTROLS, not history. "The planted file did
+// not run" is satisfied just as well by a wrapper that did not run at all, so
+// without a form that DOES execute it this test would keep passing while
+// checking nothing — it would survive the guard being deleted. There are two of
+// them rather than three because nested-vs-bare is the only difference that
+// could change the answer; which warning text the if branch would have echoed
+// cannot, and the guard never reaches it here.
+//
+// entire is absent from PATH throughout, so the planted file is the only
+// `entire` anywhere: where.exe searches the current directory too, so the guard
+// passes in every case and the difference is entirely in what the else branch
+// resolves.
+func TestWindowsWrappers_DoNotResolveFromTheWorktree(t *testing.T) {
+	// No t.Parallel(): t.Setenv("PATH") forbids it.
+
+	const hookCommand = "entire hooks codex stop"
+
+	// The wrappers as they stood before windowsEntireGuard. Spelled out rather
+	// than built, so that changing the production wrappers cannot quietly change
+	// what the controls prove.
+	const unhardenedNested = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & ` +
+		`if errorlevel 1 (ver>nul) else (` + hookCommand + `)"`
+	const unhardenedBare = `where.exe entire >nul 2>nul & ` +
+		`if errorlevel 1 (echo missing) else (` + hookCommand + `)`
+
+	for _, tc := range []struct {
+		name    string
+		wrapper string
+		wantRan bool
+	}{
+		{
+			name:    "control: unhardened nested wrapper runs the worktree's entire.bat",
+			wrapper: unhardenedNested,
+			wantRan: true,
+		},
+		{
+			name:    "control: unhardened bare wrapper runs the worktree's entire.bat",
+			wrapper: unhardenedBare,
+			wantRan: true,
+		},
+		{
+			name:    "silent wrapper does not",
+			wrapper: WrapWindowsProductionSilentHookCommand(hookCommand),
+			wantRan: false,
+		},
+		{
+			name:    "json warning wrapper does not",
+			wrapper: WrapWindowsProductionJSONWarningHookCommand(hookCommand, WarningFormatSingleLine),
+			wantRan: false,
+		},
+		{
+			name:    "plain text warning wrapper does not",
+			wrapper: WrapWindowsProductionPlainTextWarningHookCommand(hookCommand, WarningFormatSingleLine),
+			wantRan: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worktree := t.TempDir()
+			markerPath := filepath.Join(worktree, "planted-ran.txt")
+			planted := "@echo off\r\n" + `echo PLANTED>> "` + markerPath + `"` + "\r\n" + "exit /b 0\r\n"
+			if err := os.WriteFile(filepath.Join(worktree, "entire.bat"), []byte(planted), 0o700); err != nil {
+				t.Fatalf("plant entire.bat: %v", err)
+			}
+
+			_, stderr, code := runWindowsWrapperInDir(t, tc.wrapper, false, worktree)
+
+			ran := true
+			if _, err := os.Stat(markerPath); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("stat planted marker: %v", err)
+				}
+				ran = false
+			}
+			if ran != tc.wantRan {
+				t.Fatalf("worktree entire.bat ran = %v, want %v; exit=%d stderr=%q", ran, tc.wantRan, code, stderr)
+			}
+		})
+	}
 }
