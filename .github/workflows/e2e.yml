@@ -1,281 +1,150 @@
-name: E2E Tests
+name: E2E Tests - CRLF validation
 
 on:
   workflow_dispatch:
     inputs:
       agent:
-        description: 'Run a single agent (leave empty for all)'
-        required: false
-        type: choice
-        options:
-          - ''
-          - claude-code
-          - opencode
-          - gemini-cli
-          - factoryai-droid
-          - cursor-cli
-          - copilot-cli
-          - roger-roger
-          - codex
-      test:
-        description: 'Test name filter (regex; empty runs the full suite)'
-        required: false
+        description: Agent name, empty for all supported real agents
         type: string
         default: ''
-  push:
-    branches:
-      - main
+      os:
+        description: Runner label, or all
+        type: string
+        default: all
+      backend:
+        description: git-branch, git-refs, or all
+        type: string
+        default: all
+      test:
+        description: Test regex, empty for the full suite
+        type: string
+        default: ''
+      code_ref:
+        description: Commit to build and test, empty for this workflow branch
+        type: string
+        default: ''
 
-# Concurrency: only one E2E job runs at a time
-concurrency:
-  group: e2e-tests
-  cancel-in-progress: true
-
-# Deny by default: matrix-setup needs no token at all, and the three jobs that
-# do need one declare exactly what they use.
 permissions: {}
 
+concurrency:
+  group: crlf-validation-${{ github.ref }}-${{ inputs.agent }}-${{ inputs.os }}-${{ inputs.backend }}-${{ inputs.test }}-${{ inputs.code_ref }}
+  cancel-in-progress: false
+
 jobs:
-  # Build the matrix dynamically so workflow_dispatch can select a single agent.
-  matrix-setup:
+  matrix:
     runs-on: ubuntu-latest
     outputs:
-      agents: ${{ steps.set.outputs.agents }}
+      include: ${{ steps.matrix.outputs.include }}
     steps:
-      - id: set
-        # Pass the input through env rather than interpolating it into the script:
-        # `type: choice` only constrains the UI, so a REST-API dispatch could inject
-        # shell metacharacters here otherwise.
+      - id: matrix
         env:
-          AGENT_INPUT: ${{ github.event.inputs.agent }}
-        # gemini-cli is deliberately absent from the all-agents list. Since
-        # Gemini CLI 0.57.0 the agent forces `core.hooksPath=''` on every shell
-        # command it runs, so no checkpoint is recorded for a commit it makes and
-        # the leg fails for a reason no change on our side can fix. It stays in
-        # the workflow_dispatch choices above so the leg can be run by hand
-        # against a newer Gemini release; put it back in this list (it is still
-        # in the RED "reliable" tier in notify-slack) once one restores hooks.
+          AGENT_INPUT: ${{ inputs.agent }}
+          OS_INPUT: ${{ inputs.os }}
+          BACKEND_INPUT: ${{ inputs.backend }}
         run: |
-          input="$AGENT_INPUT"
-          if [ -n "$input" ]; then
-            echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
-          else
-            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
-          fi
+          python3 - <<'PY'
+          import json, os
+          unix = ['claude-code', 'opencode', 'codex', 'cursor-cli', 'factoryai-droid', 'copilot-cli']
+          windows = ['claude-code', 'opencode', 'codex', 'copilot-cli']
+          rows = [dict(os=runner, agent=agent, backend=backend)
+                  for runner in ['ubuntu-latest', 'macos-latest', 'windows-latest']
+                  for agent in (windows if runner == 'windows-latest' else unix)
+                  for backend in ['git-branch', 'git-refs']
+                  if os.environ['AGENT_INPUT'] in ['', agent]
+                  and os.environ['OS_INPUT'] in ['all', runner]
+                  and os.environ['BACKEND_INPUT'] in ['all', backend]]
+          if not rows:
+              raise SystemExit('No supported agent/OS/backend combinations selected')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('include=' + json.dumps(rows) + '\n')
+          print(json.dumps(rows, indent=2))
+          PY
 
-  e2e-tests:
-    needs: matrix-setup
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+  test:
+    needs: matrix
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 65
     permissions:
-      actions: read
       contents: read
-      # Needed by the copilot-cli leg. GitHub does not allow matrix expressions in
-      # `permissions:`, so this scope is granted to every leg's GITHUB_TOKEN. The
-      # token is kept away from non-copilot agents in two ways: it is only placed
-      # in COPILOT_GITHUB_TOKEN for the copilot-cli leg (see env blocks below), and
-      # checkout runs with persist-credentials: false so it is not left in
-      # .git/config for an agent process to read.
+      actions: read
       copilot-requests: write
     strategy:
       fail-fast: false
       matrix:
-        agent: ${{ fromJson(needs.matrix-setup.outputs.agents) }}
-
+        include: ${{ fromJson(needs.matrix.outputs.include) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      AGENT: ${{ matrix.agent }}
+      TEST_FILTER: ${{ inputs.test }}
+      E2E_CHECKPOINT_STORE: ${{ matrix.backend }}
+      E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e/artifacts
+      E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
+      E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
-          # an agent process running in the checkout could read it.
           persist-credentials: false
-
-      - name: Setup mise
-        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
-
-      - name: Install system dependencies
+          ref: ${{ inputs.code_ref || github.sha }}
+      - name: Record tested commit
+        run: |
+          git rev-parse HEAD
+          git config --show-origin --get core.autocrlf || true
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204
+      - name: Install tmux on Linux
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y tmux
-
-      - name: Install agent CLI
+      - name: Install tmux on macOS
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: Install Claude on Windows
+        if: runner.os == 'Windows' && matrix.agent == 'claude-code'
+        shell: pwsh
         run: |
-          case "${{ matrix.agent }}" in
+          irm https://claude.ai/install.ps1 | iex
+          "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Install agent
+        if: runner.os != 'Windows' || matrix.agent != 'claude-code'
+        run: |
+          case "$AGENT" in
             claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
-            opencode)    curl -fsSL https://opencode.ai/install | bash ;;
-            gemini-cli)  npm install -g @google/gemini-cli ;;
-            codex)       npm install -g @openai/codex ;;
-            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
+            opencode) npm install -g opencode-ai ;;
+            codex) npm install -g @openai/codex ;;
+            copilot-cli) npm install -g @github/copilot ;;
+            cursor-cli) curl -fsSL https://cursor.com/install | bash ;;
             factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
-            copilot-cli)  npm install -g @github/copilot  ;;
-            roger-roger) ;; # installed by mise (see mise.toml)
+            *) echo "Unsupported agent: $AGENT"; exit 1 ;;
           esac
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Verify roger-roger agent
-        if: matrix.agent == 'roger-roger'
-        run: |
-          set -euo pipefail
-          echo "Verifying roger-roger binaries on PATH..."
-          command -v roger-roger
-          command -v entire-agent-roger-roger
-
-      - name: Bootstrap agent
-        if: matrix.agent != 'roger-roger'
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          # Only the copilot-cli leg gets the token; other agents must not receive it.
-          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
-        run: go run ./e2e/bootstrap
-
-      - name: Run E2E Tests
-        env:
-          TEST_FILTER: ${{ inputs.test }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
-          E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          # Only the copilot-cli leg gets the token; other agents must not receive it.
-          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
-          E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}
-        # roger-roger is deterministic, so it runs through its dedicated task,
-        # which does NOT enable --rerun-fails. Routing it through the default
-        # task (`test:e2e`) would retry a real regression and mask it.
-        run: |
-          if [ "${{ matrix.agent }}" = "roger-roger" ]; then
-            mise run test:e2e:roger-roger "${TEST_FILTER:-TestExternalAgent}"
-          else
-            mise run test:e2e --agent ${{ matrix.agent }} "$TEST_FILTER"
+          if [ "$RUNNER_OS" != Windows ]; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            echo "$HOME/bin" >> "$GITHUB_PATH"
           fi
-
-      # opencode writes nothing to stdout or stderr while it stalls during
-      # startup, so a hung `opencode run` reaches us as an empty-output SIGKILL
-      # naming no cause — which is exactly how the 2026-09-03 red streak looked
-      # from the artifacts. Its own log dir is the only record of what it was
-      # waiting on, so fold it into the artifact tree. Best-effort: a leg that
-      # never got as far as writing logs must not fail here.
-      - name: Collect opencode logs
-        if: always() && matrix.agent == 'opencode'
+      - name: Bootstrap agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
+        run: go run ./e2e/bootstrap "$AGENT"
+      - name: Run E2E suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
         run: |
-          mkdir -p e2e/artifacts/opencode-logs
-          cp -R "$HOME/.local/share/opencode/log/." e2e/artifacts/opencode-logs/ || true
-
+          mise run test:e2e --agent "$AGENT" "$TEST_FILTER"
+          if grep -q '^Total: 0 ' "$E2E_ARTIFACT_DIR/report.txt"; then
+            echo "No E2E tests ran"
+            exit 1
+          fi
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: e2e-artifacts-${{ matrix.agent }}
+          name: crlf-${{ matrix.os }}-${{ matrix.agent }}-${{ matrix.backend }}
           path: e2e/artifacts/
           retention-days: 7
-
-  e2e-windows:
-    if: inputs.agent == '' || inputs.agent == 'claude-code'
-    uses: ./.github/workflows/e2e-windows.yml
-    permissions:
-      contents: read
-    with:
-      test: ${{ inputs.test }}
-    secrets: inherit
-
-  notify-slack:
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-    needs: [e2e-tests, e2e-windows]
-    if: ${{ always() && (needs.e2e-tests.result == 'failure' || needs.e2e-windows.result == 'failure') && github.event_name == 'push' }}
-    steps:
-      # Classify the failed jobs into two severities:
-      #   RED    — a "reliable" agent (or Windows) failed. These pass on every
-      #            healthy run, so a failure here is a real regression.
-      #   YELLOW — only a known-flaky agent failed. Worth investigating, but not
-      #            a `main` regression. Reported so we don't lose visibility.
-      - name: Classify failures
-        id: classify
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Reliable tier (RED). The e2e-windows reusable job is also RED but
-          # is matched separately below since it has no "(agent)" suffix.
-          reliable="claude-code opencode gemini-cli roger-roger"
-
-          failed_names=$(gh api --paginate \
-            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-            --jq '.jobs[] | select(.conclusion == "failure") | .name')
-
-          red=""
-          yellow=""
-          while IFS= read -r name; do
-            [ -z "$name" ] && continue
-            case "$name" in
-              *e2e-windows*) red="$red windows"; continue ;;
-            esac
-            # "e2e-tests (cursor-cli)" -> "cursor-cli"
-            agent="${name#*(}"; agent="${agent%)*}"
-            case " $reliable " in
-              *" $agent "*) red="$red $agent" ;;
-              *)            yellow="$yellow $agent" ;;
-            esac
-          done <<EOF
-          $failed_names
-          EOF
-
-          # Each list was built as " a b c" (leading space, space-separated).
-          # Strip the leading space, then join on ", ". Empty stays empty.
-          red="${red# }";       red="${red// /, }"
-          yellow="${yellow# }"; yellow="${yellow// /, }"
-
-          if [ -n "$red" ]; then
-            color="#d50200"
-            header=":red_circle: *E2E Tests Failed* on \`main\`"
-          else
-            color="#daa038"
-            header=":large_yellow_circle: *E2E flaky-agent failures* on \`main\`"
-          fi
-
-          body=""
-          [ -n "$red" ]    && body="${body}Reliable agents (regression): *${red}*\\n"
-          [ -n "$yellow" ] && body="${body}Flaky agents (investigate): *${yellow}*\\n"
-
-          {
-            echo "color=$color"
-            echo "header=$header"
-            echo "body=$body"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Notify Slack of E2E failure
-        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
-        with:
-          webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            {
-              "attachments": [
-                {
-                  "color": "${{ steps.classify.outputs.color }}",
-                  "blocks": [
-                    {
-                      "type": "section",
-                      "text": {
-                        "type": "mrkdwn",
-                        "text": "${{ steps.classify.outputs.header }}\n\n${{ steps.classify.outputs.body }}<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
-                      }
-                    },
-                    {
-                      "type": "context",
-                      "elements": [
-                        {
-                          "type": "mrkdwn",
-                          "text": "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
