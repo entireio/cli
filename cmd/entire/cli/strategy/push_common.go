@@ -43,12 +43,50 @@ func (p checkpointRefPush) refSpec() string {
 	return p.hash.String() + ":" + p.name.String()
 }
 
+// resolveQueuedCheckpointRef returns the spelling a queued checkpoint ref is
+// actually stored under: the queued one when it resolves, otherwise its
+// case-folded alternate when THAT resolves.
+//
+// A checkpoint ref is written through its canonical name but stored under
+// whichever spelling already named its shard bucket, and on a case-insensitive
+// filesystem those differ. They agree only while the ref is loose, because
+// there the filesystem resolves one onto the other; once git packs the ref,
+// lookup is an exact string match and the queued name stops resolving. See
+// checkpoint.FoldedRefName for why one alternate is exhaustive.
+//
+// Only a definite ErrReferenceNotFound moves to the alternate. A transient
+// lookup failure returns the queued name unchanged, so a flaky read never
+// rewrites which ref a caller acts on.
+func resolveQueuedCheckpointRef(repo *git.Repository, ref plumbing.ReferenceName) plumbing.ReferenceName {
+	if _, err := repo.Reference(ref, false); !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return ref
+	}
+	cid, ok := checkpoint.ParseRef(ref)
+	if !ok {
+		return ref
+	}
+	folded, ok := checkpoint.FoldedRefName(cid)
+	if !ok {
+		return ref
+	}
+	if _, err := repo.Reference(folded, false); err == nil {
+		return folded
+	}
+	return ref
+}
+
 // partitionLocalRefs splits refs into those that exist locally (pushable) and
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
 // rather than retrying them forever. listed holds the tip of every ref found by
 // listing the checkpoint namespace; it is nil when the namespace was not
 // listed, and a ref missing from it has no known tip.
+//
+// A queued name is resolved through resolveQueuedCheckpointRef first, and the
+// resolved spelling is what is returned as pushable: without that, a ref stored
+// under its case-folded shard reads as absent and is dropped from the queue, so
+// the checkpoint is never pushed. The stale list keeps the name the caller
+// passed in, since that is the queue entry it has to prune.
 func partitionLocalRefs(
 	ctx context.Context,
 	repo *git.Repository,
@@ -90,8 +128,12 @@ func partitionLocalRefsUsing(
 		}
 	}
 	for _, ref := range refs {
-		if _, ok := present[ref]; ok || localRefMayExist(repo, ref) {
-			existing = append(existing, ref)
+		resolved := ref
+		if _, ok := present[ref]; !ok {
+			resolved = resolveQueuedCheckpointRef(repo, ref)
+		}
+		if _, ok := present[resolved]; ok || localRefMayExist(repo, resolved) {
+			existing = append(existing, resolved)
 		} else {
 			stale = append(stale, ref)
 		}

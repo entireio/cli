@@ -569,7 +569,14 @@ func partitionCheckpointRefPushes(
 			part.waiting = append(part.waiting, entry)
 			continue
 		}
-		ref, err := repo.Reference(entry.Ref, true)
+		// The queued spelling is not always the one the ref is stored under: on
+		// a case-insensitive filesystem a checkpoint ref lands in whichever
+		// shard directory already existed, and once git packs it the queued
+		// name stops resolving. Classifying that as stale drops the entry and
+		// the checkpoint is then never pushed, silently and permanently — so
+		// resolve to the spelling that exists before deciding.
+		name := resolveQueuedCheckpointRef(repo, entry.Ref)
+		ref, err := repo.Reference(name, true)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			part.stale = append(part.stale, entry)
 			continue
@@ -579,7 +586,11 @@ func partitionCheckpointRefPushes(
 			part.readErrs[entry.Ref] = fmt.Errorf("read checkpoint ref: %w", err)
 			continue
 		}
-		candidate := checkpointRefPush{token: entry, name: entry.Ref, hash: ref.Hash()}
+		// name, not entry.Ref: the push is <hash>:<name>, so this is also the
+		// spelling the remote receives, and recoverCheckpointRef fetches it
+		// back by the same name. The queue entry is untouched — removal keys on
+		// token, so the original spelling is still what gets pruned.
+		candidate := checkpointRefPush{token: entry, name: name, hash: ref.Hash()}
 		switch {
 		case !pin.IsZero() && pin != candidate.hash:
 			part.changed = append(part.changed, candidate)
