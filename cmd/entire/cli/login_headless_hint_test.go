@@ -157,6 +157,7 @@ func TestPersistLogin_HintDoesNotPromiseMemoryWhenPathIsOverridden(t *testing.T)
 	if strings.Contains(err.Error(), "The choice is remembered") {
 		t.Fatalf("hint must not promise a memory the marker will not keep while ENTIRE_TOKEN_STORE_PATH is set:\n%v", err)
 	}
+	// Prose is pinned deliberately here: the wording IS this task's deliverable.
 	if !strings.Contains(err.Error(), "ENTIRE_TOKEN_STORE_PATH is set, so the choice is not remembered") {
 		t.Fatalf("hint should say why the choice is not remembered:\n%v", err)
 	}

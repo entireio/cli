@@ -401,6 +401,8 @@ func TestShouldUseBrowserLogin(t *testing.T) {
 		{facts: loginFlowFacts{useDevice: true, canPrompt: true}, want: false}, // --device forces device
 		{facts: loginFlowFacts{useDevice: true}, want: false},
 		{facts: loginFlowFacts{useDevice: true, canPrompt: true, sshSession: true}, want: false},
+		{facts: loginFlowFacts{canPrompt: true, noDisplay: true}, want: false}, // no display: nothing to open a browser on → device
+		{facts: loginFlowFacts{canPrompt: true, noDisplay: true, useDevice: true}, want: false},
 	}
 	for _, tc := range cases {
 		if got := shouldUseBrowserLogin(tc.facts); got != tc.want {
@@ -421,6 +423,36 @@ func TestIsSSHSession(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "10.0.0.1 50022 10.0.0.2 22")
 	if !isSSHSession() {
 		t.Error("isSSHSession() = false with SSH_CONNECTION set")
+	}
+}
+
+func TestNoLocalDisplay(t *testing.T) {
+	t.Parallel()
+	env := func(vars map[string]string) func(string) string {
+		return func(k string) string { return vars[k] }
+	}
+	cases := map[string]struct {
+		goos string
+		vars map[string]string
+		want bool
+	}{
+		"linux, nothing set":      {"linux", nil, true},
+		"freebsd, nothing set":    {"freebsd", nil, true},
+		"openbsd, nothing set":    {"openbsd", nil, true},
+		"netbsd, nothing set":     {"netbsd", nil, true},
+		"dragonfly, nothing set":  {"dragonfly", nil, true},
+		"linux, X11":              {"linux", map[string]string{"DISPLAY": ":0"}, false},
+		"linux, wayland":          {"linux", map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, false},
+		"linux, explicit BROWSER": {"linux", map[string]string{"BROWSER": "firefox"}, false},
+		"WSL distro":              {"linux", map[string]string{"WSL_DISTRO_NAME": "Ubuntu"}, false},
+		"WSL interop":             {"linux", map[string]string{"WSL_INTEROP": "/run/WSL/1_interop"}, false},
+		"darwin, nothing set":     {"darwin", nil, false},
+		"windows, nothing set":    {"windows", nil, false},
+	}
+	for name, tc := range cases {
+		if got := noLocalDisplay(tc.goos, env(tc.vars)); got != tc.want {
+			t.Errorf("%s: noLocalDisplay = %v, want %v", name, got, tc.want)
+		}
 	}
 }
 
@@ -865,6 +897,49 @@ func TestRunLoginAuto_SSHSession_FallsBackToDevice(t *testing.T) {
 		t.Errorf("stderr missing SSH explanation:\n%s", errW.String())
 	}
 	// mockClient.StartDeviceAuth errors — proof the device flow was attempted.
+	if err == nil || !strings.Contains(err.Error(), "not implemented in mock") {
+		t.Fatalf("err = %v, want device-flow start error from mock", err)
+	}
+}
+
+func TestRunLoginAuto_NoDisplay_FallsBackToDevice(t *testing.T) {
+	t.Parallel()
+
+	var browserCalls int
+
+	var errW bytes.Buffer
+	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &errW, &mockClient{},
+		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(),
+		loginFlowFacts{canPrompt: true, noDisplay: true})
+
+	if browserCalls != 0 {
+		t.Errorf("startBrowser calls = %d, want 0 (no display must skip the browser flow)", browserCalls)
+	}
+	if !strings.Contains(errW.String(), "No graphical display detected") {
+		t.Errorf("stderr missing the no-display explanation:\n%s", errW.String())
+	}
+	if err == nil || !strings.Contains(err.Error(), "not implemented in mock") {
+		t.Fatalf("err = %v, want device-flow start error from mock", err)
+	}
+}
+
+// A plain ssh session has no display either; the SSH explanation is the more
+// specific diagnosis and must win over the no-display one.
+func TestRunLoginAuto_SSHWithoutDisplay_PrintsTheSSHExplanation(t *testing.T) {
+	t.Parallel()
+
+	var browserCalls int
+	var errW bytes.Buffer
+	err := runLoginAuto(context.Background(), &bytes.Buffer{}, &errW, &mockClient{},
+		startBrowserStub(&browserCalls, nil, nil), newTestLoginURLInteractor(),
+		loginFlowFacts{canPrompt: true, sshSession: true, noDisplay: true})
+
+	if browserCalls != 0 {
+		t.Errorf("startBrowser calls = %d, want 0", browserCalls)
+	}
+	if !strings.Contains(errW.String(), "SSH session detected") || strings.Contains(errW.String(), "No graphical display detected") {
+		t.Errorf("want the SSH explanation and not the no-display one:\n%s", errW.String())
+	}
 	if err == nil || !strings.Contains(err.Error(), "not implemented in mock") {
 		t.Fatalf("err = %v, want device-flow start error from mock", err)
 	}
