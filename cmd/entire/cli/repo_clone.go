@@ -327,109 +327,119 @@ func newRepoCloneCmd() *cobra.Command {
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
-			// Trim once up front so the entire:// detection and the value forwarded
-			// to git clone agree (the shorthand path trims inside parseMirrorCloneRef).
-			ref := strings.TrimSpace(args[0])
+			cloneURL, err := resolveRepoRemoteURL(cmd, args[0], cluster, selectCloneTarget)
+			if err != nil {
+				return err
+			}
 			var targetDir string
 			if len(args) > 1 {
 				targetDir = args[1]
 			}
-
-			// A full entire:// clone URL already embeds the cluster host (it's what
-			// --cluster would otherwise resolve to), so pass it verbatim to git clone
-			// — no mirror lookup or cluster resolution. --cluster is irrelevant here.
-			//
-			// Deliberately NOT run through validateClusterHost: this is a raw URL the
-			// user typed, forwarded to `git clone` exactly as given (the whole point
-			// of this branch), so it's equivalent to running `git clone entire://…`
-			// directly. The validateClusterHost guard applies on the shorthand path
-			// where we *synthesize* the URL from a --cluster flag or an API-supplied
-			// host — values that flow into the STS audience under our own construction.
-			if isEntireCloneURL(ref) {
-				return runGitClone(cmd.Context(), cmd, ref, targetDir)
-			}
-
-			// Native ref: resolve the repo's home cluster via the active-context
-			// control plane and clone from there. A native repo lives on exactly
-			// one home cluster, so --cluster has nothing to choose between.
-			project, repoName, nativeErr := parseNativeCloneRef(ref)
-			if nativeErr == nil {
-				if cluster != "" {
-					return fmt.Errorf("--cluster applies to /gh/ mirror refs; %s/%s is cloned from its home cluster", project, repoName)
-				}
-				var cloneURL string
-				if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-					url, err := resolveNativeCloneURL(ctx, c, project, repoName)
-					if err != nil {
-						return err
-					}
-					cloneURL = url
-					return nil
-				}); err != nil {
-					return err
-				}
-				return runGitClone(cmd.Context(), cmd, cloneURL, targetDir)
-			}
-
-			// provider is always "github" for the /gh/ shorthand; the pull-gated
-			// resolver pins the provider itself, so it's not threaded through.
-			_, owner, repo, mirrorErr := parseMirrorCloneRef(ref)
-			if mirrorErr != nil {
-				return invalidCloneRefError(ref, nativeErr, mirrorErr)
-			}
-
-			var placements []coreapi.ResolvedPlacement
-			lister := func(ctx context.Context, c *coreapi.Client) error {
-				ps, err := resolvePullablePlacements(ctx, c, owner, repo)
-				if err != nil {
-					return err
-				}
-				placements = ps
-				return nil
-			}
-			// An explicit --cluster may name a cluster in a different federation
-			// than the active context, whose mirrors the active-context core can't
-			// see (the original bug: cloning a royalcanin.partial.to mirror while a
-			// different context is active failed with "not mirrored on ..."). Dial
-			// the core fronting that cluster — discovered from its well-known and
-			// authenticated with the matching local context, the same path
-			// `mirror create <url> [cluster]` uses — so the lookup resolves against
-			// the right federation. With no --cluster, list from the active context.
-			runWithCore := runCore
-			if cluster != "" {
-				if err := validateClusterHost(cluster); err != nil {
-					return fmt.Errorf("invalid --cluster: %w", err)
-				}
-				runWithCore = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
-					return runCoreForCluster(cmd, cluster, fn)
-				}
-			}
-			if err := runWithCore(cmd, lister); err != nil {
-				return err
-			}
-
-			if len(placements) == 0 {
-				return fmt.Errorf("no mirror found for /gh/%s/%s; run 'entire repo mirror create github.com/%s/%s' to onboard it", owner, repo, owner, repo)
-			}
-
-			chosen, err := selectCloneTarget(cmd, placements, cluster)
-			if err != nil {
-				return err
-			}
-
-			// chosen.ClusterHost is server-provided, but it's interpolated into the
-			// entire:// clone URL just like the user-supplied --cluster, so apply the
-			// same anti-token-leak guard (validateClusterHost) before building it —
-			// defense-in-depth against a malformed host reaching git / the STS audience.
-			if err := validateClusterHost(chosen.ClusterHost); err != nil {
-				return fmt.Errorf("mirror has an invalid cluster host %q: %w", chosen.ClusterHost, err)
-			}
-			cloneURL := mirrorCloneURL(chosen.ClusterHost, owner, repo)
 			return runGitClone(cmd.Context(), cmd, cloneURL, targetDir)
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
 	return cmd
+}
+
+// resolveRepoRemoteURL shares ref parsing, cluster routing, and URL validation
+// between clone and remote-url. Full URLs pass through without a lookup.
+func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, pick func(*cobra.Command, []coreapi.ResolvedPlacement, string) (coreapi.ResolvedPlacement, error)) (string, error) {
+	// Trim once up front so the entire:// detection and the value forwarded
+	// to git clone agree (the shorthand path trims inside parseMirrorCloneRef).
+	ref = strings.TrimSpace(ref)
+
+	// A full entire:// clone URL already embeds the cluster host (it's what
+	// --cluster would otherwise resolve to), so pass it verbatim to git clone
+	// — no mirror lookup or cluster resolution. --cluster is irrelevant here.
+	//
+	// Deliberately NOT run through validateClusterHost: this is a raw URL the
+	// user typed, forwarded to `git clone` exactly as given (the whole point
+	// of this branch), so it's equivalent to running `git clone entire://…`
+	// directly. The validateClusterHost guard applies on the shorthand path
+	// where we *synthesize* the URL from a --cluster flag or an API-supplied
+	// host — values that flow into the STS audience under our own construction.
+	if isEntireCloneURL(ref) {
+		return ref, nil
+	}
+
+	// Native ref: resolve the repo's home cluster via the active-context
+	// control plane and clone from there. A native repo lives on exactly
+	// one home cluster, so --cluster has nothing to choose between.
+	project, repoName, nativeErr := parseNativeCloneRef(ref)
+	if nativeErr == nil {
+		if cluster != "" {
+			return "", fmt.Errorf("--cluster applies to /gh/ mirror refs; %s/%s is cloned from its home cluster", project, repoName)
+		}
+		var cloneURL string
+		if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+			url, err := resolveNativeCloneURL(ctx, c, project, repoName)
+			if err != nil {
+				return err
+			}
+			cloneURL = url
+			return nil
+		}); err != nil {
+			return "", err
+		}
+		return cloneURL, nil
+	}
+
+	// provider is always "github" for the /gh/ shorthand; the pull-gated
+	// resolver pins the provider itself, so it's not threaded through.
+	_, owner, repo, mirrorErr := parseMirrorCloneRef(ref)
+	if mirrorErr != nil {
+		return "", invalidCloneRefError(ref, nativeErr, mirrorErr)
+	}
+
+	var placements []coreapi.ResolvedPlacement
+	lister := func(ctx context.Context, c *coreapi.Client) error {
+		ps, err := resolvePullablePlacements(ctx, c, owner, repo)
+		if err != nil {
+			return err
+		}
+		placements = ps
+		return nil
+	}
+	// An explicit --cluster may name a cluster in a different federation
+	// than the active context, whose mirrors the active-context core can't
+	// see (the original bug: cloning a royalcanin.partial.to mirror while a
+	// different context is active failed with "not mirrored on ..."). Dial
+	// the core fronting that cluster — discovered from its well-known and
+	// authenticated with the matching local context, the same path
+	// `mirror create <url> [cluster]` uses — so the lookup resolves against
+	// the right federation. With no --cluster, list from the active context.
+	runWithCore := runCore
+	if cluster != "" {
+		if err := validateClusterHost(cluster); err != nil {
+			return "", fmt.Errorf("invalid --cluster: %w", err)
+		}
+		runWithCore = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
+			return runCoreForCluster(cmd, cluster, fn)
+		}
+	}
+	if err := runWithCore(cmd, lister); err != nil {
+		return "", err
+	}
+
+	if len(placements) == 0 {
+		return "", fmt.Errorf("no mirror found for /gh/%s/%s; run 'entire repo mirror create github.com/%s/%s' to onboard it", owner, repo, owner, repo)
+	}
+
+	chosen, err := pick(cmd, placements, cluster)
+	if err != nil {
+		return "", err
+	}
+
+	// chosen.ClusterHost is server-provided, but it's interpolated into the
+	// entire:// clone URL just like the user-supplied --cluster, so apply the
+	// same anti-token-leak guard (validateClusterHost) before building it —
+	// defense-in-depth against a malformed host reaching git / the STS audience.
+	if err := validateClusterHost(chosen.ClusterHost); err != nil {
+		return "", fmt.Errorf("mirror has an invalid cluster host %q: %w", chosen.ClusterHost, err)
+	}
+	cloneURL := mirrorCloneURL(chosen.ClusterHost, owner, repo)
+	return cloneURL, nil
 }
 
 // mirrorLister is the subset of the control-plane client listMirrorsForRepo
@@ -512,11 +522,13 @@ type placementPicker struct {
 	action string
 }
 
+const clusterSelectorFlag = "--cluster"
+
 // selectCloneTarget resolves which mirror placement to clone from, with the
 // clone verb's wording. See selectPlacement for the selection rules.
 func selectCloneTarget(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterFlag string) (coreapi.ResolvedPlacement, error) {
 	return selectPlacement(cmd, placements, clusterFlag, placementPicker{
-		selector: "--cluster",
+		selector: clusterSelectorFlag,
 		title:    "This repo is mirrored on more than one cluster — pick one to clone from",
 		action:   "Clone",
 	})
@@ -574,6 +586,7 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 				Value(&selected),
 		),
 	)
+	form.WithOutput(cmd.ErrOrStderr())
 	if err := form.RunWithContext(cmd.Context()); err != nil {
 		// handleFormCancellation prints "<action> cancelled." and returns nil for a
 		// Ctrl+C / cancelled-context abort. Surface that as a SilentError so the

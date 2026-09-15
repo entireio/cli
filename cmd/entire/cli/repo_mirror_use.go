@@ -491,7 +491,7 @@ func newRepoMirrorUseCmd() *cobra.Command {
 			}
 
 			chosen, err := selectPlacement(cmd, placements, clusterArg, placementPicker{
-				selector: "--cluster",
+				selector: clusterSelectorFlag,
 				title:    fmt.Sprintf("%s/%s is mirrored on more than one cluster — pick the one to use", owner, repo),
 				action:   "Remote update",
 			})

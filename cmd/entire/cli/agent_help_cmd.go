@@ -176,6 +176,9 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"project":     {agentHelpAudienceUserOwned, false},
 	"repo":        {agentHelpAudienceUserOwned, false},
 	"review":      {agentHelpAudienceUserOwned, false},
+
+	// Keep the new URL helper unlisted and user-owned, like the repo group.
+	"repo remote-url": {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,

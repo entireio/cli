@@ -39,6 +39,7 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo get":           true,
 		"repo delete":        false,
 		"repo clone":         false,
+		"repo remote-url":    false,
 		"repo mirror create": false,
 		"repo mirror list":   true,
 		"repo mirror get":    true,
