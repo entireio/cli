@@ -85,6 +85,18 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// Same reason for the agents' relocated homes: tests steer them through
+	// HOME and ENTIRE_TEST_*_PROJECT_DIR in the child env, and an inherited
+	// relocation variable would outrank HOME in the base-dir fallback. The list
+	// is static for the same reason as the one above.
+	for _, name := range agent.RelocationEnvVars() {
+		if err := os.Unsetenv(name); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", name, err)
+			os.RemoveAll(tmpDir)
+			os.Exit(1)
+		}
+	}
+
 	moduleRoot := findModuleRoot()
 	buildCmd := exec.CommandContext(context.Background(), "go", "build", "-o", testBinaryPath, ".")
 	buildCmd.Dir = filepath.Join(moduleRoot, "cmd", "entire")

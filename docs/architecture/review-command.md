@@ -124,7 +124,7 @@ When `RunMulti` is dispatched in a TTY, sink composition includes a live Bubble 
 
 ## Skill Discovery (Claude Code)
 
-`DiscoverReviewSkills` (`cmd/entire/cli/agent/claudecode/discovery.go`) walks three roots: plugin cache (`~/.claude/plugins/cache/<market>/<plugin>/<version>/{skills,commands,agents}`), user skills (`~/.claude/skills`), and user commands/agents (`~/.claude/commands`, `~/.claude/agents`).
+`DiscoverReviewSkills` (`cmd/entire/cli/agent/claudecode/discovery.go`) walks three roots under Claude Code's config directory (`$CLAUDE_CONFIG_DIR`, default `~/.claude`): plugin cache (`plugins/cache/<market>/<plugin>/<version>/{skills,commands,agents}`), user skills (`skills`), and user commands/agents (`commands`, `agents`).
 
 For the plugin cache, `pickLatestVersion` picks one version directory per plugin: highest valid semver wins; if no entries parse as semver, the lexicographic max is picked.
 

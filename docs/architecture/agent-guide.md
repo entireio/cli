@@ -34,7 +34,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | | `SupportsHooks()` | Whether agent supports lifecycle hooks |
 | | `ParseHookInput()` | Parse hook callback input from stdin |
 | | `GetSessionID()` | Extract session ID from hook input |
-| | `GetSessionDir()` | Where agent stores session data |
+| | `GetSessionDir()` | Where agent stores session data. If the agent has a relocation variable, honor it here so resume writes where the agent reads (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `FACTORY_HOME_OVERRIDE`, `GEMINI_CLI_HOME`, `PI_CODING_AGENT_DIR`). Check whether it replaces `~` or the dot-directory: Gemini and Droid append `.gemini`/`.factory` under theirs, Claude does not. Cursor keeps `agent-transcripts` under `~/.cursor` even when `CURSOR_DATA_DIR` relocates its other data, so it has none to honor |
 | | `ResolveSessionFile()` | Path to session transcript file |
 | | `ReadSession()` | Read session data from agent's storage |
 | | `WriteSession()` | Write session data for resumption |

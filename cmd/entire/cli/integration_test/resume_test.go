@@ -1152,3 +1152,67 @@ func TestResume_RelocatedRepo(t *testing.T) {
 		t.Errorf("output should contain 'Restored session', got: %s", output)
 	}
 }
+
+// TestResume_HonorsClaudeConfigDir pins the restore destination to Claude
+// Code's relocated config directory: with CLAUDE_CONFIG_DIR set, the transcript
+// lands under <dir>/projects/<encoded-repo>/, where the agent will look for it,
+// not under ~/.claude.
+func TestResume_HonorsClaudeConfigDir(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	content := rubyPuts
+	env.WriteFile("hello.rb", content)
+	session.CreateTranscript(
+		"Create a hello script",
+		[]FileChange{{Path: "hello.rb", Content: content}},
+	)
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	featureBranch := env.GetCurrentBranch()
+	env.GitCheckoutBranch(masterBranch)
+
+	// The child gets a throwaway home as well as the config dir: with the
+	// ENTIRE_TEST override cleared it falls back to the real resolver, and a
+	// regression that ignored CLAUDE_CONFIG_DIR would otherwise write into the
+	// developer's own ~/.claude and leave the transcript behind.
+	configDir := t.TempDir()
+	fakeHome := t.TempDir()
+	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "session", "resume", featureBranch)
+	cmd.Dir = env.RepoDir
+	cmd.Env = append(testutil.GitIsolatedEnv(),
+		"ENTIRE_TEST_CLAUDE_PROJECT_DIR=", // empty so the real resolution runs
+		"CLAUDE_CONFIG_DIR="+configDir,
+		"HOME="+fakeHome,
+		"USERPROFILE="+fakeHome,
+	)
+	outputBytes, err := cmd.CombinedOutput()
+	output := string(outputBytes)
+	if err != nil {
+		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	}
+
+	if !strings.Contains(output, configDir) {
+		t.Errorf("output should name the destination under %s, got:\n%s", configDir, output)
+	}
+	restored, err := filepath.Glob(filepath.Join(configDir, "projects", "*", session.ID+".jsonl"))
+	if err != nil {
+		t.Fatalf("glob restored transcript: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("expected the transcript under %s/projects/<repo>/, got %v", configDir, restored)
+	}
+	stray, err := filepath.Glob(filepath.Join(fakeHome, ".claude", "projects", "*", session.ID+".jsonl"))
+	if err != nil {
+		t.Fatalf("glob home fallback: %v", err)
+	}
+	if len(stray) != 0 {
+		t.Errorf("transcript also landed under the home fallback: %v", stray)
+	}
+}

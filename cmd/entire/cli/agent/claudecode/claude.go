@@ -91,6 +91,19 @@ func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) 
 // ProtectedDirs returns directories that Claude uses for config/state.
 func (c *ClaudeCodeAgent) ProtectedDirs() []string { return []string{".claude"} }
 
+// claudeConfigDirEnvVar relocates Claude Code's configuration directory
+// (~/.claude by default). Claude Code documents that every ~/.claude path lives
+// under it when set, so transcripts, settings, skills and plugins move together;
+// resolving it in one place keeps Entire looking where Claude actually wrote.
+const claudeConfigDirEnvVar = "CLAUDE_CONFIG_DIR"
+
+// resolveClaudeConfigDir returns Claude Code's configuration directory:
+// $CLAUDE_CONFIG_DIR when set, else ~/.claude. See agent.ResolveHome for the
+// override policy.
+func resolveClaudeConfigDir() (string, error) {
+	return agent.ResolveHome(claudeConfigDirEnvVar, ".claude") //nolint:wrapcheck // the error already names the override and its value
+}
+
 // GetSessionDir returns the directory where Claude stores session transcripts.
 func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 	// Check for test environment override
@@ -98,24 +111,24 @@ func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
+	configDir, err := resolveClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
 
 	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
+	return filepath.Join(configDir, "projects", projectDir), nil
 }
 
 // GetSessionBaseDir returns the base directory containing per-project session subdirectories.
 // Unlike GetSessionDir, this does NOT use ENTIRE_TEST_CLAUDE_PROJECT_DIR because the
 // test override points to a specific project dir, not the base containing all projects.
 func (c *ClaudeCodeAgent) GetSessionBaseDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	configDir, err := resolveClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(homeDir, ".claude", "projects"), nil
+	return filepath.Join(configDir, "projects"), nil
 }
 
 // ReadSession reads a session from Claude's storage (JSONL transcript file).

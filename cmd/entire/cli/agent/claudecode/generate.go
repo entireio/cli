@@ -112,14 +112,11 @@ func writeAuthSettingsFile(apiKeyHelper string) (string, func(), error) {
 // the claude CLI does: $CLAUDE_CONFIG_DIR/settings.json when set, otherwise
 // ~/.claude/settings.json.
 func userClaudeSettingsPath() (string, error) {
-	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
-		return filepath.Join(dir, "settings.json"), nil
-	}
-	home, err := os.UserHomeDir()
+	configDir, err := resolveClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".claude", "settings.json"), nil
+	return filepath.Join(configDir, "settings.json"), nil
 }
 
 // readUserAPIKeyHelper returns the apiKeyHelper field from the user's claude
