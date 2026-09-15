@@ -4,6 +4,7 @@ package integration
 
 import (
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"net/http/httptest"
 	"os"
@@ -35,6 +36,28 @@ func (s *httpGitServer) tokenEnv(token string) []string {
 		"ENTIRE_CHECKPOINT_TOKEN=" + token,
 		"GIT_SSL_CAINFO=" + s.CACertFile,
 	}
+}
+
+// plainGitPushEnv is tokenEnv plus the Authorization header a plain `git push`
+// needs to reach this server. The backend requires a non-empty Authorization
+// header on receive-pack, and the test environment has no credential helper
+// and no terminal to prompt at, so git has nothing to send — the 401 it gets
+// back carries no WWW-Authenticate challenge either, so there is not even a
+// scheme to answer. ENTIRE_CHECKPOINT_TOKEN covers only Entire's own checkpoint
+// pushes, not the user's code push. http.extraHeader supplies a header
+// unconditionally — the same mechanism appendCheckpointTokenEnv uses, which
+// appends at the next free index and so coexists with this entry.
+//
+// Needed only by tests that push the user's code branch with the real git
+// binary (GitPushWithHooks); tests that drive the hook directly (RunPrePush)
+// want tokenEnv.
+func (s *httpGitServer) plainGitPushEnv(token string) []string {
+	auth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	return append(s.tokenEnv(token),
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.extraHeader",
+		"GIT_CONFIG_VALUE_0=Authorization: Basic "+auth,
+	)
 }
 
 // sslEnv returns env vars for HTTPS git operations without token auth.
