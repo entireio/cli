@@ -57,30 +57,89 @@ func TestReadAndParseHookInput_ReturnsBeforeEOF(t *testing.T) {
 // TestReadAndParseHookInput_ReturnsBeforeEOF: the size-bounded raw reader must
 // also return on the first complete JSON value without waiting for stdin close
 // (issue #1398).
+//
+// The shorter-than-a-BOM case additionally pins the one-byte gate in
+// skipUTF8BOM: such a payload returns only because the BOM check peeks one byte
+// before it peeks three. An unconditional Peek(3) blocks here.
+//
+// The claim is scoped to VALID payloads. A payload that is only a BOM does now
+// block until the writer closes, because stripping it leaves the decoder
+// nothing to read; see skipUTF8BOM.
 func TestReadHookInputRawLimited_ReturnsBeforeEOF(t *testing.T) {
 	t.Parallel()
 
-	pr, pw := io.Pipe()
-	go func() {
-		if _, err := pw.Write([]byte(`{"session_file":"/t.jsonl"}`)); err != nil {
-			_ = pw.CloseWithError(err)
-		}
-		// No Close(): the write end stays open, so EOF never arrives.
-	}()
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{"complete value", `{"session_file":"/t.jsonl"}`},
+		{"shorter than a BOM", `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := ReadHookInputRawLimited(pr, 10*1024*1024)
-		done <- err
-	}()
+			pr, pw := io.Pipe()
+			go func() {
+				if _, err := pw.Write([]byte(tc.payload)); err != nil {
+					_ = pw.CloseWithError(err)
+				}
+				// No Close(): the write end stays open, so EOF never arrives.
+			}()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("ReadHookInputRawLimited blocked waiting for EOF — regression of #1398")
+			done := make(chan error, 1)
+			go func() {
+				_, err := ReadHookInputRawLimited(pr, 10*1024*1024)
+				done <- err
+			}()
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("ReadHookInputRawLimited blocked waiting for EOF — regression of #1398")
+			}
+		})
+	}
+}
+
+// TestReadAndParseHookInput_SkipsUTF8BOM covers the payload shape Cursor
+// delivers on Windows: PowerShell 5.1 writes a BOM ahead of the JSON and a
+// trailing CRLF after it, and Go's decoder rejects the BOM as
+// `invalid character 'ï' looking for beginning of value`.
+//
+// Both BOM counts are measured, not hypothetical. The hook command's own
+// `$OutputEncoding = [System.Text.Encoding]::UTF8` adds one at any console
+// codepage; a UTF-8 console codepage adds a second, independently. So the
+// stacked shape is what a cp65001 box actually sends.
+func TestReadAndParseHookInput_SkipsUTF8BOM(t *testing.T) {
+	t.Parallel()
+
+	const bom = "\xef\xbb\xbf"
+	const payload = `{"session_id":"abc","transcript_path":"/t.jsonl"}`
+
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"one BOM", bom + payload + "\r\n"},
+		{"stacked BOMs", bom + bom + payload + "\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ReadAndParseHookInput[hookInput](strings.NewReader(tc.input))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.SessionID != "abc" {
+				t.Fatalf("session_id = %q, want %q", got.SessionID, "abc")
+			}
+			if got.TranscriptPath != "/t.jsonl" {
+				t.Fatalf("transcript_path = %q, want %q", got.TranscriptPath, "/t.jsonl")
+			}
+		})
 	}
 }
 

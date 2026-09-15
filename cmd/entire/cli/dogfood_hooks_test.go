@@ -12,7 +12,7 @@ import (
 )
 
 // committedHookConfigAgents are the agents whose Entire hook config this repo
-// commits: .claude/settings.json, .codex/hooks.json,
+// commits: .claude/settings.json, .codex/hooks.json, .cursor/hooks.json,
 // .opencode/plugins/entire.ts, and .pi/extensions/entire/index.ts. Each must be
 // found and current. The path travels with the agent name so the test can copy
 // that exact committed config into its isolated repository.
@@ -26,6 +26,7 @@ var committedHookConfigAgents = []struct {
 }{
 	{name: "claude-code", path: ".claude/settings.json"},
 	{name: "codex", path: ".codex/hooks.json"},
+	{name: "cursor", path: ".cursor/hooks.json"},
 	{name: "opencode", path: ".opencode/plugins/entire.ts"},
 	{name: "pi", path: ".pi/extensions/entire/index.ts"},
 }
@@ -50,6 +51,16 @@ var committedHookConfigAgents = []struct {
 // When this fails: run `entire enable --force` at the repo root and commit the
 // regenerated files.
 func TestCommittedHookConfigsAreCurrent(t *testing.T) {
+	// The committed configs can only carry one wrapper form, and they carry the
+	// sh one — correct for this repo's own CI, which runs on Linux and macOS. On
+	// a Windows host InstallHooks writes the cmd.exe form for the agents whose
+	// wrapper depends on the host, so the comparison would fail on a difference
+	// that is the intended behaviour. The per-agent dogfood tests skip for the
+	// same reason.
+	if agent.HookHostIsWindows() {
+		t.Skip("committed hook configs hold the sh wrappers; a Windows host installs the cmd.exe ones")
+	}
+
 	// t.Chdir is process-global, so this test must not be parallel. It is needed
 	// because CheckHookConfig resolves the config paths from the working
 	// directory via paths.WorktreeRoot. That resolution is cached, but the cache
