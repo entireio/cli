@@ -119,9 +119,9 @@ func keyringProviderName() string {
 		return "macOS Keychain"
 	case goosWindows:
 		return "Windows Credential Manager"
-	case "linux", "freebsd", "openbsd", "netbsd", "dragonfly":
-		return "Secret Service (D-Bus)"
-	default:
-		return "OS keyring"
 	}
+	if isSecretServicePlatform(runtime.GOOS) {
+		return "Secret Service (D-Bus)"
+	}
+	return "OS keyring"
 }

@@ -51,6 +51,11 @@ func TestPersistLogin_StoreWriteFailureIncludesHeadlessHint(t *testing.T) {
 			// spawned-binary isolation; blank it so this test sees the
 			// default-keyring condition a real user hits.
 			t.Setenv("ENTIRE_TOKEN_STORE", "")
+			// The hint's suppression now also reads the remembered-preference
+			// marker in the config dir, and TestMain shares one config dir
+			// across the package: a marker written by another test in this
+			// process would suppress the hint here.
+			t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 			failingTokenStore(t)
 
 			var out bytes.Buffer
@@ -74,6 +79,7 @@ func TestPersistLogin_StoreWriteFailureIncludesHeadlessHint(t *testing.T) {
 func TestPersistLogin_StoreWriteFailureOnFileBackend_NoHint(t *testing.T) {
 	// Not parallel: mutates the process-global tokenstore backend and env.
 	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	failingTokenStore(t)
 
 	var out bytes.Buffer
@@ -98,6 +104,7 @@ func TestPersistLogin_StoreWriteFailureOnFileBackend_NoHint(t *testing.T) {
 func TestPersistLogin_NonStoreFailure_NoHint(t *testing.T) {
 	// Not parallel: mutates process-global env.
 	t.Setenv("ENTIRE_TOKEN_STORE", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
 

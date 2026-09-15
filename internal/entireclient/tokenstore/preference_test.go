@@ -1,9 +1,12 @@
 package tokenstore
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -20,6 +23,47 @@ func isolateConfigDir(t *testing.T) string {
 	t.Setenv(userdirs.EnvConfigDir, dir)
 	t.Setenv(PathEnvVar, "")
 	return dir
+}
+
+// captureNotices redirects the package's stderr notices to a buffer for the
+// test and installs a fresh warn-once so the test sees its own warning.
+func captureNotices(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var out bytes.Buffer
+	prevW, prevOnce := fallbackNoticeW, markerWarnOnce
+	fallbackNoticeW, markerWarnOnce = &out, new(sync.Once)
+	t.Cleanup(func() { fallbackNoticeW, markerWarnOnce = prevW, prevOnce })
+	return &out
+}
+
+func TestPersistedBackend_WarnsOnceAboutAnUnusableMarker(t *testing.T) {
+	dir := isolateConfigDir(t)
+	out := captureNotices(t)
+	if err := os.WriteFile(filepath.Join(dir, preferenceFileName), []byte("{ nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if got := persistedBackend(); got != "" {
+			t.Fatalf("persistedBackend() = %q for corrupt JSON, want empty", got)
+		}
+	}
+	if n := strings.Count(out.String(), "Warning: ignoring unusable token store preference"); n != 1 {
+		t.Fatalf("warned %d times, want once:\n%s", n, out.String())
+	}
+	if !strings.Contains(out.String(), preferenceFileName) {
+		t.Fatalf("warning should name the marker file:\n%s", out.String())
+	}
+}
+
+func TestPersistedBackend_AbsentMarkerIsSilent(t *testing.T) {
+	isolateConfigDir(t)
+	out := captureNotices(t)
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persistedBackend() = %q, want empty", got)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("an absent marker must not warn:\n%s", out.String())
+	}
 }
 
 func TestPersistedBackend_UnsetWhenNoMarker(t *testing.T) {
@@ -132,6 +176,7 @@ func TestRememberBackend_FileIsIdempotent(t *testing.T) {
 
 func TestPersistedBackend_CorruptOrUnknownMarkerIsUnset(t *testing.T) {
 	dir := isolateConfigDir(t)
+	captureNotices(t)
 	for name, body := range map[string]string{
 		"not json":        "{ nope",
 		"unknown backend": `{"backend":"vault"}`,
@@ -159,19 +204,25 @@ func TestRememberBackend_RejectsUnknownName(t *testing.T) {
 // A planted symlink at the marker's name is refused on read and replaced on
 // write; nothing follows it to its target. The target holds valid JSON that
 // would read as "file" if followed, with a trailing newline that a
-// write-through would erase, so both halves are observable.
+// write-through would erase, so both halves are observable. It sits INSIDE
+// the config dir on purpose: a link escaping the root is refused by os.Root
+// on its own, so the read half would pass even with a following read. An
+// in-root target is what ReadFileNoFollow exists to refuse, and it is the
+// realistic case — an attacker planting the link is writing into that
+// directory anyway.
 func TestMarker_SymlinkIsNeitherFollowedNorWrittenThrough(t *testing.T) {
 	if runtime.GOOS == goosWindows {
 		t.Skip("creating symlinks needs a privilege the Windows runner may lack")
 	}
 	dir := isolateConfigDir(t)
+	captureNotices(t)
 	planted := []byte("{\"backend\":\"file\"}\n")
-	target := filepath.Join(t.TempDir(), "target.json")
+	target := filepath.Join(dir, "inside.json")
 	if err := os.WriteFile(target, planted, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, preferenceFileName)
-	if err := os.Symlink(target, link); err != nil {
+	if err := os.Symlink("inside.json", link); err != nil {
 		t.Fatal(err)
 	}
 
