@@ -551,8 +551,11 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
+	// Deliberately does not print batchErr: it now carries git's own output, and
+	// this runs inside the user's `git push`. The hint below is the actionable
+	// part; the full error still reaches .entire/logs via the caller.
 	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
+		fmt.Fprintln(os.Stderr, "[entire] Warning: couldn't push checkpoint refs (SSH authentication failed).")
 		printNonInteractiveSSHAuthHint()
 		if dest.checkpointRemote {
 			printCheckpointRemoteHint(dest.target)

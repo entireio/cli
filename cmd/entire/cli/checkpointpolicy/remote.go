@@ -229,17 +229,16 @@ func isSupportedRemotePolicyHashLength(raw string) bool {
 
 func Push(ctx context.Context, target Target) error {
 	refspec := RefName.String() + ":" + RefName.String()
-	result, err := remote.PushWithOptions(ctx, remote.PushOptions{
+	_, err := remote.PushWithOptions(ctx, remote.PushOptions{
 		Remote:   target.Remote,
 		RefSpecs: []string{refspec},
 		Dir:      target.Dir,
 	})
 	if err != nil {
-		output := strings.TrimSpace(result.Output)
-		if output == "" {
-			return fmt.Errorf("push checkpoint policy: %w", err)
-		}
-		return fmt.Errorf("push checkpoint policy: %s: %w", output, err)
+		// err already carries git's output, collapsed and with the remote
+		// redacted. Repeating result.Output here printed it twice, and the copy
+		// here was the unredacted one.
+		return fmt.Errorf("push checkpoint policy: %w", err)
 	}
 	return nil
 }
