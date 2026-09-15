@@ -288,7 +288,7 @@ func TestBatchBytesWithPrivacyFilter_OPFDisabledReturnsRegexOnly(t *testing.T) {
 	// No ConfigurePrivacyFilter call → cfg == nil
 
 	inputs := []NamedBlob{
-		{Name: "x.jsonl", Content: []byte(`{"text":"key=AKIAYRWQG5EJLPZLBYNP"}`)},
+		{Name: "x.jsonl", Content: []byte(`{"text":"key=` + awsKeyFixture + `"}`)},
 	}
 	got, err := BatchBytesWithPrivacyFilter(context.Background(), inputs)
 	if err != nil {
