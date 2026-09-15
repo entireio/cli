@@ -1776,20 +1776,23 @@ env token has none of, so it stays on the active context.
 ### Credential Store Selection (keyring or tokens.json?)
 
 `internal/entireclient/tokenstore` picks the backend once per process, in
-`resolveBackend`, from three inputs in strict precedence: `ENTIRE_TOKEN_STORE`
+`resolveBackend`, from three production inputs in strict precedence (the
+`go test` temp store slots in after the marker; see below): `ENTIRE_TOKEN_STORE`
 when set (`file`, or anything else meaning the keyring; explicit, never falls
 back, and a successful write through it is remembered; an explicit keyring write
 also removes the superseded copy of that credential from the default-path
 `tokens.json`, so a plaintext bearer does not linger for the fallback to
 re-adopt), then the remembered
 preference in `<config dir>/token_store.json` (`preference.go` — it records
-**the backend that last received a write**, so reads consult it and only writes
-change it; it is never written while `ENTIRE_TOKEN_STORE_PATH` is set, because
-the marker cannot carry a path and would point later processes at the default
-one), then the platform default. On Linux/BSD the default keyring is
-fronted by `fallbackStore` (`fallback.go`): a keyring call that fails for an
-availability reason — anything but `ErrNotFound` and Ctrl-C — is retried on the
-file store at `FileBackendPath` (`ENTIRE_TOKEN_STORE_PATH` when set, else
+**the backend that holds the freshest credential**: an explicit write records
+it, and the Linux fallback records it once the file store proves it holds the
+credential (Get, Set or Delete — never after a keyring timeout). Reads through
+the marker never change it. It is never written while `ENTIRE_TOKEN_STORE_PATH`
+is set, because the marker cannot carry a path and would point later processes
+at the default one), then the platform default. On Linux/BSD the default
+keyring is fronted by `fallbackStore` (`fallback.go`): a keyring call that fails
+for an availability reason — anything but `ErrNotFound` and Ctrl-C — is retried
+on the file store at `FileBackendPath` (`ENTIRE_TOKEN_STORE_PATH` when set, else
 `tokens.json` in the config dir), and once the file store proves it holds the
 credential it is adopted, announced once on stderr, and remembered — except
 after a keyring *timeout*, which is adopted for this process only: the
@@ -1804,17 +1807,18 @@ or a locked store, and a plaintext file must not be the silent answer to either.
 Three consequences for tests. The marker is process-visible state in the
 per-user config dir, so any test that resolves the backend with the variable
 unset, or asserts on `FileBackendSelected()`/`BackendDescription()`, must
-isolate `ENTIRE_CONFIG_DIR`. `resolveBackend` is pure over `backendInputs`
+isolate `ENTIRE_CONFIG_DIR`. The decision in `resolveBackend` is pure over
+`backendInputs` (constructing a file store still reads the path environment)
 precisely so the keyring branches can be tested at all: under `go test` the
 `testdirs` store sits in front of them and `resolveBackendLocked` never reaches
 them. And `resolveBackendLocked` drops an explicit non-`file`
 `ENTIRE_TOKEN_STORE` when it detects a test process, so a `keyring` exported in
 a developer's shell cannot route a test's writes to the real OS keyring; only
 the pure resolver honours it, and only its own tests exercise that branch.
-Do not spell the config-dir string resolver's call in a comment in a non-test
-`.go` file under `internal/` or `cmd/` (the guard's pathspec skips `_test.go`
-files and two named non-consumers): the consumer ledger guard is a `git grep`
-and reads a mention as a call.
+Do not spell the config-dir string resolver's call in a comment in any non-test
+`.go` file in the repository (the guard's pathspec excludes `_test.go`; two
+named non-consumers are skipped in the guard's own code, not by the pathspec):
+the consumer ledger guard is a `git grep` and reads a mention as a call.
 
 A Get that misses in both stores returns the keyring error, not `ErrNotFound`,
 and `auth status` renders it as "could not be read from …" rather than "Not

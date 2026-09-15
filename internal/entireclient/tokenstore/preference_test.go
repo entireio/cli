@@ -211,12 +211,33 @@ func TestRememberBackend_FileIsNotRememberedWhenPathIsOverridden(t *testing.T) {
 	}
 }
 
-func TestRememberBackend_FileIsIdempotent(t *testing.T) {
-	isolateConfigDir(t)
-	for i := range 2 {
-		if err := rememberBackend(backendFile); err != nil {
-			t.Fatalf("call %d: %v", i+1, err)
-		}
+// The present-marker branch of rememberBackend skips the write rather than
+// rewriting the same bytes: switchTo calls it on every adoption, and a rename
+// in the config dir per adoption would buy nothing. A hand-added trailing
+// newline is what tells a skip from a byte-identical rewrite.
+func TestRememberBackend_FileIsIdempotentAndSkipsWhenPresent(t *testing.T) {
+	dir := isolateConfigDir(t)
+	marker := filepath.Join(dir, preferenceFileName)
+	if err := rememberBackend(backendFile); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if _, err := os.ReadFile(marker); err != nil {
+		t.Fatalf("marker not written: %v", err)
+	}
+	edited := "{\"backend\":\"file\"}\n"
+	if err := os.WriteFile(marker, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rememberBackend(backendFile); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != edited {
+		t.Fatalf("marker bytes = %q after the second call, want the hand-edited %q left alone: a present marker is skipped, not rewritten", got, edited)
 	}
 	if got := persistedBackend(); got != backendFile {
 		t.Fatalf("persistedBackend() = %q, want %q", got, backendFile)

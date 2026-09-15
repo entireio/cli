@@ -372,16 +372,18 @@ func isSSHSession() bool {
 
 // noLocalDisplay reports whether this machine cannot show a browser: a Linux
 // or BSD session with neither an X11 nor a Wayland display. WSL is excluded
-// (xdg-open there reaches the Windows browser through interop; GitHub issue
-// #1707 tracks the WSL browser case), and so is an explicit $BROWSER, which
-// names an opener the user vouches for. macOS and Windows always have a
-// display.
+// because a browser is reachable there — the Windows one through interop, or
+// a Linux one; GitHub issue #1707 is about which of those xdg-open picks, not
+// about whether one exists. An explicit $BROWSER is excluded too: it names an
+// opener the user vouches for. macOS and Windows always have a display.
 //
 // This catches the remote terminals isSSHSession cannot: web terminals and
 // agent orchestrators that give the user a shell on a server without SSH
 // variables. There the loopback listener binds on the server, and the browser
-// the user opens on their own machine is redirected to a 127.0.0.1 that is not
-// the server — the "login redirects me to 127" report.
+// the user opens on their own machine is redirected to a 127.0.0.1 that means
+// the server, not the machine the browser is on — the September 2026 support
+// report of a browser redirected to a 127.0.0.1 that was the server rather
+// than the user's machine.
 //
 // The platform list is the same set tokenstore.secretServicePlatforms owns.
 // It is spelled again here because the concern differs (a display, not a
@@ -527,11 +529,12 @@ func loginCompleteLine(token, dialled string) string {
 // store write failure. The default backend is the OS keyring, which locked
 // or keyring-less machines (CI, containers, minimal server VMs) can't use —
 // the raw store error gives those users no way forward (#1036). The hint is
-// skipped when ENTIRE_TOKEN_STORE=file is already set (suggesting it again
-// would be nonsense) and for failures the file store wouldn't help with. On
-// Linux/BSD the keyring-less case is now handled by the tokenstore fallback
-// before this ever runs, so the hint here is reached only when the keyring
-// was selected explicitly, or when a Ctrl-C interrupted the keyring call
+// skipped when the file store is already selected, by ENTIRE_TOKEN_STORE=file
+// or by the remembered preference (suggesting it again would be nonsense), and
+// for failures the file store wouldn't help with. On Linux/BSD the
+// keyring-less case is handled by the tokenstore fallback before this ever
+// runs, so the hint here is reached only when the keyring was selected
+// explicitly, or when a Ctrl-C interrupted the keyring call
 // (which the fallback deliberately does not catch); that case is constructed
 // but never shown, because a signalled abort exits before the error is
 // rendered. A fallback whose file write also failed carries

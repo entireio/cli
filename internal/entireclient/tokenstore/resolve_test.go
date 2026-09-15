@@ -103,9 +103,9 @@ func TestResolveBackend_TestDirBeatsKeyring(t *testing.T) {
 	}
 }
 
-// Not parallel, and config-dir isolated: Task 3 gives the fallback store a
-// file half at the default path, and a parallel test that reaches it would
-// read the path environment while sequential tests are setting it.
+// Not parallel, and config-dir isolated: the fallback store has a file half at
+// the default path, and a parallel test that reaches it would read the path
+// environment while sequential tests are setting it.
 func TestResolveBackend_DefaultIsFallbackOnSecretServicePlatformsOnly(t *testing.T) {
 	isolateConfigDir(t)
 	for goos, wantFallback := range map[string]bool{
@@ -130,6 +130,7 @@ func TestResolveBackend_DefaultIsFallbackOnSecretServicePlatformsOnly(t *testing
 
 func TestRecordingStore_SetRemembersTheExplicitBackend(t *testing.T) {
 	isolateConfigDir(t)
+	notice := captureNotices(t)
 	inner := newScriptedStore()
 
 	if err := (recordingStore{inner: inner, name: backendFile}).Set("svc", "alice", "tok"); err != nil {
@@ -144,6 +145,9 @@ func TestRecordingStore_SetRemembersTheExplicitBackend(t *testing.T) {
 	}
 	if got := persistedBackend(); got != "" {
 		t.Fatalf("after explicit keyring write: persisted = %q, want empty", got)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("a healthy explicit write prints nothing:\n%s", notice.String())
 	}
 }
 

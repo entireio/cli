@@ -17,11 +17,13 @@ var fallbackNoticeW io.Writer = os.Stderr
 
 // secretServicePlatforms are the GOOS values where the OS keyring is a
 // separately installed daemon (Secret Service over D-Bus) that a bare server
-// or container usually lacks. Only there is an unavailable keyring evidence
-// that the machine has none; on macOS and Windows the keyring is always
-// present, so a failure is a denied prompt or a locked store and must not be
-// worked around with a plaintext file. keyringProviderName reads the same
-// set, so the two cannot drift.
+// or container usually lacks. On these platforms an unavailable keyring is
+// treated as absent — including a present-but-locked collection, since without
+// a prompter the CLI cannot tell the two apart; the notice is what makes that
+// acceptable. On macOS and Windows the keyring is always present, so a failure
+// is a denied prompt or a locked store and must not be worked around with a
+// plaintext file. keyringProviderName reads the same set, so the two cannot
+// drift.
 var secretServicePlatforms = map[string]bool{
 	"linux": true, "freebsd": true, "openbsd": true, "netbsd": true, "dragonfly": true,
 }
@@ -34,10 +36,11 @@ func isSecretServicePlatform(goos string) bool { return secretServicePlatforms[g
 // timeout counts as unavailable: a Secret Service that never answers is no
 // better than one that is absent — but a timeout is never remembered, because
 // the abandoned keyring call may still complete; see switchTo. Everything
-// else a Linux keyring call can
-// return — no session bus, no provider on the bus, a collection that will not
-// unlock, ErrUnsupportedPlatform on a cgo-less BSD — is an availability
-// failure, so there is deliberately no string matching here.
+// else a Linux keyring call can return — no session bus, no provider on the
+// bus, a collection that will not unlock, ErrUnsupportedPlatform on a FreeBSD
+// or DragonFly build without cgo (NetBSD and OpenBSD get D-Bus regardless) —
+// is an availability failure, so there is deliberately no string matching
+// here.
 func fallbackEligible(err error) bool {
 	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, context.Canceled) {
 		return false
