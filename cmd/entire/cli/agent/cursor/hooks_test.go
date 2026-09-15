@@ -624,6 +624,146 @@ func TestInstallHooks_DropsLegacyHookAlongsideCurrent(t *testing.T) {
 		})
 }
 
+// hooksFileWith builds a hooks.json carrying one entry per managed hook type,
+// with command(verb) under each. The seven types are spelled out rather than
+// taken from managedCursorHooks so the test pins the type-to-verb mapping
+// independently of the implementation it checks.
+func hooksFileWith(command func(verb string) string) CursorHooksFile {
+	var file CursorHooksFile
+	file.Hooks.SessionStart = []CursorHookEntry{{Command: command(HookNameSessionStart)}}
+	file.Hooks.SessionEnd = []CursorHookEntry{{Command: command(HookNameSessionEnd)}}
+	file.Hooks.BeforeSubmitPrompt = []CursorHookEntry{{Command: command(HookNameBeforeSubmitPrompt)}}
+	file.Hooks.Stop = []CursorHookEntry{{Command: command(HookNameStop)}}
+	file.Hooks.PreCompact = []CursorHookEntry{{Command: command(HookNamePreCompact)}}
+	file.Hooks.SubagentStart = []CursorHookEntry{{Command: command(HookNameSubagentStart)}}
+	file.Hooks.SubagentStop = []CursorHookEntry{{Command: command(HookNameSubagentStop)}}
+	return file
+}
+
+// cursorShHookCommand is the sh wrapper, stated outright — what an install
+// before the Windows wrapper change left on disk.
+func cursorShHookCommand(verb string) string {
+	return agent.WrapProductionSilentHookCommand("entire hooks cursor " + verb)
+}
+
+// TestCheckHookConfig pins the drift states `entire status` and `entire doctor`
+// read off Cursor.
+//
+// The case that motivated it: a repo enabled before the Windows wrapper change
+// carries sh-wrapped entries a Windows host cannot run (see silentHookCommand),
+// and AreHooksInstalled still answers true for them because it matches the
+// ownership marker — so nothing told the user to re-run enable.
+//
+// Mutates the shared probe, so no t.Parallel().
+func TestCheckHookConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// goos overrides the host when the case is about a specific one; empty
+		// leaves this host's, so the case reads the same everywhere.
+		goos string
+		seed func(t *testing.T, dir string)
+		want agent.HookConfigState
+	}{
+		{
+			name: "no config file",
+			want: agent.HooksAbsent,
+		},
+		{
+			name: "config holds only a user hook",
+			seed: func(t *testing.T, dir string) {
+				var file CursorHooksFile
+				file.Hooks.Stop = []CursorHookEntry{{Command: "echo mine"}}
+				writeHooksFile(t, dir, file)
+			},
+			want: agent.HooksAbsent,
+		},
+		{
+			name: "config is malformed",
+			seed: func(t *testing.T, dir string) {
+				cursorDir := filepath.Join(dir, ".cursor")
+				if err := os.MkdirAll(cursorDir, 0o755); err != nil {
+					t.Fatalf("mkdir .cursor: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(cursorDir, HooksFileName), []byte("{not json"), 0o600); err != nil {
+					t.Fatalf("write malformed config: %v", err)
+				}
+			},
+			want: agent.HooksAbsent,
+		},
+		{
+			name: "freshly installed on this host",
+			seed: func(t *testing.T, _ string) {
+				if _, err := (&CursorAgent{}).InstallHooks(context.Background(), false); err != nil {
+					t.Fatalf("InstallHooks() error = %v", err)
+				}
+			},
+			want: agent.HooksCurrent,
+		},
+		{
+			name: "sh wrappers on a Windows host",
+			goos: "windows",
+			seed: func(t *testing.T, dir string) {
+				writeHooksFile(t, dir, hooksFileWith(cursorShHookCommand))
+			},
+			want: agent.HooksOutdated,
+		},
+		{
+			name: "cmd.exe wrappers on a POSIX host",
+			goos: "linux",
+			seed: func(t *testing.T, dir string) {
+				writeHooksFile(t, dir, hooksFileWith(cursorWindowsHookCommand))
+			},
+			want: agent.HooksOutdated,
+		},
+		{
+			name: "one managed hook type left uninstalled",
+			seed: func(t *testing.T, dir string) {
+				file := hooksFileWith(cursorHookCommand)
+				file.Hooks.Stop = nil
+				writeHooksFile(t, dir, file)
+			},
+			want: agent.HooksOutdated,
+		},
+		{
+			name: "stale entry beside the current one",
+			goos: "linux",
+			seed: func(t *testing.T, dir string) {
+				file := hooksFileWith(cursorShHookCommand)
+				// Both fire, so this is drift even though the right command is
+				// there — which is what InstallHooks' syncEntireHook exists to
+				// converge away from.
+				file.Hooks.Stop = append(file.Hooks.Stop,
+					CursorHookEntry{Command: cursorWindowsHookCommand(HookNameStop)})
+				writeHooksFile(t, dir, file)
+			},
+			want: agent.HooksOutdated,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.goos != "" {
+				t.Cleanup(agent.SetWindowsHookProbeForTesting(tc.goos, func(context.Context, string) bool {
+					return true
+				}))
+			}
+
+			tempDir := t.TempDir()
+			// See TestInstallHooks_WindowsInstallsCmdWrappersWhateverTheProbeSays
+			// for why the root registry is closed before t.TempDir removes the
+			// directory it is anchored on.
+			t.Cleanup(osroot.ResetShared)
+			t.Chdir(tempDir)
+
+			if tc.seed != nil {
+				tc.seed(t, tempDir)
+			}
+
+			if got := (&CursorAgent{}).CheckHookConfig(context.Background()); got != tc.want {
+				t.Errorf("CheckHookConfig() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCommittedDogfoodHooksIsCurrent guards this repo's own committed agent config against drifting from what
 // InstallHooks writes. A stale committed config is how the pi extension ended up
 // invoking a launcher script that had been deleted.
@@ -633,6 +773,13 @@ func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
 	// Windows host InstallHooks writes the cmd.exe form, so the comparison would
 	// fail on a difference that is the intended behaviour. Codex has the same
 	// condition for the same reason.
+	//
+	// Worth knowing, because skipping here removes the thing that would
+	// otherwise say it: on a Windows host `entire enable` in THIS repo rewrites
+	// the committed .cursor/hooks.json to the cmd.exe wrappers, so a Windows
+	// contributor finds a modified tracked file in `git status` and must not
+	// commit it. CheckHookConfig reports that same drift through `entire status`,
+	// which is where the signal belongs.
 	if agent.HookHostIsWindows() {
 		t.Skip("committed .cursor/hooks.json holds the sh wrappers; a Windows host installs the cmd.exe ones")
 	}

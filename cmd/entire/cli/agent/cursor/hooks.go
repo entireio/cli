@@ -17,6 +17,7 @@ import (
 var (
 	_ agent.HookSupport       = (*CursorAgent)(nil)
 	_ agent.HookConfigLocator = (*CursorAgent)(nil)
+	_ agent.HookFreshness     = (*CursorAgent)(nil)
 )
 
 // Cursor hook names - these become subcommands under `entire hooks cursor`
@@ -321,40 +322,134 @@ func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
+// managedCursorHook pairs the entries installed under one hook type in
+// hooks.json with the Entire verb that belongs under it.
+type managedCursorHook struct {
+	entries []CursorHookEntry
+	verb    string
+}
+
+// managedCursorHooks lists every hook type Entire installs under, so the
+// read-only paths walk the same set InstallHooks writes rather than spelling all
+// seven out again.
+func managedCursorHooks(h CursorHooks) []managedCursorHook {
+	return []managedCursorHook{
+		{h.SessionStart, HookNameSessionStart},
+		{h.SessionEnd, HookNameSessionEnd},
+		{h.BeforeSubmitPrompt, HookNameBeforeSubmitPrompt},
+		{h.Stop, HookNameStop},
+		{h.PreCompact, HookNamePreCompact},
+		{h.SubagentStart, HookNameSubagentStart},
+		{h.SubagentStop, HookNameSubagentStop},
+	}
+}
+
+// readManagedHooks parses the hook types Entire manages out of hooks.json.
 //
-// A missing config file is an answer, not a failure: that file is where the
-// state lives, so its absence means no hooks. Anything that stops us reading the
-// answer — an unreadable file, malformed config — is returned as an error, since
-// "we could not tell" and "there are none" are different things to a caller
-// deciding whether hooks can be left alone.
-func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+// A missing config file is an answer, not a failure — that file is where the
+// state lives, so its absence means no hooks — and it is reported as exists
+// false rather than an error. Anything that stops us reading the answer (an
+// unreadable file, malformed config) is an error, since "we could not tell" and
+// "there are none" are different things to a caller deciding whether hooks can
+// be left alone.
+func readManagedHooks(ctx context.Context) (hooks CursorHooks, exists bool, err error) {
 	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		return false, err
+		return CursorHooks{}, false, err
 	}
 	data, err := cfg.Read()
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return CursorHooks{}, false, nil
 	}
 	if err != nil {
 		logging.Warn(ctx, "cursor: failed to read hooks file", "path", cfg.Path(), "err", err)
-		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
+		return CursorHooks{}, false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var hooksFile CursorHooksFile
 	if err := json.Unmarshal(data, &hooksFile); err != nil {
 		logging.Warn(ctx, "cursor: failed to parse hooks file", "path", cfg.Path(), "err", err)
-		return false, fmt.Errorf("parse hook config: %w", err)
+		return CursorHooks{}, false, fmt.Errorf("parse hook config: %w", err)
 	}
 
-	return hasEntireHook(hooksFile.Hooks.SessionStart) ||
-		hasEntireHook(hooksFile.Hooks.SessionEnd) ||
-		hasEntireHook(hooksFile.Hooks.BeforeSubmitPrompt) ||
-		hasEntireHook(hooksFile.Hooks.Stop) ||
-		hasEntireHook(hooksFile.Hooks.PreCompact) ||
-		hasEntireHook(hooksFile.Hooks.SubagentStart) ||
-		hasEntireHook(hooksFile.Hooks.SubagentStop), nil
+	return hooksFile.Hooks, true, nil
+}
+
+// AreHooksInstalled checks if Entire hooks are installed.
+func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	hooks, exists, err := readManagedHooks(ctx)
+	if err != nil || !exists {
+		return false, err
+	}
+
+	for _, managed := range managedCursorHooks(hooks) {
+		if hasEntireHook(managed.entries) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// CheckHookConfig satisfies agent.HookFreshness: it reports whether the
+// installed hooks are still the ones InstallHooks would write today.
+//
+// AreHooksInstalled cannot answer that. It matches on the ownership marker,
+// which an sh-wrapped entry written by an older CLI still carries — so on a
+// Windows host such a config reads as installed while firing nothing, because
+// Cursor's PowerShell child cannot resolve sh (see silentHookCommand). Until
+// Cursor implemented this interface, `entire status` and `entire doctor` skipped
+// it and said nothing, leaving the user no prompt to re-run enable.
+//
+// Current means a hook type carries exactly the current command and no second
+// Entire-owned entry beside it — what InstallHooks converges to. A stale entry
+// next to a current one is drift even though the right command is there: both
+// fire.
+//
+// Moving one checkout between a POSIX host and a Windows one therefore reports
+// drift each way. That is correct, since the wrapper genuinely has to change,
+// and it is noisier than the generated-file agents this sits beside, whose
+// configs do not depend on the host.
+//
+// An unreadable or malformed file collapses to HooksAbsent, matching Codex and
+// Claude Code: this is a coarse three-state diagnostic and no caller here acts
+// on "could not tell". AreHooksInstalled is the API that keeps that distinction,
+// and readManagedHooks has already logged the failure.
+func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	hooks, exists, err := readManagedHooks(ctx)
+	if err != nil || !exists {
+		return agent.HooksAbsent
+	}
+
+	useWindowsHooks := agent.HookHostIsWindows()
+	installed, outdated := false, false
+	for _, managed := range managedCursorHooks(hooks) {
+		want := silentHookCommand(managed.verb, useWindowsHooks)
+		ours, hasWant := 0, false
+		for _, entry := range managed.entries {
+			if !isEntireHook(entry.Command) {
+				continue
+			}
+			ours++
+			if entry.Command == want {
+				hasWant = true
+			}
+		}
+		if ours > 0 {
+			installed = true
+		}
+		if ours != 1 || !hasWant {
+			outdated = true
+		}
+	}
+
+	switch {
+	case !installed:
+		return agent.HooksAbsent
+	case outdated:
+		return agent.HooksOutdated
+	default:
+		return agent.HooksCurrent
+	}
 }
 
 // GetSupportedHooks returns the hook types Cursor supports.
