@@ -442,7 +442,7 @@ func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, err
 
 	// Delete shadow branch if it exists and no other sessions need it
 	if ss.HasShadowBranch {
-		if shouldDelete, err := canDeleteShadowBranch(ctx, ss.ShadowBranch, ss.State.SessionID); err != nil {
+		if shouldDelete, err := strategy.CanDeleteShadowBranch(ctx, ss.ShadowBranch, ss.State.SessionID); err != nil {
 			fmt.Fprintf(errW, "Warning: could not check other sessions for shadow branch: %v\n", err)
 		} else if shouldDelete {
 			if err := strategy.DeleteBranchCLI(ctx, ss.ShadowBranch); err != nil {
@@ -1596,27 +1596,4 @@ func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
 func writeCodexTrackedHooksRemedy(w io.Writer) {
 	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the root worktree has it")
 	fmt.Fprintln(w, "  (merge to the default branch, or check that branch out there).")
-}
-
-// canDeleteShadowBranch checks if a shadow branch can be safely deleted.
-// Returns true if no other sessions (besides excludeSessionID) need this branch.
-func canDeleteShadowBranch(ctx context.Context, shadowBranch, excludeSessionID string) (bool, error) {
-	states, err := strategy.ListSessionStates(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	for _, state := range states {
-		if state.SessionID == excludeSessionID {
-			continue
-		}
-		// Task records never live on the shadow branch, so only SaveStep
-		// checkpoints pin it alive.
-		otherShadow := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranch && state.StepCount > 0 {
-			return false, nil
-		}
-	}
-
-	return true, nil
 }
