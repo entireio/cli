@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
 // --- status -----------------------------------------------------------------
@@ -60,6 +61,55 @@ func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Not logged in to "+testCoreURL) {
 		t.Fatalf("output = %q, want 'Not logged in' message", out.String())
+	}
+}
+
+// When the credential could not be read, status must not say "Not logged in":
+// it names the store and the error, and exits non-zero, so a keyring-less
+// machine is told what is wrong instead of being told to log in again. With
+// the keyring selected, the remedy is the file store.
+//
+// Not parallel: the remedy depends on FileBackendSelected(), which reads the
+// env var this package's TestMain sets to "file" and the marker in the shared
+// config dir, so both are isolated here.
+func TestRunAuthStatus_StoreReadError_KeyringSelected(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN_STORE", "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	var out bytes.Buffer
+	target := statusTarget{coreURL: testCoreURL, activeContext: "example", storeErr: errors.New("The name org.freedesktop.secrets was not provided by any .service files")}
+	err := runAuthStatus(context.Background(), &out, unusedProfile(t), noSessions, target)
+	if err == nil {
+		t.Fatal("want an error for an unreadable credential store")
+	}
+	for _, want := range []string{testCoreURL, "could not be read", "org.freedesktop.secrets", "ENTIRE_TOKEN_STORE=file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%v", want, err)
+		}
+	}
+	if strings.Contains(out.String(), "Not logged in") {
+		t.Fatalf("stdout must not claim 'Not logged in':\n%s", out.String())
+	}
+}
+
+// With the file store already selected, suggesting ENTIRE_TOKEN_STORE=file
+// would be nonsense (the rule withHeadlessStoreHint already follows); the
+// error names the file to check instead.
+func TestRunAuthStatus_StoreReadError_FileSelected(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	var out bytes.Buffer
+	target := statusTarget{coreURL: testCoreURL, activeContext: "example", storeErr: errors.New("parsing token store: unexpected end of JSON input")}
+	err := runAuthStatus(context.Background(), &out, unusedProfile(t), noSessions, target)
+	if err == nil {
+		t.Fatal("want an error for an unreadable credential store")
+	}
+	if !strings.Contains(err.Error(), tokenstore.FileBackendPath()) || !strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("error should name the token file and the read failure:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "=file entire login") {
+		t.Fatalf("must not suggest the file store when it is already selected:\n%v", err)
 	}
 }
 

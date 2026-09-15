@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,6 +84,38 @@ func TestAuthTokenCmd(t *testing.T) {
 		require.ErrorAs(t, err, &silent)
 		require.Empty(t, out.String(), "stdout must stay clean for command substitution")
 		require.Contains(t, errOut.String(), "Not logged in")
+	})
+
+	// A saved login whose credential cannot be READ is a store failure, and
+	// `auth token` must say so: a SilentError here exits 1 with no
+	// explanation, which is what sent the keyring-less customer round the
+	// `entire login` loop. Set succeeds and every Get fails, so the context
+	// is recorded but unreadable.
+	t.Run("store read error is reported, not silenced", func(t *testing.T) {
+		t.Setenv("ENTIRE_TOKEN_STORE", "")
+		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+		restore := tokenstore.UseFailingGetBackendForTesting(
+			filepath.Join(t.TempDir(), "tokens.json"),
+			func(string, string) bool { return true },
+		)
+		t.Cleanup(restore)
+
+		exp := time.Now().Add(time.Hour).Unix()
+		stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+		_, err := auth.RecordLoginContext(stored, "", true)
+		require.NoError(t, err)
+
+		cmd := newAuthTokenCmd()
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		err = cmd.ExecuteContext(t.Context())
+
+		require.Error(t, err)
+		var silent *SilentError
+		require.NotErrorAs(t, err, &silent, "a store failure must be explained, not silently exit 1")
+		require.Contains(t, err.Error(), "could not be read")
+		require.Empty(t, out.String(), "stdout must stay clean for command substitution")
 	})
 }
 

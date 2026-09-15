@@ -574,3 +574,67 @@ func TestAuthUseCmd_ArgsAndSwitch(t *testing.T) {
 		t.Fatalf("current context = %q, want %q", current, names[1])
 	}
 }
+
+// A saved context whose credential cannot be READ is a store failure, not an
+// absent login. resolveStatusTarget carries the error so status can say so;
+// it does not return it, because logout shares this resolver and must still
+// be able to remove the context.
+func TestResolveStatusTarget_CarriesStoreReadError(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	// Set works, Get fails: record the context, then every read errors.
+	restore := tokenstore.UseFailingGetBackendForTesting(
+		filepath.Join(t.TempDir(), "tokens.json"),
+		func(string, string) bool { return true },
+	)
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+
+	failRefresh := func(_ context.Context, _ *contexts.Context) (string, error) {
+		return "", auth.ErrNotLoggedIn
+	}
+	got, err := resolveStatusTarget(t.Context(), auth.Contexts, failRefresh)
+	if err != nil {
+		t.Fatalf("resolveStatusTarget must not fail (logout depends on it): %v", err)
+	}
+	if got.token != "" || got.coreURL != testCoreURL {
+		t.Fatalf("got token=%q coreURL=%q, want empty token against the context's core", got.token, got.coreURL)
+	}
+	if got.storeErr == nil || !strings.Contains(got.storeErr.Error(), "injected Get failure") {
+		t.Fatalf("storeErr = %v, want the store's read error", got.storeErr)
+	}
+}
+
+// A context whose slot is simply empty is "not logged in", as before: no
+// storeErr, so the informational message and exit 0 are preserved.
+func TestResolveStatusTarget_MissingTokenIsNotAStoreError(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	exp := time.Now().Add(time.Hour).Unix()
+	stored := makeContextJWT(t, fmt.Sprintf(`{"iss":"`+testCoreURL+`","handle":"alice","exp":%d}`, exp))
+	if _, err := auth.RecordLoginContext(stored, "", true); err != nil {
+		t.Fatalf("record context: %v", err)
+	}
+	if err := tokenstore.Delete(tokenstore.CoreKeyringService(testCoreURL), "alice"); err != nil {
+		t.Fatalf("delete token: %v", err)
+	}
+
+	failRefresh := func(_ context.Context, _ *contexts.Context) (string, error) {
+		return "", auth.ErrNotLoggedIn
+	}
+	got, err := resolveStatusTarget(t.Context(), auth.Contexts, failRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.token != "" || got.storeErr != nil {
+		t.Fatalf("got token=%q storeErr=%v, want a plain not-logged-in target", got.token, got.storeErr)
+	}
+}
