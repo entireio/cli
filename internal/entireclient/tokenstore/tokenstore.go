@@ -100,10 +100,12 @@ func currentBackend() store {
 // BackendEnvVar selects the credential backend explicitly: "file" uses the
 // JSON file store, any other non-empty value (canonically "keyring") uses the
 // OS keyring. An explicit selection is never overridden by the remembered
-// preference and never falls back; a successful write through it becomes the
-// remembered preference (see preference.go). Unset means: remembered
-// preference, else the platform default. PathEnvVar overrides where the file
-// store lives (default: tokens.json in the per-user config directory).
+// preference and never falls back (under `go test` a non-`file` value is
+// ignored so the test store still wins — see `resolveBackendLocked`); a
+// successful write through it becomes the remembered preference (see
+// preference.go). Unset means: remembered preference, else the platform
+// default. PathEnvVar overrides where the file store lives (default:
+// tokens.json in the per-user config directory).
 // Exported so user-facing guidance (e.g. login's headless hint) names the
 // same variables this package actually reads.
 const (
