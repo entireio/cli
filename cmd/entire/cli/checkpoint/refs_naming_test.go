@@ -124,3 +124,30 @@ func TestParseRef(t *testing.T) {
 		})
 	}
 }
+
+// TestParseRef_CaseInsensitiveShard covers #2401: on a case-insensitive
+// filesystem (macOS APFS, Windows NTFS) a ULID checkpoint whose canonical shard
+// is "6B" is written into a pre-existing legacy-hex "6b" directory, and the ref
+// must still parse back to its ID instead of becoming permanently invisible.
+func TestParseRef_CaseInsensitiveShard(t *testing.T) {
+	t.Parallel()
+
+	// The exact case from the issue report: ULID sharding on "6B", stored under
+	// a legacy "6b" directory.
+	const reported id.CheckpointID = "01M2DCHJCHTR9T9MZTSB7WV76B"
+	require.Equal(t, "6B", reported.ShardFor(), "precondition: canonical shard is uppercase")
+
+	gotID, ok := ParseRef("refs/entire/checkpoints/6b/01M2DCHJCHTR9T9MZTSB7WV76B")
+	assert.True(t, ok, "a ref whose shard differs only in case must still parse")
+	assert.Equal(t, reported, gotID)
+
+	// The mirror case: a lowercase legacy ID stored under an uppercase directory.
+	gotID, ok = ParseRef("refs/entire/checkpoints/F6/a1b2c3d4e5f6")
+	assert.True(t, ok, "a lowercase ID under an uppercase shard directory must still parse")
+	assert.Equal(t, id.CheckpointID("a1b2c3d4e5f6"), gotID)
+
+	// Folding the case must not weaken the guard: a genuinely different bucket
+	// is still rejected.
+	_, ok = ParseRef("refs/entire/checkpoints/a1/01M2DCHJCHTR9T9MZTSB7WV76B")
+	assert.False(t, ok, "a ref in a genuinely different bucket must stay rejected")
+}
