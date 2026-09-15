@@ -1773,6 +1773,46 @@ env-token-first precedence itself — see `resolveAuthStatusTarget` /
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
 
+### Credential Store Selection (keyring or tokens.json?)
+
+`internal/entireclient/tokenstore` picks the backend once per process, in
+`resolveBackend`, from three inputs in strict precedence: `ENTIRE_TOKEN_STORE`
+when set (`file`, or anything else meaning the keyring; explicit, never falls
+back, and a successful write through it is remembered), then the remembered
+preference in `<config dir>/token_store.json` (`preference.go` — it records
+**the backend that last received a write**, so reads consult it and only writes
+change it; it is never written while `ENTIRE_TOKEN_STORE_PATH` is set, because
+the marker cannot carry a path and would point later processes at the default
+one), then the platform default. On Linux/BSD the default keyring is
+fronted by `fallbackStore` (`fallback.go`): a keyring call that fails for an
+availability reason — anything but `ErrNotFound` and Ctrl-C — is retried on the
+default-path file store, and once the file store proves it holds the credential
+it is adopted, announced once on stderr, and remembered. A fallback whose file
+write also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint`
+checks so it never recommends the store that just failed. macOS and Windows never
+fall back: there the keyring is always present, so a failure is a denied prompt
+or a locked store, and a plaintext file must not be the silent answer to either.
+
+Three consequences for tests. The marker is process-visible state in the
+per-user config dir, so any test that resolves the backend with the variable
+unset, or asserts on `FileBackendSelected()`/`BackendDescription()`, must
+isolate `ENTIRE_CONFIG_DIR`. `resolveBackend` is pure over `backendInputs`
+precisely so the keyring branches can be tested at all: under `go test` the
+`testdirs` store sits in front of them and `resolveBackendLocked` never reaches
+them. And `resolveBackendLocked` drops an explicit non-`file`
+`ENTIRE_TOKEN_STORE` when it detects a test process, so a `keyring` exported in
+a developer's shell cannot route a test's writes to the real OS keyring; only
+the pure resolver honours it, and only its own tests exercise that branch.
+Do not spell the config-dir string resolver's call in a comment anywhere under
+`internal/` or `cmd/`: the consumer ledger guard is a `git grep` and reads a
+mention as a call.
+
+A Get that misses in both stores returns the keyring error, not `ErrNotFound`,
+and `auth status` renders it as "could not be read from …" rather than "Not
+logged in" (`statusTarget.storeErr`). A Delete that misses returns
+`ErrNotFound`, so `logout` can still remove a context on a machine whose keyring
+has vanished.
+
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 
 The data plane (entire-api) is deployed per jurisdiction; a repo placement
