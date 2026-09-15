@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -517,6 +518,9 @@ func TestRunSessionsFix_ForceDiscardOutput_Indented(t *testing.T) {
 // test asserts stderr stays empty.
 func TestRunSessionsFix_NonInteractive_HintsForceInsteadOfPrompting(t *testing.T) {
 	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
+	// ENTIRE_TEST_TTY beats testing.Testing() in CanPromptInteractively; pin it
+	// so an ambient =1 can't drop this test into the real form.
+	t.Setenv(interactive.EnvTestTTY, "0")
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
@@ -560,6 +564,8 @@ func TestRunSessionsFix_NonInteractive_HintsForceInsteadOfPrompting(t *testing.T
 
 func TestRunSessionsFix_NonInteractive_TaskContentHintMatchesForceCondense(t *testing.T) {
 	// Cannot use t.Parallel() because t.Chdir modifies process-global state.
+	// Same pin as the sibling no-TTY test above.
+	t.Setenv(interactive.EnvTestTTY, "0")
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
