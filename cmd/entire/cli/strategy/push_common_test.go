@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1641,4 +1643,96 @@ func TestNonInteractiveSSHAuthFailure(t *testing.T) {
 		"interactive context must not treat auth errors as BatchMode hints")
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, errors.New("non-fast-forward")))
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, nil))
+
+	// The shape an actual git-refs push failure has. PushWithOptions uses
+	// CombinedOutput, so ExitError.Stderr is empty and the auth text exists
+	// ONLY in the captured output — matching on err.Error() alone made the hint
+	// at the batch-push site unreachable on that backend. This case is the
+	// difference between the hint firing and not existing.
+	realShape := fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{
+		output: "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+		err:    errors.New("git push: exit status 128"),
+	})
+	assert.True(t, nonInteractiveSSHAuthFailure(ctx, realShape),
+		"auth failure carried in git's output must be detected, not just one in the message")
+	assert.False(t, nonInteractiveSSHAuthFailure(context.Background(), realShape),
+		"an interactive context must still opt out")
+	assert.False(t, nonInteractiveSSHAuthFailure(ctx, fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{
+		output: " ! refs/x:refs/x [rejected] (non-fast-forward)", err: errors.New("git push: exit status 1"),
+	})), "an ordinary rejection must not be read as an auth failure")
+}
+
+// git anonymizes userinfo in the URLs it prints but leaves a query string
+// intact, so a credential passed that way in a user-supplied checkpoint_remote
+// would otherwise reach .entire/logs verbatim.
+func TestScrubPushOutput(t *testing.T) {
+	t.Parallel()
+	const target = "https://example.test/org/checkpoints.git?token=SUPERSECRET"
+	got := scrubPushOutput("fatal: unable to access '"+target+"': 403\n", target)
+	assert.NotContains(t, got, "SUPERSECRET", "a credential in the target URL must not reach the log")
+	assert.Contains(t, got, "403", "the diagnostic payload must survive redaction")
+
+	assert.Empty(t, scrubPushOutput("   \n\t ", target), "whitespace-only output carries nothing")
+
+	// One record per failure, and the queue is undrained: a backfill pushing
+	// thousands of refs must not put a megabyte in a single log line.
+	long := strings.Repeat("! refs/entire/checkpoints/AA/x [rejected]\n", 5000)
+	bounded := scrubPushOutput(long, target)
+	assert.Less(t, len(bounded), len(long), "oversized output must be truncated")
+	assert.Contains(t, bounded, "truncated")
+	assert.Contains(t, bounded, "[rejected]", "the head of the output, where the reasons are, must survive")
+}
+
+// A push failure's cause must survive the wrapping between where git reports it
+// and where it is logged. batchPushRefs returns the typed error inside an
+// fmt.Errorf("%w"), and the log sites are two call layers above that, so the
+// extraction has to work through the chain rather than only on a bare value.
+func TestPushOutputAttrs(t *testing.T) {
+	t.Parallel()
+	const output = " ! refs/entire/checkpoints/AA/x:refs/entire/checkpoints/AA/x [remote rejected] (pre-receive hook declined)\n"
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"wrapped like batchPushRefs wraps it",
+			fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{output: output, err: errors.New("git push: exit status 1")}),
+			"[remote rejected] (pre-receive hook declined)"},
+		{"doubly wrapped, as the recovery path returns it",
+			fmt.Errorf("sync diverged checkpoint ref x: %w",
+				fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{output: output, err: errors.New("git push: exit status 1")})),
+			"[remote rejected] (pre-receive hook declined)"},
+		// No output is informative rather than missing: git said nothing, so the
+		// failure is the transport, not a verdict from the remote.
+		{"git produced no output", fmt.Errorf("x: %w", &pushOutputError{output: "   \n", err: errors.New("boom")}), ""},
+		{"not a push failure at all", errors.New("open repository: no such file"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			attrs := pushOutputAttrs(tc.err)
+			if tc.want == "" {
+				if len(attrs) != 0 {
+					t.Fatalf("pushOutputAttrs = %v, want no attributes", attrs)
+				}
+				return
+			}
+			if len(attrs) != 1 {
+				t.Fatalf("pushOutputAttrs = %v, want exactly one attribute", attrs)
+			}
+			got, ok := attrs[0].(slog.Attr)
+			if !ok || got.Key != "git_output" {
+				t.Fatalf("attribute = %#v, want a git_output slog.Attr", attrs[0])
+			}
+			if !strings.Contains(got.Value.String(), tc.want) {
+				t.Errorf("git_output = %q, want it to contain %q", got.Value.String(), tc.want)
+			}
+		})
+	}
+
+	// The error message itself must stay exactly what it was: the typed error
+	// carries the output for logs, it does not smuggle it into user-facing text.
+	wrapped := fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{output: output, err: errors.New("git push: exit status 1")})
+	if got := wrapped.Error(); got != "push 1 checkpoint refs: git push: exit status 1" {
+		t.Errorf("error text = %q; the output must not leak into it", got)
+	}
 }
