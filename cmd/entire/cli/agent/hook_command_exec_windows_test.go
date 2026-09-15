@@ -168,24 +168,37 @@ func TestWindowsWrappers_Execution(t *testing.T) {
 // later on a line that `set` it — which is exactly how the wrapper uses it.
 // Believing that without checking is what this test refuses to do.
 //
-// The unhardened subtest is a POSITIVE CONTROL, not history. "The planted file
-// did not run" is satisfied just as well by a wrapper that did not run at all,
-// so without a form that DOES execute it this test would keep passing while
-// checking nothing — it would survive the guard being deleted. It runs the
-// wrapper Entire shipped before this change, in the same worktree, and requires
-// the marker to appear.
+// ALL THREE wrappers, because they do not have one shape. The silent wrapper
+// nests its own `cmd.exe /d /s /c`, so the `set` and the command it protects run
+// in an inner shell; the two warning wrappers are bare lines that the agent runs
+// through its own `cmd.exe /C`, where the `set` lands in the shell the agent
+// started. Whether the variable takes effect could differ between those, and
+// nothing but running them says which.
 //
-// entire is absent from PATH in both, so the planted file is the only `entire`
-// anywhere: where.exe searches the current directory too, so the guard passes
-// either way and the difference is entirely in what the else branch resolves.
+// The unhardened cases are POSITIVE CONTROLS, not history. "The planted file did
+// not run" is satisfied just as well by a wrapper that did not run at all, so
+// without a form that DOES execute it this test would keep passing while
+// checking nothing — it would survive the guard being deleted. There are two of
+// them rather than three because nested-vs-bare is the only difference that
+// could change the answer; which warning text the if branch would have echoed
+// cannot, and the guard never reaches it here.
+//
+// entire is absent from PATH throughout, so the planted file is the only
+// `entire` anywhere: where.exe searches the current directory too, so the guard
+// passes in every case and the difference is entirely in what the else branch
+// resolves.
 func TestWindowsWrappers_DoNotResolveFromTheWorktree(t *testing.T) {
 	// No t.Parallel(): t.Setenv("PATH") forbids it.
 
-	// The wrapper as it stood before windowsEntireGuard. Spelled out rather than
-	// built, so that changing the production wrapper cannot quietly change what
-	// the control proves.
-	const unhardened = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & ` +
-		`if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`
+	const hookCommand = "entire hooks codex stop"
+
+	// The wrappers as they stood before windowsEntireGuard. Spelled out rather
+	// than built, so that changing the production wrappers cannot quietly change
+	// what the controls prove.
+	const unhardenedNested = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & ` +
+		`if errorlevel 1 (ver>nul) else (` + hookCommand + `)"`
+	const unhardenedBare = `where.exe entire >nul 2>nul & ` +
+		`if errorlevel 1 (echo missing) else (` + hookCommand + `)`
 
 	for _, tc := range []struct {
 		name    string
@@ -193,13 +206,28 @@ func TestWindowsWrappers_DoNotResolveFromTheWorktree(t *testing.T) {
 		wantRan bool
 	}{
 		{
-			name:    "unhardened wrapper runs the worktree's entire.bat",
-			wrapper: unhardened,
+			name:    "control: unhardened nested wrapper runs the worktree's entire.bat",
+			wrapper: unhardenedNested,
 			wantRan: true,
 		},
 		{
-			name:    "hardened wrapper does not",
-			wrapper: WrapWindowsProductionSilentHookCommand("entire hooks codex stop"),
+			name:    "control: unhardened bare wrapper runs the worktree's entire.bat",
+			wrapper: unhardenedBare,
+			wantRan: true,
+		},
+		{
+			name:    "silent wrapper does not",
+			wrapper: WrapWindowsProductionSilentHookCommand(hookCommand),
+			wantRan: false,
+		},
+		{
+			name:    "json warning wrapper does not",
+			wrapper: WrapWindowsProductionJSONWarningHookCommand(hookCommand, WarningFormatSingleLine),
+			wantRan: false,
+		},
+		{
+			name:    "plain text warning wrapper does not",
+			wrapper: WrapWindowsProductionPlainTextWarningHookCommand(hookCommand, WarningFormatSingleLine),
 			wantRan: false,
 		},
 	} {
