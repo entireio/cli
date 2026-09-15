@@ -300,6 +300,8 @@ func serveRepoCreate(t *testing.T) <-chan []byte {
 			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
 			Name:            "web",
 			OwningProjectId: testProjectULID,
+			// Already active so this creation fixture does not enter the readiness poll.
+			State: coreapi.NewOptString("active"),
 		}); err != nil {
 			t.Errorf("encode create response: %v", err)
 		}

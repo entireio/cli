@@ -68,8 +68,10 @@ func newCreateRepoServer(t *testing.T) *httptest.Server {
 			ID:              testDeleteULID,
 			Name:            "web",
 			OwningProjectId: testRepoCreateProjectULID,
-			ClusterHost:     coreapi.NewOptString("c.example.com"),
-			Path:            coreapi.NewOptString("/gh/o/web"),
+			// Already active so this creation fixture does not enter the readiness poll.
+			State:       coreapi.NewOptString("active"),
+			ClusterHost: coreapi.NewOptString("c.example.com"),
+			Path:        coreapi.NewOptString("/gh/o/web"),
 		}
 		if err := printJSON(w, repo); err != nil {
 			t.Errorf("encode repo: %v", err)
