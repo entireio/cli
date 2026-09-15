@@ -354,3 +354,55 @@ func TestGitRefsStore_RemoteDiscoverySkipsForkedLocalCheckpoint(t *testing.T) {
 	assert.Equal(t, 1, counts[remoteOnly], "a genuinely remote-only checkpoint is still discovered")
 	assert.Len(t, infos, 2)
 }
+
+// TestGitRefsStore_BackfillFetchedFoldedRefDoesNotFork covers the ordering hole
+// between writeRefName and the backfill fetch. A backfill targets a checkpoint
+// that may exist only on the remote, so base() is refBaseForBackfill, which
+// fetches. writeRefName runs BEFORE that fetch, sees nothing locally, and picks
+// the canonical name — but the fetch then materializes the ref under the folded
+// spelling the remote uses, and base() hands back its tip. The CAS would target
+// a name the fetch did not populate, expecting a hash it can never match.
+func TestGitRefsStore_BackfillFetchedFoldedRefDoesNotFork(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	canonical := mustRefName(t, foldableULID)
+	foldedName, ok := FoldedRefName(foldableULID)
+	require.True(t, ok)
+
+	// Build the checkpoint, then strip every local spelling, keeping the commit
+	// so a "remote" fetch can restore it — as on a machine that never had it.
+	refsWrite(t, store, foldableULID, "sess-1", "transcript")
+	ref, err := store.repo.Reference(canonical, true)
+	require.NoError(t, err)
+	commitHash := ref.Hash()
+	require.NoError(t, store.repo.Storer.RemoveReference(canonical))
+	require.NoError(t, os.RemoveAll(filepath.Join(repoDirOf(t, store), ".git", "refs", "entire", "checkpoints", foldableULID.ShardFor())))
+
+	// The remote publishes only the folded spelling. The fetch packs what it
+	// wrote, which is what makes this assert the same thing on both kinds of
+	// filesystem: on a case-SENSITIVE one the canonical name simply does not
+	// exist after this, while on a case-insensitive one a loose folded ref
+	// would still answer to the canonical name and hide the bug.
+	store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+		if rn != foldedName {
+			return plumbing.ErrReferenceNotFound
+		}
+		if err := store.repo.Storer.SetReference(plumbing.NewHashReference(rn, commitHash)); err != nil {
+			return err
+		}
+		testutil.RunGit(t, repoDirOf(t, store), "pack-refs", "--all")
+		return nil
+	})
+
+	require.NoError(t, store.backfillSummary(ctx, foldableULID, &Summary{Intent: "backfilled"}))
+
+	assert.Equal(t, []string{foldedName.String()}, checkpointRefNames(t, store),
+		"the backfill must advance the fetched ref, not fork a canonical twin")
+	after, err := store.repo.Reference(foldedName, true)
+	require.NoError(t, err)
+	commit, err := store.repo.CommitObject(after.Hash())
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.Hash{commitHash}, commit.ParentHashes,
+		"the backfill commit parents on the fetched tip")
+}
