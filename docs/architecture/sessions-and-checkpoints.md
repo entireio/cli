@@ -355,7 +355,7 @@ re-creating state would resurrect a zombie session; state present but
 `PhaseEnded` → complete the record, then eagerly condense
 (`CondenseAndMarkFullyCondensed`) so it doesn't linger as post-condensation
 data. Hard-killed agents get the same terminal state from the exited-owner
-sweep (`finalizeExitedSessions`, run inside `entire status`/`doctor`), which
+sweep (`finalizeExitedSessions`, run inside `entire doctor` and the session sweeper — not `entire status`, which is read-only), which
 completes live records before ending the session — the transcript-so-far
 still reaches a permanent checkpoint.
 
