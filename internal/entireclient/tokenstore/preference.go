@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -25,9 +26,11 @@ import (
 // The marker is honored on every platform, including macOS and Windows where
 // the automatic fallback (fallback.go) never writes it: an explicit
 // ENTIRE_TOKEN_STORE=file login does, by design, so that choice sticks there
-// too. Threat model: obeying a planted marker grants nothing new. It can only
-// select a store that lives in this same directory, and a writer with access
-// here can already repoint contexts.json's core_url at a hostile issuer. The
+// too. Threat model: obeying a planted marker downgrades future credentials
+// from the platform keystore to a 0600 file, but grants nothing new. It can
+// only select a store that lives in this same directory, and a writer with
+// access here can already repoint contexts.json's core_url at a hostile
+// issuer; if contexts.json ever gains integrity protection, revisit this. The
 // file is created 0600 in a 0700 directory like its neighbours.
 const preferenceFileName = "token_store.json"
 
@@ -41,10 +44,19 @@ type storedPreference struct {
 	Backend string `json:"backend"`
 }
 
+// markerWarnOnce dedupes the unusable-marker warning to once per process:
+// persistedBackend runs on every backend resolution and again behind
+// FileBackendSelected, and a broken marker should be reported, not repeated.
+// A pointer so tests can swap in a fresh Once.
+var markerWarnOnce = new(sync.Once)
+
 // persistedBackend returns the remembered backend, or "" when nothing is
-// remembered. Unreadable, corrupt, or unknown markers all read as unset: the
-// marker is an accelerator, and the fallback store recovers the same fact the
-// slow way (one failed keyring call) if the marker is missing.
+// remembered. An absent marker is the normal case and is silent. A marker that
+// is present but unusable — unreadable, a refused symlink, corrupt JSON — also
+// reads as unset, because the marker is an accelerator and the fallback store
+// recovers the same fact the slow way, but it is reported once on stderr: on a
+// platform with no fallback, silence would reproduce the very "not logged in"
+// symptom this file exists to remove.
 func persistedBackend() string {
 	root, err := userdirs.ConfigRootForRead()
 	if err != nil {
@@ -52,16 +64,32 @@ func persistedBackend() string {
 	}
 	data, err := osroot.ReadFileNoFollow(root, preferenceFileName)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			warnUnusableMarker(err)
+		}
 		return ""
 	}
 	var p storedPreference
 	if err := json.Unmarshal(data, &p); err != nil {
+		warnUnusableMarker(err)
 		return ""
 	}
 	if p.Backend == backendFile {
 		return backendFile
 	}
 	return ""
+}
+
+// warnUnusableMarker names the marker file but not the directory it is in:
+// resolving the directory here would go through the unchecked string
+// resolver that the userdirs consumer ledger guards, and "the Entire config
+// directory" is what a user will search for anyway. The wrapped error may
+// still carry the path (an os.PathError does), which is fine: a marker holds
+// a backend name, never a secret.
+func warnUnusableMarker(err error) {
+	markerWarnOnce.Do(func() {
+		fmt.Fprintf(fallbackNoticeW, "Warning: ignoring unusable token store preference %s in the Entire config directory: %v\n", preferenceFileName, err)
+	})
 }
 
 // rememberBackend records name as the backend that last received a write.
