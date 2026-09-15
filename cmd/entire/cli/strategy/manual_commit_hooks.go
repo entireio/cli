@@ -2881,6 +2881,10 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 // working tree. `git diff --cached --name-only` uses native git's optimized index
 // and filesystem monitors.
 //
+// -z keeps names unquoted and NUL-terminated, so non-ASCII paths (which git
+// would otherwise emit quoted/C-escaped under the default core.quotePath=true)
+// still match their SessionState.FilesTouched form.
+//
 // Returns (non-nil empty slice, nil) when no files are staged — callers can
 // distinguish "no staged files" from "error resolving staged files" (nil, err).
 func getStagedFiles(ctx context.Context) ([]string, error) {
@@ -2889,7 +2893,7 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
@@ -2897,12 +2901,9 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 	}
 
 	staged := []string{}
-	trimmed := strings.TrimSpace(string(output))
-	// Normalize Windows line endings (\r\n) to Unix (\n) for cross-platform git output
-	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
-	for _, line := range strings.Split(trimmed, "\n") {
-		if line != "" {
-			staged = append(staged, filepath.ToSlash(line))
+	for _, field := range strings.Split(string(output), "\x00") {
+		if field != "" {
+			staged = append(staged, filepath.ToSlash(field))
 		}
 	}
 	return staged, nil
