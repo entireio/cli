@@ -316,6 +316,14 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 		// device flow. extraEnv is appended after, so a test can still
 		// set them deliberately.
 		"SSH_CONNECTION=", "SSH_CLIENT=", "SSH_TTY=",
+		// And give it a display: noLocalDisplay() routes a Linux/BSD process
+		// with no DISPLAY or WAYLAND_DISPLAY to the device flow, which is
+		// exactly what a headless CI runner looks like. The browser flow
+		// under test never opens a browser (terminal actions are off under
+		// test), so a nominal DISPLAY is enough to model the desktop these
+		// tests simulate. Harmless for the device-flow tests, which are
+		// routed by the absence of a TTY before the display is consulted.
+		"DISPLAY=:0",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 
