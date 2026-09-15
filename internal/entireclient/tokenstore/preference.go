@@ -14,28 +14,32 @@ import (
 )
 
 // preferenceFileName is the marker, next to contexts.json in the per-user
-// config directory, that remembers which credential backend last received a
-// write. It exists so that a machine whose OS keyring is unavailable does not
-// need ENTIRE_TOKEN_STORE in the environment of every entire process: login
-// records the choice once and every later process reads it.
+// config directory, that remembers which credential backend holds the
+// freshest credential. It exists so that a machine whose OS keyring is
+// unavailable does not need ENTIRE_TOKEN_STORE in the environment of every
+// entire process: login records the choice once and every later process reads
+// it.
 //
-// It records a *write*, not a preference the user typed, because the store
-// that most recently received tokens is the store that holds the freshest
-// credential. Reads consult it. It changes when a store receives a write, and
-// when the Linux fallback proves the file store already holds the credential
-// (see switchTo in fallback.go); rememberBackend is the only writer.
+// It records evidence, not a preference the user typed: an explicit write
+// through ENTIRE_TOKEN_STORE records the store that just received the token,
+// and the Linux fallback records the file store once it has proven it holds
+// the credential — on a Get, Set or Delete that succeeded there (see switchTo
+// in fallback.go) — but never after a keyring timeout, since the abandoned
+// keyring call may still complete. Reads through the marker never change it;
+// rememberBackend is the only writer.
 //
 // The marker is honored on every platform, including macOS and Windows where
 // the automatic fallback (fallback.go) never writes it: an explicit
 // ENTIRE_TOKEN_STORE=file login does, by design, so that choice sticks there
 // too. Threat model: obeying a planted marker downgrades future credentials
 // from the platform keystore to a 0600 file, but grants nothing new. It can
-// only select a store that lives in this same directory, and a writer with
-// access here can already repoint contexts.json's core_url at a hostile
-// issuer; if contexts.json ever gains integrity protection, revisit this. A
-// login onto the file store always says so on stdout (persistLogin in the cli
-// package), so a planted marker cannot redirect credentials unannounced. The
-// file is created 0600 in a 0700 directory like its neighbours.
+// only say `file`; where that file lives comes from the environment or this
+// same directory. A writer with access here can already repoint
+// contexts.json's core_url at a hostile issuer; if contexts.json ever gains
+// integrity protection, revisit this. A login onto the file store always says
+// so on stdout (persistLogin in the cli package), so a planted marker cannot
+// redirect credentials unannounced. The file is created 0600 in a 0700
+// directory like its neighbours.
 const preferenceFileName = "token_store.json"
 
 // Backend names as they appear in BackendEnvVar and in the marker.
@@ -113,7 +117,8 @@ func warnUnusableMarker(err error) {
 // store. Never while PathEnvVar is set: the marker cannot carry a path, and a
 // bare "file" would point later processes at the default location, which does
 // not hold the token. The rule lives here so rememberBackend and the fallback's
-// notice cannot disagree about it.
+// notice cannot disagree about it. The marker is still honoured for READS while
+// the variable is set — it selects the backend, never the path.
 func markerApplies() bool { return os.Getenv(PathEnvVar) == "" }
 
 // ChoiceIsRemembered reports whether a file-store selection made now would be
@@ -122,7 +127,7 @@ func markerApplies() bool { return os.Getenv(PathEnvVar) == "" }
 // cannot promise a memory the marker will not keep.
 func ChoiceIsRemembered() bool { return markerApplies() }
 
-// rememberBackend records name as the backend that last received a write.
+// rememberBackend records name as the backend that now holds the credential.
 // "file" writes the marker (only if it is not already there); "keyring"
 // removes it, because the keyring is the platform default and needs no
 // marker. Any other name is a programming error.

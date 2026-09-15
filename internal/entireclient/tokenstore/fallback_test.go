@@ -5,12 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/zalando/go-keyring"
+
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // The D-Bus error a Secret-Service-less Linux session produces, verbatim,
@@ -372,5 +376,138 @@ func TestSetBackend_AdoptionIsVisibleToProvenanceWhenPathIsSet(t *testing.T) {
 	restore()
 	if FileBackendSelected() {
 		t.Fatal("restoring the test backend must clear the adoption flag")
+	}
+}
+
+// Pinned by descriptor rather than pointer equality with os.Stderr, for the
+// reason TestLoosePermsWarnWriter_DefaultsToStderr gives: under `go test -json`
+// the testing package swaps the os.Stderr variable after package init.
+func TestFallbackNoticeWriter_DefaultsToStderr(t *testing.T) {
+	f, ok := fallbackNoticeW.(*os.File)
+	if !ok || f.Fd() != uintptr(syscall.Stderr) {
+		t.Fatalf("fallbackNoticeW default = %T, want the process stderr", fallbackNoticeW)
+	}
+}
+
+// The struct tests inject adopt and never touch package state; this one drives
+// the package-level Set and Get through a fallback store installed the way
+// resolveBackend installs it (adoptedFile still false), so it pins the wiring
+// those tests bypass: newFallbackStore's adopt is setBackend, and setBackend
+// replaces the process backend, so the very next package call reads the file
+// store directly instead of asking the keyring again.
+func TestPackageSetAndGetGoThroughTheFallback(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv(BackendEnvVar, "")
+	notice := captureNotices(t)
+	resetBackendForTesting(t)
+	primary := newScriptedStore()
+	primary.setErr, primary.getErr = errNoSecretService, errNoSecretService
+	backendMu.Lock()
+	backend, resolved = newFallbackStore(primary), true
+	backendMu.Unlock()
+	if FileBackendSelected() {
+		t.Fatal("precondition: nothing selects the file store before the fallback fires")
+	}
+
+	if err := Set("svc", "alice", "tok"); err != nil {
+		t.Fatalf("Set through the fallback: %v", err)
+	}
+	got, err := Get("svc", "alice")
+	if err != nil || got != "tok" {
+		t.Fatalf("Get after adoption = (%q, %v), want (tok, nil)", got, err)
+	}
+	if primary.gets != 0 {
+		t.Fatalf("keyring asked %d times on Get, want 0: adoption must replace the process backend", primary.gets)
+	}
+	if got := persistedBackend(); got != backendFile {
+		t.Fatalf("persisted = %q, want %q", got, backendFile)
+	}
+	if !FileBackendSelected() {
+		t.Fatal("FileBackendSelected() must follow the adoption")
+	}
+	if n := strings.Count(notice.String(), "Note: OS keyring"); n != 1 {
+		t.Fatalf("notice printed %d times, want once:\n%s", n, notice.String())
+	}
+}
+
+// A tokens.json that will not parse is a file store that FAILED, not one that
+// has nothing: on Get and on Delete alike the fallback must report both
+// failures — ErrFileStoreFailed for login's hint, the keyring error for auth
+// status — and adopt nothing. Reading it as a miss would print "not logged in"
+// about a credential sitting in a file the CLI cannot parse, or, on Delete,
+// tell logout the slot is gone when nothing was checked.
+func TestFallbackStore_CorruptFileStoreReportsBothFailures(t *testing.T) {
+	primary := newScriptedStore()
+	primary.getErr, primary.delErr = errNoSecretService, errNoSecretService
+	f, file, notice, adopted := newTestFallback(t, primary)
+	if err := os.MkdirAll(filepath.Dir(file.path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file.path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, getErr := f.Get("svc", "alice")
+	for op, err := range map[string]error{"Get": getErr, "Delete": f.Delete("svc", "alice")} {
+		if !errors.Is(err, ErrFileStoreFailed) || !errors.Is(err, errNoSecretService) {
+			t.Fatalf("%s = %v, want both ErrFileStoreFailed and the keyring error reachable", op, err)
+		}
+		if errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s = %v must not read as ErrNotFound: nothing was checked", op, err)
+		}
+	}
+	if *adopted != nil {
+		t.Fatal("a file store that failed must not be adopted")
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("nothing to announce when both stores failed:\n%s", notice.String())
+	}
+}
+
+// rememberWarn's comment says the marker write is retried on every adoption
+// and only the warning is deduped; this pins both halves. The config dir is
+// made unwritable by pointing ENTIRE_CONFIG_DIR at a regular FILE, which fails
+// userdirs.ConfigRoot with something other than ErrNotExist (a missing
+// directory would simply be created), while the file store is injected at a
+// working path so the adoption itself succeeds and switchTo runs. The failed
+// open is not memoized — osroot.Shared caches successful opens only — so
+// replacing the file with a directory is all the retry needs.
+func TestFallbackStore_MarkerWriteIsRetriedOnEveryAdoption(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(configDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(userdirs.EnvConfigDir, configDir)
+	t.Setenv(PathEnvVar, "")
+	notice := captureNotices(t)
+	primary := newScriptedStore()
+	primary.setErr = errNoSecretService
+	tokens := &fileStore{path: filepath.Join(t.TempDir(), "tokens.json")}
+	f := newFallbackStore(primary)
+	f.newFile = func() store { return tokens }
+	f.adopt = func(store) {}
+
+	const couldNotRemember = "could not remember the token store choice"
+	if err := f.Set("svc", "alice", "tok"); err != nil {
+		t.Fatalf("first Set: %v", err)
+	}
+	if !strings.Contains(notice.String(), couldNotRemember) {
+		t.Fatalf("a failed marker write must be warned about:\n%s", notice.String())
+	}
+
+	if err := os.Remove(configDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Set("svc", "alice", "tok"); err != nil {
+		t.Fatalf("second Set: %v", err)
+	}
+	if got := persistedBackend(); got != backendFile {
+		t.Fatalf("persisted = %q after the second adoption, want %q: the marker write must be retried", got, backendFile)
+	}
+	if n := strings.Count(notice.String(), couldNotRemember); n != 1 {
+		t.Fatalf("could-not-remember warned %d times, want once:\n%s", n, notice.String())
 	}
 }
