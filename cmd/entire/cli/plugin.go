@@ -112,6 +112,14 @@ func MaybeRunPlugin(ctx context.Context, rootCmd *cobra.Command, args []string) 
 		// repositions the cursor or repaints what is above it. That last one
 		// is the same hazard hasTerminalControlChars exists for.
 		fmt.Fprintf(rootCmd.ErrOrStderr(), "Running %s%s\n", pluginBinaryPrefix, pluginName)
+	} else if isManagedBinEntry(binPath) {
+		// LookPath accepts a 0-byte executable, so an empty managed entry
+		// resolves and then fails in exec with an opaque "exec format error".
+		// Diagnose it the way the on-demand path does, with the remedy.
+		if err := managedEntryUnrunnable(pluginName, binPath); err != nil {
+			fmt.Fprintln(rootCmd.ErrOrStderr(), RenderUserFacingError(err))
+			return true, 1, nil
+		}
 	}
 	exitCode, killedBy = runPlugin(ctx, pluginName, binPath, pluginArgs)
 	if exitCode == 0 {

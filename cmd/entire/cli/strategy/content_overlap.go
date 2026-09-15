@@ -166,7 +166,7 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 		}
 
 		// Compare by hash (blob hash) - exact content match required for new files
-		if headFile.Hash == shadowFile.Hash {
+		if headFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesOverlapWithContent: new file content match found",
 				slog.String("file", filePath),
 				slog.String("hash", headFile.Hash.String()),
@@ -283,7 +283,7 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		}
 
 		// Compare hashes - exact match means file is unchanged
-		if stagedHash == shadowFile.Hash {
+		if stagedHash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "stagedFilesOverlapWithContent: new file content match found",
 				slog.String("file", stagedPath),
 				slog.String("hash", stagedHash.String()),
@@ -496,7 +496,7 @@ func filesWithRemainingAgentChanges(
 			continue
 		}
 
-		if commitFile.Hash == shadowFile.Hash {
+		if commitFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content fully committed",
 				slog.String("file", filePath),
 			)
@@ -586,7 +586,8 @@ func WorktreeMatchesCommitted(ctx context.Context, worktreeRoot string, files ma
 	var ambiguous map[string]*object.File
 	for path, file := range files {
 		worktreeHash, hashed := worktreeHashes[path]
-		if hashed && worktreeHash == file.Hash {
+		// Equal compares hash bytes without depending on object-format metadata.
+		if hashed && worktreeHash.Equal(file.Hash) {
 			matches[path] = true
 			continue
 		}

@@ -101,7 +101,7 @@ func SyncFrom(ctx context.Context, repo *git.Repository, targets []Target) (Stat
 	if !remoteFound {
 		return local, nil
 	}
-	if local.Hash == baseline.Hash {
+	if local.Hash.Equal(baseline.Hash) {
 		return baseline, nil
 	}
 
@@ -187,7 +187,7 @@ func findRemoteBaseline(ctx context.Context, repo *git.Repository, targets []Tar
 		if !remoteState.Exists {
 			continue
 		}
-		if local.Hash == remoteState.Hash {
+		if local.Hash.Equal(remoteState.Hash) {
 			baseline := local
 			baseline.Source = SourceRemote
 			baseline.RemoteHash = remoteState.Hash
@@ -281,7 +281,7 @@ func isAncestorOf(ctx context.Context, repo *git.Repository, ancestor, target pl
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("checkpoint policy ancestry context: %w", err)
 		}
-		if commit.Hash == ancestor {
+		if commit.Hash.Equal(ancestor) {
 			found = true
 			return errStopTraversal
 		}

@@ -2469,19 +2469,32 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 				name: "missing_configured_remote", options: `,"checkpoint_push_remote":"gone"`,
 				origin: "https://github.com/org/repo.git", wantFallback: "origin", wantErr: true,
 			},
-			// Push- and fetch-side ownership disagree. Both require EVERY
-			// identity to be owned by the checkpoint repo's owner, but over
-			// different sets: origin plus fork's PUSH urls (all "org", so the
-			// push side certifies the dedicated store) versus origin plus
-			// fork's FETCH url ("other", so the fetch side rejects it). With
-			// pushing disabled the line names a read source, so the fetch
-			// side decides and the elected remote is reported; deciding it
-			// with PushURL named a store reads never use.
+			// The candidate's fetch and push urls have different owners. Both
+			// ownership votes — push side (InheritedCheckpointRemote) and
+			// read side (ReadsDedicatedStore) — require EVERY identity to be
+			// owned by the checkpoint repo's owner over the SAME set: origin
+			// plus the candidate's PUSH urls. Its FETCH url is deliberately
+			// not a vote: reads must land where writes went, and writes are
+			// decided by push urls (#2342). So a candidate fetching from
+			// another owner but pushing to the store's owner is accepted on
+			// both sides, and the dedicated store is the read source ...
 			{
-				name:    "dedicated_rejected_by_fetch_owner",
+				name:    "dedicated_accepted_by_push_owner",
 				options: `,"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
 				origin:  "https://github.com/org/repo.git",
 				fork:    "https://github.com/other/fork.git", forkPush: "https://github.com/org/fork.git",
+				wantRemote: "org/checkpoints", wantSource: checkpointSyncSourceDedicated,
+			},
+			// ... while one fetching from the store's owner but pushing
+			// elsewhere is rejected on both, so the elected remote is the
+			// read source and the configured store is reported as not in use.
+			// Before the votes were aligned this row's mirror image passed on
+			// the push side and failed on the read side.
+			{
+				name:    "dedicated_rejected_by_push_owner",
+				options: `,"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}`,
+				origin:  "https://github.com/org/repo.git",
+				fork:    "https://github.com/org/fork.git", forkPush: "https://github.com/other/fork.git",
 				wantRemote: "fork", wantSource: "config", wantIgnored: true,
 			},
 			// A failed election does not stop reads: they fail open, so the
@@ -2553,14 +2566,12 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 					t.Fatal(err)
 				}
 				info := computeCheckpointSyncInfo(t.Context(), s)
-				// The two "not in use" rows reach that warning by different
-				// routes: the origin-owner row through the push-side verdict,
-				// the fetch-rejected row through the read-side branch that
-				// exists because that verdict ACCEPTS what the fetch side
-				// declines. Without the second, a configured store serving no
-				// reads is reported by nothing. (Not the divergence
-				// documented as accepted on InheritedCheckpointRemote — that
-				// one is the opposite direction.)
+				// Both "not in use" rows reach that warning through the
+				// push-side verdict, which votes on the same identity set as
+				// the read side. The read-side branch behind it covers the
+				// non-ownership reasons reads can decline a store (an origin
+				// URL that will not parse, a protocol with no checkpoint
+				// mapping), none of which this table stages.
 				if (info.Err != "") != tc.wantErr || (info.IgnoredRemote != "") != tc.wantIgnored {
 					t.Errorf("unexpected remote diagnostics: %+v", info)
 				}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -212,6 +213,28 @@ func TestCloneRefAlwaysRequiresItsForgePrefix(t *testing.T) {
 		msg := invalidCloneRefError("acme/tool", nativeErr, mirrorErr).Error()
 		require.Contains(t, msg, "/et/acme/tool")
 		require.Contains(t, msg, "/gh/acme/tool")
+	})
+
+	// `repo clone` is no longer the only command parsing a forge-prefixed ref:
+	// resolveRepoRef took the native grammar for `repo get`, `repo delete`, the
+	// visibility and protection subtrees, and `grant repo add/list/remove`
+	// (COR-1632). The guard follows the requirement rather than the command, so
+	// the same table runs against the second entry point — a bare pair must not
+	// become resolvable just because it was typed at a different subcommand.
+	t.Run("the shared repo-ref resolver refuses a bare pair too", func(t *testing.T) {
+		for _, ref := range append(bare, "github.com/acme/tool", "https://github.com/acme/tool") {
+			c, calls := resolveTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("a ref without a forge prefix reached the control plane: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusInternalServerError)
+			})
+			// With --project set as well: the flag must not become a way to
+			// have a forge-less pair read as a name inside that project.
+			for _, project := range []string{"", "acme"} {
+				_, err := resolveRepoRef(context.Background(), c, ref, project)
+				require.Errorf(t, err, "resolveRepoRef(%q, project=%q) must not accept a forge-less pair", ref, project)
+			}
+			require.Zerof(t, calls.Load(), "ref %q must be refused before the control plane", ref)
+		}
 	})
 }
 

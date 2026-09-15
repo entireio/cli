@@ -1566,3 +1566,34 @@ func TestWorktreeMatchesCommitted_ExplicitTextAttributes(t *testing.T) {
 		})
 	}
 }
+
+func TestWorktreeMatchesCommitted_CustomCleanFilter(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	const path = "filtered.txt"
+	const content = "raw content\n"
+	testutil.WriteFile(t, dir, path, content)
+	testutil.RunGit(t, dir, "add", "--", path)
+	testutil.RunGit(t, dir, "commit", "-m", "Commit before enabling the filter")
+
+	// Git itself makes a portable clean filter: it consumes the raw bytes and
+	// emits their hash. The on-disk bytes still equal HEAD, but adding the file
+	// now would commit different content, exactly the reviewer's x -> y case.
+	testutil.RunGit(t, dir, "config", "filter.hash-content.clean", "git hash-object --stdin")
+	testutil.RunGit(t, dir, "config", "filter.hash-content.required", "true")
+	testutil.WriteFile(t, dir, ".gitattributes", path+" filter=hash-content\n")
+	require.Contains(t, testutil.RunGit(t, dir, "diff", "--name-only", "--", path), path)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	file := headFileForTest(t, repo, path)
+	headContent, err := file.Contents()
+	require.NoError(t, err)
+	require.Equal(t, content, headContent, "raw worktree content still matches HEAD")
+	hashes, err := gitrepo.HashWorktreeFiles(t.Context(), dir, []string{path})
+	require.NoError(t, err)
+	require.False(t, hashes[path].Equal(file.Hash), "the clean filter must change the content hash")
+	assert.False(t, WorktreeMatchesCommitted(t.Context(), dir, map[string]*object.File{path: file})[path],
+		"raw equality must not hide changes required by a custom clean filter")
+}

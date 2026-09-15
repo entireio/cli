@@ -110,6 +110,12 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 
 	switch len(candidates) {
 	case 0:
+		// Spelled out rather than derived from summaryCapableProviderNames:
+		// these are BINARY names to install (`claude`, `copilot`), not the
+		// registry names that helper returns (`claude-code`, `copilot-cli`),
+		// and "install claude-code" names nothing you can install. The mapping
+		// lives in isSummaryCLIAvailable; deriving this needs that, not the
+		// name list.
 		return nil, errors.New("no summary-capable provider is available; install claude, codex, gemini, pi, cursor, or copilot, install an external entire-agent-* plugin that declares text_generator, or set summary_generation.provider in settings")
 	case 1:
 		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider", selectionAutomatic)
@@ -225,11 +231,8 @@ func listEnabledSummaryProviders(_ context.Context) []checkpointSummaryProvider 
 	registered := listRegisteredAgents()
 	providers := make([]checkpointSummaryProvider, 0, len(registered))
 	for _, name := range registered {
-		ag, err := getSummaryAgent(name)
-		if err != nil {
-			continue
-		}
-		if _, ok := agent.AsTextGenerator(ag); !ok {
+		ag, _, capable := summaryCapableAgent(name)
+		if !capable {
 			continue
 		}
 		// Check CLI binary on PATH for built-ins. External agents are already
@@ -243,6 +246,25 @@ func listEnabledSummaryProviders(_ context.Context) []checkpointSummaryProvider 
 		})
 	}
 	return providers
+}
+
+// summaryCapableAgent resolves a provider name to its agent and reports whether
+// that agent can generate text. The one place "is this name a usable summary
+// provider" is decided: the two registry walks, doctor's check, and the error
+// paths all go through it, so the capability predicate cannot drift between
+// them. AsTextGenerator consults CapabilityDeclarer for external agents, which
+// is exactly the part a second inline copy would get wrong.
+//
+// Reports the two failures separately because callers treat them differently:
+// an unregistered name may be an uninstalled plugin, while a registered one
+// that cannot generate text is a settled fault.
+func summaryCapableAgent(name types.AgentName) (ag agent.Agent, registered, capable bool) {
+	ag, err := getSummaryAgent(name)
+	if err != nil {
+		return nil, false, false
+	}
+	_, capable = agent.AsTextGenerator(ag)
+	return ag, true, capable
 }
 
 func isSummaryProviderAvailable(name types.AgentName, ag agent.Agent) bool {
@@ -280,6 +302,58 @@ func buildCheckpointSummaryProvider(name types.AgentName, model string) (*checkp
 	return buildCheckpointSummaryProviderWithEffectiveModel(name, summarize.ResolveModel(name, model))
 }
 
+// summaryCapableProviderNames returns the registered agents that can generate
+// text, which is the set of values summary_generation.provider accepts.
+//
+// Derived from the registry rather than spelled out, so an agent that gains
+// GenerateText needs no second edit here and one that loses it cannot leave a
+// stale name in a user-facing error. The order is agent.List's, which is
+// documented as sorted, so the message is stable without sorting again.
+//
+// Deliberately NOT filtered by $PATH, unlike listEnabledSummaryProviders: this
+// answers "which names does this field accept", and a provider the user has yet
+// to install is still an answer to that. The PATH condition has its own error,
+// which says to install it.
+func summaryCapableProviderNames() []string {
+	registered := listRegisteredAgents()
+	names := make([]string, 0, len(registered))
+	for _, name := range registered {
+		if _, _, capable := summaryCapableAgent(name); capable {
+			names = append(names, string(name))
+		}
+	}
+	return names
+}
+
+// unsupportedSummaryProviderError reports an agent that exists but cannot
+// generate text, naming the providers that would work.
+//
+// The list is the whole point. Every agent name is a valid value for `entire
+// enable --agent`, and summary_generation.provider takes names out of that same
+// registry — so writing the agent you code with into it looks right and is how
+// `opencode` and `factoryai-droid` end up there. The bare sentence said the
+// value was wrong without saying what a right one looks like, and neither
+// `status` nor the settings loader mentions the field at all, so this error is
+// the first and only place a user hears about it.
+//
+// It lists agents rather than pointing at summary_generation.provider, because
+// the value does not always come from there: `configure --summarize-provider`
+// passes a flag, and naming the field would be answering about a file the user
+// did not touch. doctor's check names the field, which is the surface where
+// locating the value is the actual problem.
+//
+// An empty capable set degrades to the bare sentence rather than a dangling
+// "supported agents:" — reachable only with a stubbed registry, since the cli
+// package links every built-in.
+func unsupportedSummaryProviderError(name types.AgentName) error {
+	capable := summaryCapableProviderNames()
+	if len(capable) == 0 {
+		return fmt.Errorf("agent %q does not support summary generation", name)
+	}
+	return fmt.Errorf("agent %q does not support summary generation; supported agents: %s, or an external entire-agent-* plugin that declares text_generator",
+		name, strings.Join(capable, ", "))
+}
+
 func buildCheckpointSummaryProviderWithEffectiveModel(name types.AgentName, effectiveModel string) (*checkpointSummaryProvider, error) {
 	ag, err := getSummaryAgent(name)
 	if err != nil {
@@ -288,7 +362,9 @@ func buildCheckpointSummaryProviderWithEffectiveModel(name types.AgentName, effe
 
 	textGenerator, ok := agent.AsTextGenerator(ag)
 	if !ok {
-		return nil, fmt.Errorf("agent %s does not support summary generation", name)
+		// Backstop: every caller passes a name a gate below already accepted,
+		// so this is unreachable rather than a surface.
+		return nil, unsupportedSummaryProviderError(name)
 	}
 
 	_, streaming := agent.AsStreamingTextGenerator(textGenerator)
@@ -317,7 +393,7 @@ func ensureSummaryProviderPresent(_ context.Context, name types.AgentName) error
 		return fmt.Errorf("unknown summary provider %s: %w", name, err)
 	}
 	if _, ok := agent.AsTextGenerator(ag); !ok {
-		return fmt.Errorf("agent %s does not support summary generation", name)
+		return unsupportedSummaryProviderError(name)
 	}
 	if !isSummaryProviderAvailable(name, ag) {
 		return fmt.Errorf("summary provider %q is configured but its CLI binary is not on PATH; install it or update summary_generation.provider in settings", name)
@@ -332,7 +408,7 @@ func validateSummaryProvider(provider string) error {
 		return fmt.Errorf("unknown summary provider %q: %w", provider, err)
 	}
 	if _, ok := agent.AsTextGenerator(ag); !ok {
-		return fmt.Errorf("agent %q does not support summary generation", provider)
+		return unsupportedSummaryProviderError(name)
 	}
 	if !isSummaryProviderAvailable(name, ag) {
 		return fmt.Errorf("summary provider %q CLI binary is not on PATH; install it or choose another provider", provider)

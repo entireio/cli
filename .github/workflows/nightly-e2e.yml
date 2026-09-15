@@ -195,11 +195,14 @@ jobs:
       # would kill a recovering run and report it as a failure.
       #
       # In each body: `set +e` because GitHub already runs `shell: bash` with
-      # -e, which would end the step before its result row is written. The
-      # `Total: 0` check because a filter matching no test exits 0 with "[no
-      # tests to run]", which would report every agent as passing. Per-agent
-      # E2E_ARTIFACT_DIR because the mise task otherwise derives one shared dir
-      # and later agents overwrite earlier reports.
+      # -e, which would end the step before its result row is written; the
+      # closing `exit "$rc"` then reports the agent's own verdict on its own
+      # step, and the `!cancelled()` gates above are what keep the later agents
+      # running after it fails. The `Total: 0` check because a filter matching
+      # no test exits 0 with "[no tests to run]", which would report every
+      # agent as passing. Per-agent E2E_ARTIFACT_DIR because the mise task
+      # otherwise derives one shared dir and later agents overwrite earlier
+      # reports.
       #
       # E2E_ENTIRE_BIN (job env, set above) is what makes this the *installed*
       # nightly: the mise task skips its build when it is set.
@@ -222,6 +225,7 @@ jobs:
           rc=$?
           grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
           echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
 
       - name: Smoke test opencode
         if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' opencode ') }}
@@ -240,6 +244,7 @@ jobs:
           rc=$?
           grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
           echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
 
       - name: Smoke test codex
         if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' codex ') }}
@@ -259,6 +264,7 @@ jobs:
           rc=$?
           grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
           echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
 
       - name: Smoke test cursor-cli
         if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' cursor-cli ') }}
@@ -277,6 +283,7 @@ jobs:
           rc=$?
           grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
           echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
 
       - name: Smoke test factoryai-droid
         if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' factoryai-droid ') }}
@@ -297,6 +304,7 @@ jobs:
           rc=$?
           grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
           echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
 
       - name: Smoke test copilot-cli
         if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' copilot-cli ') }}
@@ -315,6 +323,7 @@ jobs:
           rc=$?
           grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
           echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
 
       - name: Summarize
         if: always()

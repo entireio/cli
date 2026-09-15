@@ -331,8 +331,10 @@ func detectFileChanges(ctx context.Context, previouslyUntracked []string, status
 // shadow branch nothing condenses again. "Matching" is Git's verdict on content, clean
 // filters applied (strategy.WorktreeMatchesCommitted): a CRLF working copy of an LF blob
 // under core.autocrlf is committed; the executable bit is not compared. Files not in HEAD
-// or with different content in the working tree are kept. Fails open: if any git operation
-// errors, returns the original list unchanged.
+// or with different content in the working tree are kept. Repository or HEAD lookup
+// failures return the original list. Comparison failures are handled per path: successful
+// matches are still removed, failed hashes use a confined raw comparison, and paths
+// that cannot be confirmed as committed are kept.
 func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot string) []string {
 	if len(files) == 0 {
 		return files

@@ -58,7 +58,7 @@ func updateBaseline(ctx context.Context, repo *git.Repository, target Target) (S
 	if err != nil {
 		return State{}, err
 	}
-	if !remoteFound || local.Hash == baseline.Hash {
+	if !remoteFound || local.Hash.Equal(baseline.Hash) {
 		return baseline, nil
 	}
 	if local.Hash.IsZero() {

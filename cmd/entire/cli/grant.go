@@ -381,7 +381,7 @@ func newGrantRepoAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "add <repo> <grantee>",
 		Short:   "Grant a user access to a repo",
-		Long:    "Grant a user (addressed as provider:handle, e.g. github:alice) access to a repo (name or ULID).",
+		Long:    "Grant a user (addressed as provider:handle, e.g. github:alice) access to a repo (a /et/<project>/<repo> path, a bare name with --project, or a ULID).",
 		Example: "  entire grant repo add web github:alice --project acme --role writer",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -454,7 +454,7 @@ func newGrantRepoRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove <repo> <grantee>",
 		Short: "Revoke repo access from a grantee",
-		Long: "Revoke a grantee's access to a repo (addressed by name or ULID). " +
+		Long: "Revoke a grantee's access to a repo (addressed by a /et/<project>/<repo> path, a bare name with --project, or a ULID). " +
 			"The grantee is a provider-qualified handle (e.g. github:alice) or an " +
 			"account ULID.",
 		Example: "  entire grant repo remove web github:alice --project acme",

@@ -50,8 +50,9 @@ the commands are always runnable in every build.
   through `strategy.ResolveCallerSession`, not "which state file moved last" —
   see [Resolving the calling session](#resolving-the-calling-session).
 - `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`.
-  `explain` also takes `--repo <owner/name>`, the drill-down for a cross-repo
-  `search` hit: it reads the checkpoint from that repo's entire-api cell over
+  `explain` also takes a forge-qualified `--repo` (`gh/<owner>/<name>` or
+  `et/<project>/<name>`), the drill-down for a cross-repo `search` hit: it
+  reads the checkpoint from that repo's entire-api cell over
   HTTP (`/repos/{repo_id}/checkpoints/{id}` plus `.../transcript/raw`) rather
   than fetching git objects, so a foreign checkpoint never enters this repo's
   object store, ref namespace, or `tokens profile`. It needs a full checkpoint
@@ -106,11 +107,25 @@ the commands are always runnable in every build.
   Requiring the prefix is a **namesquatting** guard, not tidiness: without it,
   whichever namespace the CLI defaulted to could shadow the other, and
   `TestCloneRefAlwaysRequiresItsForgePrefix` pins that no forge-less pair
-  resolves in either parser or in the command. It holds only for *intent* —
+  resolves in either parser, in `repo clone`, or in `resolveRepoRef` — the last
+  being the surface every other repo-ref command shares. It holds only for
+  *intent* —
   lookups are already unambiguous because native rows are stored prefixed in the
   same `full_name` index (`et/<project>/<repo>`), which is why the bare-pair
   `--repo` filters on `search`/`experts`/`explain` cannot cross namespaces
   either.
+  The native `/et/<project>/<repo>` path is **not** clone-only: it is the
+  `path` the API returns, and `resolveRepoRef` accepts it for every command
+  that takes a repo ref — `get`, `delete`, the `visibility` and `protection`
+  subtrees, and `grant repo add`/`list`/`remove` (COR-1632). The other two
+  clone shapes are not: a `/gh/` mirror ref is refused there (the by-name
+  lookup resolves a project and then a repo inside it, and a mirror is in no
+  project — so a mirror is addressed by ULID), and an `entire://` URL is not
+  parsed at all. `--project` serves the **bare-name** spelling alone, because
+  the control plane has no by-name repo route that is not project-scoped; the
+  path form is checked against it for agreement, and a ULID warns that it is
+  ignored rather than validating, which would cost a `GetRepo` on every command
+  but `repo get`.
   Native names are validated client-side against the server's own rules
   (`nativeProjectRe`/`nativeRepoRe`, mirroring `normalizeName` in entiredb
   `core/resource/project_name.go`); those bounds are server parity only and buy
@@ -1316,6 +1331,13 @@ comments at each site say which case applies:
   Those operations (`setupEntireDirectory`, `removeEntireDirectory`, the one
   `MkdirAll` of an agent's session dir in `resume.go`) legitimately use plain
   `os` calls.
+- **`Root.Link` takes two root-relative names, and `Root.Symlink` with an
+  absolute target is unusable on Windows.** `Root.Link(absPath, name)` is a
+  path escape everywhere. `Root.Symlink(absPath, name)` on Windows (Go 1.27)
+  writes the reparse target without the `\??\` prefix, so the link is created
+  but every follow fails with `ERROR_INVALID_NAME` — the 0-byte
+  `bin\entire-graph.exe` bug. See `plugin_store_windows.go` and
+  `materializeManagedEntry`.
 
 **Deliberately not rooted**, with the reason:
 
