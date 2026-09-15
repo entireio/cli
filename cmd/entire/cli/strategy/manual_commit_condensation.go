@@ -1178,7 +1178,11 @@ func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
 // persist in session state after condensation.
 func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
-	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
+	if agentType != agent.AgentTypeCopilotCLI {
+		return nil
+	}
+
+	if len(transcript) > 0 {
 		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
@@ -1186,11 +1190,7 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 		logging.Debug(ctx, "copilot-cli: full-session token read produced no data, falling back to checkpoint usage")
 	}
 
-	if agentType == agent.AgentTypeCopilotCLI && hasTokenUsageData(checkpointUsage) {
-		return checkpointUsage
-	}
-
-	if checkpointUsage != nil && checkpointUsage.InputTokens > 0 {
+	if hasTokenUsageData(checkpointUsage) {
 		return checkpointUsage
 	}
 
