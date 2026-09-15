@@ -168,25 +168,61 @@ func TestWindowsWrappers_Execution(t *testing.T) {
 // later on a line that `set` it — which is exactly how the wrapper uses it.
 // Believing that without checking is what this test refuses to do.
 //
-// entire is absent from PATH here, so the planted file is the only `entire`
-// anywhere: where.exe searches the current directory too, so the guard still
-// passes, and the command that follows must fail to resolve rather than run it.
+// The unhardened subtest is a POSITIVE CONTROL, not history. "The planted file
+// did not run" is satisfied just as well by a wrapper that did not run at all,
+// so without a form that DOES execute it this test would keep passing while
+// checking nothing — it would survive the guard being deleted. It runs the
+// wrapper Entire shipped before this change, in the same worktree, and requires
+// the marker to appear.
+//
+// entire is absent from PATH in both, so the planted file is the only `entire`
+// anywhere: where.exe searches the current directory too, so the guard passes
+// either way and the difference is entirely in what the else branch resolves.
 func TestWindowsWrappers_DoNotResolveFromTheWorktree(t *testing.T) {
 	// No t.Parallel(): t.Setenv("PATH") forbids it.
 
-	worktree := t.TempDir()
-	markerPath := filepath.Join(worktree, "planted-ran.txt")
-	planted := "@echo off\r\n" + `echo PLANTED>> "` + markerPath + `"` + "\r\n" + "exit /b 0\r\n"
-	if err := os.WriteFile(filepath.Join(worktree, "entire.bat"), []byte(planted), 0o700); err != nil {
-		t.Fatalf("plant entire.bat: %v", err)
-	}
+	// The wrapper as it stood before windowsEntireGuard. Spelled out rather than
+	// built, so that changing the production wrapper cannot quietly change what
+	// the control proves.
+	const unhardened = `cmd.exe /d /s /c "where.exe entire >nul 2>nul & ` +
+		`if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`
 
-	_, stderr, _ := runWindowsWrapperInDir(t,
-		WrapWindowsProductionSilentHookCommand("entire hooks codex stop"), false, worktree)
+	for _, tc := range []struct {
+		name    string
+		wrapper string
+		wantRan bool
+	}{
+		{
+			name:    "unhardened wrapper runs the worktree's entire.bat",
+			wrapper: unhardened,
+			wantRan: true,
+		},
+		{
+			name:    "hardened wrapper does not",
+			wrapper: WrapWindowsProductionSilentHookCommand("entire hooks codex stop"),
+			wantRan: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worktree := t.TempDir()
+			markerPath := filepath.Join(worktree, "planted-ran.txt")
+			planted := "@echo off\r\n" + `echo PLANTED>> "` + markerPath + `"` + "\r\n" + "exit /b 0\r\n"
+			if err := os.WriteFile(filepath.Join(worktree, "entire.bat"), []byte(planted), 0o700); err != nil {
+				t.Fatalf("plant entire.bat: %v", err)
+			}
 
-	if _, err := os.Stat(markerPath); err == nil {
-		t.Fatalf("the worktree's own entire.bat was executed by the hook wrapper; stderr=%q", stderr)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stat planted marker: %v", err)
+			_, stderr, code := runWindowsWrapperInDir(t, tc.wrapper, false, worktree)
+
+			ran := true
+			if _, err := os.Stat(markerPath); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("stat planted marker: %v", err)
+				}
+				ran = false
+			}
+			if ran != tc.wantRan {
+				t.Fatalf("worktree entire.bat ran = %v, want %v; exit=%d stderr=%q", ran, tc.wantRan, code, stderr)
+			}
+		})
 	}
 }
