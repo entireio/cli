@@ -17,7 +17,7 @@ import (
 //
 // The active context is the preferred identity for both `git clone entire://…`
 // (it authenticates any cluster fronted by its login server) and the
-// control-plane commands (auth status, org/project/repo/grant), which dial the
+// control-plane commands (auth status, org/project/repo), which dial the
 // context's core. Switching takes effect on the next operation; resolution
 // recomputes every time. Activity/search/dispatch take their host from
 // ENTIRE_API_BASE_URL; trail commands route to the repository's owning cell.
@@ -32,7 +32,7 @@ func newAuthUseCmd() *cobra.Command {
 			"a time.\n\n" +
 			"The active context is the identity for every authenticated operation:\n" +
 			"`git clone entire://…`, the control-plane commands (auth status,\n" +
-			"org/project/repo/grant), and the data-API commands (activity, search,\n" +
+			"org/project/repo), and the data-API commands (activity, search,\n" +
 			"trail, dispatch). The switch takes effect on the next operation.\n\n" +
 			"This is persistent and machine-wide — it changes the identity for every\n" +
 			"shell, worktree, and background git hook until you switch back. To act as\n" +

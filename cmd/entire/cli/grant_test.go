@@ -2,23 +2,40 @@ package cli
 
 import (
 	"slices"
+	"strconv"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-func TestValidateGrantRole(t *testing.T) {
+// TestValidateRole covers the one role check every `<noun> grant add` runs:
+// the value matches one of the target's roles exactly (the server enums are
+// lowercase) and the message lists what would have been accepted.
+func TestValidateRole(t *testing.T) {
 	t.Parallel()
-	for _, ok := range []string{"reader", "writer", "admin"} {
-		if err := validateGrantRole(ok); err != nil {
-			t.Errorf("validateGrantRole(%q) = %v, want nil", ok, err)
-		}
+	roles := []string{"reader", "writer", "admin"}
+	for _, ok := range roles {
+		require.NoError(t, validateRole(ok, roles))
 	}
 	for _, bad := range []string{"", "owner", "Reader", "member"} {
-		if err := validateGrantRole(bad); err == nil {
-			t.Errorf("validateGrantRole(%q) expected error", bad)
-		}
+		require.ErrorContains(t, validateRole(bad, roles), "invalid --role "+strconv.Quote(bad)+": must be one of reader, writer, admin")
 	}
+}
+
+// TestGrantTargetRoles pins each target's role set and default against the
+// server's enums: org membership has owner/admin/member with member as the
+// server default, while project and repo access has reader/writer/admin and no
+// default, so --role is required there.
+func TestGrantTargetRoles(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, []string{"owner", "admin", "member"}, orgGrantTarget.roles)
+	require.Equal(t, "member", orgGrantTarget.defaultRole)
+	require.Equal(t, []string{"reader", "writer", "admin"}, projectGrantTarget.roles)
+	require.Empty(t, projectGrantTarget.defaultRole)
+	require.Equal(t, []string{"reader", "writer", "admin"}, repoGrantTarget.roles)
+	require.Empty(t, repoGrantTarget.defaultRole)
 }
 
 func TestGranteeName(t *testing.T) {
@@ -83,38 +100,4 @@ func TestGrantRows(t *testing.T) {
 			t.Errorf("repoGrantRow = %v, want %v", row, want)
 		}
 	})
-}
-
-func TestParseOrgRole(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		in      string
-		want    coreapi.AddOrgMemberInputBodyRole
-		wantErr bool
-	}{
-		{in: "owner", want: coreapi.AddOrgMemberInputBodyRoleOwner},
-		{in: "admin", want: coreapi.AddOrgMemberInputBodyRoleAdmin},
-		{in: "member", want: coreapi.AddOrgMemberInputBodyRoleMember},
-		{in: "", wantErr: true},
-		{in: "viewer", wantErr: true},
-		{in: "Owner", wantErr: true}, // case-sensitive: server enum is lowercase
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			t.Parallel()
-			got, err := parseOrgRole(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parseOrgRole(%q) expected error, got %q", tt.in, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseOrgRole(%q): %v", tt.in, err)
-			}
-			if got != tt.want {
-				t.Errorf("parseOrgRole(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
 }

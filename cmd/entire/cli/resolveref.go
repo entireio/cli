@@ -11,7 +11,7 @@ import (
 )
 
 // Control-plane commands reference orgs and projects by their parent ULID in
-// many places (repo create --project, project create --owner, grant org/project
+// many places (repo create --project, project create --owner, org/project grant
 // <id>, …). ULIDs are unfriendly to type, so these refs also accept a human
 // name: looksLikeULID decides which form was given, and the resolveXRef helpers
 // turn a name into its ULID. A ULID is always passed straight through with no
@@ -193,16 +193,25 @@ func resolveProjectRef(ctx context.Context, c projectRefClient, ref string) (str
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
-	out, err := c.ListProjects(ctx, coreapi.ListProjectsParams{Name: coreapi.NewOptString(ref)})
+	return resolveProjectByName(ctx, c, ref)
+}
+
+// resolveProjectByName is the by-name half of resolveProjectRef, for callers
+// that already know the value is a name: a path segment is one by construction,
+// and a project can legitimately be NAMED like a ULID (the server's rules admit
+// 26 base32 characters), so sending it through the ULID passthrough would
+// silently read a name as an id.
+func resolveProjectByName(ctx context.Context, c projectRefClient, name string) (string, error) {
+	out, err := c.ListProjects(ctx, coreapi.ListProjectsParams{Name: coreapi.NewOptString(name)})
 	if err != nil {
 		if isCoreNotFound(err) {
-			return "", noProjectNamedErr(ref)
+			return "", noProjectNamedErr(name)
 		}
 		return "", fmt.Errorf("list projects: %w", err)
 	}
 	project, ok := out.Project.Get()
 	if !ok {
-		return "", noProjectNamedErr(ref)
+		return "", noProjectNamedErr(name)
 	}
 	return project.ID, nil
 }
@@ -296,6 +305,25 @@ func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef st
 	}
 	if projectRef != "" && looksLikeULID(projectRef) && !strings.EqualFold(projectRef, projID) {
 		return "", projectMismatchErr(projectRef, project, ref)
+	}
+	return resolveRepoInProject(ctx, c, repoName, projID)
+}
+
+// resolveRepoPath resolves the one repo spelling `repo grant` accepts, the
+// native /et/<project>/<repo> path. A ULID or a bare name is refused: the path
+// names the repo the way the API and `repo clone` do, and access management
+// should not need a lookup to know which project it is touching. The grammar
+// is parseNativeCloneRef, shared with clone. Both parsed segments are names by
+// construction, so they take the by-name lookups directly rather than
+// resolveRepoRef, whose ULID passthrough would read a ULID-shaped NAME as an id.
+func resolveRepoPath(ctx context.Context, c repoRefClient, ref string) (string, error) {
+	project, repoName, err := parseNativeCloneRef(ref)
+	if err != nil {
+		return "", fmt.Errorf("repo %q must be a /%s/<project>/<repo> path: %w", ref, nativeCloneForge, err)
+	}
+	projID, err := resolveProjectByName(ctx, c, project)
+	if err != nil {
+		return "", err
 	}
 	return resolveRepoInProject(ctx, c, repoName, projID)
 }

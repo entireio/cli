@@ -344,10 +344,9 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 
 | Command          | Description                                                                       |
 | ---------------- | --------------------------------------------------------------------------------- |
-| `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`)                    |
-| `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`)                         |
-| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`) |
-| `entire grant`   | Manage Entire access grants and org membership (`org`, `project`, `repo`)          |
+| `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`, `grant`)           |
+| `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`, `grant`)                |
+| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`, `protection`, `grant`) |
 | `entire api`     | Make an authenticated request to an Entire API and print the response              |
 
 ### Other
