@@ -471,14 +471,40 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 		// of this operation, remembered so the outage is paid once.
 		return nil, fmt.Errorf("fetch checkpoint ref %s: skipped, an earlier checkpoint-ref fetch already failed in this operation: %w", refName, priorFailure)
 	}
-	if fetchErr := s.refFetcher(ctx, refName); fetchErr != nil {
+	// Both spellings are asked for, canonical first, because the REMOTE can
+	// hold either one. batchPushRefs pushes <ref>:<ref>, keeping the local and
+	// remote spellings deliberately identical, so a machine whose shard bucket
+	// was folded publishes the checkpoint under the folded name — and a clone
+	// that has neither spelling locally (a fresh one, or any case-sensitive
+	// filesystem) would otherwise ask only for the canonical name, be told
+	// "absent", and never see an intact checkpoint. It also strands a
+	// remote-list discovery stub, which ParseRef accepts from the folded remote
+	// name and which then has nothing to hydrate from.
+	//
+	// The second ask costs one extra round-trip on a genuine miss, which is why
+	// it runs on the absence signal alone: a transport failure still returns
+	// immediately, and is still memoized so an outage is paid once.
+	candidates := []plumbing.ReferenceName{refName}
+	if folded, ok := FoldedRefName(cid); ok {
+		candidates = append(candidates, folded)
+	}
+	for _, candidate := range candidates {
+		fetchErr := s.refFetcher(ctx, candidate)
+		if fetchErr == nil {
+			// Re-resolve after a successful fetch. ErrReferenceNotFound here
+			// means the remote genuinely has no such checkpoint; anything else
+			// is a real error. The re-resolve is tolerant for the same reason
+			// the first one is: the fetch writes through the name it asked for
+			// and lands in the folded bucket like any other write.
+			return s.resolveLocalRef(cid)
+		}
 		if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
-			// The fetcher probed the remote and it genuinely lacks this ref
-			// (remote.FetchCheckpointRef's absence signal) — absence, not a
-			// failure, and per-ref, so it is not memoized.
+			// The fetcher probed the remote and it genuinely lacks this
+			// spelling (remote.FetchCheckpointRef's absence signal) — absence,
+			// not a failure, and per-ref, so it is not memoized.
 			logging.Debug(ctx, "git-refs: remote has no such checkpoint ref",
-				slog.String("ref", refName.String()))
-			return nil, plumbing.ErrReferenceNotFound
+				slog.String("ref", candidate.String()))
+			continue
 		}
 		// Memoize only network verdicts: a cancellation originating from the
 		// CALLER's context says nothing about the remote and must not poison
@@ -491,19 +517,10 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 			s.fetchFailureMu.Unlock()
 		}
 		logging.Debug(ctx, "git-refs: on-demand checkpoint ref fetch failed",
-			slog.String("ref", refName.String()), slog.String("error", fetchErr.Error()))
-		return nil, fmt.Errorf("fetch checkpoint ref %s: %w", refName, fetchErr)
+			slog.String("ref", candidate.String()), slog.String("error", fetchErr.Error()))
+		return nil, fmt.Errorf("fetch checkpoint ref %s: %w", candidate, fetchErr)
 	}
-	// Re-resolve after a successful fetch. ErrReferenceNotFound here means the
-	// remote genuinely has no such checkpoint; anything else is a real error.
-	// The re-resolve is tolerant for the same reason the first one is: the fetch
-	// writes through the canonical name and lands in the folded bucket like any
-	// other write.
-	ref, err = s.resolveLocalRef(cid)
-	if err != nil {
-		return nil, err
-	}
-	return ref, nil
+	return nil, plumbing.ErrReferenceNotFound
 }
 
 // sessionTree resolves the FetchingTree for one session within a checkpoint ref.

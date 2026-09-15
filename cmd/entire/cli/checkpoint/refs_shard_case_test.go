@@ -252,3 +252,66 @@ func TestGitRefsStore_ListDedupesForkedShardSpellings(t *testing.T) {
 		"the listing must show the ref Read serves, not the stranded twin")
 	assert.Len(t, summary.Sessions, 2)
 }
+
+// TestGitRefsStore_FetchesFoldedRefFromRemote covers the cross-machine half:
+// the checkpoint was written on a machine whose shard bucket was folded, so it
+// reached the remote under the folded spelling (batchPushRefs pushes
+// <ref>:<ref>). A clone with NEITHER spelling locally must ask the remote for
+// both before concluding the checkpoint does not exist.
+func TestGitRefsStore_FetchesFoldedRefFromRemote(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	canonical := mustRefName(t, foldableULID)
+	foldedName, ok := FoldedRefName(foldableULID)
+	require.True(t, ok)
+
+	refsWrite(t, store, foldableULID, "sess-1", "transcript")
+	ref, err := store.repo.Reference(canonical, true)
+	require.NoError(t, err)
+	commitHash := ref.Hash()
+
+	// Drop every local spelling: this clone has only what it can fetch.
+	require.NoError(t, store.repo.Storer.RemoveReference(canonical))
+	_, err = store.repo.Reference(canonical, true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "precondition: nothing resolves locally")
+
+	// A remote that holds the folded spelling and nothing else.
+	var asked []string
+	store.SetRefFetcher(func(_ context.Context, rn plumbing.ReferenceName) error {
+		asked = append(asked, rn.String())
+		if rn != foldedName {
+			return plumbing.ErrReferenceNotFound
+		}
+		return store.repo.Storer.SetReference(plumbing.NewHashReference(rn, commitHash))
+	})
+
+	summary, err := store.Read(ctx, foldableULID)
+	require.NoError(t, err)
+	require.NotNil(t, summary, "a checkpoint published under the folded spelling must still read")
+	assert.Equal(t, foldableULID, summary.CheckpointID)
+	assert.Equal(t, []string{canonical.String(), foldedName.String()}, asked,
+		"canonical first, folded only after the remote reports the canonical one absent")
+}
+
+// A transport failure must still return immediately rather than spending a
+// second round-trip on the other spelling: the memo exists so one outage is
+// paid once, and "the remote is unreachable" is not per-spelling news.
+func TestGitRefsStore_FetchFailureDoesNotRetryFoldedSpelling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := newRefsStore(t)
+	refsWrite(t, store, foldableULID, "sess-1", "transcript")
+	require.NoError(t, store.repo.Storer.RemoveReference(mustRefName(t, foldableULID)))
+
+	asked := 0
+	store.SetRefFetcher(func(_ context.Context, _ plumbing.ReferenceName) error {
+		asked++
+		return assert.AnError
+	})
+
+	_, err := store.Read(ctx, foldableULID)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrCheckpointNotFound, "an outage must not be reported as absence")
+	assert.Equal(t, 1, asked, "a transport failure ends the lookup; it does not try the other spelling")
+}
