@@ -367,9 +367,10 @@ func TestFileStore_Reads0600FileWithoutWarning(t *testing.T) {
 }
 
 // BackendDescription pins: user-facing provenance wording must track the env
-// the way resolveBackendLocked does. Not parallel: t.Setenv.
+// the way resolveBackend does. Not parallel: t.Setenv.
 func TestBackendDescription_Keyring(t *testing.T) {
 	t.Setenv(BackendEnvVar, "")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	got := BackendDescription()
 	if got != keyringProviderName() {
 		t.Fatalf("BackendDescription() = %q, want the per-OS keyring name %q", got, keyringProviderName())
@@ -388,7 +389,7 @@ func TestBackendDescription_FileWithExplicitPath(t *testing.T) {
 }
 
 // The default file location is tokens.json in the per-user config dir — this
-// is production routing (resolveBackendLocked uses the same helper), so a
+// is production routing (defaultFileStore uses the same helper), so a
 // typo'd default would relocate real users' token files.
 func TestFileBackendPath_DefaultsToConfigDirTokensJSON(t *testing.T) {
 	cfgDir := t.TempDir()
@@ -474,24 +475,33 @@ func TestFileStore_TightensOwnedDirectory(t *testing.T) {
 	}
 }
 
+// explicitFileStore unwraps the *fileStore behind an explicit
+// ENTIRE_TOKEN_STORE=file selection, which resolves to a recordingStore.
+func explicitFileStore(t *testing.T, label string) *fileStore {
+	t.Helper()
+	got := resolveBackendLocked()
+	rec, ok := got.(recordingStore)
+	if !ok {
+		t.Fatalf("%s: got %T, want recordingStore for an explicit env selection", label, got)
+	}
+	fs, ok := rec.inner.(*fileStore)
+	if !ok {
+		t.Fatalf("%s: inner = %T, want *fileStore", label, rec.inner)
+	}
+	return fs
+}
+
 func TestResolveBackend_OwnsDirOnlyForTheDefaultPath(t *testing.T) {
 	t.Setenv(BackendEnvVar, "file")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	t.Setenv(PathEnvVar, "")
-	def, ok := resolveBackendLocked().(*fileStore)
-	if !ok {
-		t.Fatalf("default path: got %T, want *fileStore", resolveBackendLocked())
-	}
-	if !def.ownsDir {
+	if def := explicitFileStore(t, "default path"); !def.ownsDir {
 		t.Error("default path: ownsDir = false, want true")
 	}
 
 	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
-	custom, ok := resolveBackendLocked().(*fileStore)
-	if !ok {
-		t.Fatalf("custom path: got %T, want *fileStore", resolveBackendLocked())
-	}
-	if custom.ownsDir {
+	if custom := explicitFileStore(t, "custom path"); custom.ownsDir {
 		t.Error("custom path: ownsDir = true, want false")
 	}
 }

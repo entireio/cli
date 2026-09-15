@@ -2,8 +2,10 @@
 // entiredb and entire-core CLIs.
 //
 // By default it delegates to the OS keyring (macOS Keychain, Linux Secret
-// Service, etc.). Set ENTIRE_TOKEN_STORE=file to use a JSON file instead,
-// which is useful in CI environments that lack a keyring daemon.
+// Service, etc.). Set ENTIRE_TOKEN_STORE=file to use a JSON file instead. On
+// Linux and the BSDs the CLI switches to the file on its own when the keyring
+// is unavailable, and remembers the choice in token_store.json next to
+// contexts.json — see preference.go and fallback.go.
 //
 // When using the file backend the tokens are stored in
 // $ENTIRE_TOKEN_STORE_PATH (default: tokens.json in the per-user config
@@ -19,8 +21,10 @@
 package tokenstore
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -93,9 +97,13 @@ func currentBackend() store {
 	return backend
 }
 
-// BackendEnvVar selects the credential backend: set to "file" to use the
-// JSON file store instead of the OS keyring. PathEnvVar overrides where the
-// file store lives (default: tokens.json in the per-user config directory).
+// BackendEnvVar selects the credential backend explicitly: "file" uses the
+// JSON file store, any other non-empty value (canonically "keyring") uses the
+// OS keyring. An explicit selection is never overridden by the remembered
+// preference and never falls back; a successful write through it becomes the
+// remembered preference (see preference.go). Unset means: remembered
+// preference, else the platform default. PathEnvVar overrides where the file
+// store lives (default: tokens.json in the per-user config directory).
 // Exported so user-facing guidance (e.g. login's headless hint) names the
 // same variables this package actually reads.
 const (
@@ -103,18 +111,35 @@ const (
 	PathEnvVar    = "ENTIRE_TOKEN_STORE_PATH"
 )
 
-// FileBackendSelected reports whether the environment selects the file
-// backend — the single predicate shared by backend resolution, provenance
-// wording, and login's headless hint, so they can never disagree.
+// selectedBackend reports which backend the environment and the remembered
+// preference pick: BackendEnvVar when set, else the marker. "" means neither
+// said anything and the platform default applies. resolveBackend reads the
+// two inputs separately (an explicit selection is recorded after a write, a
+// remembered one is not); this is the combined view for callers that only
+// ask "which store?".
+func selectedBackend() string {
+	if v := os.Getenv(BackendEnvVar); v != "" {
+		if v == backendFile {
+			return backendFile
+		}
+		return backendKeyring
+	}
+	return persistedBackend()
+}
+
+// FileBackendSelected reports whether the file backend is selected, by the
+// environment or by the remembered preference — the single predicate shared
+// by provenance wording and login's headless hint, so they can never disagree
+// with each other or with resolution.
 func FileBackendSelected() bool {
-	return os.Getenv(BackendEnvVar) == "file"
+	return selectedBackend() == backendFile
 }
 
 // BackendDescription names the credential backend the current environment
-// resolves to, for user-facing provenance lines (e.g. `entire auth status`).
-// It mirrors resolveBackendLocked's env semantics — the production resolution
-// — rather than introspecting the live backend, so test-only overrides don't
-// leak into user-facing wording.
+// and remembered preference resolve to, for user-facing provenance lines
+// (e.g. `entire auth status`). It mirrors selectedBackend — the production
+// resolution — rather than introspecting the live backend, so test-only
+// overrides don't leak into user-facing wording.
 func BackendDescription() string {
 	if FileBackendSelected() {
 		return "file " + FileBackendPath()
@@ -160,27 +185,109 @@ func fileBackendPathChecked() (string, error) {
 	return filepath.Join(dir, tokenStoreFileName), nil
 }
 
-func resolveBackendLocked() store {
-	if FileBackendSelected() {
-		// Entire owns the directory only when it also picked it: an
-		// explicit PathEnvVar names a location the user chose, and its
-		// mode is theirs to set.
-		//
-		// pathErr is carried rather than resolved here: this function has no
-		// error return, and swallowing it is what put tokens in the working
-		// directory. Every operation reports it before touching the filesystem.
-		path, pathErr := fileBackendPathChecked()
-		return &fileStore{path: path, pathErr: pathErr, ownsDir: os.Getenv(PathEnvVar) == ""}
+// defaultFileStore is the file store at FileBackendPath. Entire owns the
+// directory only when it also picked it: an explicit PathEnvVar names a
+// location the user chose, and its mode is theirs to set.
+//
+// pathErr is carried rather than resolved here because the callers have no
+// error return, and swallowing it is what once put tokens in the working
+// directory. Every operation reports it before touching the filesystem.
+func defaultFileStore() *fileStore {
+	path, pathErr := fileBackendPathChecked()
+	return &fileStore{path: path, pathErr: pathErr, ownsDir: os.Getenv(PathEnvVar) == ""}
+}
+
+// backendInputs are the facts resolveBackend decides on. resolveBackendLocked
+// gathers them once so the decision is a pure function tests can drive
+// through every branch — including the keyring branches that `go test` never
+// reaches on its own, because the testdirs store sits in front of them.
+type backendInputs struct {
+	envValue   string // BackendEnvVar, "" when unset
+	remembered string // persistedBackend(), consulted only when envValue is ""
+	testDir    string // testdirs.Dir("tokenstore"); "" outside `go test`
+	goos       string // runtime.GOOS
+}
+
+// resolveBackend applies the precedence documented on BackendEnvVar:
+// explicit env, then remembered preference, then the test store, then the
+// platform default. Under `go test` the test store must beat the keyring so a
+// test that forgets UseFileBackendForTesting cannot write real keychain
+// entries; the remembered preference beats the test store because a test
+// that wrote the marker is testing exactly that. The decision is pure over
+// its inputs; constructing a file store still reads the path environment
+// (PathEnvVar and the config dir), which is why the tests that reach those
+// branches isolate it.
+func resolveBackend(in backendInputs) store {
+	if in.envValue != "" {
+		if in.envValue == backendFile {
+			return recordingStore{inner: defaultFileStore(), name: backendFile}
+		}
+		return recordingStore{inner: keyringStore{}, name: backendKeyring}
 	}
-	// Under `go test`, never fall through to the real OS keyring: a test
-	// that forgets tokenstore.UseFileBackendForTesting would otherwise write
-	// real keychain entries. The fallback file is per-process; tests that
-	// need isolation from each other still swap in a per-test file via
-	// UseFileBackendForTesting.
-	if dir, ok := testdirs.Dir("tokenstore"); ok {
-		return &fileStore{path: filepath.Join(dir, "tokens.json"), ownsDir: true}
+	if in.remembered == backendFile {
+		return defaultFileStore()
+	}
+	if in.testDir != "" {
+		return &fileStore{path: filepath.Join(in.testDir, "tokens.json"), ownsDir: true}
+	}
+	if isSecretServicePlatform(in.goos) {
+		return newFallbackStore(keyringStore{})
 	}
 	return keyringStore{}
+}
+
+func resolveBackendLocked() store {
+	in := backendInputs{envValue: os.Getenv(BackendEnvVar), goos: runtime.GOOS}
+	if dir, ok := testdirs.Dir("tokenstore"); ok {
+		in.testDir = dir
+		// Under `go test`, an explicit keyring selection inherited from the
+		// developer's shell is not a test asking for the real OS keyring:
+		// drop it so the test store still wins. An explicit "file" stays
+		// honoured, since the file store is what the test harnesses select
+		// on purpose. The pure resolver below keeps honouring the explicit
+		// value; only this gathering step knows it is running under test.
+		if in.envValue != "" && in.envValue != backendFile {
+			in.envValue = ""
+		}
+	}
+	if in.envValue == "" {
+		in.remembered = persistedBackend()
+	}
+	return resolveBackend(in)
+}
+
+// recordingStore wraps the backend BackendEnvVar selected explicitly and,
+// after each successful write, remembers that selection — so a one-off
+// `ENTIRE_TOKEN_STORE=file entire login` sticks for every later process, and
+// an explicit keyring login clears a stale file preference. Reads and deletes
+// learn nothing and pass straight through.
+type recordingStore struct {
+	inner store
+	name  string
+}
+
+func (r recordingStore) Get(service, user string) (string, error) {
+	//nolint:wrapcheck // thin wrapper, callers handle errors
+	return r.inner.Get(service, user)
+}
+
+func (r recordingStore) Set(service, user, password string) error {
+	if err := r.inner.Set(service, user, password); err != nil {
+		//nolint:wrapcheck // thin wrapper, callers handle errors
+		return err
+	}
+	if err := rememberBackend(r.name); err != nil {
+		// The credential is stored; failing to remember where is a
+		// degradation (the next process may need ENTIRE_TOKEN_STORE), not a
+		// failed login. Say so rather than failing or staying silent.
+		fmt.Fprintf(fallbackNoticeW, "Warning: could not remember the token store choice: %v\n", err)
+	}
+	return nil
+}
+
+func (r recordingStore) Delete(service, user string) error {
+	//nolint:wrapcheck // thin wrapper, callers handle errors
+	return r.inner.Delete(service, user)
 }
 
 // Get retrieves a credential.
