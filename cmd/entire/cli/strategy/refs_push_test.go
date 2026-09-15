@@ -71,6 +71,39 @@ func TestPartitionLocalRefs(t *testing.T) {
 	assert.Equal(t, []plumbing.ReferenceName{stale}, missing, "absent ref is stale")
 }
 
+func TestPushQueuedCheckpointRefs_NormalizesFoldedShardRef(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	cid := id.MustCheckpointID("01M2DCHJCHTR9T9MZTSB7WV76B")
+	canonical := mustRefName(t, cid)
+	folded, ok := checkpoint.FoldedRefName(cid)
+	require.True(t, ok)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(folded, head.Hash())))
+	testutil.RunGit(t, workDir, "pack-refs", "--all")
+
+	// Reopen after packing: this models a later pre-push process with only the
+	// canonical spelling left in its queue from before folded-ref support.
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{canonical})
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, 1, pushed)
+	assert.NotEmpty(t, remoteRefHash(t, bareDir, folded), "the folded ref must reach the remote")
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "the obsolete canonical queue spelling must be removed")
+}
+
 func TestBatchPushRefs(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)
