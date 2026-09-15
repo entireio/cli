@@ -5,7 +5,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -458,7 +457,6 @@ func filesWithRemainingAgentChanges(
 	}
 	keep := make([]bool, len(filesTouched))
 	var candidates []worktreeCandidate
-	candidateFiles := make(map[string]*object.File)
 
 	for i, filePath := range filesTouched {
 		// Skip files absent from the shadow tree — nothing to carry forward.
@@ -510,13 +508,42 @@ func filesWithRemainingAgentChanges(
 			commitMode: commitFile.Mode,
 			shadowHash: shadowFile.Hash,
 		})
-		candidateFiles[filePath] = commitFile
 	}
 
-	workingTreeClean := WorktreeMatchesCommitted(logCtx, worktreeRoot, candidateFiles)
+	worktreeHashes := make(map[string]plumbing.Hash)
+	if worktreeRoot != "" && len(candidates) > 0 {
+		paths := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			// hash-object follows symlinks and hashes target content, while a Git
+			// symlink blob stores the target path. Compare either side of a mode
+			// mismatch through the confined fallback instead.
+			if !requiresConfinedWorktreeHash(worktreeRoot, candidate.path, candidate.commitMode) {
+				paths = append(paths, candidate.path)
+			}
+		}
+		var err error
+		worktreeHashes, err = gitrepo.HashWorktreeFiles(ctx, worktreeRoot, paths)
+		if err != nil {
+			logging.Warn(logCtx, "native git could not hash every carry-forward candidate; checking failed paths conservatively without clean filters",
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 
 	for _, candidate := range candidates {
-		if workingTreeClean[candidate.path] {
+		workingTreeClean := false
+		if worktreeHash, ok := worktreeHashes[candidate.path]; ok {
+			// Equal, not ==: plumbing.Hash carries an object-format field
+			// alongside its bytes, and `==` compares that field too. FromHex
+			// leaves it unset for a 40-char hash while stamping SHA256 on a
+			// 64-char one, so `==` only works while the tree decoder happens to
+			// agree. If it ever stamped "sha1", every candidate would read dirty
+			// and the phantom carry-forward would return with no test failing.
+			workingTreeClean = worktreeHash.Equal(candidate.commitHash)
+		} else if worktreeRoot != "" {
+			workingTreeClean = workingTreeMatchesBlob(worktreeRoot, candidate.path, candidate.commitMode, candidate.commitHash)
+		}
+		if workingTreeClean {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content differs from shadow but working tree is clean, skipping",
 				slog.String("file", candidate.path),
 				slog.String("commit_hash", candidate.commitHash.String()[:7]),
@@ -547,71 +574,6 @@ func filesWithRemainingAgentChanges(
 	)
 
 	return remaining
-}
-
-// WorktreeMatchesCommitted reports, per path, whether the working tree still
-// holds the content the commit holds, judged the way `git status` judges it.
-// Native hash-object applies the path's clean filters (core.autocrlf, LFS,
-// ident), so a CRLF working copy of an LF-normalized blob matches. When only raw
-// bytes match, a private index comparison asks Git whether a legacy CRLF blob
-// is exempt from normalization. Raw equality alone cannot override an explicit
-// text attribute or clean filter. Symlink blobs and paths Git
-// cannot hash take the confined raw comparison only, because hash-object
-// follows a link and hashes the target's content while the blob stores the
-// target path. Modes are not compared: an executable-bit-only change reads as
-// committed. An empty worktreeRoot matches nothing. Warnings are logged on ctx,
-// so callers pass the context carrying their component.
-func WorktreeMatchesCommitted(ctx context.Context, worktreeRoot string, files map[string]*object.File) map[string]bool {
-	matches := make(map[string]bool, len(files))
-	if worktreeRoot == "" || len(files) == 0 {
-		return matches
-	}
-	// Share one budget across hashing and the exceptional index comparison.
-	ctx, cancel := context.WithTimeout(ctx, gitrepo.WorktreeContentHashBudget)
-	defer cancel()
-
-	paths := make([]string, 0, len(files))
-	for path, file := range files {
-		if !requiresConfinedWorktreeHash(worktreeRoot, path, file.Mode) {
-			paths = append(paths, path)
-		}
-	}
-	worktreeHashes, err := gitrepo.HashWorktreeFiles(ctx, worktreeRoot, paths)
-	if err != nil {
-		logging.Warn(ctx, "native git could not hash every working-tree candidate; checking failed paths conservatively without clean filters",
-			slog.String("error", err.Error()),
-		)
-	}
-
-	var ambiguous map[string]*object.File
-	for path, file := range files {
-		worktreeHash, hashed := worktreeHashes[path]
-		// Equal compares hash bytes without depending on object-format metadata.
-		if hashed && worktreeHash.Equal(file.Hash) {
-			matches[path] = true
-			continue
-		}
-		rawMatch := workingTreeMatchesBlob(worktreeRoot, path, file.Mode, file.Hash)
-		if !hashed {
-			matches[path] = rawMatch
-		} else if rawMatch {
-			if ambiguous == nil {
-				ambiguous = make(map[string]*object.File)
-			}
-			ambiguous[path] = file
-		}
-	}
-	if len(ambiguous) > 0 {
-		confirmed, err := gitrepo.MatchWorktreeFiles(ctx, worktreeRoot, ambiguous)
-		if err != nil {
-			logging.Warn(ctx, "could not confirm legacy working-tree matches; retaining candidates",
-				slog.String("error", err.Error()))
-		}
-		for path, match := range confirmed {
-			matches[path] = match
-		}
-	}
-	return matches
 }
 
 func requiresConfinedWorktreeHash(worktreeRoot, filePath string, commitMode filemode.FileMode) bool {
@@ -650,16 +612,13 @@ func workingTreeMatchesBlob(worktreeRoot, filePath string, commitMode filemode.F
 		return false
 	}
 	var diskContent []byte
-	if commitMode == filemode.Symlink && isSymlinkOnDisk(root, name) {
+	if commitMode == filemode.Symlink {
 		target, readErr := root.Readlink(name)
 		if readErr != nil {
 			return false
 		}
 		diskContent = []byte(target)
 	} else {
-		// Under core.symlinks=false git checks a symlink blob out as a regular
-		// file holding the link text and keeps mode 120000 on add, so the raw
-		// bytes are what the blob stores.
 		diskContent, err = osroot.ReadFileNoFollow(root, name)
 		if err != nil {
 			return false
@@ -674,11 +633,6 @@ func workingTreeMatchesBlob(worktreeRoot, filePath string, commitMode filemode.F
 		return false
 	}
 	return commitHash.Equal(h.Sum())
-}
-
-func isSymlinkOnDisk(root *os.Root, name string) bool {
-	info, err := root.Lstat(name)
-	return err == nil && info.Mode()&fs.ModeSymlink != 0
 }
 
 // subtractFilesByName returns files from filesTouched that are NOT in committedFiles.

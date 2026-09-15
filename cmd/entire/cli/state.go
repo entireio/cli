@@ -23,7 +23,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 )
 
 // PrePromptState stores the state captured before a user prompt
@@ -327,14 +328,11 @@ func detectFileChanges(ctx context.Context, previouslyUntracked []string, status
 
 // filterToUncommittedFiles removes files from the list that are already committed to HEAD
 // with matching content. This prevents re-adding files that an agent committed mid-turn
-// (already condensed by PostCommit) back to FilesTouched via SaveStep, which would mint a
-// shadow branch nothing condenses again. "Matching" is Git's verdict on content, clean
-// filters applied (strategy.WorktreeMatchesCommitted): a CRLF working copy of an LF blob
-// under core.autocrlf is committed; the executable bit is not compared. Files not in HEAD
-// or with different content in the working tree are kept. Repository or HEAD lookup
-// failures return the original list. Comparison failures are handled per path: successful
-// matches are still removed, failed hashes use a confined raw comparison, and paths
-// that cannot be confirmed as committed are kept.
+// (already condensed by PostCommit) back to FilesTouched via SaveStep. Files not in
+// HEAD or with different content in the working tree are kept. If raw bytes differ,
+// native Git hashing also checks for clean-filter equivalence, such as a CRLF working
+// copy of an LF blob. Repository/HEAD errors keep the original list; unreadable paths
+// and paths whose normalized content cannot be confirmed are kept individually.
 func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot string) []string {
 	if len(files) == 0 {
 		return files
@@ -363,29 +361,65 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 
 	logCtx := logging.WithComponent(ctx, "filter-uncommitted")
 
-	// relPath comes from git, so it is already the coordinate both the tree
-	// lookup and the working-tree hash read in.
-	committed := make(map[string]*object.File, len(files))
+	var result []string
+	var candidates []string
+	headHashes := make(map[string]plumbing.Hash)
 	for _, relPath := range files {
-		headFile, fileErr := headTree.File(relPath)
-		if fileErr != nil {
+		headFile, err := headTree.File(relPath)
+		if err != nil {
+			// File not in HEAD — it's uncommitted
 			logging.Debug(logCtx, "file not in HEAD tree, keeping",
 				slog.String("file", relPath),
-				slog.String("error", fileErr.Error()))
+				slog.String("error", err.Error()))
+			result = append(result, relPath)
 			continue
 		}
-		committed[relPath] = headFile
-	}
-	matches := strategy.WorktreeMatchesCommitted(logCtx, repoRoot, committed)
 
-	var result []string
-	for _, relPath := range files {
-		if !matches[relPath] {
+		// File is in HEAD — compare content with working tree, through the
+		// worktree's shared root. relPath comes from git, so it is already the
+		// coordinate the root reads in.
+		workingContent, ok := readWorktreeFileSafely(repoRoot, relPath)
+		if !ok {
+			// Can't read working tree file (deleted?) — keep it
 			result = append(result, relPath)
+			continue
 		}
+
+		headContent, err := headFile.Contents()
+		if err != nil {
+			result = append(result, relPath)
+			continue
+		}
+
+		if string(workingContent) != headContent {
+			result = append(result, relPath)
+			if headFile.Mode == filemode.Regular || headFile.Mode == filemode.Executable {
+				candidates = append(candidates, relPath)
+				headHashes[relPath] = headFile.Hash
+			}
+		}
+		// else: content matches HEAD — already committed, skip
 	}
 
-	return result
+	if len(candidates) == 0 {
+		return result
+	}
+
+	// Only raw mismatches need Git's clean filters. Keep successful hashes even
+	// when another path fails, without changing the existing raw-match behavior.
+	hashes, err := gitrepo.HashWorktreeFiles(logCtx, repoRoot, candidates)
+	if err != nil {
+		logging.Warn(logCtx, "could not normalize every candidate; keeping unconfirmed files",
+			slog.String("error", err.Error()))
+	}
+	kept := result[:0]
+	for _, relPath := range result {
+		if hash, ok := hashes[relPath]; ok && hash.Equal(headHashes[relPath]) {
+			continue
+		}
+		kept = append(kept, relPath)
+	}
+	return kept
 }
 
 // FilterAndNormalizePaths converts absolute paths to relative and filters out
