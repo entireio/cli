@@ -59,6 +59,11 @@ var markerWarnOnce = new(sync.Once)
 // recovers the same fact the slow way, but it is reported once on stderr: on a
 // platform with no fallback, silence would reproduce the very "not logged in"
 // symptom this file exists to remove.
+//
+// Deliberately not memoized: switchTo writes the marker mid-process, and the
+// next BackendDescription()/FileBackendSelected() must see it — that is what
+// keeps `auth status`'s provenance line right after an in-process fallback.
+// It is one small root-confined read; do not "optimize" it with a sync.Once.
 func persistedBackend() string {
 	root, err := userdirs.ConfigRootForRead()
 	if err != nil {

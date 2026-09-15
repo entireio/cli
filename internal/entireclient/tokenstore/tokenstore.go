@@ -21,6 +21,7 @@
 package tokenstore
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -261,8 +262,9 @@ func resolveBackendLocked() store {
 // recordingStore wraps the backend BackendEnvVar selected explicitly and,
 // after each successful write, remembers that selection — so a one-off
 // `ENTIRE_TOKEN_STORE=file entire login` sticks for every later process, and
-// an explicit keyring login clears a stale file preference. Reads and deletes
-// learn nothing and pass straight through.
+// an explicit keyring login clears a stale file preference and removes the
+// superseded copy of that credential from the default-path file store. Reads
+// and deletes learn nothing and pass straight through.
 type recordingStore struct {
 	inner store
 	name  string
@@ -284,7 +286,26 @@ func (r recordingStore) Set(service, user, password string) error {
 		// failed login. Say so rather than failing or staying silent.
 		fmt.Fprintf(fallbackNoticeW, "Warning: could not remember the token store choice: %v\n", err)
 	}
+	if r.name == backendKeyring {
+		removeSupersededFileCopy(service, user)
+	}
 	return nil
+}
+
+// removeSupersededFileCopy deletes the (service, user) entry from the
+// default-path file store after an explicit keyring write. Clearing the marker
+// alone would leave a live bearer in tokens.json: a plaintext copy the user
+// just chose to stop using, and one the Linux fallback would re-adopt on the
+// next transient keyring failure (see switchTo in fallback.go). Only the
+// default path is touched — a store named through PathEnvVar is the user's to
+// manage — and a missing entry is the normal case.
+func removeSupersededFileCopy(service, user string) {
+	if !markerApplies() {
+		return
+	}
+	if err := defaultFileStore().Delete(service, user); err != nil && !errors.Is(err, ErrNotFound) {
+		fmt.Fprintf(fallbackNoticeW, "Warning: could not remove the superseded copy of this credential from %s: %v\n", FileBackendPath(), err)
+	}
 }
 
 func (r recordingStore) Delete(service, user string) error {

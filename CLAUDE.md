@@ -1812,7 +1812,10 @@ env token has none of, so it stays on the active context.
 `internal/entireclient/tokenstore` picks the backend once per process, in
 `resolveBackend`, from three inputs in strict precedence: `ENTIRE_TOKEN_STORE`
 when set (`file`, or anything else meaning the keyring; explicit, never falls
-back, and a successful write through it is remembered), then the remembered
+back, and a successful write through it is remembered; an explicit keyring write
+also removes the superseded copy of that credential from the default-path
+`tokens.json`, so a plaintext bearer does not linger for the fallback to
+re-adopt), then the remembered
 preference in `<config dir>/token_store.json` (`preference.go` — it records
 **the backend that last received a write**, so reads consult it and only writes
 change it; it is never written while `ENTIRE_TOKEN_STORE_PATH` is set, because
@@ -1837,9 +1840,10 @@ them. And `resolveBackendLocked` drops an explicit non-`file`
 `ENTIRE_TOKEN_STORE` when it detects a test process, so a `keyring` exported in
 a developer's shell cannot route a test's writes to the real OS keyring; only
 the pure resolver honours it, and only its own tests exercise that branch.
-Do not spell the config-dir string resolver's call in a comment anywhere under
-`internal/` or `cmd/`: the consumer ledger guard is a `git grep` and reads a
-mention as a call.
+Do not spell the config-dir string resolver's call in a comment in a non-test
+`.go` file under `internal/` or `cmd/` (the guard's pathspec skips `_test.go`
+files and two named non-consumers): the consumer ledger guard is a `git grep`
+and reads a mention as a call.
 
 A Get that misses in both stores returns the keyring error, not `ErrNotFound`,
 and `auth status` renders it as "could not be read from …" rather than "Not
