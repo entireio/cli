@@ -143,20 +143,62 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 // pre-fetches and verifies the ref's presence itself (refreshCheckpoint)
 // before writing, so the local-only probe is safe there too.
 func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
-	refName, err := RefName(cid)
-	if err != nil {
-		return plumbing.ZeroHash, nil, err
-	}
-	ref, err := s.repo.Reference(refName, true)
+	ref, err := s.resolveLocalRef(cid)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return plumbing.ZeroHash, nil, nil // no ref yet → new checkpoint (orphan)
 	}
 	if err != nil {
 		// A real lookup failure (IO/corruption), not an absent ref: surface it
 		// rather than silently starting a fresh orphan history over the ref.
-		return plumbing.ZeroHash, nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+		return plumbing.ZeroHash, nil, err
 	}
 	return s.refTip(cid, ref)
+}
+
+// resolveLocalRef resolves cid's checkpoint ref from LOCAL refs alone, trying
+// the canonical RefName spelling first and then the case-folded one.
+//
+// The fallback is not defensive tidying. On a case-insensitive-but-case-
+// preserving filesystem a ref is written THROUGH the canonical name but STORED
+// under whichever spelling already named its shard bucket, and the two agree
+// only while the ref is loose, because there the filesystem resolves the
+// canonical name onto the folded directory for us. git pack-refs — which git gc
+// --auto runs on its own — then moves the ref into packed-refs under its
+// stored, folded name, where lookup is an exact string match and the canonical
+// name stops resolving. Without the fallback the checkpoint reads as absent:
+// Read reports ErrCheckpointNotFound for an intact checkpoint, and refBase
+// hands the writer a ZeroHash parent, restarting the checkpoint's history as an
+// orphan under a second ref. See FoldedRefName for why exactly one extra
+// lookup is exhaustive rather than a heuristic.
+//
+// It reports plumbing.ErrReferenceNotFound only when NEITHER spelling resolves,
+// so callers keep distinguishing absence from an IO failure.
+func (s *gitRefsStore) resolveLocalRef(cid id.CheckpointID) (*plumbing.Reference, error) {
+	refName, err := RefName(cid)
+	if err != nil {
+		return nil, err
+	}
+	ref, err := s.repo.Reference(refName, true)
+	if err == nil {
+		return ref, nil
+	}
+	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
+	folded, ok := FoldedRefName(cid)
+	if !ok {
+		return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
+	}
+	foldedRef, foldedErr := s.repo.Reference(folded, true)
+	if foldedErr == nil {
+		return foldedRef, nil
+	}
+	if !errors.Is(foldedErr, plumbing.ErrReferenceNotFound) {
+		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", folded, foldedErr)
+	}
+	// Absent under both spellings: report the canonical miss, so the error
+	// names the ref the caller asked for.
+	return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
 }
 
 // refBaseForBackfill resolves like refBase, but a ref missing locally is
@@ -221,13 +263,43 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 	}
 }
 
+// writeRefName is the ref spelling a write must target: the one an existing ref
+// already uses — which may be the case-folded shard, see resolveLocalRef — and
+// the canonical RefName for a checkpoint that has none.
+//
+// Writing through the canonical name unconditionally is what forks a folded
+// checkpoint in two once packing has taken away the filesystem's case-
+// insensitive resolution: refBase finds the old ref and hands back its tip,
+// while the CAS update creates a SECOND ref at the canonical spelling. The
+// compare-and-swap cannot succeed there either, since git resolves the expected
+// old value under the name being updated and that name holds nothing.
+//
+// A resolution failure falls back to the canonical name rather than failing the
+// write: the checkpoint write is the operation that matters, and a real IO
+// problem resurfaces immediately in updatePersistentRef's CAS.
+//
+// The push queue is enqueued with the name this returns, which is deliberate:
+// it is the spelling that actually resolves locally, so the refspec works, and
+// another clone reads whichever spelling arrives back through the same fallback.
+func (s *gitRefsStore) writeRefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
+	canonical, err := RefName(cid)
+	if err != nil {
+		return "", err
+	}
+	ref, err := s.resolveLocalRef(cid)
+	if err != nil {
+		return canonical, nil //nolint:nilerr // absent or unreadable → write the canonical name
+	}
+	return ref.Name(), nil
+}
+
 func (s *gitRefsStore) updateCheckpointRef(
 	ctx context.Context,
 	cid id.CheckpointID,
 	base func() (plumbing.Hash, *object.Tree, error),
 	build func(parentHash plumbing.Hash, existing *object.Tree) (plumbing.Hash, error),
 ) error {
-	refName, err := RefName(cid)
+	refName, err := s.writeRefName(cid)
 	if err != nil {
 		return err
 	}
@@ -381,15 +453,15 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 	if err != nil {
 		return nil, err
 	}
-	ref, err := s.repo.Reference(refName, true)
+	ref, err := s.resolveLocalRef(cid)
 	if err == nil {
 		return ref, nil
 	}
 	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+		return nil, err
 	}
 	if s.refFetcher == nil {
-		return nil, err //nolint:wrapcheck // genuinely absent; caller maps ErrReferenceNotFound to ErrCheckpointNotFound
+		return nil, err
 	}
 	s.fetchFailureMu.Lock()
 	priorFailure := s.fetchFailure
@@ -424,9 +496,12 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 	}
 	// Re-resolve after a successful fetch. ErrReferenceNotFound here means the
 	// remote genuinely has no such checkpoint; anything else is a real error.
-	ref, err = s.repo.Reference(refName, true)
+	// The re-resolve is tolerant for the same reason the first one is: the fetch
+	// writes through the canonical name and lands in the folded bucket like any
+	// other write.
+	ref, err = s.resolveLocalRef(cid)
 	if err != nil {
-		return nil, err //nolint:wrapcheck // ErrReferenceNotFound (absent) or a real error; caller distinguishes via errors.Is
+		return nil, err
 	}
 	return ref, nil
 }
@@ -514,9 +589,20 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 
 	var checkpoints []CheckpointInfo
 	seen := make(map[id.CheckpointID]struct{})
+	indexByID := make(map[id.CheckpointID]int)
 	err = refs.ForEach(func(ref *plumbing.Reference) error {
 		cid, ok := ParseRef(ref.Name())
 		if !ok {
+			return nil
+		}
+		// One checkpoint can be named by two refs — the canonical spelling and
+		// the case-folded one — in a repo a pre-fix CLI forked before
+		// resolveLocalRef and writeRefName existed. Both parse to this same ID,
+		// so list it once, preferring the canonical spelling because that is
+		// the one resolveLocalRef tries first: a listing that disagreed with
+		// the read would show one commit and explain another.
+		prior, dup := indexByID[cid]
+		if dup && !isCanonicalRefName(cid, ref.Name()) {
 			return nil
 		}
 		commit, commitErr := s.repo.CommitObject(ref.Hash())
@@ -527,7 +613,13 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		if treeErr != nil {
 			return nil //nolint:nilerr // skip unreadable refs, keep listing
 		}
-		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(cid, tree))
+		info := readCommittedInfoFromCheckpointTree(cid, tree)
+		if dup {
+			checkpoints[prior] = info
+			return nil
+		}
+		indexByID[cid] = len(checkpoints)
+		checkpoints = append(checkpoints, info)
 		seen[cid] = struct{}{}
 		return nil
 	})
@@ -683,13 +775,9 @@ func (s *gitRefsStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.
 	if err := ctx.Err(); err != nil {
 		return Author{}, err //nolint:wrapcheck // Propagating context cancellation
 	}
-	refName, err := RefName(checkpointID)
+	ref, err := s.resolveLocalRef(checkpointID)
 	if err != nil {
-		return Author{}, nil //nolint:nilerr // invalid ID → unknown author
-	}
-	ref, err := s.repo.Reference(refName, true)
-	if err != nil {
-		return Author{}, nil //nolint:nilerr // no ref → unknown author
+		return Author{}, nil //nolint:nilerr // invalid ID or no ref → unknown author
 	}
 	commit, err := s.repo.CommitObject(ref.Hash())
 	if err != nil {
