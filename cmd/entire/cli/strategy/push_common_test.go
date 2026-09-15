@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1641,4 +1643,58 @@ func TestNonInteractiveSSHAuthFailure(t *testing.T) {
 		"interactive context must not treat auth errors as BatchMode hints")
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, errors.New("non-fast-forward")))
 	assert.False(t, nonInteractiveSSHAuthFailure(ctx, nil))
+}
+
+// A push failure's cause must survive the wrapping between where git reports it
+// and where it is logged. batchPushRefs returns the typed error inside an
+// fmt.Errorf("%w"), and the log sites are two call layers above that, so the
+// extraction has to work through the chain rather than only on a bare value.
+func TestPushOutputAttrs(t *testing.T) {
+	t.Parallel()
+	const output = " ! refs/entire/checkpoints/AA/x:refs/entire/checkpoints/AA/x [remote rejected] (pre-receive hook declined)\n"
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"wrapped like batchPushRefs wraps it",
+			fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{output: output, err: errors.New("git push: exit status 1")}),
+			"[remote rejected] (pre-receive hook declined)"},
+		{"doubly wrapped, as the recovery path returns it",
+			fmt.Errorf("sync diverged checkpoint ref x: %w",
+				fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{output: output, err: errors.New("git push: exit status 1")})),
+			"[remote rejected] (pre-receive hook declined)"},
+		// No output is informative rather than missing: git said nothing, so the
+		// failure is the transport, not a verdict from the remote.
+		{"git produced no output", fmt.Errorf("x: %w", &pushOutputError{output: "   \n", err: errors.New("boom")}), ""},
+		{"not a push failure at all", errors.New("open repository: no such file"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			attrs := pushOutputAttrs(tc.err)
+			if tc.want == "" {
+				if len(attrs) != 0 {
+					t.Fatalf("pushOutputAttrs = %v, want no attributes", attrs)
+				}
+				return
+			}
+			if len(attrs) != 1 {
+				t.Fatalf("pushOutputAttrs = %v, want exactly one attribute", attrs)
+			}
+			got, ok := attrs[0].(slog.Attr)
+			if !ok || got.Key != "git_output" {
+				t.Fatalf("attribute = %#v, want a git_output slog.Attr", attrs[0])
+			}
+			if !strings.Contains(got.Value.String(), tc.want) {
+				t.Errorf("git_output = %q, want it to contain %q", got.Value.String(), tc.want)
+			}
+		})
+	}
+
+	// The error message itself must stay exactly what it was: the typed error
+	// carries the output for logs, it does not smuggle it into user-facing text.
+	wrapped := fmt.Errorf("push 1 checkpoint refs: %w", &pushOutputError{output: output, err: errors.New("git push: exit status 1")})
+	if got := wrapped.Error(); got != "push 1 checkpoint refs: git push: exit status 1" {
+		t.Errorf("error text = %q; the output must not leak into it", got)
+	}
 }

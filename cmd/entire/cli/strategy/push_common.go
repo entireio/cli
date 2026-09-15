@@ -63,8 +63,44 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 	for _, ref := range refs {
 		refSpecs = append(refSpecs, ref.String()+":"+ref.String())
 	}
-	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
-		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+	res, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs})
+	if err != nil {
+		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), &pushOutputError{output: res.Output, err: err})
+	}
+	return nil
+}
+
+// pushOutputError carries git's own output alongside its exit status. The push
+// runs with --porcelain, so that output holds a per-ref verdict and the reason
+// a ref was refused, while the error says only "exit status 1".
+//
+// Keeping the two separate is the point. The user-facing retry banner
+// deliberately names no cause — a batch fails on divergence about as often as
+// on an unreachable or unauthorized remote, and guessing sends people after
+// the wrong problem — but a LOG that records only "exit status 1" leaves a
+// failed push undiagnosable after the fact. That is not hypothetical: a single
+// checkpoint ref failed on every push for days, and neither the queue, the
+// logs, nor a support bundle could say why, because the answer was captured
+// and then dropped one layer below the log line.
+type pushOutputError struct {
+	output string
+	err    error
+}
+
+func (e *pushOutputError) Error() string { return e.err.Error() }
+func (e *pushOutputError) Unwrap() error { return e.err }
+
+// pushOutputAttrs returns a git_output log attribute when git said anything
+// beyond its exit status, and nothing when it did not — an empty attribute on
+// every push failure is noise, and the absence is itself informative (git
+// produced no output, so the failure is the transport rather than the remote).
+func pushOutputAttrs(err error) []any {
+	var poe *pushOutputError
+	if !errors.As(err, &poe) {
+		return nil
+	}
+	if out := strings.TrimSpace(poe.output); out != "" {
+		return []any{slog.String("git_output", out)}
 	}
 	return nil
 }

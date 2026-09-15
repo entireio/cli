@@ -548,6 +548,12 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	}
 	stop("")
 
+	// Logged even though the banner below prints: the banner names no cause on
+	// purpose, so this is the only record of what the remote actually said.
+	logging.Warn(ctx, "git-refs push: batch checkpoint ref push failed; retrying individually",
+		append([]any{slog.Int("refs", len(existing)), slog.String("error", batchErr.Error())},
+			pushOutputAttrs(batchErr)...)...)
+
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
@@ -576,7 +582,8 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	for _, ref := range existing {
 		if err := pushCheckpointRefWithRecovery(pushCtx, dest.target, ref); err != nil {
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
-				slog.String("ref", ref.String()), slog.String("error", err.Error()))
+				append([]any{slog.String("ref", ref.String()), slog.String("error", err.Error())},
+					pushOutputAttrs(err)...)...)
 			if nonInteractiveSSHAuthFailure(pushCtx, err) {
 				printNonInteractiveSSHAuthHint()
 			}
