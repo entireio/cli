@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -15,14 +16,22 @@ import (
 
 const worktreeFixContent = "package main // fixed in the worktree\n"
 
+// worktreeGit returns git's STDOUT only. Callers parse the result as a commit
+// hash, a blob's contents, a common dir and ls-tree names, so stderr must not
+// reach it: git writes advice and gc notices there even under GitIsolatedEnv,
+// and a warning concatenated onto a hash fails in a way that looks like a bug in
+// the code under test. Stderr is captured separately so a failure still reports
+// what git said.
 func worktreeGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = dir
 	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, stderr.String())
 	}
 	return strings.TrimSpace(string(out))
 }
@@ -157,6 +166,49 @@ func TestWorktreeCapture_WorktreeLaunchedSessionRecordsTheWorktree(t *testing.T)
 	wantHead := worktreeGit(t, wtDir, "rev-parse", "HEAD")
 	if state.BaseCommit != wantHead {
 		t.Errorf("BaseCommit = %q, want the worktree's HEAD %q", state.BaseCommit, wantHead)
+	}
+}
+
+// TestWorktreeCapture_NonCanonicalCwdIsStoredAsGitSpellsIt pins that the root the
+// override stores is canonicalised rather than taken verbatim from the payload.
+//
+// It matters because the stored value becomes the session's WorktreePath, and
+// commit linking compares that against a root git resolved — exactWorktreeMatches
+// compares the raw strings, so two spellings of one directory read as two
+// worktrees and the session is never found. macOS makes this concrete every day
+// (/var vs /private/var), and the same class appears on Windows with separators.
+//
+// The fixture uses a symlink to the worktree as the event's cwd, which is the
+// portable way to produce a second spelling of one directory.
+func TestWorktreeCapture_NonCanonicalCwdIsStoredAsGitSpellsIt(t *testing.T) {
+	env := NewFeatureBranchEnv(t)
+	env.InitEntire()
+	wtDir := addLinkedWorktree(t, env, "fix/pr-3")
+
+	link := filepath.Join(t.TempDir(), "link-to-wt")
+	if err := os.Symlink(wtDir, link); err != nil {
+		t.Skipf("symlinks unavailable here, so a second spelling cannot be produced: %v", err)
+	}
+	if link == wtDir {
+		t.Fatal("fixture is wrong: the link and the worktree are the same string")
+	}
+
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, t)
+	session := env.NewSession()
+	if err := runner.SimulateUserPromptSubmitWithCwd(session.ID, "work", session.TranscriptPath, link); err != nil {
+		t.Fatalf("prompt submit: %v", err)
+	}
+
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("read session state: %v", err)
+	}
+	if state.WorktreePath == link {
+		t.Errorf("WorktreePath stored the payload's spelling %q; commit linking compares "+
+			"against git's spelling %q and would not match", link, wtDir)
+	}
+	if state.WorktreePath != wtDir {
+		t.Errorf("WorktreePath = %q, want git's spelling of the worktree %q", state.WorktreePath, wtDir)
 	}
 }
 

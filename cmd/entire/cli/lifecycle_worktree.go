@@ -107,9 +107,11 @@ func withEventWorktree(ctx context.Context, event *agent.Event) context.Context 
 	if !ok {
 		return ctx
 	}
-	if eventRoot == filepath.Clean(sessionRoot) {
-		// Already there; setting the override would be a no-op that only makes
-		// the resolution harder to reason about.
+	if eventRoot == canonicalPath(sessionRoot) {
+		// Already there. Both sides are canonicalised because they arrive by
+		// different routes — one from the payload, one from paths.WorktreeRoot —
+		// and a lexical compare would miss the match and rewrite a root that git
+		// already spelled correctly.
 		return ctx
 	}
 
@@ -169,7 +171,31 @@ func resolveEventWorktreeRoot(ctx context.Context, eventCWD, sessionRoot string)
 		return "", false
 	}
 
-	return filepath.Clean(eventCWD), true
+	// Canonicalised, not merely cleaned. This value becomes the session's
+	// WorktreePath, and commit linking compares that against a root git
+	// resolved — which has symlinks resolved and, on Windows, its own
+	// separators. Storing the payload's spelling would leave two names for one
+	// directory: on macOS /var/... against /private/var/..., which is a live
+	// split in this repo, and exactly the comparison exactWorktreeMatches makes
+	// without cleaning either side. Worktree-based linking would then miss the
+	// session — the fallback that matters most where process ancestry cannot
+	// introspect.
+	return canonicalPath(eventCWD), true
+}
+
+// canonicalPath resolves p to the spelling git reports, so a path from a hook
+// payload and a path from git compare equal when they name one directory.
+// EvalSymlinks failing is not the same as the paths differing, so a lexical
+// clean is the fallback rather than an error.
+func canonicalPath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = p
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }
 
 // sameCommonDir compares two common directories through EvalSymlinks, because
@@ -178,11 +204,5 @@ func resolveEventWorktreeRoot(ctx context.Context, eventCWD, sessionRoot string)
 // /var/... or /private/var/... depending on which. A lexical comparison would
 // read one repository as two.
 func sameCommonDir(a, b string) bool {
-	resolve := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return r
-		}
-		return filepath.Clean(p)
-	}
-	return resolve(a) == resolve(b)
+	return canonicalPath(a) == canonicalPath(b)
 }
