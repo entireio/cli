@@ -38,6 +38,7 @@ var entireDirCheckExemptions = map[string]string{
 	"entire auth":       "reads ~/.config/entire and the OS keyring, never the repo",
 	"entire login":      "control-plane login; user-level credentials only",
 	"entire logout":     "control-plane logout; user-level credentials only",
+	"entire cluster":    "control-plane only",
 	"entire org":        "control-plane only",
 	"entire project":    "control-plane only",
 	"entire repo":       "control-plane only; git content operations are out of scope",

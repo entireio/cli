@@ -78,6 +78,29 @@ the commands are always runnable in every build.
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
+- `cluster`: the control plane's data-plane cluster catalog — `list` only, since
+  clusters are provisioned by Entire rather than by users. It renders `GET
+  /clusters` (`coreapi.ListClusters`, the same call the mirror wizard and
+  `repo mirror list` already make to map slugs to hosts) sorted by region then
+  slug. The table's columns are the values other commands take: REGION is the
+  jurisdiction slug behind `org create --region` and `project create
+  --region`; CLUSTER is the placement slug `repo mirror list --cluster`
+  accepts; HOST is the bare public host behind `repo create --cluster-host`,
+  `repo mirror create` and `repo clone --cluster`, reduced through
+  `hostFromPublicURL` so a publicUrl that fails validation renders `-` rather
+  than a spoofable host. `--json` is the wire model, `apiUrl` and `isDefault`
+  included, plus a synthesized `host` merged into each object
+  (`clusterJSON`, via the additive-only `mergeSynthesizedField` that `repo
+  create` uses for `remote`): the same validated host the table shows, absent
+  rather than dashed when `publicUrl` fails validation, so a script never has
+  to re-implement the guard over the raw URL. `apiUrl` is never a table
+  column, because the CLI dials the API URL itself. `isDefault` becomes a
+  DEFAULT column only when the catalog holds a non-default cluster
+  (`clusterTable`): that is the catalog in which a reader needs telling where
+  a region falls back to when a command names the region alone, and in a
+  catalog with one cluster per region the column would read yes on every
+  row. The catalog carries no health, capacity or usage data — nothing
+  server-side does — and hidden or decommissioned clusters never reach it.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,

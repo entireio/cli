@@ -297,6 +297,7 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 		"login":      groupAccount,
 		"logout":     groupAccount,
 		"auth":       groupAccount,
+		"cluster":    groupControlPlane,
 		"org":        groupControlPlane,
 		"project":    groupControlPlane,
 		"repo":       groupControlPlane,

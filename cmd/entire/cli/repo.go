@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -63,12 +62,16 @@ func repoDetailRow(r coreapi.Repo) []string {
 // its resolved cluster host and path — the form `git clone` and
 // `git remote add` accept, which git-remote-entire reads back as the repo
 // slug from the URL path. Returns "" when either coordinate is missing (a
-// still-provisioning repo may not have them yet); a half-formed URL is worse
-// than none.
+// still-provisioning repo may not have them yet) or when the host is not a
+// bare host[:port] (validateClusterHost): the URL is pasted straight into
+// `git clone`, which reads `real-host@evil.com` as userinfo and sends the repo
+// token to evil.com, so a spoofable URL is worse than none. `repo clone`
+// refuses the same host at its end; this keeps the printed and --json copies
+// from handing out what clone would refuse.
 func repoRemoteURL(r coreapi.Repo) string {
 	host := strings.TrimSpace(r.ClusterHost.Or(""))
 	path := strings.TrimSpace(r.Path.Or(""))
-	if host == "" || path == "" {
+	if path == "" || validateClusterHost(host) != nil {
 		return ""
 	}
 	return "entire://" + host + "/" + strings.TrimPrefix(path, "/")
@@ -76,36 +79,14 @@ func repoRemoteURL(r coreapi.Repo) string {
 
 // repoCreateOutput renders a created repo as JSON with a synthesized `remote`
 // field merged in — the entire:// URL callers paste into `git clone` or
-// `git remote add`. The repo carries a custom marshaler plus arbitrary
-// additional properties, so it can't simply be embedded in a wrapper struct;
-// instead it's round-tripped through its own encoder and the remote is merged
-// into the resulting object. The synthesis only fills a gap: if the wire
-// object already carries a `remote` (a future first-class field, or one
-// arriving via additional properties) it's left untouched, so the
-// server-provided value always wins. The field is omitted when the clone
-// coordinates aren't resolvable yet rather than emitted half-formed.
+// `git remote add` (see mergeSynthesizedField for the merge rules). The field
+// is omitted when the clone coordinates aren't resolvable yet rather than
+// emitted half-formed.
 func repoCreateOutput(r *coreapi.Repo) (any, error) {
 	if r == nil {
 		return nil, errors.New("nil repo")
 	}
-	raw, err := json.Marshal(r)
-	if err != nil {
-		return nil, fmt.Errorf("encode repo: %w", err)
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, fmt.Errorf("decode repo: %w", err)
-	}
-	if _, ok := obj["remote"]; !ok {
-		if remote := repoRemoteURL(*r); remote != "" {
-			encoded, err := json.Marshal(remote)
-			if err != nil {
-				return nil, fmt.Errorf("encode remote: %w", err)
-			}
-			obj["remote"] = encoded
-		}
-	}
-	return obj, nil
+	return mergeSynthesizedField(r, "remote", func() string { return repoRemoteURL(*r) })
 }
 
 // parseObjectFormat maps the CLI flag value to the wire enum, rejecting
@@ -145,6 +126,12 @@ func newRepoCreateCmd() *cobra.Command {
 				}
 				return err
 			}
+			if clusterHost != "" {
+				if err := validateClusterHost(clusterHost); err != nil {
+					cmd.SilenceUsage = true
+					return fmt.Errorf("invalid --cluster-host: %w", err)
+				}
+			}
 			var format coreapi.CreateRepoInputBodyObjectFormat
 			if objectFormat != "" {
 				parsed, err := parseObjectFormat(objectFormat)
@@ -180,6 +167,14 @@ func newRepoCreateCmd() *cobra.Command {
 				msg := fmt.Sprintf("✓ Created repository %s (%s)", created.Name, created.ID)
 				if remote := repoRemoteURL(*created); remote != "" {
 					msg += "\n  Remote: " + remote
+				}
+				// repoRemoteURL answers "" for a host that fails validation, the
+				// same as for a repo still provisioning; say which it was, or the
+				// missing Remote line reads as "wait and retry".
+				if host := strings.TrimSpace(created.ClusterHost.Or("")); host != "" {
+					if err := validateClusterHost(host); err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the server returned an invalid cluster host for this repository, so no remote URL was derived: %v\n", err)
+					}
 				}
 				return msg, wire, nil
 			})

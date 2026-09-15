@@ -164,6 +164,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"agent":       {agentHelpAudienceUserOwned, false},
 	"auth":        {agentHelpAudienceUserOwned, false},
 	"clean":       {agentHelpAudienceUserOwned, false},
+	"cluster":     {agentHelpAudienceUserOwned, false},
 	"configure":   {agentHelpAudienceUserOwned, false},
 	"disable":     {agentHelpAudienceUserOwned, false},
 	"enable":      {agentHelpAudienceUserOwned, false},
