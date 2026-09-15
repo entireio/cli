@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,40 @@ func TestCompareAndSwapRef_RejectsSymbolicRef(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.Equal(t, replacement, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", refName.String())))
+		})
+	}
+}
+
+func TestCompareAndSwapRef_SymbolicRefAbortFailure(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("abort failure injection requires POSIX signals")
+	}
+	for _, backend := range refCASBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			t.Parallel()
+			repoDir, initial, replacement := backend.init(t)
+			hooksDir := t.TempDir()
+			// Fail the owned Git process after it releases the prepared ref lock.
+			hook := `#!/bin/sh
+if [ "$1" = aborted ]; then
+    echo 'fatal: cannot lock references' >&2
+    kill -TERM "$PPID"
+fi
+`
+			require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "reference-transaction"), []byte(hook), 0o755))
+			gitenv.Run(t, repoDir, "config", "core.hooksPath", hooksDir)
+
+			err := CompareAndSwapRef(t.Context(), repoDir, plumbing.HEAD, plumbing.NewHash(initial), plumbing.NewHash(replacement))
+			require.ErrorIs(t, err, ErrRefSymbolic)
+			require.ErrorContains(t, err, "cannot lock references", "retain the abort failure diagnosis")
+			require.NotErrorIs(t, err, ErrRefLocked, "cleanup must not make symbolic-ref rejection retryable")
+			require.NotErrorIs(t, err, ErrRefCASConflict)
+			require.Equal(t, "refs/heads/main", strings.TrimSpace(gitenv.Run(t, repoDir, "symbolic-ref", "HEAD")))
+			require.Equal(t, replacement, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", "HEAD")))
+
+			require.NoError(t, CompareAndSwapRef(t.Context(), repoDir, plumbing.NewBranchReferenceName("main"), plumbing.NewHash(initial), plumbing.NewHash(replacement)))
+			require.Equal(t, initial, strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", "HEAD")))
 		})
 	}
 }
