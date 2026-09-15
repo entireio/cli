@@ -101,6 +101,12 @@ func warnUnusableMarker(err error) {
 // notice cannot disagree about it.
 func markerApplies() bool { return os.Getenv(PathEnvVar) == "" }
 
+// ChoiceIsRemembered reports whether a file-store selection made now would be
+// remembered for later processes — the same rule rememberBackend and the
+// fallback's notice follow (see markerApplies). Exported so login's hint
+// cannot promise a memory the marker will not keep.
+func ChoiceIsRemembered() bool { return markerApplies() }
+
 // rememberBackend records name as the backend that last received a write.
 // "file" writes the marker (only if it is not already there); "keyring"
 // removes it, because the keyring is the platform default and needs no
