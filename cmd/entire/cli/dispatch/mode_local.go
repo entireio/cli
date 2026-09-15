@@ -422,15 +422,39 @@ func reachableCheckpointIDsInRange(ctx context.Context, repoRoot, revRange strin
 // and leave the dispatch effectively empty. In that case we summarize
 // everything reachable from HEAD in the window, matching the server-side
 // dispatch. The base..HEAD exclusion only applies to feature branches.
+//
+// The same "nothing to exclude" reasoning holds for any branch whose base..HEAD
+// range is empty — a feature-branch worktree freshly created off the up-to-date
+// default branch (the standard git-worktree workflow), or a branch whose work
+// has already merged into the base. There the exclusion would again drop all
+// reachable in-window activity and report "no activity" despite HEAD clearly
+// carrying merged work (ENT-1201). Detecting the empty range directly, rather
+// than matching the default branch by name, covers both cases.
 func branchLocalRevRange(ctx context.Context, repoRoot, currentBranch string) string {
+	const headRev = "HEAD"
 	base := defaultBranchRef(ctx, repoRoot)
 	if base == "" {
-		return "HEAD"
+		return headRev
 	}
 	if currentBranch != "" && strings.TrimPrefix(base, "origin/") == currentBranch {
-		return "HEAD"
+		return headRev
 	}
-	return base + "..HEAD"
+	if revRangeIsEmpty(ctx, repoRoot, base+".."+headRev) {
+		return headRev
+	}
+	return base + ".." + headRev
+}
+
+// revRangeIsEmpty reports whether revRange contains no commits (i.e. HEAD has no
+// commits the base lacks). A git failure is treated as non-empty so the caller
+// keeps the base..HEAD exclusion — the conservative choice that never widens
+// scope on error.
+func revRangeIsEmpty(ctx context.Context, repoRoot, revRange string) bool {
+	out, ok := runGitOutput(ctx, repoRoot, "rev-list", "--count", revRange)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(out) == "0"
 }
 
 // defaultBranchRef resolves the repository's default branch, preferring
