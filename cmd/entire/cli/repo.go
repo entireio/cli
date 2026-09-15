@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -44,19 +45,19 @@ func repoRow(r coreapi.Repo) []string {
 }
 
 // repoDetailColumns / repoDetailRow extend the shared repo view with the
-// entire:// clone URL for the single-repo `get` output. The list view stays on
-// the lean repoColumns — a full clone URL per row would bloat the table — but a
-// person inspecting one repo wants the URL they can paste into `git clone`
-// (COR-699). REMOTE is "-" until the repo is provisioned enough to have a
-// resolvable cluster host + path.
-var repoDetailColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE", "REMOTE"}
+// provisioning reason and entire:// clone URL for the single-repo `get` output.
+// The list view stays on the lean repoColumns — a full clone URL per row would
+// bloat the table — but a person inspecting one repo wants the URL they can
+// paste into `git clone` (COR-699). REMOTE is "-" until the repo is provisioned
+// enough to have a resolvable cluster host + path.
+var repoDetailColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE", "PROVISION REASON", "REMOTE"}
 
 func repoDetailRow(r coreapi.Repo) []string {
 	remote := repoRemoteURL(r)
 	if remote == "" {
 		remote = "-"
 	}
-	return append(repoRow(r), remote)
+	return append(repoRow(r), r.ProvisionReason.Or("-"), remote)
 }
 
 // repoRemoteURL synthesizes the entire:// clone/remote URL for a repo from
@@ -127,11 +128,36 @@ func newRepoCreateCmd() *cobra.Command {
 		projectID    string
 		clusterHost  string
 		objectFormat string
+		noWait       bool
+		waitTimeout  time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   cmdCreateName,
 		Short: "Create a repository in a project",
-		Args:  cobra.ExactArgs(1),
+		Long: `Create a repository and wait for provisioning to become active by
+default. Active means provisioning completed; later pushes or mirror
+creation can still fail for other reasons.
+
+--wait-timeout must be positive. It bounds project resolution, creation,
+and readiness polling after client setup, including creation with
+--no-wait. Use --no-wait to return without confirming readiness.
+
+If creation succeeds but readiness cannot be confirmed, the command exits
+nonzero and preserves the repository result. Do not create again to
+recover. With --json, stdout contains one repository object; progress
+and recovery instructions go to stderr.`,
+		Example: "  entire repo create web --project acme\n" +
+			"  entire repo create web --project acme --no-wait\n" +
+			"  entire repo create web --project acme --wait-timeout=5m",
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			// Invalid flag values are usage errors, including zero/negative
+			// durations; match mirror create and Cobra's malformed-value path.
+			if waitTimeout <= 0 {
+				return errors.New("--wait-timeout must be positive")
+			}
+			return nil
+		},
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Refuse a name Entire could not address once it existed: every ref
 			// parser drops a trailing `.git` (see gitDirSuffix), so the repo
@@ -154,15 +180,14 @@ func newRepoCreateCmd() *cobra.Command {
 				}
 				format = parsed
 			}
-			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
+			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+				ctx, cancel := context.WithTimeout(ctx, waitTimeout)
+				defer cancel()
 				projID, err := resolveProjectRef(ctx, c, projectID)
 				if err != nil {
-					return "", nil, err
+					return err
 				}
-				body := &coreapi.CreateRepoInputBody{
-					Name:      args[0],
-					ProjectId: projID,
-				}
+				body := &coreapi.CreateRepoInputBody{Name: args[0], ProjectId: projID}
 				if clusterHost != "" {
 					body.ClusterHost = coreapi.NewOptString(clusterHost)
 				}
@@ -171,20 +196,24 @@ func newRepoCreateCmd() *cobra.Command {
 				}
 				created, err := c.CreateRepo(ctx, body)
 				if err != nil {
-					return "", nil, err
+					return err
 				}
-				wire, err := repoCreateOutput(created)
-				if err != nil {
-					return "", nil, err
+				var waitErr error
+				if !noWait {
+					var finish func(bool)
+					waitErr = awaitRepoActive(ctx, c, created, func() {
+						finish = startSpinner(cmd.ErrOrStderr(), "Waiting for repository "+created.Name+" to become active")
+					})
+					if finish != nil {
+						finish(waitErr == nil)
+					}
 				}
-				msg := fmt.Sprintf("✓ Created repository %s (%s)", created.Name, created.ID)
-				if remote := repoRemoteURL(*created); remote != "" {
-					msg += "\n  Remote: " + remote
-				}
-				return msg, wire, nil
+				return reportRepoCreation(cmd, created, noWait, waitErr)
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return after creation without confirming provisioning readiness")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 10*time.Minute, "Time limit for project resolution, creation, and provisioning readiness")
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
 	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	cmd.Flags().StringVar(&objectFormat, "object-format", "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
@@ -306,20 +335,48 @@ func newRepoListCmd() *cobra.Command {
 
 func newRepoGetCmd() *cobra.Command {
 	var project string
+	var authoritative bool
 	cmd := &cobra.Command{
 		Use:   "get <repo>",
 		Short: "Show a repository by /et/<project>/<repo> path, name, or ULID",
-		Args:  cobra.ExactArgs(1),
+		Long: `Show repository details. Use --authoritative to also check provisioning
+status. This command does not wait: it exits successfully when it can
+read the repository, even if provisioning is still in progress or has failed.
+Use --authoritative --json and inspect state for scripting; active means
+provisioning has completed.
+
+The default read cannot confirm readiness. If the server cannot provide
+readiness information, --authoritative reports an error or a missing state;
+neither confirms readiness.`,
+		Example: "  entire repo get /et/acme/web\n" +
+			"  entire repo get /et/acme/web --json\n" +
+			"  entire repo get /et/acme/web --authoritative",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, repoDetailColumns, repoDetailRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
 				repoID, err := resolveRepoRef(ctx, c, args[0], project)
 				if err != nil {
 					return nil, err
 				}
-				return c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+				params := coreapi.GetRepoParams{RepoId: repoID}
+				if authoritative {
+					params.Authoritative = coreapi.NewOptBool(true)
+				}
+				repo, err := c.GetRepo(ctx, params)
+				if authoritative && readinessCheckUnavailable(err) {
+					// A registry-only fallback cannot answer the readiness question.
+					// Keep that choice explicit, and print here so renderCoreError
+					// cannot strip the recovery hint with the API error wrapper.
+					// The plain read is the default, so the hint names no flag: a
+					// value the user would have to restate is not a recovery step.
+					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo get %s to inspect repository details without a readiness check.\n", renderRepoReadError(err), repoID)
+					return nil, NewSilentError(err)
+				}
+				return repo, err
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Check repository provisioning status")
 	bindRepoProjectFlag(cmd, &project)
 	addJSONFlag(cmd)
 	return cmd

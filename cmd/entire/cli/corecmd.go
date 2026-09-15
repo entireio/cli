@@ -611,6 +611,15 @@ func runCoreClient(cmd *cobra.Command, newClient func(context.Context) (*coreapi
 		return fmt.Errorf("connect to Entire control plane: %w", err)
 	}
 	if err := fn(cmd.Context(), client); err != nil {
+		// Commands that already reported a partial success own the rendering.
+		// renderCoreError extracts API problems through wrappers, discarding
+		// SilentError and causing main to print again. Guard here rather than
+		// changing that display helper: the mirror-create wizard needs its
+		// plain message before it prints.
+		var silent *SilentError
+		if errors.As(err, &silent) {
+			return err
+		}
 		return renderCoreError(err)
 	}
 	return nil

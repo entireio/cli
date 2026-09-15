@@ -128,6 +128,10 @@ type GetProjectParams struct {
 // GetRepoParams is parameters of getRepo operation.
 type GetRepoParams struct {
 	RepoId string
+	// Require the repo's regional lifecycle state. A local repo is unaffected. A repo homed in another
+	// jurisdiction redirects with 421. This core reports 503 when it cannot route the read. Provisioning
+	// and failed states still return 200.
+	Authoritative OptBool `json:",omitempty,omitzero"`
 }
 
 // GetRepoVisibilityParams is parameters of getRepoVisibility operation.

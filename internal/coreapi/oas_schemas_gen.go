@@ -11756,9 +11756,10 @@ type Repo struct {
 	ProvisionAttempts OptInt64            `json:"provisionAttempts"`
 	ProvisionReason   OptString           `json:"provisionReason"`
 	RepoGroupId       OptString           `json:"repoGroupId"`
-	State             OptString           `json:"state"`
-	Visibility        OptString           `json:"visibility"`
-	AdditionalProps   RepoAdditional
+	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.
+	State           OptString `json:"state"`
+	Visibility      OptString `json:"visibility"`
+	AdditionalProps RepoAdditional
 }
 
 // GetSchema returns the value of Schema.
