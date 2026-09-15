@@ -21,7 +21,9 @@ import (
 //
 // It records a *write*, not a preference the user typed, because the store
 // that most recently received tokens is the store that holds the freshest
-// credential. Reads consult it; only writes change it. See rememberBackend.
+// credential. Reads consult it. It changes when a store receives a write, and
+// when the Linux fallback proves the file store already holds the credential
+// (see switchTo in fallback.go); rememberBackend is the only writer.
 //
 // The marker is honored on every platform, including macOS and Windows where
 // the automatic fallback (fallback.go) never writes it: an explicit
@@ -92,6 +94,13 @@ func warnUnusableMarker(err error) {
 	})
 }
 
+// markerApplies reports whether the marker can describe this process's file
+// store. Never while PathEnvVar is set: the marker cannot carry a path, and a
+// bare "file" would point later processes at the default location, which does
+// not hold the token. The rule lives here so rememberBackend and the fallback's
+// notice cannot disagree about it.
+func markerApplies() bool { return os.Getenv(PathEnvVar) == "" }
+
 // rememberBackend records name as the backend that last received a write.
 // "file" writes the marker (only if it is not already there); "keyring"
 // removes it, because the keyring is the platform default and needs no
@@ -101,10 +110,11 @@ func warnUnusableMarker(err error) {
 // "file", and a later process without the variable would resolve that to the
 // DEFAULT path, which does not hold the token; an explicit path is
 // environment configuration and has to travel with the process that set it.
+// See markerApplies.
 func rememberBackend(name string) error {
 	switch name {
 	case backendFile:
-		if os.Getenv(PathEnvVar) != "" || persistedBackend() == backendFile {
+		if !markerApplies() || persistedBackend() == backendFile {
 			return nil
 		}
 		root, err := userdirs.ConfigRoot()
