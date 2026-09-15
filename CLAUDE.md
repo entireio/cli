@@ -449,6 +449,8 @@ out, err := cmd.CombinedOutput()
 
 `interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., opening `interactive.OpenPromptTTY()` directly inside a prompt reader).
 
+A prompt that runs Bubble Tea on a separately opened terminal (plugin confirmations, the login key prompt) must open it with `interactive.OpenPromptTTY()` and release it with `PromptTTY.Close()`, never `tea.OpenTTY()` plus a bare `Close`. Bubble Tea only gets a cancellable console reader for `os.Stdin`; on any other handle its reader loop leaves a read pending after the answer, and Go's `os.File.Close` on Windows waits for that read, which a console completes only on a keypress — the user had to press Enter twice. `PromptTTY.Close` cancels the pending read first (`CancelIoEx`, `tty_release_windows.go`); the reader then sees `io.EOF`, so the close must come after the form has returned.
+
 ### Linting and Formatting
 
 ```bash

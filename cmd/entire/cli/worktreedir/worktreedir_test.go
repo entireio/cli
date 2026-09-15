@@ -2,11 +2,14 @@ package worktreedir
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 )
 
 func TestName(t *testing.T) {
@@ -160,4 +163,73 @@ func TestNameFollowingLinks(t *testing.T) {
 			t.Errorf("NameFollowingLinks() error = %v, want os.ErrNotExist", err)
 		}
 	})
+}
+
+func TestHashableEntry_ModeTable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		mode fs.FileMode
+		want bool
+	}{
+		{name: "regular", mode: 0, want: true},
+		{name: "cloud placeholder file", mode: fs.ModeIrregular, want: true},
+		{name: "directory", mode: fs.ModeDir, want: false},
+		{name: "cloud placeholder directory", mode: fs.ModeDir | fs.ModeIrregular, want: false},
+		{name: "symlink", mode: fs.ModeSymlink, want: false},
+		{name: "symlink irregular", mode: fs.ModeSymlink | fs.ModeIrregular, want: false},
+		{name: "named pipe", mode: fs.ModeNamedPipe, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// The exported entry point Lstats a real file, so the mode rule is
+			// asserted directly here and through the filesystem below.
+			got := tt.mode.Type()&^fs.ModeIrregular == 0
+			if got != tt.want {
+				t.Errorf("mode %v hashable = %v, want %v", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHashableEntry_WorktreeSymlinkIsWithheld is the case that matters
+// on the read side: git hash-object follows a working-tree symlink and hashes
+// the target's content, so a link pointing at content equal to the recorded
+// blob hashes equal and a real typechange (git status " T") reads as clean.
+// The tree mode alone cannot catch it — the tree still says regular.
+func TestHashableEntry_WorktreeSymlinkIsWithheld(t *testing.T) {
+	// Not testutil.SkipWithoutSymlinks: testutil imports gitrepo, so using it
+	// here is an import cycle in the test binary.
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on Windows")
+	}
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "real.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("failed to write target: %v", err)
+	}
+	if err := os.Symlink("real.txt", filepath.Join(dir, "link.txt")); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	if HashableEntry(dir, "link.txt", filemode.Symlink) {
+		t.Error("a symlink recorded in the tree must not be sent to hash-object")
+	}
+	if HashableEntry(dir, "link.txt", filemode.Regular) {
+		t.Error("a working-tree symlink must not be sent to hash-object even when the tree says regular")
+	}
+	if !HashableEntry(dir, "real.txt", filemode.Regular) {
+		t.Error("an ordinary regular file must still be hashed through native Git")
+	}
+}
+
+func TestHashableEntry_MissingEntry(t *testing.T) {
+	t.Parallel()
+
+	if HashableEntry(t.TempDir(), "absent.txt", filemode.Regular) {
+		t.Error("a path with no working-tree entry must not be sent to hash-object")
+	}
 }

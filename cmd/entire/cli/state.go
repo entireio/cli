@@ -21,10 +21,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 )
 
 // PrePromptState stores the state captured before a user prompt
@@ -393,7 +393,7 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 
 		if string(workingContent) != headContent {
 			result = append(result, relPath)
-			if headFile.Mode == filemode.Regular || headFile.Mode == filemode.Executable {
+			if worktreedir.HashableEntry(repoRoot, relPath, headFile.Mode) {
 				candidates = append(candidates, relPath)
 				headHashes[relPath] = headFile.Hash
 			}

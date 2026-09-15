@@ -3,7 +3,6 @@ package strategy
 import (
 	"context"
 	"io"
-	"io/fs"
 	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -517,7 +516,7 @@ func filesWithRemainingAgentChanges(
 			// hash-object follows symlinks and hashes target content, while a Git
 			// symlink blob stores the target path. Compare either side of a mode
 			// mismatch through the confined fallback instead.
-			if !requiresConfinedWorktreeHash(worktreeRoot, candidate.path, candidate.commitMode) {
+			if worktreedir.HashableEntry(worktreeRoot, candidate.path, candidate.commitMode) {
 				paths = append(paths, candidate.path)
 			}
 		}
@@ -574,29 +573,6 @@ func filesWithRemainingAgentChanges(
 	)
 
 	return remaining
-}
-
-func requiresConfinedWorktreeHash(worktreeRoot, filePath string, commitMode filemode.FileMode) bool {
-	if commitMode == filemode.Symlink {
-		return true
-	}
-	root, err := worktreedir.OpenAt(worktreeRoot)
-	if err != nil {
-		return true
-	}
-	name, err := worktreedir.Name(worktreeRoot, filePath)
-	if err != nil {
-		return true
-	}
-	info, err := root.Lstat(name)
-	return err != nil || requiresConfinedWorktreeMode(info.Mode())
-}
-
-func requiresConfinedWorktreeMode(mode fs.FileMode) bool {
-	// Windows uses ModeIrregular for OneDrive Files On-Demand placeholders.
-	// Mask it so placeholder files still receive Git's clean-filter handling,
-	// while every substantive non-regular type remains confined.
-	return mode.Type()&^fs.ModeIrregular != 0
 }
 
 // workingTreeMatchesBlob checks whether the raw file representation hashes to

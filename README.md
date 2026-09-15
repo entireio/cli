@@ -54,11 +54,11 @@ With Entire, you can:
 Install with Homebrew:
 
 ```bash
-brew tap entireio/tap
-brew trust entireio/tap
-brew install --cask entire            # stable
-# brew install --cask entire@nightly  # or nightly
+brew install --cask entireio/tap/entire            # stable
+# brew install --cask entireio/tap/entire@nightly  # or nightly
 ```
+
+Use the fully-qualified cask name (`entireio/tap/entire`, not `entire`). Homebrew 6 requires third-party taps to be trusted before it will evaluate them, and a fully-qualified name taps and trusts just that one cask, so no separate `brew tap` / `brew trust` step is needed. Requires Homebrew 6.0.10 or newer.
 
 Or with the install script:
 
@@ -137,9 +137,8 @@ Entire currently ships two release channels:
 
 How to use each channel:
 
-- Homebrew (one-time setup): `brew tap entireio/tap && brew trust entireio/tap`
-- Homebrew stable: `brew install --cask entire`
-- Homebrew nightly: `brew install --cask entire@nightly`
+- Homebrew stable: `brew install --cask entireio/tap/entire`
+- Homebrew nightly: `brew install --cask entireio/tap/entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
 - `install.ps1` stable (uses Scoop when available): `irm https://entire.io/install.ps1 | iex`
