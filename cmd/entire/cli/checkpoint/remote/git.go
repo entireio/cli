@@ -289,7 +289,7 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	}
 
 	if err != nil {
-		return out, fmt.Errorf("git fetch: %w", err)
+		return out, fmt.Errorf("git fetch: %w", withHTTPAuthFailure(err, string(out)))
 	}
 	return out, nil
 }
@@ -443,7 +443,7 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 	disableTerminalPrompt(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", err)
+		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", withHTTPAuthFailure(err, string(output)))
 	}
 	return PushResult{Output: string(output)}, nil
 }
@@ -482,6 +482,9 @@ func formatGitCommandError(ctx context.Context, err error, remote string) error 
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			if authErr := withHTTPAuthFailure(err, stderr); errors.Is(authErr, ErrHTTPAuthUnavailable) || errors.Is(authErr, ErrHTTPAuthRejected) {
+				return authErr
+			}
 			if remote != "" {
 				stderr = strings.ReplaceAll(stderr, remote, RedactURLOrPath(remote))
 			}
