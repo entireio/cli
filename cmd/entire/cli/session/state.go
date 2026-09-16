@@ -1263,8 +1263,20 @@ func (s *StateStore) RemoveAll() error {
 	return nil
 }
 
-// List returns all session states.
+// List returns all loadable session states, skipping individual files that
+// cannot be read or decoded.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, false)
+}
+
+// ListStrict returns all session states and fails if any state file cannot be
+// loaded. Destructive callers should use this method when an incomplete result
+// could cause them to remove data that an omitted session still needs.
+func (s *StateStore) ListStrict(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, true)
+}
+
+func (s *StateStore) list(ctx context.Context, strict bool) ([]*State, error) {
 	root, err := s.dirRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
@@ -1289,6 +1301,9 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
 		state, err := s.Load(ctx, sessionID)
 		if err != nil {
+			if strict {
+				return nil, fmt.Errorf("failed to load session state %q: %w", sessionID, err)
+			}
 			continue // Skip corrupted state files
 		}
 		if state == nil {
