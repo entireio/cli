@@ -407,6 +407,14 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	}
 	defer repo.Close()
 
+	// Above the OPF gate, not inside the flush: the gate rewrites what it finds
+	// in the queue (RewriteQueuedCheckpointRefsWithOPF peeks, it does not drain),
+	// so a ref enqueued after it runs would be pushed without the OPF layer the
+	// rest of the batch got. The re-sync's whole job is to enqueue refs, which
+	// makes its position relative to the gate load-bearing rather than
+	// incidental.
+	mayRecordDestination := resyncCheckpointRefsOnDestinationChange(ctx, repo, ps.pushTarget())
+
 	// OPF backend divergence: both paths fail closed, but this one does it
 	// without blocking the user. The v1 path aborts the user's git push; here a
 	// checkpoint-ref failure must never do that (see this function's doc), so
@@ -417,7 +425,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 
-	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps); err == nil {
+	if flushed, err := flushCheckpointRefsQueue(ctx, repo, ps, mayRecordDestination); err == nil {
 		// Delivered, and only if something actually was: an empty queue pushed
 		// nothing, so it must not move the election or announce that it had.
 		if pendingCapture != "" && flushed > 0 {
@@ -447,6 +455,9 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if ps.pushDisabled {
 		return 0, true, nil
 	}
+	// Above the gate, for the reason given at the pre-push call site.
+	mayRecordDestination := resyncCheckpointRefsOnDestinationChange(ctx, repo, ps.pushTarget())
+
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message
 		// below: the gate fails on an unresolvable decision or a failed scan,
@@ -455,7 +466,7 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		// wrong problem. The wrapped error says which it was.
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}
-	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps)
+	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps, mayRecordDestination)
 	// Clean up even on a partial/failed flush: a diverged batch can push some
 	// refs and still return an error, and the shadow branches for the refs that
 	// *did* land must still be cleaned up — parity with the pre-push path, which
@@ -472,7 +483,12 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 // never block the user's push) and the migration command's opt-in push (which
 // surfaces it). Stale entries — refs no longer present locally — are pruned so
 // they don't block the queue forever.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings) (int, error) {
+//
+// mayRecordDestination carries the caller's destination re-sync verdict. False
+// means the re-sync did not finish, so this push must not record the
+// destination as delivered however well the push itself goes — see
+// resyncCheckpointRefsOnDestinationChange.
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, mayRecordDestination bool) (int, error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return 0, fmt.Errorf("resolve push queue: %w", err)
@@ -520,6 +536,9 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 		if removeErr := queue.Remove(existing); removeErr != nil {
 			logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 				slog.String("error", removeErr.Error()))
+		}
+		if mayRecordDestination {
+			recordPushedDestination(ctx, ps.pushTarget())
 		}
 		return len(existing), nil
 	}
@@ -571,6 +590,13 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
+	}
+	// Anything landing proves the destination was reached, so record it even on
+	// a partial success: the refs that failed stay queued and will be retried
+	// against this same destination, and a re-sync on the next push would only
+	// re-queue what is already there.
+	if len(pushed) > 0 && mayRecordDestination {
+		recordPushedDestination(ctx, ps.pushTarget())
 	}
 	if firstErr != nil {
 		return len(pushed), fmt.Errorf("%d of %d checkpoint refs failed to push: %w",
