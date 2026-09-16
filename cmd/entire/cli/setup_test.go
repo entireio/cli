@@ -79,7 +79,11 @@ func hideExternalAgentsFromPath(t *testing.T) {
 	t.Helper()
 
 	pathDir := t.TempDir()
-	for _, name := range []string{"git", "sh"} {
+	// git and sh because the CLI and the /bin/sh mocks need them; rm because a
+	// mock that has to delete something otherwise fails silently — sh has no
+	// builtin for it, so the command simply is not found and the script's exit
+	// status comes from whatever ran last.
+	for _, name := range []string{"git", "sh", "rm"} {
 		if err := preserveToolOnPath(name, pathDir); err != nil {
 			t.Fatalf("preserve %s on PATH: %v", name, err)
 		}
@@ -152,6 +156,13 @@ func writeExternalAgentBinary(t *testing.T, dir, name string) {
 // writeExternalAgentBinaryEx writes a mock external-agent binary whose
 // are-hooks-installed subcommand reports hooksInstalled, so callers can
 // simulate both installed and available (uninstalled) external plugins.
+//
+// Setting ENTIRE_TEST_EXTERNAL_HOOK_FILE switches the mock from the static
+// hooksInstalled answer to a real artifact: install-hooks creates that file,
+// uninstall-hooks deletes it, and are-hooks-installed reports whether it
+// exists. That is what lets a test assert an agent's hook config was actually
+// removed rather than that a subcommand was merely invoked. Unset, the mock
+// behaves exactly as before.
 func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled bool) {
 	t.Helper()
 	// Whatever this mock is written for, discovering it registers it into the
@@ -179,6 +190,9 @@ case "$1" in
     fi
     ;;
   install-hooks)
+    if [ -n "$ENTIRE_TEST_EXTERNAL_HOOK_FILE" ]; then
+      : > "$ENTIRE_TEST_EXTERNAL_HOOK_FILE"
+    fi
     echo '{"hooks_installed": 1}'
     ;;
   uninstall-hooks)
@@ -188,6 +202,15 @@ case "$1" in
       echo "mock uninstall-hooks failure" >&2
       exit 1
     fi
+    if [ -n "$ENTIRE_TEST_EXTERNAL_HOOK_FILE" ]; then
+      # Reported rather than ignored: a silent failure here would look like a
+      # successful uninstall that left the config behind, which is the exact
+      # bug these tests exist to catch.
+      rm -f "$ENTIRE_TEST_EXTERNAL_HOOK_FILE" || {
+        echo "mock could not remove $ENTIRE_TEST_EXTERNAL_HOOK_FILE" >&2
+        exit 1
+      }
+    fi
     exit 0
     ;;
   are-hooks-installed)
@@ -196,7 +219,19 @@ case "$1" in
     case "$ENTIRE_TEST_PROBE" in
       fail)    echo "mock probe failure" >&2; exit 1 ;;
       garbage) echo 'not json' ;;
-      *)       echo '{"installed": ` + installed + `}' ;;
+      *)
+        # With a hook file configured, the file IS the installation, so the
+        # answer tracks what install-hooks/uninstall-hooks actually did.
+        if [ -n "$ENTIRE_TEST_EXTERNAL_HOOK_FILE" ]; then
+          if [ -f "$ENTIRE_TEST_EXTERNAL_HOOK_FILE" ]; then
+            echo '{"installed": true}'
+          else
+            echo '{"installed": false}'
+          fi
+        else
+          echo '{"installed": ` + installed + `}'
+        fi
+        ;;
     esac
     ;;
   *)
@@ -2372,8 +2407,11 @@ func TestPrintMissingAgentError(t *testing.T) {
 	if !strings.Contains(output, "Missing agent name") {
 		t.Error("expected 'Missing agent name' in output")
 	}
-	for _, a := range agent.List() {
-		if !strings.Contains(output, string(a)) {
+	// StringList, not List: the suggestion list deliberately omits test-only
+	// agents (see printAgentError). TestPrintAgentError_OmitsTestOnlyAgents
+	// pins that omission from the other side.
+	for _, a := range agent.StringList() {
+		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
 	}
@@ -2395,8 +2433,9 @@ func TestPrintWrongAgentError(t *testing.T) {
 	if !strings.Contains(output, `Unknown agent "not-an-agent"`) {
 		t.Error("expected unknown agent name in output")
 	}
-	for _, a := range agent.List() {
-		if !strings.Contains(output, string(a)) {
+	// StringList, not List — see TestPrintMissingAgentError.
+	for _, a := range agent.StringList() {
+		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
 	}
@@ -2405,6 +2444,25 @@ func TestPrintWrongAgentError(t *testing.T) {
 	}
 	if !strings.Contains(output, "Usage: entire enable --agent") {
 		t.Error("expected usage line in output")
+	}
+}
+
+// TestPrintAgentError_OmitsTestOnlyAgents pins that the "Available agents"
+// suggestion list does not offer Vogon, the deterministic fake used by the e2e
+// canary. It is registered in every build, but it is not an agent a user can
+// run, so naming it in a list of things to enable is a dead end.
+func TestPrintAgentError_OmitsTestOnlyAgents(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	printWrongAgentError(&buf, "nope")
+	output := buf.String()
+
+	if strings.Contains(output, string(vogon.AgentNameVogon)) {
+		t.Errorf("test-only agent %q offered to the user:\n%s", vogon.AgentNameVogon, output)
+	}
+	if !strings.Contains(output, string(agent.AgentNameClaudeCode)) {
+		t.Fatalf("expected real agents to still be listed:\n%s", output)
 	}
 }
 
