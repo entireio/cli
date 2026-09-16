@@ -137,11 +137,15 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},
 	"blame":    {agentHelpAudienceReadOnly, false},
-	"experts":  {agentHelpAudienceReadOnly, false},
-	"labs":     {agentHelpAudienceReadOnly, false},
-	"recap":    {agentHelpAudienceReadOnly, false},
-	"version":  {agentHelpAudienceReadOnly, false},
-	"tokens":   {agentHelpAudienceReadOnly, false},
+	// recall's bare form only reads, but `recall ingest` rebuilds derived
+	// state under .entire/recall, so the group cannot claim read-only.
+	"recall":        {agentHelpAudienceTaskDriven, false},
+	"recall ingest": {agentHelpAudienceTaskDriven, false},
+	"experts":       {agentHelpAudienceReadOnly, false},
+	"labs":          {agentHelpAudienceReadOnly, false},
+	"recap":         {agentHelpAudienceReadOnly, false},
+	"version":       {agentHelpAudienceReadOnly, false},
+	"tokens":        {agentHelpAudienceReadOnly, false},
 	// tokens is read-only, which is a claim about its children too — classified
 	// rather than assumed, so a future mutating child cannot inherit the claim.
 	"tokens profile": {agentHelpAudienceReadOnly, false},

@@ -60,6 +60,11 @@ var experimentalCommands = []experimentalCommandInfo{
 		Invocation:  "entire experts",
 		Summary:     "Show agent, skill, and tool provenance for files or topics",
 	},
+	{
+		CommandPath: []string{"recall"},
+		Invocation:  "entire recall",
+		Summary:     "Ask checkpoint history what was decided and why",
+	},
 }
 
 func newLabsCmd() *cobra.Command {
@@ -108,6 +113,7 @@ Try:
   entire blame --help
   entire why --help
   entire experts --help
+  entire recall --help
 `
 }
 
