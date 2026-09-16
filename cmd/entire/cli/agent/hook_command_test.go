@@ -195,6 +195,50 @@ func TestIsManagedHookCommand_WrappedPrefix(t *testing.T) {
 	}
 }
 
+// TestWindowsWrappersKeepTheWorktreeOutOfCommandResolution pins the half of the
+// current-directory defence that is true by construction and needs no shell:
+// where.exe is named under %SystemRoot%, so the guard itself can never be a
+// program the repository committed. The other half — the bare `entire` in the
+// else branch, which has no absolute spelling because resolving it through PATH
+// IS the check — rests on NoDefaultCurrentDirectoryInExePath and is asserted
+// against a real cmd.exe by TestWindowsWrappers_DoNotResolveFromTheWorktree.
+//
+// All three wrappers, because the guard is shared and a future one that built
+// its own would reopen this on whichever agent used it.
+func TestWindowsWrappersKeepTheWorktreeOutOfCommandResolution(t *testing.T) {
+	t.Parallel()
+
+	for name, command := range map[string]string{
+		"silent":    WrapWindowsProductionSilentHookCommand("entire hooks codex stop"),
+		"json":      WrapWindowsProductionJSONWarningHookCommand("entire hooks codex stop", WarningFormatSingleLine),
+		"plaintext": WrapWindowsProductionPlainTextWarningHookCommand("entire hooks codex stop", WarningFormatSingleLine),
+	} {
+		if !strings.Contains(command, `%SystemRoot%\System32\where.exe `) {
+			t.Errorf("%s wrapper must name where.exe absolutely, got %s", name, command)
+		}
+		if !strings.Contains(command, "NoDefaultCurrentDirectoryInExePath=1") {
+			t.Errorf("%s wrapper must take the current directory out of cmd.exe's search, got %s", name, command)
+		}
+	}
+}
+
+// TestIsManagedHookCommand_MatchesTheUnhardenedWindowsWrappers pins the
+// detection-only forms. A repo enabled before windowsEntireGuard carries these
+// commands; a form we stop recognising is not replaced on the next install, it
+// is left beside the new one and both fire.
+func TestIsManagedHookCommand_MatchesTheUnhardenedWindowsWrappers(t *testing.T) {
+	t.Parallel()
+
+	for name, command := range map[string]string{
+		"bare":   `where.exe entire >nul 2>nul & if errorlevel 1 (echo x) else (entire hooks codex stop)`,
+		"nested": `cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)"`,
+	} {
+		if !IsManagedHookCommand(command) {
+			t.Errorf("unhardened %s windows wrapper must stay managed: %s", name, command)
+		}
+	}
+}
+
 func TestIsManagedHookCommand_DoesNotMatchSubstring(t *testing.T) {
 	t.Parallel()
 
