@@ -310,3 +310,11 @@ func pluralAgents(n int) string {
 	}
 	return fmt.Sprintf("%d agents", n)
 }
+
+// pluralCheckpoints renders a checkpoint count with correct pluralization.
+func pluralCheckpoints(n int) string {
+	if n == 1 {
+		return "1 checkpoint"
+	}
+	return fmt.Sprintf("%d checkpoints", n)
+}
