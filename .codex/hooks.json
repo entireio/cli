@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex post-tool-use'",
+            "command": "cmd.exe /d /s /c \"where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex post-tool-use)\"",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex session-end'",
+            "command": "cmd.exe /d /s /c \"where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex session-end)\"",
             "timeout": 3
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; exec entire hooks codex session-start'",
+            "command": "where.exe entire >nul 2>nul & if errorlevel 1 (echo {^\"systemMessage^\":^\"Entire CLI is enabled but not installed or not on PATH. Installation guide: https://docs.entire.io/cli/installation#installation-methods^\"}) else (entire hooks codex session-start)",
             "timeout": 30
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex stop'",
+            "command": "cmd.exe /d /s /c \"where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex stop)\"",
             "timeout": 30
           }
         ]
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex subagent-start'",
+            "command": "cmd.exe /d /s /c \"where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex subagent-start)\"",
             "timeout": 30
           }
         ]
@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex subagent-stop'",
+            "command": "cmd.exe /d /s /c \"where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex subagent-stop)\"",
             "timeout": 30
           }
         ]
@@ -78,7 +78,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks codex user-prompt-submit'",
+            "command": "cmd.exe /d /s /c \"where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex user-prompt-submit)\"",
             "timeout": 30
           }
         ]
