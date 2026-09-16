@@ -6,6 +6,7 @@ package cli
 const (
 	cmdAgent      = "agent"
 	cmdCheckpoint = "checkpoint"
+	cmdCreate     = "create"
 	cmdCreateName = "create <name>"
 	cmdList       = "list"
 	cmdOrg        = "org"
@@ -24,12 +25,14 @@ const (
 // Column headers shared by the control-plane tables: org, project, repo, grant
 // and the mirror subtree each print several of the same columns.
 const (
+	colHeaderBranch   = "BRANCH"
 	colHeaderCloneURL = "CLONE URL"
 	colHeaderCluster  = "CLUSTER"
 	colHeaderName     = "NAME"
 	colHeaderRegion   = "REGION"
 	colHeaderRole     = "ROLE"
 	colHeaderStatus   = "STATUS"
+	colHeaderTitle    = "TITLE"
 )
 
 // Display nouns selected by a count. Spelled here rather than inline because

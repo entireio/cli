@@ -1040,7 +1040,7 @@ func ghRepoCreate(ctx context.Context, runner bootstrapRunner, dir, fullName, vi
 	// "✓ Created repository..." / "✓ Added remote..." lines would
 	// duplicate our own summary in runGitHubBootstrapFinalize.
 	args := []string{
-		"repo", "create", fullName,
+		"repo", cmdCreate, fullName,
 		"--" + visibility,
 		"--source=.",
 		"--remote=origin",

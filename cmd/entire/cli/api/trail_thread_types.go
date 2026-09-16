@@ -9,6 +9,7 @@ import "time"
 
 // TrailThreadReply is a reply on a thread message. Replies do not nest further.
 type TrailThreadReply struct {
+	ETag      string    `json:"etag,omitempty"`
 	ID        string    `json:"id"`
 	Author    string    `json:"author"` // GitHub login
 	CreatedAt time.Time `json:"createdAt"`
@@ -17,6 +18,7 @@ type TrailThreadReply struct {
 
 // TrailThreadMessage is a top-level message in a thread.
 type TrailThreadMessage struct {
+	ETag      string             `json:"etag,omitempty"`
 	ID        string             `json:"id"`
 	Author    string             `json:"author"` // GitHub login
 	CreatedAt time.Time          `json:"createdAt"`

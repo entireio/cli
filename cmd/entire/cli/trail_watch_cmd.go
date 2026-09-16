@@ -46,13 +46,14 @@ func newTrailWatchCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "watch [<trail>]",
-		Short: "Tail a trail's events live",
-		Long: `Subscribe to the trail-wide SSE stream and print events as they arrive.
+		Short: "Tail events for a trail's selected repository branch",
+		Long: `Subscribe to the selected repository/branch's SSE stream and print events as they arrive.
 Reconnects automatically when the server caps the connection (~50s) and on
 transient network errors.
 
-<trail> may be a number, id, or branch name. If omitted, the trail for the
-current branch is used.
+<trail> is a project trail number or ID. If omitted, the current branch's
+parent is used. --repo and --branch select the working context; this does not
+aggregate streams from every repository.
 
 This command resolves the trail's id internally and streams
 GET /api/v1/trails/<id>/events with Accept: text/event-stream.
@@ -78,7 +79,7 @@ Events emitted by the server:
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print each event as a single JSON line")
 	cmd.Flags().BoolVar(&showPings, "show-pings", false, "Print SSE keepalive pings (otherwise suppressed)")
 	cmd.Flags().BoolVar(&once, "once", false, "Open one SSE connection then exit instead of reconnecting")
-	cmd.Flags().StringVar(&branch, "branch", "", "Watch the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.Flags().StringVar(&branch, "branch", "", "Select a repository branch within the trail")
 
 	return cmd
 }
@@ -88,7 +89,8 @@ func runTrailReviewWatch(cmd *cobra.Command, selector string, jsonOutput, showPi
 	if err != nil {
 		return err
 	}
-	description := trailWatchDescription(target.Host, target.Owner, target.Repo, target.Trail.Number, target.Trail.ID)
+	display := trailForDisplay(target.Trail)
+	description := trailWatchDescription(target.Host, target.Owner, target.Repo, display.Number, display.ID) + " / " + target.Trail.Branch
 	return runTrailWatchResolved(cmd, client, target.Trail.ID, description, jsonOutput, showPings, once)
 }
 

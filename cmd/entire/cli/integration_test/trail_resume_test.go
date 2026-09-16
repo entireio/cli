@@ -69,9 +69,9 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 	}
 
 	trail := api.TrailResource{
-		ID:        "trail-integration-321",
-		Number:    321,
-		URL:       "https://entire.io/gh/entireio/cli/trails/321",
+		ID:        "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+		Number:    7,
+		URL:       "https://entire.io/gh/entireio/cli/trails/7",
 		Branch:    env.GetCurrentBranch(),
 		Base:      masterBranch,
 		Title:     "Resume checkpoint sessions from trail",
@@ -93,8 +93,9 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 		checkpointID,
 		"Create hello method",
 		"Create goodbye method",
-		"entire trail resume 321 --repo entireio/cli --branch feature/test-branch --session " + firstSession.ID,
-		"entire trail resume 321 --repo entireio/cli --branch feature/test-branch --session " + secondSession.ID,
+		"entire trail resume 321 --project gh/entireio --repo gh/entireio/cli --branch feature/test-branch --session " + firstSession.ID,
+		"entire trail resume 321 --project gh/entireio --repo gh/entireio/cli --branch feature/test-branch --session " + secondSession.ID,
+		"entire trail finding 321 --project gh/entireio --repo gh/entireio/cli --branch feature/test-branch --json",
 	} {
 		if !strings.Contains(contextOutput, want) {
 			t.Fatalf("trail resume --no-resume output missing %q:\n%s", want, contextOutput)
@@ -127,6 +128,11 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 
 func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *httptest.Server {
 	t.Helper()
+	const parentID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const parentPath = "/api/v1/gh/entireio/trails/" + parentID
+	const projectID = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	parent := api.ProjectTrail{ID: parentID, Number: 321, ProjectID: projectID, Title: trail.Title, Status: "open",
+		Changes: []api.ChangeSummary{{ID: trail.ID, RepositoryID: "placement-primary", Repository: "cli", Branch: trail.Branch}}}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -178,14 +184,30 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 					},
 				},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/resolve/gh/entireio":
+			writeTrailResumeIntegrationJSON(t, w, map[string]any{
+				"project":   map[string]string{"id": projectID, "region": "us", "primaryProcessingCell": trailResumeIntegrationClusterSlug},
+				"reference": map[string]string{"host": "gh", "project": "entireio"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/gh/entireio/trails":
+			writeTrailResumeIntegrationJSON(t, w, api.ProjectTrailListResponse{Items: []api.ProjectTrail{parent}})
+		case r.Method == http.MethodGet && r.URL.Path == parentPath:
+			writeTrailResumeIntegrationJSON(t, w, parent)
+		case r.Method == http.MethodGet && r.URL.Path == parentPath+"/changes/"+trail.ID:
+			writeTrailResumeIntegrationJSON(t, w, struct {
+				api.TrailResource
+
+				TrailID      string `json:"trailId"`
+				RepositoryID string `json:"repositoryId"`
+			}{trail, parentID, "placement-primary"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
 			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
 				Trails: []api.TrailResource{trail},
 				Total:  1,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/7":
 			writeTrailResumeIntegrationJSON(t, w, trail)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321/reviews/comments":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/7/reviews/comments":
 			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"comments": []any{},
 				"hasMore":  false,

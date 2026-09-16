@@ -167,7 +167,6 @@ func TestTrailRepoOverride_RejectedByLocalCommands(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "create", args: []string{"create", "--repo", "gh/acme/app"}},
 		{name: "checkout", args: []string{"checkout", "--repo", "gh/acme/app"}},
 		{name: "finding apply", args: []string{"finding", "apply", "--repo", "gh/acme/app", "deadbeef"}},
 	}
@@ -182,17 +181,17 @@ func TestTrailRepoOverride_RejectedByLocalCommands(t *testing.T) {
 	}
 }
 
-func TestTrailSelectorAndBranchAreMutuallyExclusive(t *testing.T) {
+func TestTrailWorkingSelectorMustNameProjectIntent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		args    []string
 		wantSub string
 	}{
-		{name: "show", args: []string{"show", "123", "--branch", "foo"}, wantSub: "not both"},
-		{name: "watch", args: []string{"watch", "5", "--branch", "foo"}, wantSub: "not both"},
-		{name: "finding list positional", args: []string{"finding", "list", "123", "--branch", "foo"}, wantSub: "not both"},
-		{name: "finding list --trail", args: []string{"finding", "list", "--trail", "123", "--branch", "foo"}, wantSub: "not both"},
+		{name: "show", args: []string{"show", "feature/work", "--branch", "foo"}, wantSub: "project trail ID or number"},
+		{name: "watch", args: []string{"watch", "feature/work", "--branch", "foo"}, wantSub: "project trail ID or number"},
+		{name: "finding list positional", args: []string{"finding", "list", "feature/work", "--branch", "foo"}, wantSub: "project trail ID or number"},
+		{name: "finding list --trail", args: []string{"finding", "list", "--trail", "feature/work", "--branch", "foo"}, wantSub: "project trail ID or number"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -214,8 +213,8 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 	}{
 		{name: "show", args: []string{"show", "--repo", "gh/acme/app"}},
 		{name: "watch", args: []string{"watch", "--repo", "gh/acme/app"}},
-		{name: "update", args: []string{"update", "--repo", "gh/acme/app"}},
-		{name: "delete", args: []string{"delete", "--repo", "gh/acme/app"}},
+		{name: "update", args: []string{"update", "--title", "Intent", "--repo", "gh/acme/app"}},
+		{name: "unlink", args: []string{"unlink", "--repo", "gh/acme/app"}},
 		{name: "finding list", args: []string{"finding", "list", "--repo", "gh/acme/app"}},
 		{name: "approve", args: []string{"approve", "--repo", "gh/acme/app"}},
 		{name: "request-changes", args: []string{"request-changes", "--repo", "gh/acme/app", "-m", "why"}},

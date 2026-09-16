@@ -490,7 +490,7 @@ func TestTrailRootPrintsHelp(t *testing.T) {
 		t.Fatalf("execute trail root: %v", err)
 	}
 	text := out.String()
-	for _, want := range []string{"A trail ties together the context for a branch", "`entire trail finding`", "show", "list", "create", "finding"} {
+	for _, want := range []string{"A trail captures project intent", "--repo and --branch", "show", "list", "create", "link", "unlink"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help output missing %q, got:\n%s", want, text)
 		}
@@ -2152,7 +2152,7 @@ func TestPrintTrailListEmptyDefaultStatusNamesFilterAndHints(t *testing.T) {
 	for _, want := range []string{
 		"No open trails found.",
 		"Use --status any to see trails in other statuses.",
-		"entire trail create",
+		"entire trail link",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, text)

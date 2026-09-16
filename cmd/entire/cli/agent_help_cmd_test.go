@@ -77,9 +77,8 @@ func TestAgentHelpCommands_IncludesAnnotatedHiddenOnly(t *testing.T) {
 	}
 }
 
-// Per the trails rollout: agent-help must not surface trail-gated commands when
-// trails aren't enabled for the repo, but non-trail commands always show.
-func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
+// Project intent remains discoverable without a repository Trails toggle.
+func TestAgentHelpCommands_ProjectTrailsIndependentOfRepoToggle(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd()
 
@@ -92,8 +91,8 @@ func TestAgentHelpCommands_GatesTrailOnTrailsEnabled(t *testing.T) {
 	}
 
 	disabled := commandNames(agentHelpCommands(root, false))
-	if contains(disabled, "trail") {
-		t.Errorf("trail must NOT be advertised when trails are disabled, got %v", disabled)
+	if !contains(disabled, "trail") {
+		t.Errorf("project trails must be advertised without repo trails, got %v", disabled)
 	}
 	if !contains(disabled, "checkpoint") {
 		t.Errorf("non-trail commands should always be advertised, got %v", disabled)
@@ -285,27 +284,21 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_NotOnboardedSavesDisa
 	}
 }
 
-// Drilling into a trail-gated command is blocked when trails are disabled.
-func TestRunAgentHelp_TrailDrillGatedOnTrailsEnabled(t *testing.T) {
+// Project-level operations do not require enabled repository code work.
+func TestRunAgentHelp_ProjectTrailDrillIndependentOfRepoToggle(t *testing.T) {
 	t.Parallel()
 	root := NewRootCmd()
 
 	if _, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, true); err != nil {
 		t.Errorf("trail drill should resolve when trails enabled: %v", err)
 	}
-	_, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, false)
-	if err == nil {
-		t.Fatalf("trail drill should be unavailable when trails disabled")
-	}
-	if !strings.Contains(err.Error(), "trails are not enabled") {
-		t.Errorf("expected the requires-trails unavailable error, got: %v", err)
+	if _, err := runAgentHelp(root, []string{"trail"}, agentHelpTestRepo, false, false); err != nil {
+		t.Fatalf("project trail drill should work without repo trails: %v", err)
 	}
 }
 
-// The --json output path gates trail-gated subcommands exactly like the text
-// path: the top-level JSON subcommand list omits trail when trails are disabled
-// and includes it when enabled.
-func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
+// JSON discovery also exposes project intent without repository code work.
+func TestRunAgentHelp_JSONProjectTrailsIndependentOfRepoToggle(t *testing.T) {
 	t.Parallel()
 
 	hasSub := func(jsonOut, name string) bool {
@@ -329,8 +322,8 @@ func TestRunAgentHelp_JSONGatesTrailOnTrailsEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json top (trails disabled): %v", err)
 	}
-	if hasSub(disabled, "trail") {
-		t.Errorf("trail must NOT appear in --json subcommands when trails disabled:\n%s", disabled)
+	if !hasSub(disabled, "trail") {
+		t.Errorf("project trails must appear without repository trails:\n%s", disabled)
 	}
 	if !hasSub(disabled, "checkpoint") {
 		t.Errorf("checkpoint should always appear in --json subcommands:\n%s", disabled)
@@ -516,7 +509,7 @@ func TestRunAgentHelp_Dispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drill: unexpected error: %v", err)
 	}
-	if !strings.Contains(drill, "Manage trails for your branches") || !strings.Contains(drill, "--repo") {
+	if !strings.Contains(drill, "Manage trails across repositories and branches") || !strings.Contains(drill, "--repo") {
 		t.Fatalf("drill output unexpected:\n%s", drill)
 	}
 
@@ -681,7 +674,7 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 		"status", "trail", "checkpoint", "session", "why", "search",
 		"read-only except: policy",                      // checkpoint, one line
 		"read-only except: adopt, attach, resume, stop", // session, one line
-		"read-only: approvals, list, show, watch",       // trail: minority side named
+		"read-only: approvals, list, show, watch",       // project trail: minority side named
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("listing missing %q:\n%s", want, out)

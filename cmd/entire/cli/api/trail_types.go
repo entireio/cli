@@ -19,31 +19,32 @@ type TrailListResponse struct {
 // camelCase and nullable branch fields. Branch is empty when the trail is
 // currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
-	ID                 string             `json:"id,omitempty"`
-	Number             int                `json:"number,omitempty"`
-	URL                string             `json:"url,omitempty"`
-	Branch             string             `json:"branch"`
-	OriginalBranch     string             `json:"originalBranch,omitempty"`
-	Base               string             `json:"base"`
-	Title              string             `json:"title"`
-	Body               string             `json:"body,omitempty"`
-	Status             string             `json:"status"`
-	Phase              string             `json:"phase,omitempty"`
-	Author             *trail.Author      `json:"author"`
-	Assignees          []string           `json:"assignees"`
-	Labels             []string           `json:"labels,omitempty"`
-	Priority           string             `json:"priority,omitempty"`
-	Type               string             `json:"type,omitempty"`
-	Reviewers          []trail.Reviewer   `json:"reviewers,omitempty"`
-	RequestedReviewers []string           `json:"requestedReviewers,omitempty"`
-	CreatedAt          time.Time          `json:"createdAt"`
-	UpdatedAt          time.Time          `json:"updatedAt"`
-	MergedAt           *time.Time         `json:"mergedAt,omitempty"`
-	CommentCount       int                `json:"commentCount,omitempty"`
-	UnresolvedCount    int                `json:"unresolvedCount,omitempty"`
-	CheckpointCount    int                `json:"checkpointCount,omitempty"`
-	CommitsAhead       int                `json:"commitsAhead,omitempty"`
-	BodyDocument       *TrailBodyDocument `json:"bodyDocument,omitempty"`
+	ID                 string                `json:"id,omitempty"`
+	Number             int                   `json:"number,omitempty"`
+	URL                string                `json:"url,omitempty"`
+	Branch             string                `json:"branch"`
+	OriginalBranch     string                `json:"originalBranch,omitempty"`
+	Base               string                `json:"base"`
+	Title              string                `json:"title"`
+	Body               string                `json:"body,omitempty"`
+	Status             string                `json:"status"`
+	Phase              string                `json:"phase,omitempty"`
+	Author             *trail.Author         `json:"author"`
+	Assignees          []string              `json:"assignees"`
+	Labels             []string              `json:"labels,omitempty"`
+	Priority           string                `json:"priority,omitempty"`
+	Type               string                `json:"type,omitempty"`
+	Reviewers          []trail.Reviewer      `json:"reviewers,omitempty"`
+	RequestedReviewers []string              `json:"requestedReviewers,omitempty"`
+	CreatedAt          time.Time             `json:"createdAt"`
+	UpdatedAt          time.Time             `json:"updatedAt"`
+	MergedAt           *time.Time            `json:"mergedAt,omitempty"`
+	CommentCount       int                   `json:"commentCount,omitempty"`
+	UnresolvedCount    int                   `json:"unresolvedCount,omitempty"`
+	CheckpointCount    int                   `json:"checkpointCount,omitempty"`
+	CommitsAhead       int                   `json:"commitsAhead,omitempty"`
+	BodyDocument       *TrailBodyDocument    `json:"bodyDocument,omitempty"`
+	Parent             *TrailParentReference `json:"parent,omitempty"`
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot

@@ -120,19 +120,20 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
 	"trail":                 {agentHelpAudienceTaskDriven, true},
-	"trail approvals":       {agentHelpAudienceReadOnly, false},
 	"trail list":            {agentHelpAudienceReadOnly, false},
 	"trail show":            {agentHelpAudienceReadOnly, false},
+	"trail create":          {agentHelpAudienceTaskDriven, false},
+	"trail update":          {agentHelpAudienceTaskDriven, false},
+	"trail approvals":       {agentHelpAudienceReadOnly, false},
 	"trail watch":           {agentHelpAudienceReadOnly, false},
 	"trail approve":         {agentHelpAudienceTaskDriven, false},
 	"trail checkout":        {agentHelpAudienceTaskDriven, false},
 	"trail comment":         {agentHelpAudienceTaskDriven, false},
-	"trail create":          {agentHelpAudienceTaskDriven, false},
-	"trail delete":          {agentHelpAudienceTaskDriven, false},
 	"trail finding":         {agentHelpAudienceTaskDriven, false},
 	"trail request-changes": {agentHelpAudienceTaskDriven, false},
 	"trail resume":          {agentHelpAudienceTaskDriven, false},
-	"trail update":          {agentHelpAudienceTaskDriven, false},
+	"trail link":            {agentHelpAudienceUserOwned, false},
+	"trail unlink":          {agentHelpAudienceUserOwned, false},
 
 	// ---- Unlisted: real commands, just not the default view. ---------------
 	"activity": {agentHelpAudienceReadOnly, false},

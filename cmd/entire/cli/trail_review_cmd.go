@@ -79,9 +79,9 @@ func newTrailFindingCmd() *cobra.Command {
 		Long: `Manage a trail's agent-native findings.
 
 Running 'entire trail finding' shows the finding dashboard for the current
-branch's trail. Pass a trail selector (number, id, or branch) to inspect another
-trail in the same repo. Use 'entire trail list --status any' when you need to
-discover a trail selector first.`,
+branch's trail. Pass a project trail number or ID to inspect another trail.
+--repo and --branch select the working context; findings apply only to that
+branch, not the whole trail. Use 'entire trail list' to discover trails.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			selector, err := parseOptionalTrailSelector(args, targetOpts.Selector)
@@ -92,8 +92,8 @@ discover a trail selector first.`,
 			return runTrailReviewDashboard(cmd, selector, opts)
 		},
 	}
-	cmd.PersistentFlags().StringVar(&targetOpts.Selector, "trail", "", "Trail selector (number, id, or branch); defaults to the current branch's trail")
-	cmd.PersistentFlags().StringVar(&targetOpts.Branch, "branch", "", "Resolve the trail for this branch instead of the current branch; cannot be combined with a trail selector")
+	cmd.PersistentFlags().StringVar(&targetOpts.Selector, "trail", "", "Project trail number or ID (defaults to the current branch's parent)")
+	cmd.PersistentFlags().StringVar(&targetOpts.Branch, "branch", "", "Select a repository branch within the trail")
 	addTrailReviewListFlags(cmd, &opts)
 
 	cmd.AddCommand(newTrailFindingListCmd(&targetOpts))
@@ -478,26 +478,11 @@ func runTrailReviewSetStatus(cmd *cobra.Command, selector string, commentID, sta
 }
 
 func authenticatedTrailReviewTarget(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error) {
-	repoOverride := trailRepoFlag(cmd)
-	branchOverride := trailBranchFlag(cmd)
-	if selector != "" && branchOverride != "" {
-		return nil, trailReviewTarget{}, errors.New("pass a trail selector or --branch, not both")
-	}
-	if repoOverride != "" && selector == "" && branchOverride == "" {
-		return nil, trailReviewTarget{}, errors.New("--repo requires an explicit target: pass a trail selector or --branch")
-	}
-	var target trailReviewTarget
-	var resolvedClient *api.Client
-	err := runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client, repoID string) error {
-		var err error
-		resolvedClient = client
-		target, err = resolveTrailReviewTarget(ctx, client, repoID, selector, repoOverride, branchOverride)
-		return err
-	})
+	selected, err := resolveTrailWorkingContext(cmd, selector, trailBranchFlag(cmd), false)
 	if err != nil {
 		return nil, trailReviewTarget{}, err
 	}
-	return resolvedClient, target, nil
+	return selected.Client, trailReviewTarget{Host: selected.Host, Owner: selected.Owner, Repo: selected.Repo, Trail: selected.Work}, nil
 }
 
 func resolveTrailReviewTarget(ctx context.Context, client *api.Client, repoID, selector, repoOverride, branchOverride string) (trailReviewTarget, error) {
@@ -1473,7 +1458,7 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(map[string]any{
-		"trail":    target.Trail,
+		"trail":    trailForDisplay(target.Trail),
 		"counts":   counts,
 		"findings": comments,
 		"has_more": hasMore,
@@ -1484,7 +1469,7 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 }
 
 func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, hasMore bool, opts trailReviewListOptions, counts trailReviewCommentCounts) {
-	trail := target.Trail
+	trail := trailForDisplay(target.Trail)
 	if trail.Number > 0 {
 		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trail.Title)
 	} else {
@@ -1589,6 +1574,9 @@ func printTrailReviewCommentDetail(w io.Writer, comment api.TrailReviewComment) 
 }
 
 func trailReviewTargetDisplay(target trailReviewTarget) string {
+	if target.Trail.Parent != nil {
+		return describeTrailRef(&target.Trail)
+	}
 	if target.Trail.Number > 0 {
 		return fmt.Sprintf("trail #%d (%s)", target.Trail.Number, target.Trail.Title)
 	}

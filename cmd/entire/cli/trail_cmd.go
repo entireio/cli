@@ -17,7 +17,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 
@@ -41,7 +40,7 @@ const (
 )
 
 func trailContextBlurb() string {
-	return "A trail ties together the context for a branch. Use `entire trail` to view, create, update, or watch it; use `entire trail finding` to manage agent findings."
+	return "A trail captures project intent across repositories and branches. Manage intent and discussions on the whole trail; use --repo and --branch to select context for checkout, sessions, findings, and approvals."
 }
 
 func newTrailCmd() *cobra.Command {
@@ -50,14 +49,12 @@ func newTrailCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:    cmdTrail,
-		Short:  "Manage trails for your branches",
+		Short:  "Manage trails across repositories and branches",
 		Hidden: true,
-		// Hidden from root help while the surface matures, but advertised to
-		// coding agents through `entire agent-help` — only when trails are
-		// enabled for the repo, so we never point agents at trails they can't use.
+		// Project intent can exist without any repository or repo-trails toggle.
+		// Keep it discoverable even when repository code work is unavailable.
 		Annotations: map[string]string{
-			agentHelpAnnotation:               agentHelpAnnotationEnabled,
-			agentHelpRequiresTrailsAnnotation: agentHelpAnnotationEnabled,
+			agentHelpAnnotation: agentHelpAnnotationEnabled,
 		},
 		Args: cobra.NoArgs,
 		Long: trailContextBlurb(),
@@ -79,19 +76,16 @@ func newTrailCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&repoOverride, "repo", "",
 		"Target repository as forge/owner/repo (e.g. gh/acme/app) or a clone URL; defaults to the origin remote")
 
-	cmd.AddCommand(newTrailShowCmd())
-	cmd.AddCommand(newTrailListCmd())
-	cmd.AddCommand(newTrailCreateCmd())
-	cmd.AddCommand(newTrailUpdateCmd())
-	cmd.AddCommand(newTrailCheckoutCmd())
-	cmd.AddCommand(newTrailResumeCmd())
-	cmd.AddCommand(newTrailDeleteCmd())
-	cmd.AddCommand(newTrailFindingCmd())
-	cmd.AddCommand(newTrailWatchCmd())
-	cmd.AddCommand(newTrailApproveCmd())
-	cmd.AddCommand(newTrailRequestChangesCmd())
-	cmd.AddCommand(newTrailApprovalsCmd())
-	cmd.AddCommand(newTrailCommentCmd())
+	cmd.PersistentFlags().String("project", "", "Project as gh/<owner> or et/<project>; defaults to the repository's public namespace")
+
+	cmd.AddCommand(newProjectTrailShowCmd())
+	cmd.AddCommand(newProjectTrailListCmd())
+	cmd.AddCommand(newProjectTrailCreateCmd())
+	cmd.AddCommand(newProjectTrailUpdateCmd())
+	cmd.AddCommand(newTrailLinkCmd(), newTrailUnlinkCmd())
+	cmd.AddCommand(newTrailCheckoutCmd(), newTrailResumeCmd(), newTrailFindingCmd(), newTrailWatchCmd())
+	cmd.AddCommand(newTrailApproveCmd(), newTrailRequestChangesCmd(), newTrailApprovalsCmd())
+	cmd.AddCommand(newProjectTrailCommentCmd())
 
 	return cmd
 }
@@ -293,14 +287,14 @@ func resolveTrailBySelectorAtPath(ctx context.Context, client *api.Client, baseP
 	if selector == "" {
 		branch, err := resolveTrailBranch(ctx, branchOverride)
 		if err != nil {
-			return nil, fmt.Errorf("no trail selector given and current branch is unknown: %w\nhint: run 'entire trail list --status any' or pass a trail number, id, or branch", err)
+			return nil, fmt.Errorf("no branch context given and current branch is unknown: %w\nhint: run 'entire trail list' or select --branch", err)
 		}
 		found, err := findTrailByBranchAtPath(ctx, client, basePath, branch)
 		if err != nil {
 			return nil, err
 		}
 		if found == nil {
-			return nil, fmt.Errorf("no trail found for current branch %q\nhint: run 'entire trail create' or 'entire trail list --status any'", branch)
+			return nil, fmt.Errorf("no trail found for current branch %q\nhint: run 'entire trail link <trail> --branch <branch>' or 'entire trail list'", branch)
 		}
 		return found, nil
 	}
@@ -309,7 +303,7 @@ func resolveTrailBySelectorAtPath(ctx context.Context, client *api.Client, baseP
 		return nil, err
 	}
 	if found == nil {
-		return nil, fmt.Errorf("no trail %q found in %s/%s/%s (run 'entire trail list --status any')", selector, forge, owner, repo)
+		return nil, fmt.Errorf("no branch work %q found in %s/%s/%s (run 'entire trail list')", selector, forge, owner, repo)
 	}
 	return found, nil
 }
@@ -464,29 +458,6 @@ func decodeTrailResource(resp *http.Response) (api.TrailResource, error) {
 		return api.TrailResource{}, fmt.Errorf("decode trail resource: %w", err)
 	}
 	return resource, nil
-}
-
-func newTrailListCmd() *cobra.Command {
-	var opts trailListOptions
-
-	cmd := &cobra.Command{
-		Use:   cmdList,
-		Short: "List recent trails",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			opts.InsecureHTTP = trailInsecureHTTP(cmd)
-			opts.Repo = trailRepoFlag(cmd)
-			return runTrailListAll(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), opts)
-		},
-	}
-
-	cmd.Flags().StringVar(&opts.Author, "author", "",
-		"Filter by author login (case-insensitive); use '"+trailListAuthorMe+"' for yourself (requires gh CLI); omit for any author")
-	cmd.Flags().StringVar(&opts.Status, "status", defaultTrailListStatus,
-		"Filter by comma-separated status(es): "+formatValidStatuses()+"; use '"+trailListStatusAny+"' for all statuses")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output as JSON (respects --author, --status, and --limit)")
-	cmd.Flags().IntVarP(&opts.Limit, "limit", "n", defaultTrailListLimit, "Maximum number of trails to show")
-
-	return cmd
 }
 
 func runTrailListAll(ctx context.Context, w, errW io.Writer, opts trailListOptions) error {
@@ -689,9 +660,9 @@ func printTrailListEmpty(w io.Writer, authorFilter string, statusFilters []trail
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  entire trail create   Create a trail for the current branch")
+	fmt.Fprintln(w, "  entire trail link <trail> --branch <branch>   Link a branch")
 	fmt.Fprintln(w, "  entire trail list     List recent trails")
-	fmt.Fprintln(w, "  entire trail update   Update trail metadata")
+	fmt.Fprintln(w, "  entire trail update   Update intent")
 }
 
 func parseTrailStatusFilter(filter string) ([]trail.Status, error) {
@@ -792,7 +763,7 @@ func printTrailRows(w io.Writer, trails []*trail.Metadata, showAuthor, showStatu
 
 	// The leading two-space indent is folded into the first column so the shared
 	// table renderer (columnWidths/writeTableRow) reproduces the list's layout.
-	headers := []string{"  NUM", "BRANCH", "TITLE"}
+	headers := []string{"  NUM", colHeaderBranch, colHeaderTitle}
 	if showStatus {
 		headers = append(headers, "STATUS")
 	}
@@ -950,7 +921,7 @@ func newTrailCreateCmd() *cobra.Command {
 	var checkout, noBranch bool
 
 	cmd := &cobra.Command{
-		Use:   "create",
+		Use:   cmdCreate,
 		Short: "Create a trail for the current, a new, or no branch",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -1713,7 +1684,7 @@ func sendTrailBody(ctx context.Context, client *api.Client, path, body, ifMatch 
 	if err := checkTrailResponse(resp); err != nil {
 		switch {
 		case api.IsHTTPErrorStatus(err, http.StatusPreconditionFailed):
-			return fmt.Errorf("%w — trail body changed since it was read; run 'entire trail show' to see the current text and merge it in, then re-run — or pass --overwrite to discard it", err)
+			return fmt.Errorf("%w — trail body changed since it was read; read the current branch description before retrying and merge it in, then re-run — or pass --overwrite to discard it", err)
 		case api.IsHTTPErrorStatus(err, http.StatusConflict):
 			return fmt.Errorf("%w — trail body is not empty; pass --overwrite to replace it", err)
 		default:
@@ -1734,15 +1705,17 @@ func newTrailCheckoutCmd() *cobra.Command {
 	var trailSelector string
 	var force bool
 	var worktree bool
+	var branch string
 
 	cmd := &cobra.Command{
 		Use:   "checkout [<trail>]",
 		Short: "Check out a trail's branch",
 		Long: `Check out the branch of a trail.
 
-The trail may be given as the first argument or via --trail, as a number, id, or
-branch. Without one, the trail for the current branch is used. The trail's branch
-is checked out, fetching it from origin first when it only exists there.
+The trail may be given as the first argument or via --trail, as a project number
+or ID. Without one, the current branch's parent is used. --branch selects the
+working branch; otherwise the current branch or sole branch in this repository
+is selected. Ambiguity requires --branch. Remote-only branches are fetched.
 
 With --worktree, the branch is checked out into a git worktree under
 .entire/worktrees at the repo root instead of switching this checkout, and the
@@ -1765,11 +1738,16 @@ trail is looked up against that repository's origin remote.`,
 			if err := ensureNoTrailRepoOverride(cmd, "trail checkout"); err != nil {
 				return err
 			}
-			return runTrailCheckout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), selector, trailCheckoutOptions{Force: force, Worktree: worktree})
+			selected, err := resolveTrailWorkingContext(cmd, selector, branch, true)
+			if err != nil {
+				return err
+			}
+			return checkoutTrailBranch(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), &selected.Work, trailCheckoutOptions{Force: force, Worktree: worktree})
 		},
 	}
 
-	cmd.Flags().StringVar(&trailSelector, "trail", "", "Trail to check out (number, id, or branch; defaults to the current branch's trail)")
+	cmd.Flags().StringVar(&trailSelector, "trail", "", "Project trail number or ID (defaults to the current branch's trail)")
+	cmd.Flags().StringVar(&branch, "branch", "", "Select a branch within the trail in this repository")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the prompt before fetching a remote-only branch")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "Check out the trail branch in a worktree under .entire/worktrees instead of switching this checkout")
 
@@ -1781,62 +1759,38 @@ type trailCheckoutOptions struct {
 	Worktree bool
 }
 
-func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, opts trailCheckoutOptions) error {
-	// checkout rejects --repo (it operates on the local clone), so the enablement
-	// cache always tracks the local origin here.
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client, repoID string) error {
-		forge, owner, repo, err := resolveTrailRemote(ctx)
-		if err != nil {
-			return err
-		}
-		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
-		if err != nil {
-			return err
-		}
-
-		found, err := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repo, selector, "")
-		if err != nil {
-			return err
-		}
-
-		branch := strings.TrimSpace(found.Branch)
-		if branch == "" {
-			return fmt.Errorf("%s has no branch to check out", describeTrailRef(found))
-		}
-
-		if opts.Worktree {
-			fmt.Fprintf(errW, "Checking out %s in a worktree\n", describeTrailRef(found))
-			return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, found.Number)
-		}
-
-		currentBranch, _ := GetCurrentBranch(ctx) //nolint:errcheck // best-effort; a detached HEAD just means "not already on the branch"
-		if currentBranch == branch {
-			fmt.Fprintf(w, "Already on branch %s for %s.\n", branch, describeTrailRef(found))
-			return nil
-		}
-
-		fmt.Fprintf(w, "Checking out %s\n", describeTrailRef(found))
-		// switchToBranchForResume handles local vs. remote-only branches, the
-		// uncommitted-changes guard, and the fetch prompt; reuse it rather than
-		// re-deriving that logic here.
-		proceed, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
-		if err != nil {
-			return err
-		}
-		if !proceed {
-			// The user declined to fetch a remote-only branch — a clean stop, not
-			// an error. Say so explicitly so the preceding "Checking out …" line
-			// doesn't read as a successful switch.
-			fmt.Fprintf(w, "Checkout of branch %s cancelled.\n", branch)
-		}
+func checkoutTrailBranch(ctx context.Context, w, errW io.Writer, found *api.TrailResource, opts trailCheckoutOptions) error {
+	branch := strings.TrimSpace(found.Branch)
+	if branch == "" {
+		return fmt.Errorf("%s has no branch to check out", describeTrailRef(found))
+	}
+	if opts.Worktree {
+		fmt.Fprintf(errW, "Checking out %s in a worktree\n", describeTrailRef(found))
+		return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, trailDisplayNumber(found))
+	}
+	currentBranch, _ := GetCurrentBranch(ctx) //nolint:errcheck // detached HEAD means not already on the branch
+	if currentBranch == branch {
+		fmt.Fprintf(w, "Already on branch %s for %s.\n", branch, describeTrailRef(found))
 		return nil
-	})
+	}
+	fmt.Fprintf(w, "Checking out %s\n", describeTrailRef(found))
+	proceed, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		fmt.Fprintf(w, "Checkout of branch %s cancelled.\n", branch)
+	}
+	return nil
 }
 
 // describeTrailRef renders a short human reference to a trail for status
 // messages, e.g. "trail #575 (Add foo)" or, when the trail has no number yet,
 // "trail \"Add foo\"".
 func describeTrailRef(t *api.TrailResource) string {
+	if t.Parent != nil {
+		return fmt.Sprintf("trail #%d (branch %s)", t.Parent.Number, t.Branch)
+	}
 	title := strings.TrimSpace(t.Title)
 	if t.Number > 0 {
 		if title == "" {
@@ -1862,97 +1816,6 @@ func parseTrailNumberArg(args []string) (int, error) {
 		return 0, fmt.Errorf("invalid trail number %q: expected a positive integer (see 'entire trail list')", args[0])
 	}
 	return n, nil
-}
-
-func newTrailDeleteCmd() *cobra.Command {
-	var branch string
-	var force bool
-
-	cmd := &cobra.Command{
-		Use:   "delete [<number>]",
-		Short: "Delete a trail",
-		Long: `Delete a trail by number, or the trail for a branch.
-
-If <number> is omitted, the trail for --branch (or the current branch) is used.
-Deletion is permanent; you are prompted to confirm unless --force is passed.`,
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			number, err := parseTrailNumberArg(args)
-			if err != nil {
-				return err
-			}
-			if number > 0 && cmd.Flags().Changed("branch") {
-				return errors.New("cannot combine a trail <number> with --branch")
-			}
-			if err := ensureTrailRepoHasTarget(cmd, number > 0 || strings.TrimSpace(branch) != "", "pass a trail number or --branch"); err != nil {
-				return err
-			}
-			return runTrailDelete(cmd, number, branch, force)
-		},
-	}
-
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch whose trail to delete (defaults to current)")
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the confirmation prompt")
-
-	return cmd
-}
-
-func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) error {
-	ctx := cmd.Context()
-	w := cmd.OutOrStdout()
-
-	return runAuthenticatedTrailAPI(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), func(ctx context.Context, client *api.Client, repoID string) error {
-		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, trailRepoFlag(cmd))
-		if err != nil {
-			return err
-		}
-		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
-		if err != nil {
-			return err
-		}
-
-		// Resolve the target trail. An explicit number is authoritative (a
-		// lookup is best-effort, only to label the confirmation); otherwise the
-		// branch's trail supplies the number.
-		title := ""
-		if number == 0 {
-			if branch == "" {
-				branch, err = GetCurrentBranch(ctx)
-				if err != nil {
-					return fmt.Errorf("failed to determine current branch: %w", err)
-				}
-			}
-			found, ferr := findTrailByBranchAtPath(ctx, client, basePath, branch)
-			if ferr != nil {
-				return ferr
-			}
-			if found == nil {
-				return fmt.Errorf("no trail found for branch %q", branch)
-			}
-			if found.Number <= 0 {
-				return fmt.Errorf("trail for branch %q has no number yet; cannot delete", branch)
-			}
-			number = found.Number
-			title = found.Title
-		} else if found, ferr := findTrailByNumberAtPath(ctx, client, basePath, number); ferr == nil && found != nil {
-			title = found.Title
-		}
-
-		proceed, err := confirmTrailDeletion(ctx, w, number, title, force, interactive.CanPromptInteractively())
-		if err != nil {
-			return err
-		}
-		if !proceed {
-			return nil
-		}
-
-		if err := deleteTrailByNumberAtPath(ctx, client, basePath, number); err != nil {
-			return err
-		}
-
-		fmt.Fprintf(w, "Deleted trail #%d\n", number)
-		return nil
-	})
 }
 
 // deleteTrailByNumberAtPath deletes a trail; entire-api answers 204 No Content,
