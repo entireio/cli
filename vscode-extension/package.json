@@ -1,0 +1,61 @@
+{
+  "name": "checkpoint-intelligence",
+  "displayName": "Checkpoint Intelligence",
+  "description": "Checkpoint-native developer intelligence, requirement auditing, and release readiness for Entire CLI & Graph",
+  "version": "1.0.0",
+  "publisher": "entire-btw",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "checkpoint-intelligence-container",
+          "title": "Checkpoint Intelligence",
+          "icon": "$(shield-check)"
+        }
+      ]
+    },
+    "views": {
+      "checkpoint-intelligence-container": [
+        {
+          "type": "webview",
+          "id": "checkpoint-intelligence-sidebar",
+          "name": "Audit & Handoff Dashboard"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "entire.audit.run",
+        "title": "Checkpoint Intelligence: Refresh Audit",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "entire.audit.enable",
+        "title": "Checkpoint Intelligence: Connect/Enable Entire"
+      },
+      {
+        "command": "entire.audit.openDashboard",
+        "title": "Checkpoint Intelligence: Open Web Dashboard"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "tsc -p ./",
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^16.11.7",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^4.9.4"
+  }
+}

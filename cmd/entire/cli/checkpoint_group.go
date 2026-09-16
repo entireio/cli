@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 
+	"github.com/entireio/cli/cmd/entire/cli/audit"
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/spf13/cobra"
@@ -42,6 +43,7 @@ Examples:
 	cmd.AddCommand(newCheckpointTokensCmd())
 	experimental.Register(cmd, newCheckpointPolicyCmd()) // 'checkpoint policy' (experimental)
 	cmd.AddCommand(newCheckpointSearchCmd())
+	cmd.AddCommand(audit.NewCmd())
 
 	return cmd
 }
