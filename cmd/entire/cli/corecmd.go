@@ -169,6 +169,24 @@ func runCoreList[T any](cmd *cobra.Command, empty string, headers []string, row 
 	return runCore(cmd, renderCoreList(cmd, empty, headers, row, fn))
 }
 
+// listView is how a list renders once its items are known, for the command
+// whose output depends on what came back. table is required and picks the
+// headers and row function; toJSON is optional and, when set, replaces the
+// raw wire model on --json — it must be additive-only, merging synthesized
+// fields into the marshalled objects (see mergeSynthesizedField) and never
+// dropping or overriding a server field.
+type listView[T any] struct {
+	table  func(items []T) (headers []string, row func(T) []string)
+	toJSON func(items []T) (any, error)
+}
+
+// runCoreListShaped is runCoreList with the rendering decided after the fetch.
+// `cluster list` adds its DEFAULT column this way, only when the catalog holds
+// a non-default cluster, and merges a validated `host` into its --json.
+func runCoreListShaped[T any](cmd *cobra.Command, empty string, view listView[T], fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCore(cmd, renderCoreListShaped(cmd, empty, view, fn))
+}
+
 // runCoreListForCluster is runCoreList for a resource-provider command (see
 // runCoreForCluster): identical table/JSON/empty-state rendering, but dialing
 // the core that fronts clusterHost rather than the active context.
@@ -177,11 +195,18 @@ func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost, empty string,
 }
 
 // renderCoreList builds the run-function shared by runCoreList and
-// runCoreListForCluster: fetch via fn, then render as a table (default), the
-// empty sentence (no items), or raw JSON (--json). Kept separate from the
+// runCoreListForCluster for a table with fixed columns. Kept separate from the
 // client-selection so the two list variants differ only in which core they
 // dial.
 func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
+	view := listView[T]{table: func([]T) ([]string, func(T) []string) { return headers, row }}
+	return renderCoreListShaped(cmd, empty, view, fn)
+}
+
+// renderCoreListShaped is the rendering every list variant shares: fetch via
+// fn, then render as a table (default), the empty sentence (no items), or JSON
+// (--json) — the raw wire model unless the view supplies its own.
+func renderCoreListShaped[T any](cmd *cobra.Command, empty string, view listView[T], fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
 	return func(ctx context.Context, c *coreapi.Client) error {
 		items, err := fn(ctx, c)
 		if err != nil {
@@ -191,14 +216,55 @@ func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, r
 			if items == nil {
 				items = []T{} // a nil slice encodes as null; scripts expect []
 			}
-			return printJSON(cmd.OutOrStdout(), items)
+			if view.toJSON == nil {
+				return printJSON(cmd.OutOrStdout(), items)
+			}
+			out, err := view.toJSON(items)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), out)
 		}
 		if len(items) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), empty)
 			return nil
 		}
+		headers, row := view.table(items)
 		return printTable(cmd.OutOrStdout(), headers, items, row)
 	}
+}
+
+// mergeSynthesizedField renders a wire object as JSON with one synthesized
+// string field merged in. The generated types carry custom marshalers plus
+// arbitrary additional properties, so they can't be embedded in a wrapper
+// struct; instead v is round-tripped through its own encoder (pass a pointer —
+// the marshalers have pointer receivers) and the field is merged into the
+// resulting object. Additive-only: if the object already carries the field
+// (a future first-class field, or one arriving via additional properties) it
+// is left untouched, so the server value always wins, and an empty synth
+// result adds nothing rather than a half-formed placeholder.
+func mergeSynthesizedField(v any, field string, synth func() string) (map[string]json.RawMessage, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encode %T: %w", v, err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("decode %T: %w", v, err)
+	}
+	if _, ok := obj[field]; ok {
+		return obj, nil
+	}
+	value := synth()
+	if value == "" {
+		return obj, nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode %s: %w", field, err)
+	}
+	obj[field] = encoded
+	return obj, nil
 }
 
 // coreListFetchBudget bounds how many entries a bounded list command fetches
@@ -611,6 +677,15 @@ func runCoreClient(cmd *cobra.Command, newClient func(context.Context) (*coreapi
 		return fmt.Errorf("connect to Entire control plane: %w", err)
 	}
 	if err := fn(cmd.Context(), client); err != nil {
+		// Commands that already reported a partial success own the rendering.
+		// renderCoreError extracts API problems through wrappers, discarding
+		// SilentError and causing main to print again. Guard here rather than
+		// changing that display helper: the mirror-create wizard needs its
+		// plain message before it prints.
+		var silent *SilentError
+		if errors.As(err, &silent) {
+			return err
+		}
 		return renderCoreError(err)
 	}
 	return nil

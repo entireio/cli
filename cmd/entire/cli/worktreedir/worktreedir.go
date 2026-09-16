@@ -24,11 +24,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 )
 
 // Open returns the shared *os.Root over the current worktree root. The returned
@@ -136,4 +138,47 @@ func NameFollowingLinks(worktreeRoot, p string) (string, error) {
 		return "", fmt.Errorf("resolve %s: %w", worktreeRoot, err)
 	}
 	return Name(resolvedBase, resolved)
+}
+
+// HashableEntry reports whether filePath may be handed to
+// gitrepo.HashWorktreeFiles (git hash-object), given the mode Git recorded for
+// it in a tree.
+//
+// It lives here rather than beside HashWorktreeFiles because gitrepo cannot
+// import this package: worktreedir's own test imports testutil, which imports
+// gitrepo, so that edge is an import cycle in the test binary.
+//
+// Both halves are load-bearing, and each fails in a different direction:
+//
+//   - A Git symlink blob stores the target path, while hash-object follows the
+//     link and hashes the target's *content*. The two never agree, so a symlink
+//     recorded in the tree must be compared some other way.
+//   - The working tree can hold something other than what the tree recorded. A
+//     tracked regular file replaced by a symlink is `git status`'s typechange
+//     (" T"), and hash-object follows it — so a link pointing at content equal
+//     to the recorded blob hashes equal and the change reads as clean. FIFOs
+//     are worse than wrong: hash-object blocks reading them, which on a hook
+//     path costs the caller its whole budget.
+//
+// ModeIrregular is masked out rather than rejected, matching the reasoning in
+// paths.ValidateEntireDirAt: Windows maps OneDrive Files On-Demand
+// placeholders onto it, and those are ordinary files that should still receive
+// Git's clean-filter handling.
+func HashableEntry(worktreeRoot, filePath string, treeMode filemode.FileMode) bool {
+	if treeMode == filemode.Symlink {
+		return false
+	}
+	root, err := OpenAt(worktreeRoot)
+	if err != nil {
+		return false
+	}
+	name, err := Name(worktreeRoot, filePath)
+	if err != nil {
+		return false
+	}
+	info, err := root.Lstat(name)
+	if err != nil {
+		return false
+	}
+	return info.Mode().Type()&^fs.ModeIrregular == 0
 }

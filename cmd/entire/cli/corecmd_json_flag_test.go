@@ -54,20 +54,20 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo protection list":   true,
 		"repo protection add":    true,
 		"repo protection remove": true,
-		// grant
-		"grant org add":        true,
-		"grant org list":       true,
-		"grant org remove":     false,
-		"grant project add":    true,
-		"grant project list":   true,
-		"grant project remove": false,
-		"grant repo add":       true,
-		"grant repo list":      true,
-		"grant repo remove":    false,
+		// grant subtrees: add/list render a payload, remove only reports
+		"org grant add":        true,
+		"org grant list":       true,
+		"org grant remove":     false,
+		"project grant add":    true,
+		"project grant list":   true,
+		"project grant remove": false,
+		"repo grant add":       true,
+		"repo grant list":      true,
+		"repo grant remove":    false,
 	}
 
 	got := map[string]bool{}
-	for _, root := range []*cobra.Command{newOrgCmd(), newProjectCmd(), newRepoCmd(), newGrantCmd()} {
+	for _, root := range []*cobra.Command{newOrgCmd(), newProjectCmd(), newRepoCmd()} {
 		collectJSONFlag(t, root, root.Name(), got)
 	}
 

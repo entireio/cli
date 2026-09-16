@@ -10,7 +10,8 @@ import (
 )
 
 // newProjectCmd is the `entire project` command group: create, list,
-// get, and delete projects on the Entire control plane.
+// get, and delete projects on the Entire control plane, plus the `grant`
+// subtree for project access (see grant.go).
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
@@ -21,6 +22,7 @@ func newProjectCmd() *cobra.Command {
 	cmd.AddCommand(newProjectListCmd())
 	cmd.AddCommand(newProjectGetCmd())
 	cmd.AddCommand(newProjectDeleteCmd())
+	cmd.AddCommand(newProjectGrantCmd())
 	return cmd
 }
 

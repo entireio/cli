@@ -18,7 +18,7 @@ accept a core's JWTs.
 
 | Role | Service (prod / staging) | Hit by | Trusted-core discovery |
 |---|---|---|---|
-| **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project` / `grant`, `auth *`, `login` | none needed — the host *is* the core |
+| **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project`, `auth *`, `login` | none needed — the host *is* the core |
 | **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
 | **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
 
@@ -79,7 +79,7 @@ The host *is* a core, so there is no discovery. `coreapi.New()` consults
    `c.CoreURL` as issuer, so store reads and refresh/STS hit the right core,
    and an expired access token is silently re-minted from the stored refresh
    token. This is what makes `entire auth use <ctx>` actually retarget
-   `org`/`repo`/`project`/`grant`.
+   `org`/`repo`/`project`.
 2. **else** (no active context) → an error wrapping `ErrNotLoggedIn` with the
    `entire login` hint. There is no fallback host: a control-plane command
    without a login has no identity to act as. (At login time `entire login
@@ -165,11 +165,19 @@ the cluster path), `internal/entireclient/discovery/cluster_cores.go`
 ## Account selection
 
 One rule, everywhere a host is matched — git clusters, the data API,
-cluster-addressed control-plane commands, and entire-api cell routing
-(`auth/cell_data_api.go`'s `resolveStoredCellSubject`): **the identity is the one
-the user selected; failing that, the only saved login the host accepts.**
-`/.well-known` decides which identities are *accepted*; it picks one only when
-exactly one fits.
+cluster-addressed control-plane commands, and entire-api cell routing under an
+explicit `ENTIRE_API_BASE_URL` (`auth/cell_data_api.go`'s
+`resolveCellClientSubject`): **the identity is the one the user selected;
+failing that, the only saved login the host accepts.** `/.well-known` decides
+which identities are *accepted*; it picks one only when exactly one fits.
+
+Cell routing with **no** `ENTIRE_API_BASE_URL` matches no host: there is no
+configured data host to match against, and the production default is not a
+choice the user made, so the cell path acts as the control plane does —
+`ENTIRE_TOKEN`, else the selected context — and reads the cell `apiUrl` from
+that login's own core catalog (COR-1634). `activity`/`recap` therefore fall
+back from the cell to the data API only when `auth.DataAPIServesSelectedLogin`
+confirms both are in the same environment.
 
 The user's selection resolves in one place, `contexts.File.Active`, with this
 precedence:

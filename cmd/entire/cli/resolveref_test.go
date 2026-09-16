@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -18,6 +21,7 @@ const (
 	ulidOrgAcme        = "0123456789ABCDEFGHJKMNPQR1"
 	ulidOrgGlobex      = "0123456789ABCDEFGHJKMNPQR2"
 	ulidProjectWidgets = "0123456789ABCDEFGHJKMNPQR3"
+	ulidRepoWeb        = "0123456789ABCDEFGHJKMNPQR5"
 	ulidAccount        = "0123456789ABCDEFGHJKMNPQR4"
 	ulidResolvedAcct   = "0123456789ABCDEFGHJKMNPQR9"
 )
@@ -249,29 +253,28 @@ func TestResolveRepoRef(t *testing.T) {
 // every repo-ref command, --project alongside it is checked for agreement, and
 // the #2252 rule holds at the resolver — no ref is read as a forge it did not
 // name, and no slash-bearing ref reaches the by-name lookup.
-func TestResolveRepoRef_NativePath(t *testing.T) {
-	t.Parallel()
-	const ulidRepoWeb = "0123456789ABCDEFGHJKMNPQR5"
-
-	// nativePathHandler serves the two lookups a /et/widgets/web ref makes:
-	// GET /projects?name=widgets and GET /projects/{id}/repos?name=web. It
-	// also records the repo name the server was asked for, so tests can pin
-	// server-side filtering and the .git trim.
-	nativePathHandler := func(t *testing.T, gotRepoName *string) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasSuffix(r.URL.Path, "/repos") {
-				*gotRepoName = r.URL.Query().Get("name")
-				if err := printJSON(w, &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: ulidRepoWeb, Name: "web"})}); err != nil {
-					t.Errorf("encode repo: %v", err)
-				}
-				return
+// nativePathHandler serves the two lookups a /et/widgets/web ref makes:
+// GET /projects?name=widgets and GET /projects/{id}/repos?name=web. It also
+// records the repo name the server was asked for, so tests can pin server-side
+// filtering and the .git trim.
+func nativePathHandler(t *testing.T, gotRepoName *string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/repos") {
+			*gotRepoName = r.URL.Query().Get("name")
+			if err := printJSON(w, &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: ulidRepoWeb, Name: "web"})}); err != nil {
+				t.Errorf("encode repo: %v", err)
 			}
-			if err := printJSON(w, &coreapi.ListProjectsOutputBody{Project: coreapi.NewOptProject(coreapi.Project{ID: ulidProjectWidgets, Name: "widgets", OwnerId: ulidOrgAcme, OwnerType: coreapi.ProjectOwnerTypeOrg})}); err != nil {
-				t.Errorf("encode project: %v", err)
-			}
+			return
+		}
+		if err := printJSON(w, &coreapi.ListProjectsOutputBody{Project: coreapi.NewOptProject(coreapi.Project{ID: ulidProjectWidgets, Name: "widgets", OwnerId: ulidOrgAcme, OwnerType: coreapi.ProjectOwnerTypeOrg})}); err != nil {
+			t.Errorf("encode project: %v", err)
 		}
 	}
+}
 
+func TestResolveRepoRef_NativePath(t *testing.T) {
+	t.Parallel()
 	t.Run("native /et/ path resolves via its embedded project", func(t *testing.T) {
 		t.Parallel()
 		for _, ref := range []string{"/et/widgets/web", "et/widgets/web", "/et/widgets/web.git"} {
@@ -429,6 +432,91 @@ func TestResolveRepoRef_NativePath(t *testing.T) {
 		// guaranteed 404, since names can never contain '/'.
 		for _, ref := range []string{"a/b/c/d", "/web", "web/"} {
 			refuseLocally(t, ref, "/et/<project>/<repo>")
+		}
+	})
+}
+
+// TestResolveRepoPath covers the one repo spelling `repo grant` accepts, the
+// native /et/<project>/<repo> path: it resolves through the project and repo
+// by-name lookups exactly as the path does elsewhere, and everything else — a
+// ULID, a bare name, a bare pair, a /gh/ mirror ref — is refused locally with
+// the shape named, before any request is made.
+func TestResolveRepoPath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a native path resolves via its embedded project", func(t *testing.T) {
+		t.Parallel()
+		for _, ref := range []string{"/et/widgets/web", "et/widgets/web", "/et/widgets/web.git"} {
+			t.Run(ref, func(t *testing.T) {
+				t.Parallel()
+				var gotRepoName string
+				c, calls := resolveTestClient(t, nativePathHandler(t, &gotRepoName))
+				got, err := resolveRepoPath(context.Background(), c, ref)
+				require.NoError(t, err)
+				require.Equal(t, ulidRepoWeb, got)
+				require.Equal(t, "web", gotRepoName)
+				require.EqualValues(t, 2, calls.Load(), "project + repo lookup")
+			})
+		}
+	})
+
+	t.Run("a ULID-shaped segment is still a name", func(t *testing.T) {
+		t.Parallel()
+		// The server's name rules admit 26 base32 characters, so a project or
+		// repo can be NAMED like a ULID. Inside a path both segments are names
+		// by construction and must go through the by-name lookups, never the
+		// ULID passthrough that a bare ref gets.
+		for _, ref := range []string{"/et/widgets/" + ulidAccount, "/et/" + ulidAccount + "/web"} {
+			t.Run(ref, func(t *testing.T) {
+				t.Parallel()
+				var gotRepoName string
+				c, calls := resolveTestClient(t, nativePathHandler(t, &gotRepoName))
+				got, err := resolveRepoPath(context.Background(), c, ref)
+				require.NoError(t, err)
+				require.Equal(t, ulidRepoWeb, got)
+				require.EqualValues(t, 2, calls.Load(), "project + repo lookup")
+			})
+		}
+	})
+
+	t.Run("anything but the native path is refused without a request", func(t *testing.T) {
+		t.Parallel()
+		// A ref that never named the et/ token gets the accepted shape and
+		// nothing else: the parser's "not a native ref" reason is its signal to
+		// try another grammar, not a message for the user.
+		for _, ref := range []string{ulidRepoWeb, "web", "widgets/web", "/gh/acme/tool"} {
+			t.Run(ref, func(t *testing.T) {
+				t.Parallel()
+				c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+				})
+				_, err := resolveRepoPath(context.Background(), c, ref)
+				require.EqualError(t, err, "repo "+strconv.Quote(ref)+" must be a /et/<project>/<repo> path")
+				require.Zero(t, calls.Load())
+			})
+		}
+	})
+
+	t.Run("a malformed native path keeps the parser's reason", func(t *testing.T) {
+		t.Parallel()
+		// The ref named et/ and got the rest wrong, so the parser knows which
+		// part: that reason already carries the shape or the offending name,
+		// and only the ref itself is added in front of it.
+		for ref, reason := range map[string]string{
+			"/et/widgets":       "2 names after the et token, got 1",
+			"/et/widgets/-bad-": `repo "-bad-" is not a name the server accepts`,
+		} {
+			t.Run(ref, func(t *testing.T) {
+				t.Parallel()
+				c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+				})
+				_, err := resolveRepoPath(context.Background(), c, ref)
+				require.ErrorContains(t, err, "invalid repo ref "+strconv.Quote(ref)+": ")
+				require.ErrorContains(t, err, reason)
+				require.NotContains(t, err.Error(), "must be a")
+				require.Zero(t, calls.Load())
+			})
 		}
 	})
 }

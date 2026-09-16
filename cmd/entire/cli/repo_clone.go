@@ -167,15 +167,19 @@ func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repo
 	if err != nil {
 		return "", err
 	}
+	// The host is server-provided but interpolated into the entire:// clone URL,
+	// so apply the same anti-token-leak guard as the mirror path (see the
+	// validateClusterHost call on the /gh/ branch). Checked before the URL is
+	// built: repoRemoteURL applies the same guard and answers "" for a bad
+	// host, which would otherwise be reported as a repo still provisioning.
+	if host := strings.TrimSpace(repo.ClusterHost.Or("")); host != "" {
+		if err := validateClusterHost(host); err != nil {
+			return "", fmt.Errorf("repo has an invalid cluster host %q: %w", host, err)
+		}
+	}
 	cloneURL := repoRemoteURL(*repo)
 	if cloneURL == "" {
 		return "", fmt.Errorf("repo %s/%s has no clone URL yet (still provisioning?)", project, repoName)
-	}
-	// The host is server-provided but interpolated into the entire:// clone URL,
-	// so apply the same anti-token-leak guard as the mirror path (see the
-	// validateClusterHost call on the /gh/ branch).
-	if err := validateClusterHost(repo.ClusterHost.Or("")); err != nil {
-		return "", fmt.Errorf("repo has an invalid cluster host %q: %w", repo.ClusterHost.Or(""), err)
 	}
 	return cloneURL, nil
 }

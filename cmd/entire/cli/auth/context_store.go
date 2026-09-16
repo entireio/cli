@@ -182,6 +182,36 @@ func Contexts() ([]*contexts.Context, string, error) {
 	return f.Contexts, sel.Context.Name, nil
 }
 
+// ActiveContext returns the login context currently acting, or ok=false when
+// there is none. It exists so callers that need the context itself — its
+// CoreURL, to mint a token against — do not have to take the name from Contexts
+// and then re-find the object by looping over the slice. Three call sites grew
+// that loop independently and two of them dropped the CoreURL guard below, which
+// is the drift this accessor removes.
+//
+// A context with no CoreURL is reported as ok=false rather than returned: it is
+// an unusable pointer, and treating it as active means dialing an empty host
+// instead of telling the user to log in.
+//
+// A `--context`/$ENTIRE_CONTEXT selection is honoured, so the identity resolved
+// here is the one every other command acts as. An explicit selection naming no
+// saved context is a hard error, not ok=false: "you asked for a context that
+// doesn't exist" must not degrade into the `entire login` hint.
+func ActiveContext() (c *contexts.Context, ok bool, err error) {
+	f, err := contexts.Load(userdirs.Config())
+	if err != nil {
+		return nil, false, fmt.Errorf("load contexts: %w", err)
+	}
+	sel, err := f.Active()
+	if err != nil {
+		return nil, false, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+	}
+	if sel.Context == nil || strings.TrimSpace(sel.Context.CoreURL) == "" {
+		return nil, false, nil
+	}
+	return sel.Context, true, nil
+}
+
 // StoredContexts returns all stored login contexts and the STORED
 // current_context, ignoring any `--context`/$ENTIRE_CONTEXT override.
 //

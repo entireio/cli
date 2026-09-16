@@ -9,6 +9,7 @@ const (
 	cmdCreate     = "create"
 	cmdCreateName = "create <name>"
 	cmdList       = "list"
+	cmdGrant      = "grant"
 	cmdOrg        = "org"
 	cmdRepo       = "repo"
 	cmdReview     = "review"
@@ -22,8 +23,9 @@ const (
 	cmdSessionsAlias    = "sessions"
 )
 
-// Column headers shared by the control-plane tables: org, project, repo, grant
-// and the mirror subtree each print several of the same columns.
+// Column headers shared by the control-plane tables: org, project and repo,
+// plus their grant subtrees and repo's mirror subtree, print several of the
+// same columns.
 const (
 	colHeaderBranch   = "BRANCH"
 	colHeaderCloneURL = "CLONE URL"

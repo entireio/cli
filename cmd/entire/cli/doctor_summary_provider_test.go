@@ -168,7 +168,7 @@ func TestCheckSummaryProvider_SilentWhenSettingsWillNotLoad(t *testing.T) {
 // the local layer still overrides.
 //
 // Runs against REAL settings loading and the REAL registry rather than the
-// stubs the other tests use. Two reasons: opencode is genuinely incapable, so
+// stubs the other tests use. Two reasons: factoryai-droid is genuinely incapable, so
 // the registry needs no help; and the tracked-local case cannot be stubbed at
 // all, because localLayerRejection is unexported — only a real Load over a real
 // tracked file produces it.
@@ -185,7 +185,7 @@ func TestCheckSummaryProvider_RemedyTargetsTheLayerHoldingTheValue(t *testing.T)
 	}{
 		{
 			name:      "provider from the project layer",
-			project:   `{"enabled":true,"summary_generation":{"provider":"opencode"}}`,
+			project:   `{"enabled":true,"summary_generation":{"provider":"factoryai-droid"}}`,
 			wantFile:  settings.EntireSettingsFile,
 			wantLocal: false,
 			why:       "only the project file carries it",
@@ -193,14 +193,14 @@ func TestCheckSummaryProvider_RemedyTargetsTheLayerHoldingTheValue(t *testing.T)
 		{
 			name:      "provider from the local layer",
 			project:   `{"enabled":true}`,
-			local:     `{"summary_generation":{"provider":"opencode"}}`,
+			local:     `{"summary_generation":{"provider":"factoryai-droid"}}`,
 			wantFile:  settings.EntireSettingsLocalFile,
 			wantLocal: true,
 			why:       "the local layer supplies it, so configure needs --local",
 		},
 		{
 			name:      "local layer supplies a different provider",
-			project:   `{"enabled":true,"summary_generation":{"provider":"opencode"}}`,
+			project:   `{"enabled":true,"summary_generation":{"provider":"factoryai-droid"}}`,
 			local:     `{"summary_generation":{"provider":"claude-code"}}`,
 			wantFile:  settings.EntireSettingsFile,
 			wantLocal: false,
@@ -208,8 +208,8 @@ func TestCheckSummaryProvider_RemedyTargetsTheLayerHoldingTheValue(t *testing.T)
 		},
 		{
 			name:       "tracked local layer is ignored by the loader",
-			project:    `{"enabled":true,"summary_generation":{"provider":"opencode"}}`,
-			local:      `{"summary_generation":{"provider":"opencode"}}`,
+			project:    `{"enabled":true,"summary_generation":{"provider":"factoryai-droid"}}`,
+			local:      `{"summary_generation":{"provider":"factoryai-droid"}}`,
 			trackLocal: true,
 			wantFile:   settings.EntireSettingsFile,
 			wantLocal:  false,

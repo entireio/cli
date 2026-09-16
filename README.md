@@ -54,11 +54,10 @@ With Entire, you can:
 Install with Homebrew:
 
 ```bash
-brew tap entireio/tap
-brew trust entireio/tap
-brew install --cask entire            # stable
-# brew install --cask entire@nightly  # or nightly
+brew install --cask entireio/tap/entire
 ```
+
+Use the fully-qualified cask name (`entireio/tap/entire`, not `entire`). Homebrew 6 requires third-party taps to be trusted before it will evaluate them, and a fully-qualified name taps and trusts just that one cask, so no separate `brew tap` / `brew trust` step is needed. Requires Homebrew 6.0.10 or newer.
 
 Or with the install script:
 
@@ -137,9 +136,8 @@ Entire currently ships two release channels:
 
 How to use each channel:
 
-- Homebrew (one-time setup): `brew tap entireio/tap && brew trust entireio/tap`
-- Homebrew stable: `brew install --cask entire`
-- Homebrew nightly: `brew install --cask entire@nightly`
+- Homebrew stable: `brew install --cask entireio/tap/entire`
+- Homebrew nightly: `brew install --cask entireio/tap/entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
 - `install.ps1` stable (uses Scoop when available): `irm https://entire.io/install.ps1 | iex`
@@ -345,10 +343,10 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 
 | Command          | Description                                                                       |
 | ---------------- | --------------------------------------------------------------------------------- |
-| `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`)                    |
-| `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`)                         |
-| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`) |
-| `entire grant`   | Manage Entire access grants and org membership (`org`, `project`, `repo`)          |
+| `entire cluster` | Show the Entire clusters you can place projects and repos on (`list`)              |
+| `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`, `grant`)           |
+| `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`, `grant`)                |
+| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`, `protection`, `grant`) |
 | `entire api`     | Make an authenticated request to an Entire API and print the response              |
 
 ### Other
@@ -394,7 +392,7 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `--agent-help-skill`                        | Install the Entire agent-help skill (points agents at `entire agent-help`) for the selected agent(s)              |
 | `--telemetry=false`                         | Disable anonymous usage analytics                                                                                 |
 
-Run in a directory that is not a git repository, `entire enable` offers to initialize one and (optionally) create a matching GitHub repo via the `gh` CLI. That path is driven by `--init-repo` / `--no-init-repo`, `--no-github`, `--repo-name`, `--repo-owner`, `--repo-visibility`, `--push`, `--skip-initial-commit`, and `--initial-commit-message`. See `entire enable --help` for the full list.
+Run in a directory that is not a git repository, `entire enable` offers to initialize one and make an initial commit. It is local-only — no remote is created or pushed to, so publish the repository yourself when you are ready (`gh repo create`, `entire repo create`, or your forge's web UI). That path is driven by `--init-repo` / `--no-init-repo`, `--skip-initial-commit`, and `--initial-commit-message`. See `entire enable --help` for the full list.
 
 **Examples:**
 
@@ -620,13 +618,13 @@ When enabled, Entire automatically generates AI summaries for checkpoints at com
 
 Summaries are also generated on demand, with or without this setting, by `entire checkpoint explain --generate`.
 
-**Which agent writes them.** By default Claude Code (`claude` on your `PATH`, model `sonnet`). Set a different one with `summary_generation.provider` — `claude-code`, `codex`, `copilot-cli`, `cursor`, `gemini`, or `pi`, plus an optional `summary_generation.model` hint:
+**Which agent writes them.** By default Claude Code (`claude` on your `PATH`, model `sonnet`). Set a different one with `summary_generation.provider` — `claude-code`, `codex`, `copilot-cli`, `cursor`, `gemini`, `opencode`, or `pi`, plus an optional `summary_generation.model` hint:
 
 ```bash
 entire configure --summarize-provider codex
 ```
 
-`opencode` and `factoryai-droid` cannot generate summaries. Whichever provider you pick must be installed and authenticated.
+`factoryai-droid` cannot generate summaries. Whichever provider you pick must be installed and authenticated.
 
 **Requirements:**
 
