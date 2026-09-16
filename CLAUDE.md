@@ -1798,7 +1798,7 @@ credential it is adopted, announced once on stderr, and remembered — except
 after a keyring *timeout*, which is adopted for this process only: the
 abandoned keyring call may still complete the write once it answers, and a
 marker would orphan that copy. A fallback whose file
-write also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint` and
+operation also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint` and
 `storeReadError` check so they never recommend the store that just failed
 (they point at `ENTIRE_TOKEN_STORE_PATH` instead). macOS and Windows never
 fall back: there the keyring is always present, so a failure is a denied prompt

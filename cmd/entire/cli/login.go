@@ -539,10 +539,13 @@ func loginCompleteLine(token, dialled string) string {
 // but never shown, because a signalled abort exits before the error is
 // rendered. A fallback whose file write also failed carries
 // ErrFileStoreFailed and gets a different hint: recommending
-// ENTIRE_TOKEN_STORE=file about the store that just failed would send the
-// user in a circle, so it points at ENTIRE_TOKEN_STORE_PATH as the way to a
-// writable file store instead. On macOS and Windows, with no fallback, it is
-// reached whenever the keyring write fails.
+// ENTIRE_TOKEN_STORE=file alone would send the user back to the store that
+// just failed, so it points at ENTIRE_TOKEN_STORE_PATH as the way to a
+// writable file store, with ENTIRE_TOKEN_STORE=file alongside it so the
+// keyring is not asked again, and says both have to stay set (a choice made
+// with the path override is never remembered). storeReadError in auth.go
+// gives the same advice, in the same words, for a read. On macOS and Windows,
+// with no fallback, it is reached whenever the keyring write fails.
 //
 // The remembered/not-remembered wording follows tokenstore.ChoiceIsRemembered,
 // the same rule the fallback's own notice uses, so the two can never
@@ -552,7 +555,7 @@ func withHeadlessStoreHint(err error) error {
 		return err
 	}
 	if errors.Is(err, tokenstore.ErrFileStoreFailed) {
-		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed. Point %s at a writable location and run entire login again", err, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed. Point %s at a writable location and set %s=file, then run entire login again; a choice made with the path override is not remembered, so both variables must stay set for later commands", err, tokenstore.FileBackendPath(), tokenstore.PathEnvVar, tokenstore.BackendEnvVar)
 	}
 	if tokenstore.FileBackendSelected() {
 		return err

@@ -109,7 +109,7 @@ func persistedBackend() string {
 // Printing that path is fine — a marker holds a backend name, never a secret.
 func warnUnusableMarker(err error) {
 	markerWarnOnce.Do(func() {
-		fmt.Fprintf(fallbackNoticeW, "Warning: ignoring unusable token store preference %s in the Entire config directory: %v\nDelete it, or run entire login to rewrite it.\n", preferenceFileName, err)
+		fmt.Fprintf(fallbackNoticeW, "Warning: ignoring unusable token store preference %s in the Entire config directory: %v\nIf the Entire config directory itself is unusable, fix that first; otherwise delete the file, or run entire login to rewrite it.\n", preferenceFileName, err)
 	})
 }
 

@@ -87,8 +87,9 @@ var (
 	// process. Provenance reads it where no marker can speak: with
 	// ENTIRE_TOKEN_STORE_PATH set the marker is never written, and without
 	// this flag `auth status` named the keyring for a token it had just read
-	// from the file. Set by setBackend; cleared only by the test-only
-	// overrides' restore functions.
+	// from the file. Set by setBackend; cleared by the test-only overrides in
+	// testing.go (on install, with the previous value put back on restore)
+	// and by resetBackendForTesting.
 	adoptedFile bool
 )
 
@@ -160,9 +161,10 @@ func fileAdopted() bool {
 }
 
 // FileBackendSelected reports whether the file backend is selected, by the
-// environment or by the remembered preference — the single predicate shared
-// by provenance wording and login's headless hint, so they can never disagree
-// with each other or with resolution.
+// environment, by an in-process fallback adoption, or by the remembered
+// preference — the single predicate shared by provenance wording and login's
+// headless hint, so they can never disagree with each other or with
+// resolution.
 func FileBackendSelected() bool {
 	return selectedBackend() == backendFile
 }
@@ -364,10 +366,12 @@ func removeSupersededFileCopy(service, user string) {
 	}
 }
 
-// warnSupersededCopyNotRemoved says what a failed removal leaves behind and
-// what to do about it. The credential itself was stored, so it is a warning.
+// warnSupersededCopyNotRemoved says what a failed removal may have left
+// behind and what to do about it. "May": the failure can be the lookup itself,
+// in which case nothing is known about whether a copy is there. The credential
+// itself was stored, so it is a warning.
 func warnSupersededCopyNotRemoved(err error) {
-	fmt.Fprintf(fallbackNoticeW, "Warning: could not remove the superseded copy of this credential from %s: %v\nA plaintext copy of the old token remains there; remove the entry or the file by hand.\n", FileBackendPath(), err)
+	fmt.Fprintf(fallbackNoticeW, "Warning: could not remove the superseded copy of this credential from %s: %v\nA plaintext copy of the old token may remain there; remove the entry or the file by hand.\n", FileBackendPath(), err)
 }
 
 func (r recordingStore) Delete(service, user string) error {
