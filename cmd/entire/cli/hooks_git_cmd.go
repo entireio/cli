@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -211,6 +213,13 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked(slog.String("source", source))
 
+			// Ahead of the checkpoint-policy gate on purpose. The guard reads
+			// nothing Entire owns and draws no conclusion that depends on the
+			// checkpoint policy — it compares the index git is committing from
+			// against HEAD — and it is the last moment at which the user can be
+			// told before the commit deletes their tracked files.
+			warnOnEmptyIndexCommit(g.ctx, cmd.OutOrStdout())
+
 			if g.skipUnsupportedCheckpointPolicy() {
 				return nil
 			}
@@ -261,6 +270,17 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			g := newGitHookContext(cmd.Context(), "post-commit")
 			defer g.span.End()
 			g.logInvoked()
+
+			// The prepare-commit-msg guard from the other side of the commit,
+			// and the one place Entire can still decline to act on it. Ahead of
+			// the checkpoint-policy gate for the same reason as its twin: the
+			// question it answers — does HEAD record no files while those files
+			// are still on disk — is about the user's commit and depends on no
+			// Entire state, and a repo whose policy this binary must not act on
+			// still wants to hear that its commit deleted everything.
+			if warnOnEmptyTreeCommit(g.ctx, cmd.OutOrStdout()) {
+				return nil
+			}
 
 			if g.skipUnsupportedCheckpointPolicy() {
 				return nil
@@ -341,4 +361,76 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			return fmt.Errorf("pre-push: %w", hookErr)
 		},
 	}
+}
+
+// warnOnEmptyIndexCommit tells the user, before the commit object exists, that
+// the commit git is preparing records no files while those files are still on
+// disk — the signature of git having read `.git/index` as missing and therefore
+// empty (issue #2111).
+//
+// Read-only and silent by default: the detector reads the index header first
+// and opens the repository only if it says zero entries, so a normal commit
+// pays one open(2) and a 16-byte read on top of a worktree-root resolution the
+// rest of this hook process performs anyway (paths.WorktreeRoot caches per
+// working directory). Measured at +0.1ms per invocation. It cannot fail the
+// hook — every unresolvable step returns without a word, because a guard that
+// guesses is worse than no guard.
+func warnOnEmptyIndexCommit(ctx context.Context, out io.Writer) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	// GIT_INDEX_FILE is the index git is committing from. Git exports it to
+	// pre-commit, prepare-commit-msg and commit-msg, and by the time this hook
+	// runs it is authoritative: git re-reads the index after pre-commit and
+	// then writes the commit's tree from that in-core copy, so nothing after
+	// this point can change what lands.
+	hazard := gitrepo.DetectEmptyIndexHazard(ctx, worktreeRoot, os.Getenv("GIT_INDEX_FILE"))
+	if hazard == nil {
+		return
+	}
+	hazard.Report(ctx, out)
+}
+
+// warnOnEmptyTreeCommit reports whether the commit at HEAD records no files at
+// all while the files it removes are still in the worktree — the aftermath of
+// the same condition warnOnEmptyIndexCommit catches before the fact (#2111) —
+// warning the user when it does.
+//
+// A true return stops the whole post-commit hook. That is the point: condensing
+// against such a commit deletes shadow branches and marks the session condensed
+// on the strength of a commit the user is about to undo with `git reset --mixed
+// HEAD~1`, and advances BaseCommit onto a commit that is about to stop
+// existing. Skipping costs nothing on the other reading of the same evidence —
+// someone deliberately untracking every file gets condensed on their next
+// commit instead.
+//
+// Two hooks warn about one commit, so the messages differ: the pre-commit one
+// carries the explanation, this one the receipt.
+func warnOnEmptyTreeCommit(ctx context.Context, out io.Writer) bool {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return false
+	}
+	repo, err := gitrepo.OpenCurrent(ctx)
+	if err != nil {
+		return false
+	}
+	defer repo.Close()
+
+	head, err := repo.Head()
+	if err != nil {
+		return false
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return false
+	}
+
+	hazard := gitrepo.DetectEmptyTreeCommitHazard(ctx, worktreeRoot, commit)
+	if hazard == nil {
+		return false
+	}
+	hazard.Report(ctx, out)
+	return true
 }
