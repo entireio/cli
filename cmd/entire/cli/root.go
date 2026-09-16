@@ -179,7 +179,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newOrgCmd(), groupControlPlane)))     // 'org' — control-plane org management
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newProjectCmd(), groupControlPlane))) // 'project' — control-plane project management
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newRepoCmd(), groupControlPlane)))    // 'repo' — control-plane repo lifecycle
-	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newGrantCmd(), groupControlPlane)))   // 'grant' — control-plane access grants
 
 	// Top-level lifecycle and standalone commands.
 	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)

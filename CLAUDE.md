@@ -101,10 +101,16 @@ the commands are always runnable in every build.
   catalog with one cluster per region the column would read yes on every
   row. The catalog carries no health, capacity or usage data — nothing
   server-side does — and hidden or decommissioned clusters never reach it.
-- `org`: control-plane organization management — `create`, `list`, `get`, `delete`
-- `project`: control-plane project management — `create`, `list`, `get`, `delete`
+- `org`: control-plane organization management — `create`, `list`, `get`, `delete`,
+  plus `grant` (`add`/`list`/`remove`): org membership for a `provider:handle`
+  grantee, roles owner/admin/member (default member)
+- `project`: control-plane project management — `create`, `list`, `get`, `delete`,
+  plus `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
+  grantee, roles reader/writer/admin; `remove` also takes an account ULID
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
-  `clone`, plus the `mirror`, `visibility` and `protection` subtrees. Git
+  `clone`, plus the `mirror`, `visibility`, `protection` and `grant` subtrees
+  (`repo grant` mirrors `project grant`, addressing the repo by its
+  `/et/<project>/<repo>` path only). Git
   content operations (log, diff, …) are intentionally out of scope.
   `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
   native repo's branch-protection rules through core's
@@ -139,8 +145,13 @@ the commands are always runnable in every build.
   either.
   The native `/et/<project>/<repo>` path is **not** clone-only: it is the
   `path` the API returns, and `resolveRepoRef` accepts it for every command
-  that takes a repo ref — `get`, `delete`, the `visibility` and `protection`
-  subtrees, and `grant repo add`/`list`/`remove` (COR-1632). The other two
+  that takes a repo ref — `get`, `delete`, and the `visibility` and `protection`
+  subtrees (COR-1632). `repo grant` takes that path and nothing else — no
+  `--project`, no bare name, no ULID — through `resolveRepoPath`, which parses
+  with `parseNativeCloneRef` and resolves both segments by name only (a project
+  or repo can be *named* like a ULID, so path segments never touch the
+  `looksLikeULID` passthrough; `resolveRepoPathRef` and `resolveNativeRepo`
+  still do, pending the removal of repo-ULID addressing). The other two
   clone shapes are not: a `/gh/` mirror ref is refused there (the by-name
   lookup resolves a project and then a repo inside it, and a mirror is in no
   project — so a mirror is addressed by ULID), and an `entire://` URL is not
@@ -177,8 +188,9 @@ the commands are always runnable in every build.
   knowing — a `foo.git` created through the API or web UI *aliases* onto `foo`
   in `resolveRepoRef`, and the durable fix is a server-side rule in
   `normalizeName`, not this check.
-- `grant`: manage access grants and org membership — `org`, `project`, and `repo`
-  each support `add` / `list` / `remove`
+- The three `grant` subtrees (`org grant`, `project grant`, `repo grant`) are one
+  generic builder plus three target descriptions in `grant.go`; a new target is
+  a `grantTarget` value, not a fourth copy of the leaves.
 
 Forge tokens (`gh`, `et`) are the path segments of an `entire://` URL, and
 `gitremote.pathForges` owns the *set* — `IsForgePathToken` answers "is this a

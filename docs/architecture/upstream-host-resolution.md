@@ -18,7 +18,7 @@ accept a core's JWTs.
 
 | Role | Service (prod / staging) | Hit by | Trusted-core discovery |
 |---|---|---|---|
-| **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project` / `grant`, `auth *`, `login` | none needed — the host *is* the core |
+| **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project`, `auth *`, `login` | none needed — the host *is* the core |
 | **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
 | **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
 
@@ -79,7 +79,7 @@ The host *is* a core, so there is no discovery. `coreapi.New()` consults
    `c.CoreURL` as issuer, so store reads and refresh/STS hit the right core,
    and an expired access token is silently re-minted from the stored refresh
    token. This is what makes `entire auth use <ctx>` actually retarget
-   `org`/`repo`/`project`/`grant`.
+   `org`/`repo`/`project`.
 2. **else** (no active context) → an error wrapping `ErrNotLoggedIn` with the
    `entire login` hint. There is no fallback host: a control-plane command
    without a login has no identity to act as. (At login time `entire login

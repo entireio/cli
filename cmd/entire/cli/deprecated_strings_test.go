@@ -32,6 +32,10 @@ func TestNoDeprecatedCommandFormsInUserFacingStrings(t *testing.T) {
 		"entire trace",   // → entire doctor trace
 		"entire rewind",  // → removed (no replacement); never advertise
 		"entire reset",   // → entire clean
+		// The grant family moved under its nouns; the old spelling is gone.
+		"entire grant org",     // → entire org grant
+		"entire grant project", // → entire project grant
+		"entire grant repo",    // → entire repo grant
 	}
 
 	var offenders []string
