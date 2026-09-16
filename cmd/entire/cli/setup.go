@@ -1955,12 +1955,15 @@ func isBuiltInAgent(ag agent.Agent) bool {
 
 // printAgentError writes an error message followed by available agents and usage.
 func printAgentError(w io.Writer, message string) {
-	agents := agent.List()
+	// StringList, not List: this is a suggestion list the user is meant to pick
+	// from, and List includes test-only agents (Vogon, the deterministic fake
+	// used by the e2e canary), which nobody should be told to enable.
+	agents := agent.StringList()
 	fmt.Fprintf(w, "%s Available agents:\n", message)
 	fmt.Fprintln(w)
 	for _, a := range agents {
 		suffix := ""
-		if a == agent.DefaultAgentName {
+		if types.AgentName(a) == agent.DefaultAgentName {
 			suffix = "    (default)"
 		}
 		fmt.Fprintf(w, "  %s%s\n", a, suffix)

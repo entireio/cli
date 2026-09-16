@@ -2407,8 +2407,11 @@ func TestPrintMissingAgentError(t *testing.T) {
 	if !strings.Contains(output, "Missing agent name") {
 		t.Error("expected 'Missing agent name' in output")
 	}
-	for _, a := range agent.List() {
-		if !strings.Contains(output, string(a)) {
+	// StringList, not List: the suggestion list deliberately omits test-only
+	// agents (see printAgentError). TestPrintAgentError_OmitsTestOnlyAgents
+	// pins that omission from the other side.
+	for _, a := range agent.StringList() {
+		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
 	}
@@ -2430,8 +2433,9 @@ func TestPrintWrongAgentError(t *testing.T) {
 	if !strings.Contains(output, `Unknown agent "not-an-agent"`) {
 		t.Error("expected unknown agent name in output")
 	}
-	for _, a := range agent.List() {
-		if !strings.Contains(output, string(a)) {
+	// StringList, not List — see TestPrintMissingAgentError.
+	for _, a := range agent.StringList() {
+		if !strings.Contains(output, a) {
 			t.Errorf("expected agent %q listed in output", a)
 		}
 	}
@@ -2440,6 +2444,25 @@ func TestPrintWrongAgentError(t *testing.T) {
 	}
 	if !strings.Contains(output, "Usage: entire enable --agent") {
 		t.Error("expected usage line in output")
+	}
+}
+
+// TestPrintAgentError_OmitsTestOnlyAgents pins that the "Available agents"
+// suggestion list does not offer Vogon, the deterministic fake used by the e2e
+// canary. It is registered in every build, but it is not an agent a user can
+// run, so naming it in a list of things to enable is a dead end.
+func TestPrintAgentError_OmitsTestOnlyAgents(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	printWrongAgentError(&buf, "nope")
+	output := buf.String()
+
+	if strings.Contains(output, string(vogon.AgentNameVogon)) {
+		t.Errorf("test-only agent %q offered to the user:\n%s", vogon.AgentNameVogon, output)
+	}
+	if !strings.Contains(output, string(agent.AgentNameClaudeCode)) {
+		t.Fatalf("expected real agents to still be listed:\n%s", output)
 	}
 }
 
