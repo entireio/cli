@@ -312,6 +312,18 @@ func TestLogin_NoDisplay_UsesDeviceFlow(t *testing.T) {
 		"DISPLAY=", "WAYLAND_DISPLAY=", "BROWSER=", "WSL_DISTRO_NAME=", "WSL_INTEROP=",
 	}, "login", "--insecure-http-auth")
 
+	// Fail fast if the browser flow was taken instead. waitForLoginPrompt
+	// checks its deadline only between blocking reads, and the browser flow
+	// prints nothing after its URL until browserLoginTimeout (five minutes, no
+	// override) expires, so a regression here would block for that long. The
+	// device flow's first stdout bytes are "Device code:" — runLogin writes
+	// that before anything else, and runLoginAuto's explanation goes to
+	// stderr — while the browser flow's are "Logging in to ". Peek does not
+	// consume, so the prompt parser below still sees the whole line.
+	if head, err := proc.stdout.Peek(len("Device code:")); err != nil || string(head) != "Device code:" {
+		t.Fatalf("login did not take the device flow: first stdout bytes %q (%v)", head, err)
+	}
+
 	_, deviceCode := waitForLoginPrompt(t, proc.stdout)
 	if deviceCode != "NODI-SPLY" {
 		t.Fatalf("device code = %q, want %q", deviceCode, "NODI-SPLY")

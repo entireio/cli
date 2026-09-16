@@ -410,10 +410,10 @@ func TestFallbackNoticeWriter_DefaultsToStderr(t *testing.T) {
 
 // The struct tests inject adopt and never touch package state; this one drives
 // the package-level Set and Get through a fallback store installed the way
-// resolveBackend installs it (adoptedFile still false), so it pins the wiring
-// those tests bypass: newFallbackStore's adopt is setBackend, and setBackend
-// replaces the process backend, so the very next package call reads the file
-// store directly instead of asking the keyring again.
+// currentBackend installs resolveBackend's result (adoptedFile still false), so
+// it pins the wiring those tests bypass: newFallbackStore's adopt is setBackend,
+// and setBackend replaces the process backend, so the very next package call
+// reads the file store directly instead of asking the keyring again.
 func TestPackageSetAndGetGoThroughTheFallback(t *testing.T) {
 	isolateConfigDir(t)
 	t.Setenv(BackendEnvVar, "")
@@ -490,7 +490,11 @@ func TestFallbackStore_CorruptFileStoreReportsBothFailures(t *testing.T) {
 // directory would simply be created), while the file store is injected at a
 // working path so the adoption itself succeeds and switchTo runs. The failed
 // open is not memoized — osroot.Shared caches successful opens only — so
-// replacing the file with a directory is all the retry needs.
+// replacing the file with a directory is all the retry needs. That regular
+// file is also a config directory that is "present but unusable" as far as
+// persistedBackend can tell, so the first Set emits the once-per-process
+// "ignoring unusable token store preference" warning into the captured buffer
+// as well — which is why the test counts only the could-not-remember warning.
 func TestFallbackStore_MarkerWriteIsRetriedOnEveryAdoption(t *testing.T) {
 	configDir := filepath.Join(t.TempDir(), "config")
 	if err := os.WriteFile(configDir, nil, 0o600); err != nil {

@@ -90,9 +90,9 @@ func setBackend(s store) {
 // The transition is announced once per process by the notice on stderr, and
 // every login onto the file store prints where the tokens went (see
 // persistLogin in the cli package), so "your tokens are in a file now" is
-// never silent. The invariant that makes this safe is in
-// isSecretServicePlatform: the fallback is constructed only where an
-// unavailable keyring means the machine has none.
+// never silent. The fallback is constructed only on the platforms where an
+// unavailable keyring is treated as absent (see secretServicePlatforms for
+// why that is acceptable).
 type fallbackStore struct {
 	primary store
 	// newFile builds the file store; injectable for tests. file() memoizes
