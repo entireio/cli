@@ -1831,7 +1831,10 @@ on the file store at `FileBackendPath` (`ENTIRE_TOKEN_STORE_PATH` when set, else
 credential it is adopted, announced once on stderr, and remembered — except
 after a keyring *timeout*, which is adopted for this process only: the
 abandoned keyring call may still complete once it answers, and on a write a
-marker would orphan that copy. A fallback whose file
+marker would orphan that copy. Once the keyring has answered in a process (a
+success or an `ErrNotFound`), no later call in that process falls back: login
+writes the refresh and access slots as two calls, and falling back on only the
+second would split one login across two stores. A fallback whose file
 operation also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint` and
 `storeReadError` check so they never recommend the store that just failed
 (they point at `ENTIRE_TOKEN_STORE_PATH` instead). macOS and Windows never

@@ -534,3 +534,43 @@ func TestFallbackStore_MarkerWriteIsRetriedOnEveryAdoption(t *testing.T) {
 		t.Fatalf("could-not-remember warned %d times, want once:\n%s", n, notice.String())
 	}
 }
+
+// Login writes a credential pair as two calls. Once the keyring has answered
+// in this process — a success or an ErrNotFound both prove it is reachable —
+// a later availability failure is transient, and falling back would split one
+// login across two stores: the refresh token in the keyring, the access token
+// in the file. The operation reports the keyring error instead, so the caller
+// fails cleanly and nothing is adopted or remembered.
+func TestFallbackStore_DoesNotFallBackOnceTheKeyringHasAnswered(t *testing.T) {
+	primary := newScriptedStore()
+	f, file, notice, adopted := newTestFallback(t, primary)
+
+	if err := f.Set("svc:refresh", "alice", "r1"); err != nil {
+		t.Fatal(err)
+	}
+	primary.setErr = errNoSecretService
+	err := f.Set("svc", "alice", "a1")
+	if !errors.Is(err, errNoSecretService) {
+		t.Fatalf("second Set after the keyring answered = %v, want the keyring error, not a fallback", err)
+	}
+	if _, ferr := file.Get("svc", "alice"); !errors.Is(ferr, ErrNotFound) {
+		t.Fatalf("the access token must not land in the file store: %v", ferr)
+	}
+	if *adopted != nil || notice.Len() != 0 {
+		t.Fatalf("nothing may be adopted or announced; adopted=%v notice=%q", *adopted, notice.String())
+	}
+
+	// An ErrNotFound answer counts as the keyring being reachable too.
+	primary2 := newScriptedStore()
+	f2, _, _, adopted2 := newTestFallback(t, primary2)
+	if _, err := f2.Get("svc", "bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get on an empty reachable keyring = %v, want ErrNotFound", err)
+	}
+	primary2.delErr = errNoSecretService
+	if err := f2.Delete("svc", "bob"); !errors.Is(err, errNoSecretService) {
+		t.Fatalf("Delete after the keyring answered = %v, want the keyring error", err)
+	}
+	if *adopted2 != nil {
+		t.Fatal("nothing may be adopted")
+	}
+}

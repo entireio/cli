@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 )
 
 // fallbackNoticeW receives every store warning: the notice printed when the
@@ -93,6 +94,14 @@ func setBackend(s store) {
 // never silent. The fallback is constructed only on the platforms where an
 // unavailable keyring is treated as absent (see secretServicePlatforms for
 // why that is acceptable).
+//
+// Once the keyring has answered in this process — a success, or an
+// ErrNotFound, which also proves it is reachable — no later call falls back:
+// a keyring that worked a moment ago is present, so the failure is transient,
+// and reporting it beats moving half of a login elsewhere. Login writes the
+// refresh and access slots as two calls, and falling back on only the second
+// would leave the refresh token in the keyring and the access token in the
+// file, which the next process cannot reassemble.
 type fallbackStore struct {
 	primary store
 	// newFile builds the file store; injectable for tests. file() memoizes
@@ -114,6 +123,8 @@ type fallbackStore struct {
 	// stores: logout clears several slots per context, and one warning per
 	// process says everything the repeats would.
 	deleteMissWarn sync.Once
+	// primaryWorked is set once the keyring has answered; see mayFallBack.
+	primaryWorked atomic.Bool
 }
 
 func newFallbackStore(primary store) *fallbackStore {
@@ -129,9 +140,20 @@ func (f *fallbackStore) file() store {
 	return f.fs
 }
 
+// mayFallBack reports whether a keyring result allows the retry against the
+// file store, and records a keyring that answered so that no later call in
+// this process falls back (see the type comment).
+func (f *fallbackStore) mayFallBack(err error) bool {
+	if err == nil || errors.Is(err, ErrNotFound) {
+		f.primaryWorked.Store(true)
+		return false
+	}
+	return fallbackEligible(err) && !f.primaryWorked.Load()
+}
+
 func (f *fallbackStore) Get(service, user string) (string, error) {
 	v, err := f.primary.Get(service, user)
-	if !fallbackEligible(err) {
+	if !f.mayFallBack(err) {
 		//nolint:wrapcheck // thin wrapper, callers handle errors
 		return v, err
 	}
@@ -153,7 +175,7 @@ func (f *fallbackStore) Get(service, user string) (string, error) {
 
 func (f *fallbackStore) Set(service, user, password string) error {
 	err := f.primary.Set(service, user, password)
-	if !fallbackEligible(err) {
+	if !f.mayFallBack(err) {
 		//nolint:wrapcheck // thin wrapper, callers handle errors
 		return err
 	}
@@ -167,7 +189,7 @@ func (f *fallbackStore) Set(service, user, password string) error {
 
 func (f *fallbackStore) Delete(service, user string) error {
 	err := f.primary.Delete(service, user)
-	if !fallbackEligible(err) {
+	if !f.mayFallBack(err) {
 		//nolint:wrapcheck // thin wrapper, callers handle errors
 		return err
 	}
