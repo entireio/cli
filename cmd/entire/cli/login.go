@@ -492,9 +492,10 @@ func loginCompleteLine(token, dialled string) string {
 // store write failure. The default backend is the OS keyring, which locked
 // or keyring-less machines (CI, containers, minimal server VMs) can't use —
 // the raw store error gives those users no way forward (#1036). The hint is
-// skipped when the file store is already selected, by ENTIRE_TOKEN_STORE=file
-// or by the remembered preference (suggesting it again would be nonsense), and
-// for failures the file store wouldn't help with. On Linux/BSD the
+// skipped when the file store is already selected, by ENTIRE_TOKEN_STORE=file,
+// by the remembered preference, or by this process's own fallback adoption
+// (suggesting it again would be nonsense), and for failures the file store
+// wouldn't help with. On Linux/BSD the
 // keyring-less case is handled by the tokenstore fallback before this ever
 // runs, so the hint here is reached only when the keyring was selected
 // explicitly, or when a Ctrl-C interrupted the keyring call

@@ -95,10 +95,11 @@ var (
 
 // store is the operation set every backend implements. Get and Delete return
 // an error wrapping ErrNotFound for a missing entry; any other error means the
-// store itself failed — it could not be reached, read, or written. Callers rely
-// on that distinction: the fallback decides from it whether to try the file
-// store, and `auth status` renders one as "Not logged in" and the other as a
-// store that could not be read.
+// store itself failed — it could not be reached, read, or written — or the call
+// was interrupted (Ctrl-C surfaces as context.Canceled; see fallbackEligible).
+// Callers rely on that distinction: the fallback decides from it whether to try
+// the file store, and `auth status` renders one as "Not logged in" and the
+// other as a store that could not be read.
 type store interface {
 	Get(service, user string) (string, error)
 	Set(service, user, password string) error

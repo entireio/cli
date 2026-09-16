@@ -593,7 +593,7 @@ func resetBackendForTesting(t *testing.T) {
 // launders ./relative-config into a plausible absolute path first. Hence the
 // explicit check rather than relying on the root.
 func TestFileStore_PublicOpsRejectRelativeConfigDirWithoutSideEffects(t *testing.T) {
-	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv(BackendEnvVar, "file")
 	t.Setenv(PathEnvVar, "")
 	t.Setenv(userdirs.EnvConfigDir, "relative-config")
 	cwd := t.TempDir()
@@ -624,7 +624,7 @@ func TestFileStore_PublicOpsRejectRelativeConfigDirWithoutSideEffects(t *testing
 // rule. A relative ENTIRE_CONFIG_DIR alongside it is simply irrelevant.
 func TestFileStore_ExplicitPathKeepsWorkingWithARelativeConfigDir(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv(BackendEnvVar, "file")
 	t.Setenv(userdirs.EnvConfigDir, "relative-config")
 	t.Setenv(PathEnvVar, filepath.Join(dir, "tokens.json"))
 	resetBackendForTesting(t)

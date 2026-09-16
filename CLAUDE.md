@@ -1830,7 +1830,7 @@ on the file store at `FileBackendPath` (`ENTIRE_TOKEN_STORE_PATH` when set, else
 `tokens.json` in the config dir), and once the file store proves it holds the
 credential it is adopted, announced once on stderr, and remembered — except
 after a keyring *timeout*, which is adopted for this process only: the
-abandoned keyring call may still complete the write once it answers, and a
+abandoned keyring call may still complete once it answers, and on a write a
 marker would orphan that copy. A fallback whose file
 operation also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint` and
 `storeReadError` check so they never recommend the store that just failed
