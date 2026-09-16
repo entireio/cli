@@ -29,6 +29,12 @@ func TestRunInvestigateConfigPicker_NoEligibleAgents(t *testing.T) {
 	if !strings.Contains(err.Error(), "no launchable agents") {
 		t.Errorf("error should mention launchability, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "entire agent add") {
+		t.Errorf("error should hint at `entire agent add`, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "configure --agent") {
+		t.Errorf("error should NOT hint at the stale `configure --agent` flag, got: %v", err)
+	}
 }
 
 // TestRunInvestigateConfigPicker_FiltersNonInstalled verifies that an

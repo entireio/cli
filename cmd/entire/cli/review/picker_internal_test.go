@@ -1,9 +1,14 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
 
 func TestSlotActionOptionsOnlyModelRemoveCancel(t *testing.T) {
@@ -62,5 +67,58 @@ func TestReviewModelSelectOptionsPreservesCurrentCustomModel(t *testing.T) {
 	}
 	if !values[reviewModelCustomSentinel] {
 		t.Fatal("custom model option missing")
+	}
+}
+
+// noReviewerFor never matches any agent to a review-runner adapter, so every
+// installed agent is filtered out of launchableInstalledAgentNames.
+func noReviewerFor(string) reviewtypes.AgentReviewer { return nil }
+
+// TestRunReviewGuidedSetup_NoLaunchableAgentsHintsAgentAdd calls the real
+// guided-setup entry point (picker.go) with no launchable agents and asserts
+// the error hints at `entire agent add`, not the stale `entire configure
+// --agent` flag (issue #2249).
+func TestRunReviewGuidedSetup_NoLaunchableAgentsHintsAgentAdd(t *testing.T) {
+	t.Parallel()
+	_, _, err := RunReviewGuidedSetup(
+		context.Background(),
+		&bytes.Buffer{},
+		[]types.AgentName{"claude-code"},
+		noReviewerFor,
+		"",
+		false, // firstRun=false: skips the interactive confirm form
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error when no agents are launchable")
+	}
+	if !strings.Contains(err.Error(), "entire agent add") {
+		t.Errorf("error should hint at `entire agent add`, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "configure --agent") {
+		t.Errorf("error should NOT hint at the stale `configure --agent` flag, got: %v", err)
+	}
+}
+
+// TestDefaultReviewProfileForInstalledAgents_NoneInstalledHintsAgentAdd calls
+// the real default-profile builder (profile.go) with no installed agents and
+// asserts the error hints at `entire agent add`, not the stale `entire
+// configure --agent` flag (issue #2249).
+func TestDefaultReviewProfileForInstalledAgents_NoneInstalledHintsAgentAdd(t *testing.T) {
+	t.Parallel()
+	_, err := defaultReviewProfileForInstalledAgents(
+		context.Background(),
+		"",
+		nil, // installed
+		noReviewerFor,
+	)
+	if err == nil {
+		t.Fatal("expected error when no agents are installed")
+	}
+	if !strings.Contains(err.Error(), "entire agent add") {
+		t.Errorf("error should hint at `entire agent add`, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "configure --agent") {
+		t.Errorf("error should NOT hint at the stale `configure --agent` flag, got: %v", err)
 	}
 }

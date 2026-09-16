@@ -141,7 +141,7 @@ func RunInvestigateConfigPicker(
 	if len(eligible) == 0 {
 		return nil, errors.New(
 			"no launchable agents with hooks installed; " +
-				"run `entire configure --agent <name>` for one of: " +
+				"run `entire agent add <name>` for one of: " +
 				"claude-code, codex, gemini-cli",
 		)
 	}
