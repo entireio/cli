@@ -11,9 +11,9 @@ import (
 )
 
 // fallbackNoticeW receives every store warning: the notice printed when the
-// keyring is found unavailable and tokens move to the file store, the warning
-// for a Delete that missed in both stores, the could-not-remember warning, the
-// superseded-copy warning, and the unusable-marker warning. Package-level so
+// keyring is found unavailable and tokens move to the file store, the
+// could-not-remember warning, the superseded-copy warning, and the
+// unusable-marker warning. Package-level so
 // tests can capture it; production writes to stderr, as loosePermsWarnW does
 // for the loose-permissions warning.
 var fallbackNoticeW io.Writer = os.Stderr
@@ -82,11 +82,10 @@ func setBackend(s store) {
 // availability reason, the same operation is retried against the file store
 // at FileBackendPath (ENTIRE_TOKEN_STORE_PATH when set, else tokens.json in
 // the config dir). The file store is adopted as the process backend — and,
-// unless ENTIRE_TOKEN_STORE_PATH is set or the keyring merely timed out,
+// unless ENTIRE_TOKEN_STORE_PATH is set or a write merely timed out,
 // remembered for future processes — only once it has proven it holds (Get,
 // Delete) or now holds (Set) the credential. A miss in both stores proves
-// nothing about where future tokens should go and leaves no trace beyond the
-// warning Delete prints.
+// nothing about where future tokens should go and leaves no trace.
 //
 // The transition is announced once per process by the notice on stderr, and
 // every login onto the file store prints where the tokens went (see
@@ -119,10 +118,6 @@ type fallbackStore struct {
 	// rememberWarn dedupes the could-not-remember warning; the marker write
 	// itself is retried on every adoption (see switchTo).
 	rememberWarn sync.Once
-	// deleteMissWarn dedupes the warning for a Delete that missed in both
-	// stores: logout clears several slots per context, and one warning per
-	// process says everything the repeats would.
-	deleteMissWarn sync.Once
 	// primaryWorked is set once the keyring has answered; see mayFallBack.
 	primaryWorked atomic.Bool
 }
@@ -169,7 +164,7 @@ func (f *fallbackStore) Get(service, user string) (string, error) {
 		}
 		return "", bothFailed(err, ferr)
 	}
-	f.switchTo(fs, err)
+	f.switchTo(fs, err, false)
 	return fv, nil
 }
 
@@ -183,7 +178,7 @@ func (f *fallbackStore) Set(service, user, password string) error {
 	if ferr := fs.Set(service, user, password); ferr != nil {
 		return bothFailed(err, ferr)
 	}
-	f.switchTo(fs, err)
+	f.switchTo(fs, err, true)
 	return nil
 }
 
@@ -199,21 +194,18 @@ func (f *fallbackStore) Delete(service, user string) error {
 		// A miss here is ErrNotFound, deliberately, unlike Get: Delete's
 		// job is "make sure it is gone from wherever we can reach", and
 		// logout must be able to remove a context on a machine whose
-		// keyring has vanished. But "cannot reach" is not "gone": the
-		// keyring may be locked, unreachable from this session, or slow,
-		// and still hold the credential — so the miss is warned about once,
-		// even though it is not an error. Any other file error is reported
-		// with both.
+		// keyring has vanished. "Cannot reach" is not "gone", but this
+		// store cannot tell a logout from login's best-effort clear of a
+		// stale slot (the first store call of a device-flow login on a
+		// keyring-less machine), so it says nothing here; logout reports an
+		// unreachable store itself, from statusTarget.storeErr. Any other
+		// file error is reported with both.
 		if errors.Is(ferr, ErrNotFound) {
-			f.deleteMissWarn.Do(func() {
-				fmt.Fprintf(fallbackNoticeW, "Warning: OS keyring (%s) unavailable: %v\nCould not confirm this credential was removed from it. If a keyring on this machine still holds Entire credentials, run entire logout again from a session that can reach it.\n",
-					keyringProviderName(), err)
-			})
 			return ErrNotFound
 		}
 		return bothFailed(err, ferr)
 	}
-	f.switchTo(fs, err)
+	f.switchTo(fs, err, false)
 	return nil
 }
 
@@ -223,11 +215,15 @@ func (f *fallbackStore) Delete(service, user string) error {
 // transient failure on the first attempt should not leave the machine
 // unremembered for the rest of the process.
 //
-// A keyring that TIMED OUT is adopted for this process only, never
-// remembered. callKeyringWithTimeout abandons the goroutine rather than
-// cancelling it, so, on a write, the keyring may still complete it once it
-// answers; pinning the file store through the marker would then orphan that
-// keyring copy for good. The notice says so and names the two variables that
+// A keyring that TIMED OUT on a WRITE is adopted for this process only,
+// never remembered. callKeyringWithTimeout abandons the goroutine rather than
+// cancelling it, so the keyring may still complete the write once it answers;
+// pinning the file store through the marker would then orphan that keyring
+// copy for good. A timed-out Get or Delete orphans nothing (a discarded value;
+// a removal that can only make the keyring copy more gone), so it is
+// remembered like any other availability failure. Otherwise a keyring that
+// hangs rather than fails would cost the full timeout and reprint the notice
+// on every command, with no way to heal. The notice says so and names the two variables that
 // avoid the wait; when ENTIRE_TOKEN_STORE_PATH is set as well it adds that the
 // variable has to stay set, so the timeout does not swallow the path advice.
 //
@@ -240,8 +236,8 @@ func (f *fallbackStore) Delete(service, user string) error {
 // still in the file and for a store named through ENTIRE_TOKEN_STORE_PATH,
 // which is never touched. The notice is the only signal, which is why the
 // remembered branch always prints the way back.
-func (f *fallbackStore) switchTo(fs store, keyringErr error) {
-	timedOut := errors.Is(keyringErr, context.DeadlineExceeded)
+func (f *fallbackStore) switchTo(fs store, keyringErr error, write bool) {
+	timedOut := write && errors.Is(keyringErr, context.DeadlineExceeded)
 	pathSet := !markerApplies()
 	remembered := !pathSet && !timedOut
 	f.notice.Do(func() {

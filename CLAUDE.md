@@ -1829,9 +1829,10 @@ for an availability reason — anything but `ErrNotFound` and Ctrl-C — is retr
 on the file store at `FileBackendPath` (`ENTIRE_TOKEN_STORE_PATH` when set, else
 `tokens.json` in the config dir), and once the file store proves it holds the
 credential it is adopted, announced once on stderr, and remembered — except
-after a keyring *timeout*, which is adopted for this process only: the
-abandoned keyring call may still complete once it answers, and on a write a
-marker would orphan that copy. Once the keyring has answered in a process (a
+after a keyring *timeout on a write*, which is adopted for this process only:
+the abandoned write may still complete once the keyring answers, and a marker
+would orphan that copy (a timed-out read or delete orphans nothing and is
+remembered like any other availability failure). Once the keyring has answered in a process (a
 success or an `ErrNotFound`), no later call in that process falls back: login
 writes the refresh and access slots as two calls, and falling back on only the
 second would split one login across two stores. A fallback whose file
@@ -1860,10 +1861,11 @@ the consumer ledger guard is a `git grep` and reads a mention as a call.
 A Get that misses in both stores returns the keyring error, not `ErrNotFound`,
 and `auth status` renders it as "could not be read from …" rather than "Not
 logged in" (`statusTarget.storeErr`). A Delete that misses in both stores
-returns `ErrNotFound`, so `logout` can still remove a context on a machine
-whose keyring has vanished — but it warns once per process that the keyring
-copy is unconfirmed (the keyring may be merely locked or slow), and `logout`
-itself warns when revocation was skipped because the token could not be read.
+returns `ErrNotFound` silently, so `logout` can still remove a context on a
+machine whose keyring has vanished; the store cannot tell a logout from login's
+best-effort clear of a stale slot, so it is `logout` that warns, from
+`statusTarget.storeErr`, when the token could not be read: revocation was
+skipped and any copy in that store was not removed.
 
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 

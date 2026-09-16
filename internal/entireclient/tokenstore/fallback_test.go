@@ -209,17 +209,15 @@ func TestFallbackStore_DeleteFallsBackAndTreatsFileMissAsNotFound(t *testing.T) 
 	if *adopted != nil {
 		t.Fatal("a miss adopts nothing")
 	}
-	// The miss reads as ErrNotFound for logout's sake, but the keyring copy is
-	// unconfirmed — it may sit in a keyring that is merely locked or slow — so
-	// the user is told, once, not on every slot logout clears.
-	if out := notice.String(); !strings.Contains(out, "Could not confirm") || !strings.Contains(out, errNoSecretService.Error()) {
-		t.Fatalf("a miss in both stores must warn that the keyring copy is unconfirmed:\n%s", out)
-	}
+	// The miss reads as ErrNotFound for logout's sake and prints nothing: the
+	// store cannot tell a logout from login's best-effort clear of a stale
+	// slot, which is the first store call of a device-flow login on a
+	// keyring-less machine. Logout reports an unreachable store itself.
 	if err := f.Delete("svc", "bob"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second miss = %v, want ErrNotFound", err)
 	}
-	if n := strings.Count(notice.String(), "Could not confirm"); n != 1 {
-		t.Fatalf("unconfirmed-removal warning printed %d times, want once per process:\n%s", n, notice.String())
+	if notice.Len() != 0 {
+		t.Fatalf("a miss in both stores must print nothing:\n%s", notice.String())
 	}
 
 	if err := file.Set("svc", "alice", "tok"); err != nil {
@@ -572,5 +570,32 @@ func TestFallbackStore_DoesNotFallBackOnceTheKeyringHasAnswered(t *testing.T) {
 	}
 	if *adopted2 != nil {
 		t.Fatal("nothing may be adopted")
+	}
+}
+
+// A timeout on a READ is remembered like any other availability failure: an
+// abandoned Get orphans nothing, and refusing to remember it would make a
+// keyring that hangs cost the full timeout and the notice on every command.
+func TestFallbackStore_ReadTimeoutIsRemembered(t *testing.T) {
+	primary := newScriptedStore()
+	primary.getErr = fmt.Errorf("get timed out: %w", context.DeadlineExceeded)
+	f, file, notice, adopted := newTestFallback(t, primary)
+	if err := file.Set("svc", "alice", "tok"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := f.Get("svc", "alice")
+	if err != nil || got != "tok" {
+		t.Fatalf("Get through a timed-out keyring = %q, %v; want the file's token", got, err)
+	}
+	if *adopted != store(file) {
+		t.Fatal("the file store must be adopted")
+	}
+	if persisted := persistedBackend(); persisted != backendFile {
+		t.Fatalf("persisted = %q, want file: a read timeout is remembered", persisted)
+	}
+	out := notice.String()
+	if !strings.Contains(out, "This choice is remembered") || strings.Contains(out, "timed out rather than failing") {
+		t.Fatalf("a read timeout takes the remembered branch, not the write-timeout one:\n%s", out)
 	}
 }

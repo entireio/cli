@@ -36,9 +36,10 @@ import (
 // only say `file`; where that file lives comes from the environment or this
 // same directory. A writer with access here can already repoint
 // contexts.json's core_url at a hostile issuer; if contexts.json ever gains
-// integrity protection, revisit this. A login onto the file store always says
-// so on stdout (persistLogin in the cli package), so a planted marker cannot
-// redirect credentials unannounced. The file is created 0600 in a 0700
+// integrity protection, revisit this. A login onto the file store says so
+// on stdout (persistLogin in the cli package); token refreshes then write
+// where the login did, silently, so a planted marker is announced at the next
+// login rather than never. The file is created 0600 in a 0700
 // directory like its neighbours.
 const preferenceFileName = "token_store.json"
 

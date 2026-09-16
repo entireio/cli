@@ -34,7 +34,7 @@ func TestWarnRevokeSkipped(t *testing.T) {
 
 	var out bytes.Buffer
 	warnRevokeSkipped(&out, errors.New("Secret Service (D-Bus) unavailable"))
-	for _, want := range []string{"could not be read", "Secret Service (D-Bus) unavailable", "was not revoked"} {
+	for _, want := range []string{"could not be read", "Secret Service (D-Bus) unavailable", "was not revoked", "was not removed"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("warning missing %q:\n%s", want, out.String())
 		}
