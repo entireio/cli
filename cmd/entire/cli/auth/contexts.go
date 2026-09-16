@@ -202,7 +202,8 @@ func LocalIdentityCacheKey() (string, error) {
 }
 
 // LoginTokenForContext returns the login JWT stored for c, read from the
-// OS keyring slot the context points at. The encoded expiry is stripped;
+// credential store slot (OS keyring or tokens.json, whichever the token
+// store resolves to) the context points at. The encoded expiry is stripped;
 // the server is the authority on validity and the device-flow login holds
 // no refresh token, so an expired token surfaces as a 401 the caller can
 // translate into a re-login hint.
@@ -211,14 +212,14 @@ func LoginTokenForContext(c *contexts.Context) (string, error) {
 		return "", errors.New("nil context")
 	}
 	if c.KeychainService == "" || c.Handle == "" {
-		return "", fmt.Errorf("context %q has no keychain slot", c.Name)
+		return "", fmt.Errorf("context %q has no keychain slot: %w", c.Name, tokenstore.ErrNotFound)
 	}
 	encoded, err := tokenstore.Get(c.KeychainService, c.Handle)
 	if err != nil {
 		return "", fmt.Errorf("read token for context %q: %w", c.Name, err)
 	}
 	if encoded == "" {
-		return "", fmt.Errorf("no token stored for context %q (run `entire login`)", c.Name)
+		return "", fmt.Errorf("no token stored for context %q (run `entire login`): %w", c.Name, tokenstore.ErrNotFound)
 	}
 	token, _ := tokenstore.DecodeTokenWithExpiration(encoded)
 	return token, nil

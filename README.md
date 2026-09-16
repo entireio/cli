@@ -282,13 +282,19 @@ By default `entire login` opens a browser to sign in and stores tokens in the OS
 
 ### Interactive login on a headless machine
 
-Sign-in itself already handles this: with no interactive terminal, or over SSH, `entire login` switches to the device-code flow on its own and prints an approval URL you can open on any machine. `entire login --device` forces that flow explicitly. Only token *storage* needs an override — use the file-backed store:
+Sign-in itself already handles this: with no interactive terminal, over SSH, or on a Linux or BSD machine with no graphical display, `entire login` switches to the device-code flow on its own and prints an approval URL you can open on any machine. `entire login --device` forces that flow explicitly.
+
+Token storage handles it too. On Linux and the BSDs, when the OS keyring is unavailable (no Secret Service daemon, no session bus, a collection that will not unlock), `entire login` stores tokens in `tokens.json` instead, prints a note saying so, and remembers the choice in `token_store.json` next to `contexts.json`, so every later command uses the file with no variable set. When the keyring times out rather than failing, the file is used for that command only and the choice is not remembered, because the keyring may still answer later. On macOS and Windows the keyring is always present, so a failure there (a denied prompt, a locked store) is reported rather than worked around.
+
+To choose the file store explicitly on any platform:
 
 ```bash
 ENTIRE_TOKEN_STORE=file entire login
 ```
 
-Tokens are written with `0600` permissions to `tokens.json` in your Entire config directory (`~/.config/entire` by default). Override the location with `ENTIRE_TOKEN_STORE_PATH`. Set `ENTIRE_TOKEN_STORE=file` persistently (e.g. in your shell profile) so later commands read from the same store.
+The choice is remembered after that login. `ENTIRE_TOKEN_STORE=keyring entire login` moves back to the keyring, clears the remembered choice, and removes the superseded copy of that credential from `tokens.json`. Tokens are written with `0600` permissions to `tokens.json` in your Entire config directory (`~/.config/entire` by default). You can override the location with `ENTIRE_TOKEN_STORE_PATH`, but then the choice is not remembered (the marker cannot carry a path): keep both variables set for every command.
+
+`entire auth status` tells the two states apart: "Not logged in" (exit 0) means no credential is stored, while a store that cannot be read is reported as an error (exit 1) naming the store and the failure, so a script that probes login state with `entire auth status` sees the failure exit on a broken keyring. `entire auth token` exits non-zero in both cases, as before, but its message says which one you are in.
 
 ### Non-interactive automation (CI, workload identity)
 
@@ -300,7 +306,7 @@ ENTIRE_TOKEN=<login-or-sa-session-JWT> entire ...
 
 `ENTIRE_TOKEN` bypasses stored credentials; the CLI derives the control-plane endpoint from the token itself. Nothing is written to disk. This is the right path for CI pipelines and service accounts.
 
-> **Seeing `save login` / `failed to unlock correct collection` errors from `entire login`?** That's the OS keyring being unavailable — use one of the two paths above.
+> **Seeing `save login` errors from `entire login`?** On macOS and Windows that's the OS keyring refusing the write (a denied prompt, a locked store) — use one of the two paths above. On Linux and the BSDs the CLI already switches to the file store on its own, so a remaining error means the file store failed too, or `ENTIRE_TOKEN_STORE` explicitly selected the keyring; the message names what failed.
 
 ## Commands Reference
 

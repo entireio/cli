@@ -13,16 +13,17 @@ import "fmt"
 // per-subtest paths if they actually need isolation.
 func UseFileBackendForTesting(path string) func() {
 	backendMu.Lock()
-	prevBackend := backend
-	prevResolved := resolved
+	prevBackend, prevResolved, prevAdopted := backend, resolved, adoptedFile
 	backend = &fileStore{path: path}
 	resolved = true
+	// A test override is not a fallback adoption; provenance must not
+	// report one that a previous test left behind.
+	adoptedFile = false
 	backendMu.Unlock()
 
 	return func() {
 		backendMu.Lock()
-		backend = prevBackend
-		resolved = prevResolved
+		backend, resolved, adoptedFile = prevBackend, prevResolved, prevAdopted
 		backendMu.Unlock()
 	}
 }
@@ -61,16 +62,15 @@ func UseObservingBackendForTesting(path string, observe func(op, service, user s
 
 func installFaultStore(fs faultStore) func() {
 	backendMu.Lock()
-	prevBackend := backend
-	prevResolved := resolved
+	prevBackend, prevResolved, prevAdopted := backend, resolved, adoptedFile
 	backend = fs
 	resolved = true
+	adoptedFile = false
 	backendMu.Unlock()
 
 	return func() {
 		backendMu.Lock()
-		backend = prevBackend
-		resolved = prevResolved
+		backend, resolved, adoptedFile = prevBackend, prevResolved, prevAdopted
 		backendMu.Unlock()
 	}
 }

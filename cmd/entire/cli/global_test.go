@@ -28,6 +28,12 @@ func TestMain(m *testing.M) {
 	// keychain. Set the file-backed token store and isolated config/cache dirs
 	// process-wide so spawned children inherit them. Mirrors the integration
 	// and e2e TestMains.
+	//
+	// ENTIRE_TOKEN_STORE_PATH being set is load-bearing beyond isolation:
+	// while it is set the tokenstore marker (token_store.json) is never
+	// written (markerApplies() is false), so no test in this package can
+	// leave a marker behind by accident. A test that wants to observe marker
+	// behaviour must blank it and isolate ENTIRE_CONFIG_DIR itself.
 	isolationDir, err := os.MkdirTemp("", "entire-cli-test-*")
 	if err != nil {
 		panic(fmt.Errorf("failed to create test isolation dir: %w", err))

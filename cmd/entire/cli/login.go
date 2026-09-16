@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -191,6 +192,7 @@ func newLoginCmd() *cobra.Command {
 					useDevice:  useDevice,
 					canPrompt:  interactive.CanPromptInteractively(),
 					sshSession: isSSHSession(),
+					noDisplay:  noLocalDisplay(runtime.GOOS, os.Getenv),
 				})
 		},
 	}
@@ -310,16 +312,18 @@ type loginFlowFacts struct {
 	useDevice  bool // --device flag
 	canPrompt  bool // interactive terminal present
 	sshSession bool // running inside an SSH session
+	noDisplay  bool // Linux/BSD with no graphical display to open a browser on
 }
 
 // runLoginAuto picks between the browser (loopback authorization-code) and
 // device-code flows and runs the chosen one. The browser flow is the
 // default — no code to type, no poll latency — but it needs a browser that
 // can reach this machine's 127.0.0.1, so headless terminals (CI, piped
-// stdin), SSH sessions, and a loopback listener that fails to start all
-// fall back to the device flow with a one-line explanation; the same
-// both-flows-with-fallback shape gh / gcloud / aws sso ship. --device
-// forces the device flow without commentary.
+// stdin), SSH sessions, a machine with no graphical display, and a
+// loopback listener that fails to start all fall back to the device flow
+// with a one-line explanation; the same both-flows-with-fallback shape
+// gh / gcloud / aws sso ship. --device forces the device flow without
+// commentary.
 func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient deviceAuthClient, startBrowser func(context.Context) (browserAuthFlow, error), urlInteractor loginURLInteractor, facts loginFlowFacts) error {
 	if shouldUseBrowserLogin(facts) {
 		flow, err := startBrowser(ctx)
@@ -339,6 +343,8 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 		fmt.Fprintln(errW, "No interactive terminal detected; using device-code flow.")
 	case facts.sshSession:
 		fmt.Fprintln(errW, "SSH session detected; using device-code flow (a browser opened here couldn't reach this machine).")
+	case facts.noDisplay:
+		fmt.Fprintln(errW, "No graphical display detected; using device-code flow (a browser opened elsewhere couldn't reach this machine).")
 	}
 	return runLogin(ctx, outW, errW, deviceClient, urlInteractor, facts.canPrompt)
 }
@@ -347,11 +353,12 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 // loopback authorization-code (browser) flow. The browser flow is the
 // default but needs a local browser + reachable 127.0.0.1, so it's only
 // chosen when --device wasn't passed, an interactive terminal is present,
-// and we're not inside an SSH session (where the loopback listener binds
-// on the remote host, out of the user's browser's reach); otherwise the
-// caller falls back to the device flow.
+// we're not inside an SSH session (where the loopback listener binds on
+// the remote host, out of the user's browser's reach), and there is a
+// graphical display to open the browser on; otherwise the caller falls
+// back to the device flow.
 func shouldUseBrowserLogin(f loginFlowFacts) bool {
-	return !f.useDevice && f.canPrompt && !f.sshSession
+	return !f.useDevice && f.canPrompt && !f.sshSession && !f.noDisplay
 }
 
 // isSSHSession reports whether this process is running inside an SSH
@@ -361,6 +368,37 @@ func isSSHSession() bool {
 	return os.Getenv("SSH_CONNECTION") != "" ||
 		os.Getenv("SSH_CLIENT") != "" ||
 		os.Getenv("SSH_TTY") != ""
+}
+
+// noLocalDisplay reports whether this machine cannot show a browser: a Linux
+// or BSD session with neither an X11 nor a Wayland display. WSL is excluded
+// because a browser is reachable there — the Windows one through interop, or
+// a Linux one; GitHub issue #1707 is about which of those xdg-open picks, not
+// about whether one exists. An explicit $BROWSER is excluded too: it names an
+// opener the user vouches for. macOS and Windows always have a display.
+//
+// This catches the remote terminals isSSHSession cannot: web terminals and
+// agent orchestrators that give the user a shell on a server without SSH
+// variables. There the loopback listener binds on the server, and the browser
+// the user opens on their own machine is redirected to a 127.0.0.1 that means
+// the server, not the machine the browser is on (the September 2026 support
+// report).
+//
+// The platform list is the same set tokenstore.secretServicePlatforms owns.
+// It is spelled again here because the concern differs (a display, not a
+// keyring daemon) and that set is unexported.
+func noLocalDisplay(goos string, getenv func(string) string) bool {
+	switch goos {
+	case "linux", "freebsd", "openbsd", "netbsd", "dragonfly":
+	default:
+		return false
+	}
+	for _, v := range []string{"DISPLAY", "WAYLAND_DISPLAY", "BROWSER", "WSL_DISTRO_NAME", "WSL_INTEROP"} {
+		if getenv(v) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // runBrowserLogin runs the loopback authorization-code flow on an
@@ -459,6 +497,12 @@ func persistLogin(outW io.Writer, dialled, adoptedIssuer, token, refreshToken st
 	}
 
 	fmt.Fprintln(outW, loginCompleteLine(token, dialled))
+	// The fallback's notice announces the switch to the file store once per
+	// process; without this, every later login onto the remembered file store
+	// wrote bearer tokens to disk without a word.
+	if tokenstore.FileBackendSelected() {
+		fmt.Fprintf(outW, "Tokens are stored in %s.\n", tokenstore.FileBackendPath())
+	}
 	return nil
 }
 
@@ -484,15 +528,46 @@ func loginCompleteLine(token, dialled string) string {
 // store write failure. The default backend is the OS keyring, which locked
 // or keyring-less machines (CI, containers, minimal server VMs) can't use —
 // the raw store error gives those users no way forward (#1036). The hint is
-// skipped when ENTIRE_TOKEN_STORE=file is already set (suggesting it again
-// would be nonsense) and for failures the file store wouldn't help with.
+// skipped when the file store is already selected, by ENTIRE_TOKEN_STORE=file,
+// by the remembered preference, or by this process's own fallback adoption
+// (suggesting it again would be nonsense), and for failures the file store
+// wouldn't help with. On Linux/BSD the
+// keyring-less case is handled by the tokenstore fallback before this ever
+// runs, so the hint here is reached only when the keyring was selected
+// explicitly, or when a Ctrl-C interrupted the keyring call
+// (which the fallback deliberately does not catch); that case is constructed
+// but never shown, because a signalled abort exits before the error is
+// rendered. A fallback whose file write also failed carries
+// ErrFileStoreFailed and gets a different hint: recommending
+// ENTIRE_TOKEN_STORE=file alone would send the user back to the store that
+// just failed, so it points at ENTIRE_TOKEN_STORE_PATH as the way to a
+// writable file store, with ENTIRE_TOKEN_STORE=file alongside it so the
+// keyring is not asked again, and says both have to stay set (a choice made
+// with the path override is never remembered). storeReadError in auth.go
+// gives the same advice, in the same words, for a read. On macOS and Windows,
+// with no fallback, it is reached whenever the keyring write fails.
+//
+// The remembered/not-remembered wording follows tokenstore.ChoiceIsRemembered,
+// the same rule the fallback's own notice uses, so the two can never
+// disagree.
 func withHeadlessStoreHint(err error) error {
-	if !errors.Is(err, auth.ErrCredentialStoreWrite) || tokenstore.FileBackendSelected() {
+	if !errors.Is(err, auth.ErrCredentialStoreWrite) {
+		return err
+	}
+	if errors.Is(err, tokenstore.ErrFileStoreFailed) {
+		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed. Point %s at a writable location and set %s=file, then run entire login again; a choice made with the path override is not remembered, so both variables must stay set for later commands", err, tokenstore.FileBackendPath(), tokenstore.PathEnvVar, tokenstore.BackendEnvVar)
+	}
+	if tokenstore.FileBackendSelected() {
 		return err
 	}
 
-	return fmt.Errorf("%w\n\nIf this machine has no usable OS keyring (headless server, container, CI), store tokens in a file instead:\n\n  %s=file entire login\n\nTokens are then written with 0600 permissions to %s (override the location with %s)",
-		err, tokenstore.BackendEnvVar, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+	const lead = "%w\n\nIf this machine has no usable OS keyring (headless server, container, CI), store tokens in a file instead:\n\n  %s=file entire login\n\n"
+	if tokenstore.ChoiceIsRemembered() {
+		return fmt.Errorf(lead+"The choice is remembered, so later commands need no variable; run %s=keyring entire login to switch back. Tokens are written with 0600 permissions to %s (override the location with %s, which then has to stay set for later commands)",
+			err, tokenstore.BackendEnvVar, tokenstore.BackendEnvVar, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+	}
+	return fmt.Errorf(lead+"%s is set, so the choice is not remembered: keep both variables set for later commands. Tokens are written with 0600 permissions to %s",
+		err, tokenstore.BackendEnvVar, tokenstore.PathEnvVar, tokenstore.FileBackendPath())
 }
 
 // validateReceivedToken runs minimum-trust checks on the access token
