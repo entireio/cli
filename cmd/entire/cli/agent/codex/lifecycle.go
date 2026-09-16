@@ -180,6 +180,7 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		SubagentType:            raw.AgentType,
 		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),
 		Model:                   raw.Model,
+                TaskDescription:        derefString(raw.LastAssistantMessage),
 		Timestamp:               time.Now(),
 	}, nil
 }
@@ -290,6 +291,7 @@ func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Model:      raw.Model,
+                TaskDescription: derefString(raw.LastAssistantMessage),
 		Timestamp:  time.Now(),
 	}, nil
 }
