@@ -433,15 +433,16 @@ func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.
 // needs to know which store failed and what to do about it. The remedy
 // depends on the store, by the same rule withHeadlessStoreHint follows: when
 // the Linux fallback tried both stores and both failed (ErrFileStoreFailed)
-// the way out is a writable location for the file store; with the keyring
-// selected the way out is the file store; with the file store already
-// selected, suggesting it again is nonsense, so the error names the file to
-// check.
+// the way out is a writable location for the file store, named through the
+// path override and selected explicitly — the same advice, in the same words,
+// that withHeadlessStoreHint gives for a write; with the keyring selected the
+// way out is the file store; with the file store already selected, suggesting
+// it again is nonsense, so the error names the file to check.
 func storeReadError(t statusTarget) error {
 	base := fmt.Errorf("saved login for %s found, but its token could not be read from %s: %w",
 		t.coreURL, tokenstore.BackendDescription(), t.storeErr)
 	if errors.Is(t.storeErr, tokenstore.ErrFileStoreFailed) {
-		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed; the error names both. Fix the file store (or point %s at a writable location) and run `entire login` again", base, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed. Point %s at a writable location and set %s=file, then run entire login again; a choice made with the path override is not remembered, so both variables must stay set for later commands", base, tokenstore.FileBackendPath(), tokenstore.PathEnvVar, tokenstore.BackendEnvVar)
 	}
 	if tokenstore.FileBackendSelected() {
 		return fmt.Errorf("%w\n\nCheck that %s exists and contains valid JSON, or run `entire login` again", base, tokenstore.FileBackendPath())

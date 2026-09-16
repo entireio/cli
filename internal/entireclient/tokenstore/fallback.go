@@ -9,10 +9,12 @@ import (
 	"sync"
 )
 
-// fallbackNoticeW receives the short notice printed when the keyring is found
-// unavailable and tokens move to the file store, and the warnings about the
-// remembered preference. Package-level so tests can capture it; production
-// writes to stderr like the other store warnings.
+// fallbackNoticeW receives every store warning: the notice printed when the
+// keyring is found unavailable and tokens move to the file store, the warning
+// for a Delete that missed in both stores, the could-not-remember warning, the
+// superseded-copy warning, and the unusable-marker warning. Package-level so
+// tests can capture it; production writes to stderr, as loosePermsWarnW does
+// for the loose-permissions warning.
 var fallbackNoticeW io.Writer = os.Stderr
 
 // secretServicePlatforms are the GOOS values where the OS keyring is a
@@ -49,9 +51,10 @@ func fallbackEligible(err error) bool {
 }
 
 // ErrFileStoreFailed marks a fallback that could not complete because the
-// file store failed too. Login's headless hint checks for it: suggesting
-// ENTIRE_TOKEN_STORE=file about a file store that just failed would send the
-// user in a circle. Both underlying errors are wrapped alongside it.
+// file store failed too. Login's withHeadlessStoreHint and auth status's
+// storeReadError both check for it and point at ENTIRE_TOKEN_STORE_PATH
+// instead of recommending the file store that just failed, which would send
+// the user in a circle. Both underlying errors are wrapped alongside it.
 var ErrFileStoreFailed = errors.New("file token store failed")
 
 // bothFailed composes the error for a fallback that could not complete: the
@@ -181,7 +184,7 @@ func (f *fallbackStore) Delete(service, user string) error {
 		// with both.
 		if errors.Is(ferr, ErrNotFound) {
 			f.deleteMissWarn.Do(func() {
-				fmt.Fprintf(fallbackNoticeW, "Warning: OS keyring (%s) unavailable: %v\nCould not confirm this credential was removed from it. If this machine's keyring still holds Entire credentials, run entire logout again from a session with keyring access.\n",
+				fmt.Fprintf(fallbackNoticeW, "Warning: OS keyring (%s) unavailable: %v\nCould not confirm this credential was removed from it. If a keyring on this machine still holds Entire credentials, run entire logout again from a session that can reach it.\n",
 					keyringProviderName(), err)
 			})
 			return ErrNotFound
@@ -200,10 +203,11 @@ func (f *fallbackStore) Delete(service, user string) error {
 //
 // A keyring that TIMED OUT is adopted for this process only, never
 // remembered. callKeyringWithTimeout abandons the goroutine rather than
-// cancelling it, so the keyring may still complete the write once it answers;
-// pinning the file store through the marker would then orphan that keyring
-// copy for good. The notice says so and names the two variables that avoid
-// the wait.
+// cancelling it, so, on a write, the keyring may still complete it once it
+// answers; pinning the file store through the marker would then orphan that
+// keyring copy for good. The notice says so and names the two variables that
+// avoid the wait; when ENTIRE_TOKEN_STORE_PATH is set as well it adds that the
+// variable has to stay set, so the timeout does not swallow the path advice.
 //
 // Adopting on a successful Get is deliberate: it is what makes the customer's
 // first command after losing the keyring work without a re-login. It has a
@@ -216,13 +220,18 @@ func (f *fallbackStore) Delete(service, user string) error {
 // remembered branch always prints the way back.
 func (f *fallbackStore) switchTo(fs store, keyringErr error) {
 	timedOut := errors.Is(keyringErr, context.DeadlineExceeded)
-	remembered := markerApplies() && !timedOut
+	pathSet := !markerApplies()
+	remembered := !pathSet && !timedOut
 	f.notice.Do(func() {
 		fmt.Fprintf(fallbackNoticeW, "Note: OS keyring (%s) unavailable: %v\nStoring Entire tokens in %s instead. ",
 			keyringProviderName(), keyringErr, FileBackendPath())
 		switch {
 		case timedOut:
-			fmt.Fprintf(fallbackNoticeW, "The keyring timed out rather than failing, so this choice is not remembered, and the keyring may also have received this credential once it answered. Set %s=%s to skip the keyring check, or %s to wait longer.\n", BackendEnvVar, backendFile, keyringTimeoutEnvVar)
+			fmt.Fprintf(fallbackNoticeW, "The keyring timed out rather than failing, so this choice is not remembered: the abandoned keyring call may still complete. Set %s=%s to skip the keyring check, or %s to wait longer.", BackendEnvVar, backendFile, keyringTimeoutEnvVar)
+			if pathSet {
+				fmt.Fprintf(fallbackNoticeW, " %s is set; keep it set for later commands.", PathEnvVar)
+			}
+			fmt.Fprintln(fallbackNoticeW)
 		case remembered:
 			fmt.Fprintf(fallbackNoticeW, "This choice is remembered; run %s=%s entire login to switch back.\n", BackendEnvVar, backendKeyring)
 		default:

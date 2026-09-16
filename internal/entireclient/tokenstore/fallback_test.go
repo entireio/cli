@@ -150,7 +150,7 @@ func TestFallbackStore_SetReportsBothFailures(t *testing.T) {
 		t.Fatalf("err = %v, want both the keyring and the file failure", err)
 	}
 	if !errors.Is(err, ErrFileStoreFailed) {
-		t.Fatalf("err = %v, want ErrFileStoreFailed so the login hint can stay quiet about the file store", err)
+		t.Fatalf("err = %v, want ErrFileStoreFailed so the login hint points at the path override rather than the file store", err)
 	}
 	if *adopted != nil || persistedBackend() != "" {
 		t.Fatal("nothing adopted or remembered when the file store also failed")
@@ -239,27 +239,43 @@ func TestFallbackStore_DeleteFallsBackAndTreatsFileMissAsNotFound(t *testing.T) 
 // With an explicit ENTIRE_TOKEN_STORE_PATH the fallback still adopts the file
 // store for this process, but the marker is not written (it cannot carry the
 // path) and the notice must say so instead of claiming the choice is
-// remembered.
+// remembered. That holds when the keyring timed out too: the timeout branch
+// has its own reason for not remembering, and it must not swallow the advice
+// that the path variable has to stay set — a later command without it looks
+// at the default path, which does not hold the token.
 func TestFallbackStore_ExplicitPathIsAdoptedButNotRemembered(t *testing.T) {
-	primary := newScriptedStore()
-	primary.setErr = errNoSecretService
-	f, _, notice, adopted := newTestFallback(t, primary)
-	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
-	file := defaultFileStore()
-	f.newFile = func() store { return file }
+	for name, tc := range map[string]struct {
+		keyringErr error
+		timedOut   bool
+	}{
+		"keyring unavailable": {errNoSecretService, false},
+		"keyring timed out":   {fmt.Errorf("set timed out: %w", context.DeadlineExceeded), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			primary := newScriptedStore()
+			primary.setErr = tc.keyringErr
+			f, _, notice, adopted := newTestFallback(t, primary)
+			t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
+			file := defaultFileStore()
+			f.newFile = func() store { return file }
 
-	if err := f.Set("svc", "alice", "tok"); err != nil {
-		t.Fatal(err)
-	}
-	if *adopted != store(file) {
-		t.Fatal("the explicit-path file store must still be adopted for this process")
-	}
-	if got := persistedBackend(); got != "" {
-		t.Fatalf("persisted = %q, want empty while %s is set", got, PathEnvVar)
-	}
-	out := notice.String()
-	if strings.Contains(out, "This choice is remembered") || !strings.Contains(out, PathEnvVar+" is set") {
-		t.Fatalf("notice must say the choice is not remembered and why:\n%s", out)
+			if err := f.Set("svc", "alice", "tok"); err != nil {
+				t.Fatal(err)
+			}
+			if *adopted != store(file) {
+				t.Fatal("the explicit-path file store must still be adopted for this process")
+			}
+			if got := persistedBackend(); got != "" {
+				t.Fatalf("persisted = %q, want empty while %s is set", got, PathEnvVar)
+			}
+			out := notice.String()
+			if strings.Contains(out, "This choice is remembered") || !strings.Contains(out, PathEnvVar+" is set") {
+				t.Fatalf("notice must say the choice is not remembered and why:\n%s", out)
+			}
+			if strings.Contains(out, "timed out") != tc.timedOut {
+				t.Fatalf("notice mentions a timeout = %v, want %v:\n%s", !tc.timedOut, tc.timedOut, out)
+			}
+		})
 	}
 }
 
@@ -290,6 +306,9 @@ func TestFallbackStore_TimeoutAdoptsButDoesNotRemember(t *testing.T) {
 	}
 	if strings.Contains(out, "This choice is remembered") {
 		t.Fatalf("notice must not promise a memory a timeout does not keep:\n%s", out)
+	}
+	if strings.Contains(out, PathEnvVar+" is set") {
+		t.Fatalf("notice must not mention %s when it is not set:\n%s", PathEnvVar, out)
 	}
 }
 
