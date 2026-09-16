@@ -66,6 +66,11 @@ func newAgentListCmd() *cobra.Command {
 }
 
 func runAgentList(ctx context.Context, w io.Writer) error {
+	// An external agent plugin is only in the registry once discovery has run,
+	// and until it is, this command reports an installed plugin as not
+	// existing — and prints "No agents installed" over hooks that are live.
+	discoverExternalAgentsForReporting(ctx)
+
 	installed := GetAgentsWithHooksInstalled(ctx)
 	installedSet := make(map[types.AgentName]struct{}, len(installed))
 	for _, name := range installed {
@@ -104,6 +109,11 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			// Resolve one external agent binary by the name the user typed,
+			// exactly as `entire enable --agent <name>` does. Without it this
+			// command can only ever install a built-in, while the equivalent
+			// enable flag installs plugins.
+			discoverNamedExternalAgent(cmd.Context(), types.AgentName(name))
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
 				printWrongAgentError(cmd.OutOrStdout(), name)

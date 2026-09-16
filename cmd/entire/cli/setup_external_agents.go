@@ -30,6 +30,26 @@ func discoverNamedExternalAgent(ctx context.Context, name types.AgentName) {
 	external.DiscoverAndRegisterNamedAlways(ctx, name)
 }
 
+// discoverExternalAgentsForReporting populates the registry with the external
+// agent plugins this repository is allowed to see, for the surfaces that
+// enumerate agents rather than act on one the user named — `entire agent list`
+// and `entire status`.
+//
+// The gated sweep, never DiscoverAndRegisterAlways: these are read-only
+// reporting commands that run constantly, and an ungated sweep would execute
+// every entire-agent-* binary on $PATH in repositories that never opted into
+// external agents at all. The gate is not a limitation here — a user who
+// installed an external agent through `entire enable` already has the grant, so
+// the plugin they installed is exactly what this reports, and a refused grant
+// is announced by DiscoverAndRegister itself.
+//
+// Without this, an installed external agent is absent from the registry these
+// surfaces walk, so `entire status` and `entire agent list` report it as not
+// existing while its hooks are actively capturing sessions.
+func discoverExternalAgentsForReporting(ctx context.Context) {
+	external.DiscoverAndRegister(ctx)
+}
+
 // enableExternalAgentsLocally turns external_agents on in
 // .entire/settings.local.json.
 //

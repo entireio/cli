@@ -58,6 +58,11 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return runStatusJSON(ctx, w)
 	}
 
+	// Report installed external agent plugins alongside the built-ins. Placed
+	// after the --json branch rather than before it so the two paths do not
+	// both sweep $PATH for one invocation; runStatusJSON does its own.
+	discoverExternalAgentsForReporting(ctx)
+
 	// Check if we're in a git repository
 	if _, repoErr := paths.WorktreeRoot(ctx); repoErr != nil {
 		fmt.Fprintln(w, "✕ not a git repository")
@@ -1122,6 +1127,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	writeJSON := func(v statusJSON) error {
 		return json.NewEncoder(w).Encode(v)
 	}
+
+	// Reached directly from `entire status --json` and from the MCP status
+	// tool, so the discovery has to live here as well as in the text path.
+	discoverExternalAgentsForReporting(ctx)
 
 	if _, err := paths.WorktreeRoot(ctx); err != nil {
 		return writeJSON(statusJSON{Error: "not a git repository"})

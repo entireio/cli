@@ -1630,6 +1630,16 @@ func localExists(ctx context.Context) bool {
 
 // runRemoveAgent removes hooks for a specific agent.
 func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
+	// Resolve one external agent binary by the name the user typed, the same
+	// named lookup `entire enable --agent <name>` uses to install it. Ungated
+	// on purpose: the install side is ungated, so gating removal would leave a
+	// plugin whose hooks are installed and firing with no supported way to
+	// uninstall it — the user would be left deleting the plugin's config by
+	// hand. The blast radius is the single binary the user named, not a $PATH
+	// sweep, and the error is dropped so agent.Get below reports an
+	// unresolvable name in the user's terms.
+	discoverNamedExternalAgent(ctx, types.AgentName(name))
+
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
 		printWrongAgentError(w, name)
