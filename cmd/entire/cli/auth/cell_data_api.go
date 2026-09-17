@@ -355,6 +355,7 @@ func resolveDiscoveredCellSubject(ctx context.Context, insecureHTTP bool, dataUR
 	if err != nil {
 		return cellSubject{}, err
 	}
+	announceLogin(selected)
 
 	loginJWT, err := refreshCellLoginJWT(ctx, selected)
 	if err != nil {

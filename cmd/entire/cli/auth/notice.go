@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // contextNoticeW receives the acting-login notice.
@@ -26,6 +27,15 @@ func announceContext(f *contexts.File, c *contexts.Context) {
 		return
 	}
 	fmt.Fprintf(contextNoticeW, "Using context '%s'.\n", c.Name)
+}
+
+// announceLogin is announceContext for a login picked by host discovery.
+func announceLogin(c *contexts.Context) {
+	f, err := contexts.Load(userdirs.Config())
+	if err != nil {
+		return
+	}
+	announceContext(f, c)
 }
 
 // CaptureContextNoticeForTest redirects the notice into w and re-arms it.

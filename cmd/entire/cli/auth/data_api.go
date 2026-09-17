@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -64,7 +65,12 @@ type DataAPI struct {
 // global opt-in.
 func ResolveDataAPI(ctx context.Context) (DataAPI, error) {
 	if dataURL, ok := api.BaseURLOverride(); ok {
-		token, err := ResolveDataAPIToken(ctx, dataURL)
+		c, err := dataAPIContext(ctx, dataURL)
+		if err != nil {
+			return DataAPI{}, err
+		}
+		announceLogin(c)
+		token, err := RefreshedLoginToken(ctx, c)
 		if err != nil {
 			return DataAPI{}, err
 		}
@@ -88,11 +94,19 @@ func ResolveDataAPI(ctx context.Context) (DataAPI, error) {
 	return DataAPI{BaseURL: baseURL, Token: token}, nil
 }
 
-// DataBaseURL is the web/data API origin for the selected login, without a
-// bearer: ENTIRE_API_BASE_URL when set, else the login server's site.
+// DataBaseURL is the web/data API origin for the acting login, without a
+// bearer: ENTIRE_API_BASE_URL when set, else the site of ENTIRE_TOKEN's core,
+// else the selected login server's site.
 func DataBaseURL() (string, error) {
 	if dataURL, ok := api.BaseURLOverride(); ok {
 		return dataURL, nil
+	}
+	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+		core, _, err := ParseEnvToken(raw)
+		if err != nil {
+			return "", err
+		}
+		return dataBaseURLForCore(core)
 	}
 	c, ok, err := activeContext()
 	if err != nil {
@@ -128,10 +142,19 @@ func dataBaseURLForCore(coreURL string) (string, error) {
 // which login servers the host trusts, and guessing risks presenting a token
 // to a host that doesn't accept that core.
 func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error) {
+	selected, err := dataAPIContext(ctx, dataBaseURL)
+	if err != nil {
+		return "", err
+	}
+	return RefreshedLoginToken(ctx, selected)
+}
+
+// dataAPIContext picks the saved login the host at dataBaseURL trusts.
+func dataAPIContext(ctx context.Context, dataBaseURL string) (*contexts.Context, error) {
 	dataOrigin := api.OriginOnly(dataBaseURL)
 	host, ok := hostOf(dataOrigin)
 	if !ok {
-		return "", fmt.Errorf("data API URL %q has no host to discover against", dataBaseURL)
+		return nil, fmt.Errorf("data API URL %q has no host to discover against", dataBaseURL)
 	}
 
 	dctx, cancel := context.WithTimeout(ctx, dataAPIDiscoveryTimeout)
@@ -140,13 +163,12 @@ func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error
 
 	selected, err := resolveContextForAPI(dctx, userdirs.Config(), userdirs.Cache(), host, httpClient, nil)
 	if errors.Is(err, clusterdiscovery.ErrDiscoveryUnavailable) {
-		return "", fmt.Errorf("%s does not advertise its trusted login servers (/.well-known/entire-api.json missing or unreachable); cannot authenticate: %w", host, err)
+		return nil, fmt.Errorf("%s does not advertise its trusted login servers (/.well-known/entire-api.json missing or unreachable); cannot authenticate: %w", host, err)
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	return RefreshedLoginToken(ctx, selected)
+	return selected, nil
 }
 
 type dataAPIHTTPDiscoveryTransport struct {

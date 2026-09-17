@@ -272,6 +272,39 @@ func TestResolveDataAPI_AnnouncesContextAmongSeveral(t *testing.T) {
 	}
 }
 
+// A login picked by host discovery is announced like a selected one.
+func TestResolveDataAPI_OverrideAnnouncesContext(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "https://data.example")
+	seedProdAndStagingContexts(t, configDir, stagingFixture.name)
+	stubResolveContextForAPI(t, func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+		return &contexts.Context{Name: prodFixture.name, CoreURL: prodCoreURL, Handle: "me", KeychainService: tokenstore.CoreKeyringService(prodCoreURL)}, nil
+	})
+	var notice strings.Builder
+	CaptureContextNoticeForTest(t, &notice)
+
+	if _, err := ResolveDataAPI(context.Background()); err != nil {
+		t.Fatalf("ResolveDataAPI: %v", err)
+	}
+	if got := notice.String(); got != "Using context 'me@entire'.\n" {
+		t.Fatalf("notice = %q, want the discovered login named", got)
+	}
+}
+
+// ENTIRE_TOKEN runs still get a site for printed links: the token's core.
+func TestDataBaseURL_FollowsEnvToken(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv("ENTIRE_API_BASE_URL", "")
+	t.Setenv(EnvTokenVar, makeJWT(t, fmt.Sprintf(`{"aud":%q,"exp":%d}`, stagingCoreURL, time.Now().Add(time.Hour).Unix())))
+
+	got, err := DataBaseURL()
+	if err != nil {
+		t.Fatalf("DataBaseURL: %v", err)
+	}
+	if got != "https://partial.to" {
+		t.Fatalf("DataBaseURL = %q, want https://partial.to", got)
+	}
+}
+
 func TestResolveDataAPI_SingleLoginIsSilent(t *testing.T) {
 	configDir := isolateCellClientEnv(t, "")
 	svc := tokenstore.CoreKeyringService(prodCoreURL)

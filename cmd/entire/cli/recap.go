@@ -215,8 +215,10 @@ func newRecapClient(ctx context.Context, insecureHTTP bool) (client *api.Client,
 	}
 	target, err := auth.ResolveDataAPI(ctx)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
-		target = auth.DataAPI{BaseURL: api.BaseURL()}
-		err = nil
+		target, err = auth.DataAPI{BaseURL: api.BaseURL()}, nil
+		if base, berr := auth.DataBaseURL(); berr == nil {
+			target.BaseURL = base
+		}
 	}
 	if err != nil {
 		return nil, "", "", err
