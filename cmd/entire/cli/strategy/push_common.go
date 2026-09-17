@@ -204,8 +204,13 @@ var checkpointPushBudget = 2 * time.Minute
 // few hundred queued refs is already tens of minutes of a `git push` that looks
 // hung; when the destination is unreachable every ref instead pays the full
 // per-ref budget and the same queue runs for hours. Refs that do not fit stay
-// queued and go out on the next push, so this bounds progress, never data. var
-// so tests can shrink it.
+// queued and go out on the next push, so this bounds progress, never data.
+//
+// Applied as a context deadline, not a wall-clock check between refs, so it can
+// cut a ref that is already hung rather than waiting out its own budget first.
+// context.WithTimeout keeps the earlier of parent and child deadlines, so the
+// per-ref checkpointPushBudget automatically shrinks to whatever is left. var so
+// tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
 
 // maxConsecutiveRefPushFailures stops the individual-retry fallback once this
@@ -218,22 +223,20 @@ var checkpointFlushBudget = 2 * time.Minute
 const maxConsecutiveRefPushFailures = 5
 
 // flushAbortReason reports why the individual-retry fallback should stop before
-// the end of the queue, or "" to continue. Callers check it after an attempt
-// rather than before, so a flush always tries at least one ref.
+// the end of the queue, or "" to continue.
 //
 // The reason is a bare phrase: it is printed inside the user's `git push` and
 // names what stopped the retry, never a diagnosis of the underlying failure —
 // the same discipline flushCheckpointRefsQueue's retry line follows, and for the
 // same reason. A stalled remote and a rejecting one abort identically here.
-func flushAbortReason(ctx context.Context, consecutiveFailures int, deadline time.Time) string {
-	if ctx.Err() != nil {
-		return "interrupted"
-	}
-	if consecutiveFailures >= maxConsecutiveRefPushFailures {
-		return fmt.Sprintf("%d consecutive failures", consecutiveFailures)
-	}
-	if !time.Now().Before(deadline) {
+func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return fmt.Sprintf("budget (%s) exhausted", checkpointFlushBudget)
+	case ctx.Err() != nil:
+		return "interrupted"
+	case consecutiveFailures >= maxConsecutiveRefPushFailures:
+		return fmt.Sprintf("%d consecutive failures", consecutiveFailures)
 	}
 	return ""
 }
@@ -546,28 +549,6 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 	fmt.Fprintln(w, banner)
 }
 
-// maxFetchErrorDetail caps the git output appended to a failed fetch. The same
-// bound remote.PushWithOptions applies to push output, and for the same reasons:
-// this text reaches both a terminal inside a git hook and a log attribute.
-const maxFetchErrorDetail = 2000
-
-// withFetchDetail returns fetchErr with git's own output appended, or fetchErr
-// unchanged when git produced none.
-//
-// The output must not replace the error, which is what this path used to do. A
-// git killed by a cancelled context or an exhausted budget exits before writing
-// anything, so formatting the output alone yielded a bare "fetch failed: " — no
-// cause for the user, nothing for errors.Is to match, and no way to tell an
-// interrupted fetch from a rejected one. The error is the verdict; the output is
-// only the detail.
-func withFetchDetail(fetchErr error, fetchOutput []byte) error {
-	detail := strings.Join(strings.Fields(string(fetchOutput)), " ")
-	if detail == "" {
-		return fetchErr
-	}
-	return fmt.Errorf("%w (%s)", fetchErr, remote.ElideMiddle(detail, maxFetchErrorDetail))
-}
-
 // fetchAndRebaseRefCommon fetches a remote ref and rebases local commits on top
 // of the remote tip. Since checkpoint shards use unique paths, rebases always
 // apply cleanly.
@@ -604,7 +585,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
 	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
@@ -612,7 +593,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	fetchSpan.RecordError(fetchErr)
 	fetchSpan.End()
 	if fetchErr != nil {
-		return fmt.Errorf("fetch failed: %w", withFetchDetail(fetchErr, fetchOutput))
+		return fmt.Errorf("fetch failed: %w", fetchErr)
 	}
 
 	repo, err := OpenRepository(ctx)

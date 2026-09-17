@@ -51,16 +51,6 @@ func setupRepoWithNCheckpointRefs(t *testing.T, n int) (string, string, []plumbi
 	return workDir, bareDir, refs
 }
 
-// installCountingRejectHook rejects every push and records one line per
-// receive-pack invocation, so a test can count attempts rather than infer them
-// from elapsed time.
-func installCountingRejectHook(t *testing.T, bareDir, countFile string) {
-	t.Helper()
-	hook := "#!/bin/sh\necho attempt >> '" + countFile + "'\n" +
-		"echo '" + checkpointRejectReason + "' >&2\nexit 1\n"
-	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
-}
-
 func countedAttempts(t *testing.T, countFile string) int {
 	t.Helper()
 	data, err := os.ReadFile(countFile)
@@ -78,7 +68,7 @@ func prepareGitRefsPrePush(t *testing.T, workDir, remoteTarget string) {
 	t.Chdir(workDir) // Also captures process-global stderr.
 	paths.ClearWorktreeRootCache()
 	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
-	testutil.RunGit(t, workDir, "remote", "add", "origin", remoteTarget)
+	testutil.AddRemote(t, workDir, "origin", remoteTarget)
 }
 
 // TestFlushCheckpointRefs_StopsAfterConsecutiveFailures pins the bound on the
@@ -89,7 +79,7 @@ func TestFlushCheckpointRefs_StopsAfterConsecutiveFailures(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, queued)
 	countFile := filepath.Join(t.TempDir(), "attempts")
 	prepareGitRefsPrePush(t, workDir, bareDir)
-	installCountingRejectHook(t, bareDir, countFile)
+	installCheckpointRejectHook(t, bareDir, false, countFile)
 
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
@@ -120,7 +110,7 @@ func TestFlushCheckpointRefs_StopsWhenBudgetExhausted(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
 	countFile := filepath.Join(t.TempDir(), "attempts")
 	prepareGitRefsPrePush(t, workDir, bareDir)
-	installCountingRejectHook(t, bareDir, countFile)
+	installCheckpointRejectHook(t, bareDir, false, countFile)
 
 	restoreBudget := checkpointFlushBudget
 	checkpointFlushBudget = time.Nanosecond
@@ -137,11 +127,13 @@ func TestFlushCheckpointRefs_StopsWhenBudgetExhausted(t *testing.T) {
 	require.NoError(t, err)
 
 	// An exhausted budget still buys one attempt: aborting before any work
-	// would starve the queue instead of draining it a little at a time.
-	assert.Equal(t, 2, countedAttempts(t, countFile), "one batch, then one individual ref")
+	// would starve the queue instead of draining it a little at a time. The
+	// remaining count pins that, and holds whether or not the already-dead
+	// deadline let the attempt reach the remote at all.
 	assert.Contains(t, output, "budget")
 	assert.Contains(t, output, "exhausted")
 	assert.Contains(t, output, fmt.Sprintf("%d checkpoint ref(s) stay queued", len(refs)-1))
+	assert.LessOrEqual(t, countedAttempts(t, countFile), 2, "the deadline must cut the fallback, not let it walk the queue")
 
 	remaining, err := queue.Drain()
 	require.NoError(t, err)

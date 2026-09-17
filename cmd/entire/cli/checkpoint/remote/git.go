@@ -289,7 +289,7 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	}
 
 	if err != nil {
-		return out, fmt.Errorf("git fetch: %w", err)
+		return out, errWithGitOutput(fmt.Errorf("git fetch: %w", err), out, opts.Remote)
 	}
 	return out, nil
 }
@@ -472,6 +472,20 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("deadline exceeded: %w", err)
 	}
+	return errWithGitOutput(err, output, remote)
+}
+
+// errWithGitOutput annotates err with git's own combined output, or returns err
+// unchanged when git produced none — which is what a process killed by a
+// cancelled context or an exhausted budget does.
+//
+// The output annotates the error, it never replaces it: substituting the output
+// yielded an empty message precisely when git was killed, leaving no cause and
+// nothing for errors.Is to match. The text is collapsed to one line and capped
+// so it stays usable as a log attribute, and a URL-shaped target is redacted
+// first because git echoes the remote back into its messages and a URL may carry
+// credentials (same reasoning as formatGitCommandError and FetchBlobs).
+func errWithGitOutput(err error, output []byte, remote string) error {
 	detail := strings.TrimSpace(string(output))
 	if detail == "" {
 		return err
@@ -480,10 +494,10 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 		detail = strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
 	}
 	detail = strings.Join(strings.Fields(detail), " ")
-	return fmt.Errorf("%w (%s)", err, ElideMiddle(detail, maxPushErrorDetail))
+	return fmt.Errorf("%w (%s)", err, elideMiddle(detail, maxGitOutputDetail))
 }
 
-// ElideMiddle shortens s to at most limit runes by dropping the middle, keeping
+// elideMiddle shortens s to at most limit runes by dropping the middle, keeping
 // both ends.
 //
 // Truncating the tail would be wrong here, which is the whole reason this is not
@@ -500,7 +514,7 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 // git's own output carries multi-byte characters (em dashes in GitHub banners,
 // its own "…"), and slicing bytes through one would put invalid UTF-8 into a log
 // record.
-func ElideMiddle(s string, limit int) string {
+func elideMiddle(s string, limit int) string {
 	if limit <= 0 || len([]rune(s)) <= limit {
 		return s
 	}
@@ -515,11 +529,11 @@ func ElideMiddle(s string, limit int) string {
 	return string(r[:head]) + marker + string(r[len(r)-tail:])
 }
 
-// maxPushErrorDetail bounds the git output folded into a push error, in runes.
+// maxGitOutputDetail bounds the git output folded into a push or fetch error, in runes.
 // Push output carries per-secret push-protection banners and progress lines and
 // can run to several KB; this keeps the error usable as a log attribute while
 // leaving room for both ends of a long rejection.
-const maxPushErrorDetail = 2000
+const maxGitOutputDetail = 2000
 
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
 func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
