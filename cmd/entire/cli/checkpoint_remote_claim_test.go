@@ -33,6 +33,19 @@ func TestClaimCommandParsesAsACheckpointRemoteFlag(t *testing.T) {
 		// command naming it would fail when pasted. Offer none until the flag
 		// is widened.
 		{"provider the flag rejects", settings.CheckpointRemoteConfig{Provider: "gitlab", Repo: "acme/checkpoints"}, ""},
+		// The repo field is read from the COMMITTED settings.json — the
+		// inherited-from-upstream case this feature is about — and the output
+		// is a command a human is told to run. A hostile repository must not be
+		// able to put anything executable in it.
+		{"shell separator", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo;id"}, ""},
+		{"backticks", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo`id`"}, ""},
+		{"command substitution", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo$(id)"}, ""},
+		{"pipe", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo|id"}, ""},
+		{"and-and", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo&&id"}, ""},
+		{"newline", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo\nid"}, ""},
+		{"quote", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/fo\"o"}, ""},
+		{"redirect", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo>out"}, ""},
+		{"three segments", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo/bar"}, ""},
 		{"repo with a space", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/check points"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
