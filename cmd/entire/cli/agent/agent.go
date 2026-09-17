@@ -73,9 +73,9 @@ type Agent interface {
 	// it verbatim when absolute. Callers that source agentSessionID from
 	// untrusted data (e.g. checkpoint metadata on the shared
 	// entire/checkpoints/v1 branch, hook input) MUST validate it with
-	// validation.ValidateSessionID first. The resume/log-restore paths do
-	// this at their choke points (transcript.resolveTranscriptPath and
-	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
+	// validation.ValidateSessionID or resolve it through SessionStore.SessionFile,
+	// which applies that validation centrally. Do not call this method directly
+	// with unvalidated input.
 	ResolveSessionFile(sessionDir, agentSessionID string) string
 
 	// ReadSession reads session data from agent's storage.

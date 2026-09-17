@@ -161,7 +161,11 @@ func (e *Agent) GetSessionID(input *agent.HookInput) string {
 }
 
 func (e *Agent) GetSessionDir(repoPath string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "get-session-dir", "--repo-path", repoPath)
+	return e.getSessionDir(context.Background(), repoPath)
+}
+
+func (e *Agent) getSessionDir(ctx context.Context, repoPath string) (string, error) {
+	stdout, err := e.run(ctx, nil, "get-session-dir", "--repo-path", repoPath)
 	if err != nil {
 		return "", fmt.Errorf("get-session-dir: %w", err)
 	}
@@ -202,6 +206,26 @@ func (e *Agent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error)
 }
 
 func (e *Agent) WriteSession(ctx context.Context, session *agent.AgentSession) error {
+	// Preflight before marshalling: a ref that is going to be refused should not
+	// first be serialized into the payload it will never be sent in.
+	needsStoreCheck, err := agent.ValidateExternalSessionRef(session.SessionRef)
+	if err != nil {
+		return fmt.Errorf("write-session: validate session reference: %w", err)
+	}
+	if needsStoreCheck && session.RepoPath != "" {
+		sessionDir, dirErr := e.getSessionDir(ctx, session.RepoPath)
+		if dirErr != nil {
+			return fmt.Errorf("write-session: open session store: %w", dirErr)
+		}
+		store, storeErr := agent.OpenSessionStoreAt(e, sessionDir)
+		if storeErr != nil {
+			return fmt.Errorf("write-session: open session store: %w", storeErr)
+		}
+		if err := store.ValidateExternalWriteRef(session.SessionRef); err != nil {
+			return fmt.Errorf("write-session: validate session reference: %w", err)
+		}
+	}
+
 	data, err := marshalAgentSession(session)
 	if err != nil {
 		return fmt.Errorf("write-session: marshal: %w", err)
