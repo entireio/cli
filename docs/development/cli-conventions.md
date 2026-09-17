@@ -79,8 +79,22 @@ the commands are always runnable in every build.
   session listed is the login that replaced yours, which is the one worth
   looking at. That window is reachable whenever a family is revoked inside its
   access token's lifetime: `resolveStatusTarget` falls back to the stale bearer,
-  `/me` honours it, and `fid` names a family the listing no longer holds. Zero
-  sessions still reports, being a contradiction worth seeing.
+  `/me` honours it, and `fid` names a family the listing no longer holds. That
+  state is named rather than left to be inferred — `! this login was ended
+  elsewhere and cannot be renewed`, with the verdict line carrying the *bearer's*
+  remaining life instead of a session lifetime, since with nothing left to renew
+  it that is when the user is logged out (`login_revoked` / `token_expires_at`
+  in JSON; `expires_at` stays absent, no session having been attributed).
+  What settles it differs by listing. **Zero sessions settles it alone**: the
+  endpoint includes the caller's own session — that is how a matched `fid` finds
+  itself — so none listed means none exist, the caller's included, and no
+  truncation explains zero. **With sessions listed**, absence is the only
+  evidence, so a `fid` must have actually named something; a core too old to
+  mint one is evidence of nothing and stays quiet. Do not gate this on the
+  refresh having failed: that only becomes known when a refresh is *attempted
+  and fails*, and a token still far from expiry is returned without contacting
+  the server, so requiring it left the notice silent in the commonest case —
+  every session revoked while the current bearer still had hours to run. Zero sessions still reports, being a contradiction worth seeing.
   `logout --everywhere` is offered **only alongside the table**: it ends every
   session at once, and in the collapsed view those sessions are a count the
   reader cannot inspect, browser logins included.

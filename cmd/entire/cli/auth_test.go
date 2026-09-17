@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -710,10 +711,11 @@ func TestRunAuthStatus_MarksTheCallersOwnSession(t *testing.T) {
 	}
 }
 
-// A fid naming no listed session degrades to silence rather than guessing: the
-// actions reachable from here end a session, and ending someone else's is worse
-// than saying nothing.
-func TestRunAuthStatus_UnmatchedSessionClaimsNothing(t *testing.T) {
+// A fid naming no listed session never marks a row and never borrows another
+// session's expiry — the actions reachable from here end a session, and ending
+// someone else's is worse than saying nothing. It does name the condition
+// itself; see TestRunAuthStatus_RevokedEvidenceByListing.
+func TestRunAuthStatus_UnmatchedSessionMarksNothing(t *testing.T) {
 	t.Parallel()
 
 	token := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","fid":"fam-gone"}`)
@@ -732,6 +734,7 @@ func TestRunAuthStatus_UnmatchedSessionClaimsNothing(t *testing.T) {
 	if strings.Contains(got, currentSessionMarker) {
 		t.Fatalf("output = %q, must not mark any row when the claim matches none", got)
 	}
+	// The token carries no exp, so no deadline can be stated either.
 	if strings.Contains(got, "expires") {
 		t.Fatalf("output = %q, must not show an expiry borrowed from another session", got)
 	}
@@ -868,6 +871,90 @@ func TestRunAuthStatus_UnidentifiedSingleSessionStillCounts(t *testing.T) {
 	// Nothing identified the caller, so no expiry may be claimed.
 	if strings.Contains(got, "expires") {
 		t.Fatalf("output = %q, must not claim an expiry it could not attribute", got)
+	}
+}
+
+// A login ended elsewhere keeps working until its access token lapses, then
+// stops with nothing to renew it. "Logged in" is true and about to become
+// false, so status says so and reports the bearer's own deadline rather than a
+// session lifetime.
+func TestRunAuthStatus_RevokedLoginIsNamed(t *testing.T) {
+	t.Parallel()
+
+	replaced := func(context.Context, string, string) ([]api.AuthSession, error) {
+		return []api.AuthSession{{ID: "fam-new", Name: "the login that replaced yours",
+			CreatedAt: "2026-09-17T00:00:00Z", ExpiresAt: "2026-10-17T00:00:00Z"}}, nil
+	}
+	exp := time.Now().Add(47 * time.Minute).Unix()
+	revoked := makeTestJWT(t, fmt.Sprintf(`{"iss":"https://eu.auth.entire.io","fid":"fam-revoked","exp":%d}`, exp))
+	target := statusTarget{coreURL: testCoreURL, token: revoked, activeContext: "a", totalContexts: 1}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, replaced, target, authStatusOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "this login was ended elsewhere and cannot be renewed") {
+		t.Fatalf("output = %q, want the revoked login named", got)
+	}
+	if !strings.Contains(got, "run 'entire login'") {
+		t.Fatalf("output = %q, want the remedy", got)
+	}
+	// The bearer's own deadline, which here is when the user is logged out.
+	if !strings.Contains(got, "expires in 46m") && !strings.Contains(got, "expires in 47m") {
+		t.Fatalf("output = %q, want the access token's remaining life on the verdict line", got)
+	}
+
+	asJSON := decodeAuthStatusJSON(t, okProfile, replaced, target, authStatusOptions{})
+	if !asJSON.LoginRevoked {
+		t.Error("login_revoked = false, want the condition preserved for machine readers")
+	}
+	if asJSON.TokenExpiresAt == "" {
+		t.Error("token_expires_at = empty, want the bearer's deadline")
+	}
+	// The session-lifetime field must not be borrowed for the token's deadline.
+	if asJSON.ExpiresAt != "" {
+		t.Errorf("expires_at = %q, want it absent — no session was attributed", asJSON.ExpiresAt)
+	}
+}
+
+// What settles "my session is gone" differs by listing. Zero sessions settles
+// it alone — the endpoint includes the caller's own session, so none listed
+// means none exist. With sessions listed, absence is the only evidence, so a
+// fid must have actually named something; a core too old to mint one tells us
+// nothing and stays quiet.
+func TestRunAuthStatus_RevokedEvidenceByListing(t *testing.T) {
+	t.Parallel()
+
+	none := func(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
+	others := func(context.Context, string, string) ([]api.AuthSession, error) {
+		return []api.AuthSession{{ID: "fam-new", Name: "other", CreatedAt: "2026-09-17T00:00:00Z", ExpiresAt: "2026-10-17T00:00:00Z"}}, nil
+	}
+	withFID := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","fid":"fam-revoked"}`)
+	noFID := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io"}`)
+
+	tests := map[string]struct {
+		token string
+		list  authSessionLister
+		want  bool
+	}{
+		"empty listing settles it without a fid": {noFID, none, true},
+		"empty listing settles it with one":      {withFID, none, true},
+		"listed but absent, fid named one":       {withFID, others, true},
+		"listed but absent, no fid to name":      {noFID, others, false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			target := statusTarget{coreURL: testCoreURL, token: tt.token, activeContext: "a", totalContexts: 1}
+			var out bytes.Buffer
+			if err := runAuthStatus(context.Background(), &out, okProfile, tt.list, target, authStatusOptions{}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := strings.Contains(out.String(), "ended elsewhere"); got != tt.want {
+				t.Fatalf("revoked notice = %v, want %v\noutput = %q", got, tt.want, out.String())
+			}
+		})
 	}
 }
 

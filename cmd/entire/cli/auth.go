@@ -455,6 +455,13 @@ type authStatusData struct {
 	sessionErr error
 	// current indexes sessions, or -1 when the caller could not be identified.
 	current int
+	// revoked means the login was ended somewhere else and cannot be renewed:
+	// the caller holds a working bearer for a session that is no longer listed.
+	revoked bool
+	// tokenExpiry is when the bearer in hand lapses. Only meaningful alongside
+	// revoked: normally the token is renewed long before this and the number
+	// would say nothing about being logged out.
+	tokenExpiry time.Time
 }
 
 // resolveAuthStatus reports auth state against the target core: GET /me
@@ -503,8 +510,51 @@ func resolveAuthStatus(ctx context.Context, fetchProfile profileFetcher, listSes
 	if d.sessionErr == nil {
 		sortAuthSessionsByRecency(d.sessions)
 		d.current = currentSessionIndex(t.token, d.sessions)
+		d.revoked, d.tokenExpiry = detectRevokedLogin(t.token, d.sessions, d.current)
 	}
 	return d, nil
+}
+
+// detectRevokedLogin reports whether this login was ended elsewhere, and when
+// the bearer in hand lapses.
+//
+// /me accepted the token moments ago, so the bearer is live; what is gone is
+// the session behind it. An access token outlives its family's revocation by
+// its own lifetime, so the login keeps working for minutes and then stops with
+// nothing to renew it — which is worth saying, since "Logged in" is true and
+// about to silently become false.
+//
+// Both signals are required. A fid naming no listed session could be a
+// truncated listing; a failed refresh could be a network blip. Neither alone
+// earns a claim this alarming. A token with no fid claim at all (a core too old
+// to mint one) is not evidence of anything and stays quiet.
+func detectRevokedLogin(token string, sessions []api.AuthSession, current int) (bool, time.Time) {
+	if current >= 0 {
+		return false, time.Time{}
+	}
+	// An unreadable expiry is fine: the claim is about the session being gone,
+	// and the deadline only sharpens it. A zero time renders no "expires".
+	expiry, err := auth.LoginTokenExpiry(token)
+	if err != nil {
+		expiry = time.Time{}
+	}
+
+	// An empty listing settles it alone. The endpoint includes the caller's own
+	// session — that is how a matched fid finds itself — so none listed means
+	// none exist, the caller's included. No truncation explains zero.
+	if len(sessions) == 0 {
+		return true, expiry
+	}
+
+	// With sessions listed but the caller's absent, absence is the only
+	// evidence and a short listing could in principle explain it, so require a
+	// fid to have actually named something. A core too old to mint one tells us
+	// nothing and stays quiet.
+	fid, ferr := auth.SessionFamilyIDFromLoginJWT(token)
+	if ferr != nil || fid == "" {
+		return false, time.Time{}
+	}
+	return true, expiry
 }
 
 func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget, opts authStatusOptions) error {
@@ -562,12 +612,22 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 	// so it is stated only when that session was actually identified — showing
 	// some other session's expiry as yours would be worse than showing none.
 	headline := sty.render(sty.green, "●") + " " + sty.render(sty.bold, "Logged in")
-	if d.current >= 0 {
+	switch {
+	case d.current >= 0:
 		if exp := formatAuthTimestamp(d.sessions[d.current].ExpiresAt); exp != placeholderDash {
 			headline += sty.render(sty.dim, " · ") + "expires " + exp
 		}
+	case d.revoked && !d.tokenExpiry.IsZero():
+		// The bearer's own expiry, not a session's. Here they mean the same
+		// thing — there is nothing left to renew it, so this is when the user
+		// is logged out.
+		headline += sty.render(sty.dim, " · ") + "expires " + timeAgo(d.tokenExpiry)
 	}
 	fmt.Fprintln(w, headline)
+	if d.revoked {
+		fmt.Fprintln(w, sty.render(sty.yellow, "  ! this login was ended elsewhere and cannot be renewed")+
+			sty.render(sty.dim, " · run 'entire login'"))
+	}
 	fmt.Fprintln(w)
 
 	rows := authProfileRows(d.profile)
@@ -634,6 +694,11 @@ type authStatusJSON struct {
 	// session was identified; absent means unidentified, never "no expiry".
 	CurrentSessionID string `json:"current_session_id,omitempty"`
 	ExpiresAt        string `json:"expires_at,omitempty"`
+	// LoginRevoked reports a login ended elsewhere: the bearer still works but
+	// nothing can renew it, so the caller is logged out when TokenExpiresAt
+	// passes. Absent unless established.
+	LoginRevoked   bool   `json:"login_revoked,omitempty"`
+	TokenExpiresAt string `json:"token_expires_at,omitempty"`
 	// ActiveSessions is a pointer so a failed listing is absent rather than
 	// reported as zero sessions.
 	ActiveSessions *int   `json:"active_sessions,omitempty"`
@@ -698,6 +763,12 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	if d.sessionErr != nil {
 		out.SessionsError = d.sessionErr.Error()
 		return out
+	}
+	if d.revoked {
+		out.LoginRevoked = true
+		if !d.tokenExpiry.IsZero() {
+			out.TokenExpiresAt = d.tokenExpiry.UTC().Format(time.RFC3339)
+		}
 	}
 	count := len(d.sessions)
 	out.ActiveSessions = &count
