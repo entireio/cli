@@ -350,6 +350,21 @@ func hasMetadataRow(out, label, value string) bool {
 	return false
 }
 
+// hasMetadataLabel reports whether out contains a metadataRows line for label,
+// whatever its value. Use it to assert a row's presence or absence instead of
+// searching the whole block for the label text: a bare substring matches
+// anywhere, so a value like a context named "notebook" would answer for a
+// "note" row that is not there.
+func hasMetadataLabel(out, label string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), label)
+		if ok && strings.HasPrefix(rest, " ") {
+			return true
+		}
+	}
+	return false
+}
+
 // hasRow reports whether rows contains label with exactly value.
 func hasRow(rows []explainRow, label, value string) bool {
 	for _, r := range rows {
@@ -431,10 +446,17 @@ func TestRunAuthStatus_ForeignRegionIsJSONOnly(t *testing.T) {
 	if !hasMetadataRow(got, "jurisdiction", "au") {
 		t.Fatalf("output = %q, want the account's home region", got)
 	}
-	for _, unwanted := range []string{"outside your home region", "note"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("output = %q, must not carry a foreign-region note", got)
-		}
+	// The absent row is asserted against the row builder rather than by
+	// searching the rendered block for "note": four letters match anywhere, so
+	// a context named "notebook" or any future label carrying them would pass
+	// or fail this for unrelated reasons.
+	if rows := authProfileRows(&authProfile{Handle: "toothbrush", Provider: "github", Jurisdiction: "au", ForeignRegion: true}); hasLabel(rows, "note") {
+		t.Fatalf("rows = %+v, want no foreign-region note row", rows)
+	}
+	// The note's wording is content, not a label, so a substring check is the
+	// right shape for it.
+	if strings.Contains(got, "outside your home region") {
+		t.Fatalf("output = %q, must not carry a foreign-region note", got)
 	}
 	// The retired console deep link and the message pointing at it must never
 	// reach the user: a bare "/" redirects by role, never to a profile page.
@@ -481,7 +503,7 @@ func TestRunAuthStatus_NoJurisdictionAnywhere(t *testing.T) {
 	if err := runAuthStatus(context.Background(), &out, noJuris, noSessions, target, authStatusOptions{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if strings.Contains(out.String(), "jurisdiction") {
+	if hasMetadataLabel(out.String(), "jurisdiction") {
 		t.Fatalf("output = %q, want no jurisdiction row when nothing supplies it", out.String())
 	}
 }
@@ -522,7 +544,13 @@ func TestRunAuthStatus_EnvTokenMode(t *testing.T) {
 	if strings.Contains(got, "expires") {
 		t.Fatalf("output = %q, must not claim an expiry for an env token", got)
 	}
-	for _, unwanted := range []string{"context ", "keychain", "Active Sessions", availableContextsRowLabel} {
+	for _, unwanted := range []string{"context", availableContextsRowLabel} {
+		if hasMetadataLabel(got, unwanted) {
+			t.Fatalf("output = %q, must not carry a %q row in ENTIRE_TOKEN mode", got, unwanted)
+		}
+	}
+	// Content and headings, not labels — a substring is the right shape here.
+	for _, unwanted := range []string{"keychain", "Active Sessions"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("output = %q, must not contain %q in ENTIRE_TOKEN mode", got, unwanted)
 		}
@@ -790,7 +818,7 @@ func TestRunAuthStatus_CountRowsAreDroppedAtOne(t *testing.T) {
 	}
 	got := out.String()
 	for _, unwanted := range []string{availableContextsRowLabel, activeSessionsRowLabel} {
-		if strings.Contains(got, unwanted) {
+		if hasMetadataLabel(got, unwanted) {
 			t.Fatalf("output = %q, want no %q row at a count of one", got, unwanted)
 		}
 	}
