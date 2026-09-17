@@ -199,6 +199,8 @@ func newAuthTokenCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
 				return NewSilentError(errors.New("not logged in"))
 			}
+			// Stderr, so $(entire auth token) stays clean.
+			auth.AnnounceContext(target.totalContexts, target.activeContext)
 			fmt.Fprintln(cmd.OutOrStdout(), target.token)
 			return nil
 		},

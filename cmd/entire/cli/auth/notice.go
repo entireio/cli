@@ -19,13 +19,22 @@ var contextAnnounced atomic.Bool
 // Only when several logins are saved: with one, the answer is obvious and the
 // line would be noise on every command.
 func announceContext(saved int, c *contexts.Context) {
-	if c == nil || saved < 2 {
+	if c == nil {
+		return
+	}
+	AnnounceContext(saved, c.Name)
+}
+
+// AnnounceContext is announceContext for a caller that resolved the login
+// itself (`auth token`): name is the acting context, saved the number stored.
+func AnnounceContext(saved int, name string) {
+	if name == "" || saved < 2 {
 		return
 	}
 	if contextAnnounced.Swap(true) {
 		return
 	}
-	fmt.Fprintf(contextNoticeW, "Using context '%s'.\n", c.Name)
+	fmt.Fprintf(contextNoticeW, "Using context '%s'.\n", name)
 }
 
 // announceLogin is announceContext for a login picked by host discovery.

@@ -50,21 +50,26 @@ type DataAPI struct {
 
 // ResolveDataAPI picks the data API and bearer for this command.
 //
-// The selected login (--context / $ENTIRE_CONTEXT / current_context) decides
-// both: its refreshed login JWT is the bearer and its login server's site is
-// the host (DataBaseURL). The identity is never inferred from a target host,
-// so a staging login talks to staging and a prod login to prod, exactly as
-// the control plane does.
+// The acting login decides both, with the control plane's precedence:
+// ENTIRE_TOKEN when set (the token verbatim, its aud's site as the host), else
+// the selected login (--context / $ENTIRE_CONTEXT / current_context), whose
+// refreshed login JWT is the bearer and whose login server's site is the host
+// (DataBaseURL). The identity is never inferred from a target host, so a
+// staging login talks to staging and a prod login to prod.
 //
-// ENTIRE_API_BASE_URL is the one exception: it names the host, and that host's
-// /.well-known/entire-api.json says which saved login it accepts
-// (ResolveDataAPIToken).
+// ENTIRE_API_BASE_URL names the host instead. An env token is still sent to it
+// verbatim, as the cell path does; a saved login must be one that host's
+// /.well-known/entire-api.json trusts (ResolveDataAPIToken).
 //
 // Callers that honour --insecure-http-auth must call EnableInsecureHTTP before
 // invoking this (as they already do); the per-context refresh reads that
 // global opt-in.
 func ResolveDataAPI(ctx context.Context) (DataAPI, error) {
-	if dataURL, ok := api.BaseURLOverride(); ok {
+	dataURL, overridden := api.BaseURLOverride()
+	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+		return envTokenDataAPI(raw, dataURL, overridden)
+	}
+	if overridden {
 		c, err := dataAPIContext(ctx, dataURL)
 		if err != nil {
 			return DataAPI{}, err
@@ -88,6 +93,24 @@ func ResolveDataAPI(ctx context.Context) (DataAPI, error) {
 		return DataAPI{}, err
 	}
 	token, err := RefreshedLoginToken(ctx, c)
+	if err != nil {
+		return DataAPI{}, err
+	}
+	return DataAPI{BaseURL: baseURL, Token: token}, nil
+}
+
+// envTokenDataAPI is the ENTIRE_TOKEN path: the token verbatim, sent to the
+// explicit host or to its aud's site. Fail-closed like coreapi.New — a blank
+// or malformed value errors rather than falling back to a saved login.
+func envTokenDataAPI(raw, dataURL string, overridden bool) (DataAPI, error) {
+	core, token, err := ParseEnvToken(raw)
+	if err != nil {
+		return DataAPI{}, err
+	}
+	if overridden {
+		return DataAPI{BaseURL: dataURL, Token: token}, nil
+	}
+	baseURL, err := dataBaseURLForCore(core)
 	if err != nil {
 		return DataAPI{}, err
 	}
@@ -118,14 +141,13 @@ func DataBaseURL() (string, error) {
 	return dataBaseURLForCore(c.CoreURL)
 }
 
-// dataBaseURLForCore maps a login server to the site it serves: the site's
-// apex for entire.io and partial.to, the server itself for local dev, where
-// one process serves both.
+// dataBaseURLForCore maps a login server to the site it serves: the apex for
+// entire.io and partial.to. A loopback core has no site — local dev runs the
+// web app on its own port, and a core is not a cell either (see
+// resolveTargetCellBaseURL) — so it needs ENTIRE_API_BASE_URL, like any other
+// login server outside those two.
 func dataBaseURLForCore(coreURL string) (string, error) {
 	origin := api.OriginOnly(coreURL)
-	if isLoopbackOrigin(origin) {
-		return origin, nil
-	}
 	if site := EntireSite(origin); site != "" {
 		return "https://" + site, nil
 	}

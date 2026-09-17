@@ -189,23 +189,71 @@ func TestResolveDataAPI_FollowsSelectedLogin(t *testing.T) {
 	}
 }
 
-// A local-dev login server serves the data API itself.
-func TestResolveDataAPI_LoopbackLoginServesDataAPI(t *testing.T) {
+// A local-dev login server is not the web app (that runs on its own port), so
+// a loopback login has no site to derive; the error names the override.
+func TestResolveDataAPI_LoopbackLoginNamesOverride(t *testing.T) {
 	configDir := isolateCellClientEnv(t, "")
-	const core = "http://localhost:8787"
-	svc := tokenstore.CoreKeyringService(core)
-	jwt := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"me","exp":%d}`, core, time.Now().Add(2*time.Hour).Unix()))
-	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(jwt, 7200)); err != nil {
-		t.Fatalf("seed token: %v", err)
+	writeActiveContext(t, configDir, "dev", "http://localhost:8787", "me", "kc:dev")
+
+	_, err := ResolveDataAPI(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "ENTIRE_API_BASE_URL") {
+		t.Fatalf("err = %v, want it to name ENTIRE_API_BASE_URL", err)
 	}
-	writeActiveContext(t, configDir, "dev", core, "me", svc)
+}
+
+// ENTIRE_TOKEN outranks every saved login, as it does for the control plane:
+// the token is the bearer verbatim and its aud's site is the host. Nothing is
+// announced — no saved login is acting.
+func TestResolveDataAPI_FollowsEnvToken(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "")
+	seedProdAndStagingContexts(t, configDir, prodFixture.name)
+	envJWT := makeJWT(t, fmt.Sprintf(`{"aud":%q,"exp":%d}`, stagingCoreURL, time.Now().Add(time.Hour).Unix()))
+	t.Setenv(EnvTokenVar, envJWT)
+	var notice strings.Builder
+	CaptureContextNoticeForTest(t, &notice)
 
 	got, err := ResolveDataAPI(context.Background())
 	if err != nil {
 		t.Fatalf("ResolveDataAPI: %v", err)
 	}
-	if got.BaseURL != core {
-		t.Fatalf("BaseURL = %q, want %s", got.BaseURL, core)
+	if got.BaseURL != "https://partial.to" || got.Token != envJWT {
+		t.Fatalf("got %+v, want the env token verbatim against https://partial.to", got)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("notice = %q, want none under ENTIRE_TOKEN", notice.String())
+	}
+}
+
+// Under an override the env token is still sent verbatim to the named host;
+// discovery is for picking a saved login, and there is none to pick.
+func TestResolveDataAPI_EnvTokenUnderOverrideSkipsDiscovery(t *testing.T) {
+	isolateCellClientEnv(t, "https://data.example")
+	envJWT := makeJWT(t, fmt.Sprintf(`{"aud":%q,"exp":%d}`, prodCoreURL, time.Now().Add(time.Hour).Unix()))
+	t.Setenv(EnvTokenVar, envJWT)
+	stubResolveContextForAPI(t, func(_ context.Context, _, _, host string, _ *http.Client, _ clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+		t.Errorf("discovery against %q must not run under ENTIRE_TOKEN", host)
+		return nil, errors.New("unexpected discovery")
+	})
+
+	got, err := ResolveDataAPI(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveDataAPI: %v", err)
+	}
+	if got.BaseURL != "https://data.example" || got.Token != envJWT {
+		t.Fatalf("got %+v, want the env token verbatim against the override", got)
+	}
+}
+
+// A blank ENTIRE_TOKEN is a misconfigured runner, not a request to use the
+// saved login: fail closed, as coreapi.New does.
+func TestResolveDataAPI_BlankEnvTokenFailsClosed(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "")
+	seedProdAndStagingContexts(t, configDir, prodFixture.name)
+	t.Setenv(EnvTokenVar, "")
+
+	_, err := ResolveDataAPI(context.Background())
+	if err == nil || !strings.Contains(err.Error(), EnvTokenVar) {
+		t.Fatalf("err = %v, want a fail-closed error naming %s", err, EnvTokenVar)
 	}
 }
 

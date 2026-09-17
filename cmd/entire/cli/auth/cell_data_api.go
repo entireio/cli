@@ -315,19 +315,6 @@ func resolveCellClientSubject(ctx context.Context, insecureHTTP bool) (cellSubje
 	return resolveDiscoveredCellSubject(ctx, insecureHTTP, dataURL)
 }
 
-// DataAPIServesSelectedLogin reports whether the data API acts as the same
-// login the cell path does. Commands that fall back from a cell to the data
-// API (activity, recap) consult it.
-//
-// False whenever ENTIRE_TOKEN is set, valid or not: the data-API path never
-// reads the env token, so a fallback would act as a stored login instead.
-// Otherwise the data API follows the selected login (ResolveDataAPI), so the
-// two always agree.
-func DataAPIServesSelectedLogin() bool {
-	_, ok := os.LookupEnv(EnvTokenVar)
-	return !ok
-}
-
 // resolveDiscoveredCellSubject builds the subject for an explicitly configured
 // data host: it discovers the host's trusted login servers, picks the saved
 // login they accept, and refreshes that login's JWT.
