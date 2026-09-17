@@ -1192,39 +1192,6 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	require.NotEqual(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
 }
 
-func TestRunExplainGenerateBlocksWhenPolicyWriteUnsupported(t *testing.T) {
-	fixture := setupGenerateSummaryFixture(t)
-	stubSummaryProviderForTest(t)
-	writeUnsupportedCheckpointPolicyForCLITest(t, fixture.repo)
-
-	lookup, err := newExplainCheckpointLookup(context.Background())
-	require.NoError(t, err)
-	defer lookup.Close()
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainCheckpointWithLookup(
-		fixture.ctx,
-		&stdout,
-		&stderr,
-		fixture.cpID.String(),
-		false,
-		false,
-		false,
-		false,
-		true,
-		false,
-		false,
-		lookup,
-		nil,
-		0,
-	)
-	require.ErrorContains(t, err, "checkpoint policy cannot be satisfied by this Entire CLI")
-
-	v1After, refErr := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, refErr)
-	require.Equal(t, fixture.v1Hash, v1After.Hash(), "summary write must not advance metadata")
-}
-
 // TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent verifies
 // that an explicit timeout (e.g. from --summary-timeout-seconds) takes effect
 // even when the parent context has a much longer deadline.

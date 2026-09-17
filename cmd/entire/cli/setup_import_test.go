@@ -13,9 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // fakeAgent satisfies agent.Agent via an embedded nil interface; only Type() is
@@ -291,36 +289,6 @@ func TestMaybeOfferSessionImport_EmptySelectionSkips(t *testing.T) {
 	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, true)
 	if runCalled {
 		t.Error("import ran after an empty selection; expected skip")
-	}
-}
-
-func TestRunSelectedImports_UnsatisfiablePolicySkips(t *testing.T) {
-	// Not parallel: chdirs into a temp repo and reads CWD-based git state.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-	ctx := context.Background()
-
-	// Install a checkpoint policy this CLI cannot satisfy (a future format).
-	// The gate must skip the import, matching the standalone `entire import`
-	// command's ensureCheckpointPolicyAllowsCheckpointData check.
-	repo, err := openRepository(ctx)
-	if err != nil {
-		t.Fatalf("open repository: %v", err)
-	}
-	future := checkpointpolicy.Policy{CheckpointVersion: "branch-v99", CheckpointMinVersion: "branch-v99"}
-	if _, err := checkpointpolicy.WriteLocal(ctx, repo, plumbing.ZeroHash, future); err != nil {
-		t.Fatalf("write local policy: %v", err)
-	}
-	repo.Close()
-
-	// A nil importer would panic if the import loop ran, so the gate returning
-	// before the loop is exactly what keeps this from blowing up.
-	var buf bytes.Buffer
-	runSelectedImports(ctx, &buf, dir, []eligibleImport{{displayName: testAgentClaude}})
-
-	if got := buf.String(); !strings.Contains(got, "skipping agent history import") {
-		t.Errorf("expected a skip note for an unsatisfiable checkpoint policy, got %q", got)
 	}
 }
 

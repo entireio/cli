@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // testPluginName is the bare plugin name used across managed-store tests.
@@ -21,6 +23,9 @@ func withPluginDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv(pluginEnvPluginDir, dir)
+	// Release the memoized root: an open directory handle blocks TempDir's
+	// cleanup on Windows.
+	t.Cleanup(func() { osroot.Forget(dir) })
 	return dir
 }
 
@@ -130,12 +135,10 @@ func TestPrependPluginBinDirToPATH(t *testing.T) { //nolint:paralleltest // muta
 }
 
 func TestInstallPluginFromPath_SymlinksAndLists(t *testing.T) { //nolint:paralleltest // mutates env
-	if runtime.GOOS == windowsGOOS {
-		t.Skip("symlink path is Unix-only here")
-	}
 	withPluginDir(t)
-	src := filepath.Join(t.TempDir(), "entire-pgr")
-	if err := os.WriteFile(src, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	src := filepath.Join(t.TempDir(), pluginBinaryName(testPluginName))
+	body := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(src, body, 0o755); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
 
@@ -146,9 +149,10 @@ func TestInstallPluginFromPath_SymlinksAndLists(t *testing.T) { //nolint:paralle
 	if p.Name != testPluginName {
 		t.Errorf("Name = %q, want %s", p.Name, testPluginName)
 	}
-	if !p.Symlink {
-		t.Errorf("expected Symlink=true; got %+v", p)
+	if wantSymlink := runtime.GOOS != windowsGOOS; p.Symlink != wantSymlink {
+		t.Errorf("Symlink = %v, want %v; got %+v", p.Symlink, wantSymlink, p)
 	}
+	assertMaterializedEntry(t, p.Path, body)
 
 	plugins, err := ListInstalledPlugins()
 	if err != nil {
@@ -311,21 +315,14 @@ func TestInstallPluginFromPath_RejectsSelfInstall(t *testing.T) { //nolint:paral
 	}
 }
 
-// TestMaterializeManagedEntry_HappyPath is a smoke test that the helper
-// completes successfully on a normal write-capable destination. On Unix it
-// exits through the symlink branch; the hardlink and copy fallbacks exist
-// for Windows-without-Developer-Mode and aren't portably triggerable from an
-// in-process test (forcing os.Symlink to fail without mocks would require a
-// non-portable filesystem setup). The other tests in this file exercise
-// InstallPluginFromPath end-to-end, which calls into here.
-func TestMaterializeManagedEntry_HappyPath(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == windowsGOOS {
-		t.Skip("test exercises Unix file modes")
+// materializeEntryFixture writes a source binary at srcRel under base and
+// returns its path, its FileInfo, and a root over base.
+func materializeEntryFixture(t *testing.T, base, srcRel string, body []byte) (string, os.FileInfo, *os.Root) {
+	t.Helper()
+	src := filepath.Join(base, filepath.FromSlash(srcRel))
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatalf("mkdir src dir: %v", err)
 	}
-	srcDir := t.TempDir()
-	src := filepath.Join(srcDir, "src-bin")
-	body := []byte("#!/bin/sh\nexit 0\n")
 	if err := os.WriteFile(src, body, 0o755); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
@@ -333,22 +330,126 @@ func TestMaterializeManagedEntry_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat src: %v", err)
 	}
-
-	destDir := t.TempDir()
-	destRoot, err := os.OpenRoot(destDir)
+	root, err := os.OpenRoot(base)
 	if err != nil {
 		t.Fatalf("os.OpenRoot: %v", err)
 	}
-	defer destRoot.Close()
-	if err := materializeManagedEntry(destRoot, src, "out", srcInfo); err != nil {
-		t.Fatalf("materializeManagedEntry: %v", err)
-	}
-	got, err := os.ReadFile(filepath.Join(destDir, "out"))
+	t.Cleanup(func() { _ = root.Close() })
+	return src, srcInfo, root
+}
+
+// assertMaterializedEntry reads THROUGH the entry — the check an unfollowable
+// Windows symlink fails — and returns its Lstat.
+func assertMaterializedEntry(t *testing.T, dest string, body []byte) os.FileInfo {
+	t.Helper()
+	got, err := os.ReadFile(dest)
 	if err != nil {
-		t.Fatalf("read result: %v", err)
+		t.Fatalf("read through the managed entry: %v", err)
 	}
 	if string(got) != string(body) {
 		t.Errorf("dest content mismatch: got %q want %q", got, body)
+	}
+	info, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatalf("lstat dest: %v", err)
+	}
+	return info
+}
+
+// An in-tree source (every remote install): Unix symlinks, Windows hardlinks
+// and must never produce a symlink (see plugin_store_windows.go).
+func TestMaterializeManagedEntry_InsideTree_NoSymlinkOnWindows(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	body := []byte("#!/bin/sh\nexit 0\n")
+	src, srcInfo, root := materializeEntryFixture(t, base, "pkg/pgr/entire-pgr", body)
+	if err := os.Mkdir(filepath.Join(base, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := materializeManagedEntry(root, src, "bin/out", srcInfo); err != nil {
+		t.Fatalf("materializeManagedEntry: %v", err)
+	}
+	dest := filepath.Join(base, "bin", "out")
+	info := assertMaterializedEntry(t, dest, body)
+	if runtime.GOOS == windowsGOOS {
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("Windows entry is a symlink; os.Root.Symlink's absolute links cannot be followed there")
+		}
+		destStat, err := os.Stat(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(srcInfo, destStat) {
+			t.Errorf("Windows entry for an in-tree source is a copy, want a hardlink to %s", src)
+		}
+		return
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("Unix entry is not a symlink; the dev-loop property is lost")
+	}
+}
+
+// An out-of-tree source (local-dev install): Unix symlinks, Windows copies.
+func TestMaterializeManagedEntry_OutsideTree_CopiesOnWindows(t *testing.T) {
+	t.Parallel()
+	body := []byte("#!/bin/sh\nexit 0\n")
+	src, srcInfo, _ := materializeEntryFixture(t, t.TempDir(), "entire-pgr", body)
+	destDir := t.TempDir()
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := materializeManagedEntry(root, src, "out", srcInfo); err != nil {
+		t.Fatalf("materializeManagedEntry: %v", err)
+	}
+	dest := filepath.Join(destDir, "out")
+	info := assertMaterializedEntry(t, dest, body)
+	if runtime.GOOS == windowsGOOS {
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("Windows entry is a symlink; os.Root.Symlink's absolute links cannot be followed there")
+		}
+		destStat, err := os.Stat(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if os.SameFile(srcInfo, destStat) {
+			t.Errorf("Windows entry for an out-of-tree source shares the source inode; want an independent copy")
+		}
+		if info.Size() != srcInfo.Size() {
+			t.Errorf("copy size = %d, want %d", info.Size(), srcInfo.Size())
+		}
+		return
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("Unix entry is not a symlink; the dev-loop property is lost")
+	}
+}
+
+func TestManagedTreeName_WindowsAndUnixPaths(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for _, tc := range []struct {
+		name string
+		src  string
+		want string
+		ok   bool
+	}{
+		{name: "in tree", src: filepath.Join(base, "pkg", "graph", "entire-graph"), want: "pkg/graph/entire-graph", ok: true},
+		{name: "direct child", src: filepath.Join(base, "entire-x"), want: "entire-x", ok: true},
+		{name: "the root itself", src: base},
+		{name: "sibling of the root", src: filepath.Join(filepath.Dir(base), "elsewhere", "entire-x")},
+		{name: "unrelated absolute", src: filepath.Join(t.TempDir(), "entire-x")},
+	} {
+		got, ok := managedTreeName(root, tc.src)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("%s: managedTreeName(%q) = %q, %v; want %q, %v", tc.name, tc.src, got, ok, tc.want, tc.ok)
+		}
 	}
 }
 

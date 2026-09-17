@@ -135,7 +135,6 @@ func TestHookTypeConstants(t *testing.T) {
 	}
 }
 
-//nolint:govet // testing struct field assignment
 func TestHookInputStructure(t *testing.T) {
 	t.Parallel()
 

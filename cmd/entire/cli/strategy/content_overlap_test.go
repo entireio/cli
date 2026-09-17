@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -502,30 +501,6 @@ func TestFilesWithRemainingAgentChanges_ComparesWorktreeToCommitNotIndex(t *test
 	assert.Equal(t, []string{"config.go"}, remaining)
 }
 
-func TestRequiresConfinedWorktreeModeAllowsWindowsCloudPlaceholders(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		mode fs.FileMode
-		want bool
-	}{
-		{name: "regular", mode: 0, want: false},
-		{name: "cloud placeholder file", mode: fs.ModeIrregular, want: false},
-		{name: "directory", mode: fs.ModeDir, want: true},
-		{name: "cloud placeholder directory", mode: fs.ModeDir | fs.ModeIrregular, want: true},
-		{name: "symlink", mode: fs.ModeSymlink, want: true},
-		{name: "symlink irregular", mode: fs.ModeSymlink | fs.ModeIrregular, want: true},
-		{name: "named pipe", mode: fs.ModeNamedPipe, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, requiresConfinedWorktreeMode(tt.mode))
-		})
-	}
-}
-
 func TestWorkingTreeMatchesBlobSymlinkHashesTheTargetPath(t *testing.T) {
 	testutil.SkipWithoutSymlinks(t)
 	t.Parallel()
@@ -537,9 +512,9 @@ func TestWorkingTreeMatchesBlobSymlinkHashesTheTargetPath(t *testing.T) {
 	_, err := h.Write([]byte(target))
 	require.NoError(t, err)
 
-	assert.True(t, requiresConfinedWorktreeHash(dir, "link.txt", filemode.Symlink))
-	assert.True(t, requiresConfinedWorktreeHash(dir, "link.txt", filemode.Regular),
-		"a working-tree symlink must not be sent to hash-object even if the commit is regular")
+	// Withholding a worktree symlink from hash-object is gitrepo's rule now
+	// (TestHashableWorktreeEntry_WorktreeSymlinkIsWithheld); what stays here is
+	// what this fallback must then answer for one.
 	assert.True(t, workingTreeMatchesBlob(dir, "link.txt", filemode.Symlink, h.Sum()))
 	assert.False(t, workingTreeMatchesBlob(dir, "link.txt", filemode.Regular, h.Sum()),
 		"a symlink must not compare clean against a regular-file commit")

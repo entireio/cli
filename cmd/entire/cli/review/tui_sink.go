@@ -120,7 +120,7 @@ func terminalMeasurer(output io.Writer) func() (int, int, bool) {
 		return nil
 	}
 	return func() (int, int, bool) {
-		width, height, err := term.GetSize(int(f.Fd())) //nolint:gosec // fd values fit in int on supported platforms
+		width, height, err := term.GetSize(int(f.Fd()))
 		if err != nil || width <= 0 || height <= 0 {
 			return 0, 0, false
 		}

@@ -3,7 +3,6 @@ package strategy
 import (
 	"context"
 	"io"
-	"io/fs"
 	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -165,7 +164,7 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 		}
 
 		// Compare by hash (blob hash) - exact content match required for new files
-		if headFile.Hash == shadowFile.Hash {
+		if headFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesOverlapWithContent: new file content match found",
 				slog.String("file", filePath),
 				slog.String("hash", headFile.Hash.String()),
@@ -282,7 +281,7 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		}
 
 		// Compare hashes - exact match means file is unchanged
-		if stagedHash == shadowFile.Hash {
+		if stagedHash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "stagedFilesOverlapWithContent: new file content match found",
 				slog.String("file", stagedPath),
 				slog.String("hash", stagedHash.String()),
@@ -494,7 +493,7 @@ func filesWithRemainingAgentChanges(
 			continue
 		}
 
-		if commitFile.Hash == shadowFile.Hash {
+		if commitFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content fully committed",
 				slog.String("file", filePath),
 			)
@@ -517,7 +516,7 @@ func filesWithRemainingAgentChanges(
 			// hash-object follows symlinks and hashes target content, while a Git
 			// symlink blob stores the target path. Compare either side of a mode
 			// mismatch through the confined fallback instead.
-			if !requiresConfinedWorktreeHash(worktreeRoot, candidate.path, candidate.commitMode) {
+			if worktreedir.HashableEntry(worktreeRoot, candidate.path, candidate.commitMode) {
 				paths = append(paths, candidate.path)
 			}
 		}
@@ -533,7 +532,13 @@ func filesWithRemainingAgentChanges(
 	for _, candidate := range candidates {
 		workingTreeClean := false
 		if worktreeHash, ok := worktreeHashes[candidate.path]; ok {
-			workingTreeClean = worktreeHash == candidate.commitHash
+			// Equal, not ==: plumbing.Hash carries an object-format field
+			// alongside its bytes, and `==` compares that field too. FromHex
+			// leaves it unset for a 40-char hash while stamping SHA256 on a
+			// 64-char one, so `==` only works while the tree decoder happens to
+			// agree. If it ever stamped "sha1", every candidate would read dirty
+			// and the phantom carry-forward would return with no test failing.
+			workingTreeClean = worktreeHash.Equal(candidate.commitHash)
 		} else if worktreeRoot != "" {
 			workingTreeClean = workingTreeMatchesBlob(worktreeRoot, candidate.path, candidate.commitMode, candidate.commitHash)
 		}
@@ -568,29 +573,6 @@ func filesWithRemainingAgentChanges(
 	)
 
 	return remaining
-}
-
-func requiresConfinedWorktreeHash(worktreeRoot, filePath string, commitMode filemode.FileMode) bool {
-	if commitMode == filemode.Symlink {
-		return true
-	}
-	root, err := worktreedir.OpenAt(worktreeRoot)
-	if err != nil {
-		return true
-	}
-	name, err := worktreedir.Name(worktreeRoot, filePath)
-	if err != nil {
-		return true
-	}
-	info, err := root.Lstat(name)
-	return err != nil || requiresConfinedWorktreeMode(info.Mode())
-}
-
-func requiresConfinedWorktreeMode(mode fs.FileMode) bool {
-	// Windows uses ModeIrregular for OneDrive Files On-Demand placeholders.
-	// Mask it so placeholder files still receive Git's clean-filter handling,
-	// while every substantive non-regular type remains confined.
-	return mode.Type()&^fs.ModeIrregular != 0
 }
 
 // workingTreeMatchesBlob checks whether the raw file representation hashes to

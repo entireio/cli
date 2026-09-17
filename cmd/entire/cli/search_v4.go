@@ -434,10 +434,9 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 
 // errNoRepoAvailable is returned when at least one cell answered but none
 // matched the repo filter. A typo'd name or missing access cannot reach this
-// point — resolveScope already validated the slug against the control-plane
-// repo index — so the message names only the causes that survive: query-serve
-// hasn't indexed the repo, or its owner org isn't enabled for semantic search.
-var errNoRepoAvailable = errors.New("semantic search cannot search this repo yet — it may not be indexed, or semantic search may not be enabled for its owner")
+// point because resolveScope already validated the slug against the control-plane
+// repo index. The remaining cause is that query-serve has not indexed the repo.
+var errNoRepoAvailable = errors.New("semantic search cannot search this repo yet — it may not be indexed")
 
 // errNoRegionAvailable is returned when every queried cell lacks query-serve.
 var errNoRegionAvailable = errors.New("semantic search is not yet available in the region(s) hosting this search")

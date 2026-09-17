@@ -124,3 +124,50 @@ func TestParseRef(t *testing.T) {
 		})
 	}
 }
+
+// TestParseRef_ToleratesCaseFoldedShardDirectory reproduces the
+// case-insensitive-filesystem shard collision (macOS APFS / Windows NTFS
+// defaults): git resolves a new shard directory against existing ones
+// case-insensitively, so a checkpoint ref can be written under a shard
+// directory whose case differs from a fresh ShardFor() computation on that
+// same ID — e.g. a ULID's canonical uppercase shard ("6B") folded into an
+// already-present lowercase directory ("6b") left by an unrelated legacy hex
+// checkpoint. ParseRef must still recognize such a ref: the underlying
+// checkpoint object is intact, and rejecting it as malformed makes it
+// permanently invisible to `entire checkpoint list`/`explain`.
+//
+// These cases are deliberately kept out of TestParseRef's table: unlike every
+// other well-formed case there, RefName(gotID) recomputes the canonical
+// (non-folded) shard and would not reproduce the folded ref under test, so the
+// table's round-trip assertion does not apply here.
+func TestParseRef_ToleratesCaseFoldedShardDirectory(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		ref    plumbing.ReferenceName
+		wantID id.CheckpointID
+	}{
+		{
+			name:   "ulid ref folded into a case-colliding lowercase shard dir",
+			ref:    "refs/entire/checkpoints/6b/01M2DCHJCHTR9T9MZTSB7WV76B",
+			wantID: "01M2DCHJCHTR9T9MZTSB7WV76B",
+		},
+		{
+			// The mirror image: an uppercase shard directory holding an ID
+			// whose freshly-computed shard is lowercase.
+			name:   "legacy hex ref folded into a case-colliding uppercase shard dir",
+			ref:    "refs/entire/checkpoints/6B/0da4f302686b",
+			wantID: "0da4f302686b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotID, gotOK := ParseRef(tt.ref)
+			require.True(t, gotOK, "ParseRef(%q) should accept a case-folded shard directory", tt.ref)
+			assert.Equal(t, tt.wantID, gotID)
+		})
+	}
+}

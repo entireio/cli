@@ -326,7 +326,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		TurnID:                      opts.TurnID,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
-		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // git writes both for back-compat
+		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: git writes both so older CLIs can still read the metadata
 		TokenUsage:                  opts.TokenUsage,
 		SkillEvents:                 opts.SkillEvents,
 		PromptAttributions:          opts.PromptAttributionsJSON,

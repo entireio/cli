@@ -73,7 +73,7 @@ func requestedContext() (name, source string) {
 //
 // Source is what lets callers name the right remedy, which differs by origin: a
 // wrong `--context` is fixed by correcting the argument, a wrong
-// current_context by `entire auth use`. Telling someone to run `auth use` when
+// current_context by `entire auth switch`. Telling someone to run `auth switch` when
 // they passed an explicit flag sends them to change the wrong thing.
 type Selection struct {
 	// Context is the login to act as, or nil when there is none (logged out, or

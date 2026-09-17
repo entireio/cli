@@ -27,23 +27,40 @@ const (
 	sessionsOverviewLimit = 50
 )
 
+// Canonical agent IDs as /me/activity reports them: the keys of the display
+// map, the values knownAgents normalizes onto, and the render order all draw
+// from this one set.
+const (
+	activityAgentClaude   = "claude"
+	activityAgentGemini   = "gemini"
+	activityAgentAmp      = "amp"
+	activityAgentCodex    = "codex"
+	activityAgentOpencode = "opencode"
+	activityAgentCopilot  = "copilot"
+	activityAgentPi       = "pi"
+	activityAgentCursor   = "cursor"
+	activityAgentDroid    = "droid"
+	activityAgentKiro     = "kiro"
+	activityAgentUnknown  = "unknown"
+)
+
 // knownAgents maps normalized agent strings from the API to display IDs.
 // Used for the commit list, where per-checkpoint agent strings are free-form.
 // The /me/activity endpoint returns already-normalized canonical IDs.
 var knownAgents = map[string]string{
-	"claude":     "claude",
-	"claudecode": "claude",
-	"gemini":     "gemini",
-	"geminicli":  "gemini",
-	"amp":        "amp",
-	"codex":      "codex",
-	"opencode":   "opencode",
-	"copilot":    "copilot",
-	"copilotcli": "copilot",
-	"pi":         "pi",
-	"cursor":     "cursor",
-	"droid":      "droid",
-	"kiro":       "kiro",
+	"claude":     activityAgentClaude,
+	"claudecode": activityAgentClaude,
+	"gemini":     activityAgentGemini,
+	"geminicli":  activityAgentGemini,
+	"amp":        activityAgentAmp,
+	"codex":      activityAgentCodex,
+	"opencode":   activityAgentOpencode,
+	"copilot":    activityAgentCopilot,
+	"copilotcli": activityAgentCopilot,
+	"pi":         activityAgentPi,
+	"cursor":     activityAgentCursor,
+	"droid":      activityAgentDroid,
+	"kiro":       activityAgentKiro,
 }
 
 func newActivityCmd() *cobra.Command {

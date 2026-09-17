@@ -255,10 +255,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return nil
 	}
 
-	if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
-		return err
-	}
-
 	// Resolve agent and transcript path.
 	ag, transcriptPath, err := resolveAgentAndTranscript(logCtx, w, sessionID, agentName, existingState)
 	if err != nil {

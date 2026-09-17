@@ -33,10 +33,8 @@ const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
 var ErrCellUnavailable = errors.New("semantic search is not available in this cell")
 
 // ErrRepoFilterUnmatched reports that query-serve answered (the route exists)
-// but the explicit repo filter matched nothing the caller can search — the
-// repo isn't indexed yet, or its owner org isn't enabled on the
-// semantic-search feature flag (entire-search fails closed with a JSON 404,
-// existence not disclosed). A typo'd repo can't produce this from the CLI:
+// but the explicit repo filter matched nothing the caller can search. The
+// repository might not be indexed yet. A typo'd repo can't produce this from the CLI:
 // the slug was already resolved against the control-plane index before any
 // cell was contacted. Distinct from ErrCellUnavailable so fan-out callers
 // don't misreport a repo-level miss as a region without query-serve.
@@ -768,9 +766,8 @@ func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []strin
 	if resp.StatusCode == http.StatusNotFound {
 		// Two distinct 404s share this status. A JSON error body is
 		// query-serve answering through the gateway: the route exists but the
-		// repo filter matched nothing the caller may search (not indexed, or
-		// the owner org isn't flag-enabled — entire-search fails closed,
-		// existence not disclosed). A plain "404 page not found" is the
+		// repo filter matched nothing because query-serve has not indexed it.
+		// A plain "404 page not found" is the
 		// gateway itself: no semantic-search route, query-serve not deployed
 		// in this cell. Deployed cells answer unfiltered searches of unknown
 		// repos with an empty 200, so the split is unambiguous. The

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 type CondensedEntry struct {
@@ -59,7 +61,7 @@ func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
 		}
 
 		switch line.Type {
-		case "user":
+		case transcript.TypeUser:
 			var parts []string
 			for _, block := range blocks {
 				var text string
@@ -68,10 +70,10 @@ func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
 				}
 			}
 			if len(parts) > 0 {
-				entries = append(entries, CondensedEntry{Type: "user", Content: strings.Join(parts, "\n")})
+				entries = append(entries, CondensedEntry{Type: transcript.TypeUser, Content: strings.Join(parts, "\n")})
 			}
 
-		case "assistant":
+		case transcript.TypeAssistant:
 			for _, block := range blocks {
 				var blockType string
 				if err := json.Unmarshal(block["type"], &blockType); err != nil {
@@ -82,7 +84,7 @@ func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
 				case "text":
 					var text string
 					if err := json.Unmarshal(block["text"], &text); err == nil && text != "" {
-						entries = append(entries, CondensedEntry{Type: "assistant", Content: text})
+						entries = append(entries, CondensedEntry{Type: transcript.TypeAssistant, Content: text})
 					}
 				case "tool_use":
 					var toolName string

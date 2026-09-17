@@ -25,11 +25,6 @@ import (
 // SkipLines, NewScanner) are shared with the pi agent package via
 // cmd/entire/cli/agent/pi/pijsonl so a fix applied here also lands there.
 
-const (
-	piToolResultStatusOK  = "success"
-	piToolResultStatusErr = "error"
-)
-
 // piToolNameMap normalises Pi's lowercase tool names to the title-cased names
 // used elsewhere in Entire's compact format (matching Claude's "Read"/"Write"/"Edit").
 var piToolNameMap = map[string]string{
@@ -299,9 +294,9 @@ func piDecodeResultOutput(raw json.RawMessage) string {
 
 func piResultStatus(isError bool) string {
 	if isError {
-		return piToolResultStatusErr
+		return toolResultStatusError
 	}
-	return piToolResultStatusOK
+	return toolResultStatusSuccess
 }
 
 func piTimestampJSON(ts string) json.RawMessage {

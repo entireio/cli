@@ -93,13 +93,13 @@ func newRepoProtectionCmd() *cobra.Command {
 	cmd.AddCommand(newRepoProtectionListCmd())
 	cmd.AddCommand(newRepoProtectionAddCmd())
 	cmd.AddCommand(newRepoProtectionRemoveCmd())
-	return cmd
+	return requireSubcommand(cmd)
 }
 
 func newRepoProtectionListCmd() *cobra.Command {
 	var project string
 	cmd := &cobra.Command{
-		Use:   "list <repo>",
+		Use:   cmdListRepo,
 		Short: "Show a repository's branch-protection rules",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

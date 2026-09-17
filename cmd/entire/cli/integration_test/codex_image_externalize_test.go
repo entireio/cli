@@ -42,7 +42,7 @@ func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 	// A Codex rollout: session meta, then a user message with an inline image
 	// data-URI (the confirmed real format), then an assistant reply.
 	rollout := strings.Join([]string{
-		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + env.RepoDir + `"}}`,
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","thread_source":"user","cwd":"` + env.RepoDir + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[` +
 			`{"type":"input_text","text":"add feature.txt and look at this screenshot"},` +
 			`{"type":"input_image","image_url":"data:image/png;base64,` + b64 + `"}` +

@@ -961,8 +961,8 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 		ContextWindowSize:           200_000,
 		CheckpointTranscriptStart:   2,
 		CheckpointTranscriptSize:    1234,
-		CondensedTranscriptLines:    2,
-		TranscriptLinesAtStart:      2,
+		CondensedTranscriptLines:    2, //nolint:staticcheck // legacy field, asserted so migration keeps working
+		TranscriptLinesAtStart:      2, //nolint:staticcheck // legacy field, asserted so migration keeps working
 		TranscriptIdentifierAtStart: "source-assistant",
 		TurnID:                      "source-turn",
 		TurnCheckpointIDs:           []string{"abc123def456"},
@@ -1086,8 +1086,8 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 		BaseCommit:                "source-head",
 		WorktreePath:              "/source/repo",
 		CheckpointTranscriptStart: 9,
-		CondensedTranscriptLines:  9,
-		TranscriptLinesAtStart:    9,
+		CondensedTranscriptLines:  9, //nolint:staticcheck // legacy field, asserted so migration keeps working
+		TranscriptLinesAtStart:    9, //nolint:staticcheck // legacy field, asserted so migration keeps working
 	})
 	if err != nil {
 		t.Fatalf("buildAdoptedSessionState failed: %v", err)

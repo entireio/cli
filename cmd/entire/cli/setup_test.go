@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,6 +143,28 @@ func copyExecutable(src, dst string) error {
 	}
 
 	return os.WriteFile(dst, data, info.Mode())
+}
+
+func clearLocalGitIdentity(t *testing.T, repoDir string) {
+	t.Helper()
+	testutil.RunGit(t, repoDir, "config", "--local", "--unset-all", "user.name")
+	testutil.RunGit(t, repoDir, "config", "--local", "--unset-all", "user.email")
+}
+
+func localGitConfig(t *testing.T, repoDir, key string) (string, bool) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "config", "--local", "--get", key)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return "", false
+	}
+	t.Fatalf("read local git config %s: %v", key, err)
+	return "", false
 }
 
 func writeExternalAgentBinary(t *testing.T, dir, name string) {
@@ -2455,6 +2478,174 @@ func TestEnableCmd_AgentFlagEmptyValue(t *testing.T) {
 	}
 }
 
+func TestEnableCmd_ExistingRepoRepairsGitIdentityFromEntire(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	clearLocalGitIdentity(t, repoDir)
+
+	resolveCalls := 0
+	cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+		return func(context.Context) (*authProfile, error) {
+			resolveCalls++
+			return &authProfile{DisplayName: "Octo Cat", Handle: "octo", Provider: "github", ProviderUserID: "42"}, nil
+		}
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable existing repo: %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("profile resolver calls = %d, want 1", resolveCalls)
+	}
+	if got, ok := localGitConfig(t, repoDir, "user.name"); !ok || got != "Octo Cat" {
+		t.Fatalf("local user.name = %q, configured %v", got, ok)
+	}
+	if got, ok := localGitConfig(t, repoDir, "user.email"); !ok || got != "42+octo@users.noreply.github.com" {
+		t.Fatalf("local user.email = %q, configured %v", got, ok)
+	}
+}
+
+func TestEnableCmd_IdentityPreflightOrdering(t *testing.T) {
+	tests := []struct {
+		name        string
+		newRepo     bool
+		args        []string
+		wantResolve int
+		wantErrText string
+	}{
+		{name: "invalid agent fails before identity", args: []string{"--agent", "definitely-not-an-agent"}, wantErrText: "wrong agent name"},
+		{
+			name:        "new repo skip initial commit does not need identity",
+			newRepo:     true,
+			args:        []string{"--init-repo", "--skip-initial-commit", "--agent", "claude-code"},
+			wantResolve: 0,
+		},
+		{name: "existing repo validates agent then resolves identity", args: []string{"--agent", "claude-code"}, wantResolve: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			if tt.newRepo {
+				setupTestDir(t)
+			} else {
+				repoDir := setupTestRepo(t)
+				clearLocalGitIdentity(t, repoDir)
+			}
+			resolveCalls := 0
+			cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+				return func(context.Context) (*authProfile, error) {
+					resolveCalls++
+					return &authProfile{DisplayName: "Entire User", Email: "entire@example.com"}, nil
+				}
+			})
+			var stderr bytes.Buffer
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(tt.args)
+			err := cmd.Execute()
+			if tt.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("error = %v, stderr = %q, want %q", err, stderr.String(), tt.wantErrText)
+				}
+			} else if err != nil {
+				t.Fatalf("enable: %v; stderr=%s", err, stderr.String())
+			}
+			if resolveCalls != tt.wantResolve {
+				t.Fatalf("profile resolver calls = %d, want %d", resolveCalls, tt.wantResolve)
+			}
+		})
+	}
+}
+
+func TestEnableCmd_IdentityFailureLeavesSetupAbsent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	clearLocalGitIdentity(t, repoDir)
+
+	cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+		return func(context.Context) (*authProfile, error) { return nil, errors.New("profile unavailable") }
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--agent", "claude-code"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "profile unavailable") {
+		t.Fatalf("error = %v, want profile failure", err)
+	}
+	for _, path := range []string{
+		EntireSettingsFile,
+		EntireSettingsLocalFile,
+		filepath.Join(paths.EntireDir, "logs"),
+		filepath.Join(".claude", "settings.json"),
+	} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("setup artifact %s exists or could not be checked: %v", path, statErr)
+		}
+	}
+}
+
+func TestRunManageAgents_PreflightFollowsSelection(t *testing.T) {
+	setupTestRepo(t)
+	events := make([]string, 0, 2)
+	selectFn := func(available []string) ([]string, error) {
+		events = append(events, "select")
+		if len(available) == 0 {
+			return nil, errors.New("no available agents")
+		}
+		return []string{available[0]}, nil
+	}
+	preflight := func() error {
+		events = append(events, "identity")
+		return errors.New("stop before apply")
+	}
+	err := runManageAgentsWithPreflight(t.Context(), io.Discard, EnableOptions{}, selectFn, preflight)
+	if err == nil || !strings.Contains(err.Error(), "stop before apply") {
+		t.Fatalf("error = %v, want preflight error", err)
+	}
+	if got := strings.Join(events, " -> "); got != "select -> identity" {
+		t.Fatalf("events = %q, want selection before identity", got)
+	}
+}
+
+func TestEnableCmd_IdentityFailurePreservesConfiguredSettings(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "direct settings flow", args: []string{"--checkpoint-backend", "git-refs"}},
+		{name: "noninteractive agent-management fallback", args: []string{"--telemetry=false"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			repoDir := setupTestRepo(t)
+			clearLocalGitIdentity(t, repoDir)
+			original := `{"enabled":true,"strategy":"manual-commit","strategy_options":{"push_sessions":true}}`
+			writeSettings(t, original)
+
+			cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+				return func(context.Context) (*authProfile, error) { return nil, errors.New("profile unavailable") }
+			})
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "profile unavailable") {
+				t.Fatalf("error = %v, want profile failure", err)
+			}
+			raw, err := os.ReadFile(EntireSettingsFile)
+			if err != nil {
+				t.Fatalf("read settings: %v", err)
+			}
+			if string(raw) != original {
+				t.Fatalf("settings changed on identity failure:\n got: %s\nwant: %s", raw, original)
+			}
+		})
+	}
+}
+
 func TestEnableUsesSetupFlow(t *testing.T) {
 	t.Parallel()
 
@@ -4441,7 +4632,7 @@ func TestConfigureCmd_SummarizeProvider_InvalidProvider(t *testing.T) {
 	cmd := newSetupCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--summarize-provider", "opencode"})
+	cmd.SetArgs([]string{"--summarize-provider", "factoryai-droid"})
 
 	err := cmd.Execute()
 	if err == nil {

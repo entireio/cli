@@ -113,7 +113,7 @@ func promoteNextLogin(outW, errW io.Writer) {
 	}
 	next := all[0].Name
 	if err := auth.SetCurrentContext(next); err != nil {
-		fmt.Fprintf(errW, "Note: %d saved login(s) remain; run `entire auth use <context>` to switch.\n", len(all))
+		fmt.Fprintf(errW, "Note: %d saved login(s) remain; run `entire auth switch <context>` to switch.\n", len(all))
 		return
 	}
 	fmt.Fprintf(outW, "Now using %q (%d saved login(s) remain; run `entire logout` again to remove each).\n", next, len(all))

@@ -55,7 +55,7 @@ func TestDetectHookManagers_Lefthook(t *testing.T) {
 	if len(managers) != 1 {
 		t.Fatalf("expected 1 manager, got %d", len(managers))
 	}
-	if managers[0].Name != "Lefthook" { //nolint:goconst // test assertion, not a magic string
+	if managers[0].Name != "Lefthook" {
 		t.Errorf("expected Lefthook, got %s", managers[0].Name)
 	}
 	if managers[0].ConfigPath != "lefthook.yml" {

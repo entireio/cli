@@ -3437,6 +3437,7 @@
             "type": "string"
           },
           "state": {
+            "description": "Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.",
             "type": "string"
           },
           "visibility": {
@@ -7554,6 +7555,16 @@
             "schema": {
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
+            }
+          },
+          {
+            "description": "Require the repo's regional lifecycle state. A local repo is unaffected. A repo homed in another jurisdiction redirects with 421. This core reports 503 when it cannot route the read. Provisioning and failed states still return 200.",
+            "explode": false,
+            "in": "query",
+            "name": "authoritative",
+            "schema": {
+              "description": "Require the repo's regional lifecycle state. A local repo is unaffected. A repo homed in another jurisdiction redirects with 421. This core reports 503 when it cannot route the read. Provisioning and failed states still return 200.",
+              "type": "boolean"
             }
           }
         ],

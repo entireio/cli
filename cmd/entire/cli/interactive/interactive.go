@@ -119,7 +119,7 @@ func IsTerminalReader(r io.Reader) bool {
 	if !ok {
 		return false
 	}
-	return term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // IsTerminalWriter reports whether w is an *os.File backed by a terminal.
@@ -130,7 +130,7 @@ func IsTerminalWriter(w io.Writer) bool {
 	if !ok {
 		return false
 	}
-	return term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // ShouldStyle reports whether ANSI-styled output (color, bold, rendered

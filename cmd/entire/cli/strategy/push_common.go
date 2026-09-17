@@ -140,7 +140,7 @@ func hasUnpushedBranchRef(repo *git.Repository, remoteName string, localHash plu
 
 	// If local and remote point to same commit, nothing to sync
 	// This is the only case where we skip - any difference needs handling
-	return localHash != remoteRef.Hash()
+	return !localHash.Equal(remoteRef.Hash())
 }
 
 func displayPushTarget(target string) string {
@@ -549,7 +549,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	}
 
 	// If local is already at or behind remote, fast-forward
-	if localRef.Hash() == remoteRef.Hash() {
+	if localRef.Hash().Equal(remoteRef.Hash()) {
 		return advance(remoteRef.Hash())
 	}
 
@@ -564,7 +564,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	}
 
 	// If local is ancestor of remote (merge base == local), fast-forward to remote
-	if mergeBase == localRef.Hash() {
+	if mergeBase.Equal(localRef.Hash()) {
 		if err := advance(remoteRef.Hash()); err != nil {
 			return fmt.Errorf("failed to fast-forward ref: %w", err)
 		}

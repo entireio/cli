@@ -174,12 +174,15 @@ jobs:
           retention-days: 7
 
   e2e-windows:
-    if: inputs.agent == '' || inputs.agent == 'claude-code'
+    # Windows covers the two agents e2e-windows.yml can install. An unset agent
+    # (the push path) means claude-code, as before.
+    if: inputs.agent == '' || inputs.agent == 'claude-code' || inputs.agent == 'factoryai-droid'
     uses: ./.github/workflows/e2e-windows.yml
     permissions:
       contents: read
     with:
       test: ${{ inputs.test }}
+      agent: ${{ inputs.agent || 'claude-code' }}
     secrets: inherit
 
   notify-slack:

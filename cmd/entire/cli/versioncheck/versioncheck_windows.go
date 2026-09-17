@@ -14,14 +14,6 @@ import (
 // markers below are already lowercase.
 func foldPathCase(p string) string { return strings.ToLower(p) }
 
-// updateCommandShell is PowerShell: the one shell every Windows update command
-// works in. The install.ps1 one-liners below run nowhere else — cmd.exe has no
-// `iex`, and bash expands the `$(irm ...)` substitution itself before
-// PowerShell ever sees it — while the scoop, mise, and cmd.exe-prefixed
-// commands run there as happily as anywhere. Every one of them is printed for
-// the user to paste, so whatever prints one has to say where to paste it.
-const updateCommandShell = "PowerShell"
-
 // Windows install.ps1 one-liners, in the README's shapes. Printed, never
 // auto-run. windowsInstallCmd is the bare stable form; arguments go through
 // windowsInstallWithArgs, the iex "& {...}" form that can bind them.

@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -297,6 +299,94 @@ func TestRunPluginDoctor_DetectsTamperedBinary(t *testing.T) { //nolint:parallel
 	}
 }
 
+// The bin/ entry is what the dispatcher execs, so doctor checks it too: an
+// entry that cannot be run gets a repair from its install manifest, and
+// a non-symlink entry whose bytes drifted from pkg/ is reported even when pkg/
+// still matches the manifest.
+func TestRunPluginDoctor_ChecksBinEntry(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+
+	pkgDir, err := EnsurePluginPkgDir("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgBin := filepath.Join(pkgDir, pluginBinaryName("demo"))
+	if err := os.WriteFile(pkgBin, []byte("original"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(pkgBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePluginManifest(&PluginManifest{Name: "demo", RepoURL: "https://x.example/entire-demo", Tag: "v1.0.0", BinarySHA256: digest}); err != nil {
+		t.Fatal(err)
+	}
+	binDir, err := EnsurePluginBinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(binDir, pluginBinaryName("demo"))
+
+	doctor := func() (problems, fixes string) {
+		t.Helper()
+		issues, err := RunPluginDoctor(context.Background())
+		if err != nil {
+			t.Fatalf("RunPluginDoctor: %v", err)
+		}
+		var p, f []string
+		for _, i := range issues {
+			p = append(p, i.Problem)
+			f = append(f, i.Fix)
+		}
+		return strings.Join(p, " | "), strings.Join(f, " | ")
+	}
+
+	// An empty entry gets one fault and a repair from its recorded source.
+	if err := os.WriteFile(entry, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	problems, fixes := doctor()
+	if problems != "managed entry cannot be run: it is an empty file" {
+		t.Errorf("doctor missed the empty bin entry: %s", problems)
+	}
+	if fixes != "reinstall: entire plugin install https://x.example/entire-demo --force" {
+		t.Errorf("doctor remedy does not preserve the source: %s", fixes)
+	}
+
+	// A copy whose bytes drifted from pkg/ while pkg/ still matches the manifest.
+	if err := os.WriteFile(entry, []byte("drifted"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	problems, _ = doctor()
+	if !strings.Contains(problems, "managed bin entry is not the installed release binary") {
+		t.Errorf("doctor missed the drifted bin entry: %s", problems)
+	}
+	if strings.Contains(problems, "digest recorded at install") {
+		t.Errorf("pkg/ is intact and must not be reported: %s", problems)
+	}
+	// A local override is a note, not a fault: `plugin doctor` prints it and
+	// still exits 0, as it did before the bin/ entry was checked at all.
+	cmd := newPluginDoctorCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetContext(context.Background())
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Errorf("doctor exited non-zero on a note-only report: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "note: managed bin entry is not the installed release binary") || !strings.Contains(out.String(), "All plugins healthy.") {
+		t.Errorf("doctor output lacks the note or the healthy verdict:\n%s", out.String())
+	}
+
+	// A faithful copy is healthy.
+	if err := os.WriteFile(entry, []byte("original"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if problems, _ = doctor(); problems != "" {
+		t.Errorf("doctor flagged a healthy install: %s", problems)
+	}
+}
+
 // Diamond dependency with differing minimums: A needs sem >= v1.0.0, B needs
 // sem >= v2.0.0, and sem is installed at v1.5.0. A name-only visited set
 // marked sem handled on the first (satisfied) requirement and skipped the
@@ -452,5 +542,95 @@ func TestDoctorReinstallCommand_CarriesAllowUnverified(t *testing.T) {
 	got := reinstallCommand(unverified)
 	if !strings.Contains(got, "--force") || !strings.Contains(got, "--allow-unverified") {
 		t.Errorf("unverified install needs both flags to be reinstallable: %q", got)
+	}
+}
+
+func TestRunPluginDoctor_EntryRepair(t *testing.T) { //nolint:paralleltest // mutates env
+	for _, kind := range []string{"dangling", "non-executable", "empty"} {
+		t.Run(kind, func(t *testing.T) {
+			for _, release := range []bool{false, true} {
+				name := "local"
+				if release {
+					name = "release"
+				}
+				t.Run(name, func(t *testing.T) {
+					withIsolatedPluginEnv(t)
+					binDir, err := EnsurePluginBinDir()
+					if err != nil {
+						t.Fatal(err)
+					}
+					entry := filepath.Join(binDir, pluginBinaryName("demo"))
+					target := filepath.Join(t.TempDir(), "target")
+					switch kind {
+					case "empty":
+						if err := os.WriteFile(entry, nil, 0o755); err != nil {
+							t.Fatal(err)
+						}
+					default:
+						if kind == "non-executable" {
+							if runtime.GOOS == "windows" {
+								t.Skip("requires Unix executable bits")
+							}
+							if err := os.WriteFile(target, []byte("binary"), 0o644); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if err := os.Symlink(target, entry); err != nil {
+							t.Skipf("symlinks unavailable: %v", err)
+						}
+					}
+					want := "rebuild the target or run: entire plugin remove demo"
+					if release {
+						if err := SavePluginManifest(&PluginManifest{
+							Name: "demo", RepoURL: "https://x.example/custom-demo",
+							Tag: "v1.2.3", Pinned: true, Unverified: true,
+						}); err != nil {
+							t.Fatal(err)
+						}
+						want = "reinstall: entire plugin install https://x.example/custom-demo --force --allow-unverified --pin v1.2.3"
+					}
+					issues, err := RunPluginDoctor(context.Background())
+					if err != nil {
+						t.Fatal(err)
+					}
+					var entryIssues []PluginDoctorIssue
+					for _, issue := range issues {
+						if strings.HasPrefix(issue.Problem, "managed entry") {
+							entryIssues = append(entryIssues, issue)
+						}
+					}
+					if len(entryIssues) != 1 {
+						t.Fatalf("entry issues = %+v, want one", entryIssues)
+					}
+					if entryIssues[0].Fix != want {
+						t.Errorf("fix = %q, want %q", entryIssues[0].Fix, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestEntryRepairFix_NonRepairable(t *testing.T) {
+	t.Parallel()
+	if got := entryRepairFix("demo", false); got != "" {
+		t.Errorf("non-repairable failure suggests a repair: %q", got)
+	}
+}
+
+// A manifest that exists but cannot be read is not a repair source: the entry
+// is not local development, so rebuild-or-remove would be wrong, and the
+// source a reinstall would name is unknown, so no remedy is the honest answer.
+func TestEntryRepairFix_UnreadableManifest(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+	dir, err := EnsurePluginPkgDir("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, pluginManifestFileName), []byte("name: [unterminated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := entryRepairFix("demo", true); got != "" {
+		t.Errorf("an unreadable manifest produced a repair: %q", got)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -682,6 +683,11 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		TranscriptPath:        transcriptPath,
 		LastPrompt:            truncatePromptForStorage(userPrompt),
 	}
+	if agentType == agent.AgentTypeCodex {
+		complete := true
+		state.SubagentInventoryComplete = &complete
+		state.SubagentTokensBaselineComplete = &complete
+	}
 
 	// Take the gate, then re-check under lock. Without this re-check a
 	// concurrent turn-start hook that wrote a richer state in the gap
@@ -699,6 +705,41 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 	}
 	if existing != nil && existing.BaseCommit != "" {
 		return nil
+	}
+	if existing != nil && agentType == agent.AgentTypeCodex {
+		// Repair the partial state in place. A child hook can have recorded task
+		// content and accounting before the parent session initializes, so a
+		// fresh replacement would silently discard durable child state.
+		state = existing
+		state.CLIVersion = versioninfo.Version
+		state.BaseCommit = headHash
+		state.AttributionBaseCommit = headHash
+		state.WorktreePath = worktreePath
+		state.WorktreeID = worktreeID
+		if state.StartedAt.IsZero() {
+			state.StartedAt = now
+		}
+		state.LastInteractionTime = &now
+		state.TurnID = turnID.String()
+		state.AgentType = agentType
+		if model != "" {
+			state.ModelName = model
+		}
+		if transcriptPath != "" {
+			state.TranscriptPath = transcriptPath
+		}
+		if userPrompt != "" {
+			state.LastPrompt = truncatePromptForStorage(userPrompt)
+		}
+		if state.UntrackedFilesAtStart == nil {
+			state.UntrackedFilesAtStart = untrackedFiles
+		}
+
+		// This is a repair, not an authoritative SessionStart inventory. Keep
+		// the ledger and token data but retain conservative coverage markers.
+		incomplete := false
+		state.SubagentInventoryComplete = &incomplete
+		state.SubagentTokensBaselineComplete = &incomplete
 	}
 	return s.saveSessionState(ctx, state)
 }

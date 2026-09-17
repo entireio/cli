@@ -30,7 +30,7 @@ func WithPromptTimeout(d time.Duration) Option {
 }
 
 // PromptTimeoutEnv is the environment variable that overrides every agent's
-// per-prompt timeout. It is documented in e2e/README.md and CLAUDE.md.
+// per-prompt timeout. It is documented in e2e/README.md and docs/development/testing.md.
 const PromptTimeoutEnv = "E2E_TIMEOUT"
 
 // promptTimeout resolves the per-prompt deadline for a single RunPrompt call.

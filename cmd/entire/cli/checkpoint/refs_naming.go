@@ -34,10 +34,22 @@ func RefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
 // ParseRef extracts the checkpoint ID from a per-checkpoint ref name,
 // reporting whether name is a well-formed checkpoint ref. A ref is well-formed
 // when it has the CheckpointRefPrefix, exactly a <shard>/<id> tail, and the
-// shard matches the ID's own ShardFor — so refs the resolver did not write
-// (mismatched shard, extra path segments) are rejected rather than silently
-// resolved to the wrong bucket. It does not require the ID to be a recognized
-// kind, so a future ID format still parses as long as it shards consistently.
+// shard case-insensitively matches the ID's own ShardFor — so refs the
+// resolver did not write (mismatched shard, extra path segments) are rejected
+// rather than silently resolved to the wrong bucket. It does not require the
+// ID to be a recognized kind, so a future ID format still parses as long as it
+// shards consistently.
+//
+// The shard match is case-insensitive (strings.EqualFold) rather than exact,
+// because the on-disk directory name is not always byte-identical to a fresh
+// ShardFor() computation: on a case-insensitive-but-case-preserving filesystem
+// (macOS APFS, Windows NTFS defaults), git resolves a new shard directory
+// against existing ones case-insensitively, so a ULID's uppercase shard (e.g.
+// "6B") can land inside an already-present differently-cased directory (e.g.
+// a legacy hex checkpoint's lowercase "6b") instead of a distinct one. An
+// exact comparison then rejects that ref as malformed even though the
+// checkpoint object it names is intact — see the ULID/legacy shard-collision
+// bug this guards against.
 func ParseRef(name plumbing.ReferenceName) (id.CheckpointID, bool) {
 	s := name.String()
 	tail, ok := strings.CutPrefix(s, CheckpointRefPrefix)
@@ -53,7 +65,7 @@ func ParseRef(name plumbing.ReferenceName) (id.CheckpointID, bool) {
 		return id.EmptyCheckpointID, false
 	}
 	cid := id.CheckpointID(rest)
-	if cid.ShardFor() != shard {
+	if !strings.EqualFold(cid.ShardFor(), shard) {
 		return id.EmptyCheckpointID, false
 	}
 	return cid, true

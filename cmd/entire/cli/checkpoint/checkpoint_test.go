@@ -4657,7 +4657,7 @@ func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
 						ToolUseID:       "toolu_desc",
 						AgentID:         "agent3",
 						SubagentType:    "general-purpose",
-						TaskDescription: "rotate key=AKIAYRWQG5EJLPZLBYNP in staging",
+						TaskDescription: "rotate key=" + awsKeyFixture + " in staging",
 						Transcript:      redact.AlreadyRedacted([]byte(`{"msg":"child"}` + "\n")),
 					},
 				},
@@ -4677,7 +4677,7 @@ func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to read task.json: %v", err)
 			}
-			if strings.Contains(taskContent, "AKIAYRWQG5EJLPZLBYNP") {
+			if strings.Contains(taskContent, awsKeyFixture) {
 				t.Errorf("task.json still carries the secret: %s", taskContent)
 			}
 			var meta taskRecordMetadata
@@ -5394,9 +5394,9 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 
 	meta := Metadata{
 		Kind:         "agent_review",
-		ReviewPrompt: "credential leak: key=AKIAYRWQG5EJLPZLBYNP",
+		ReviewPrompt: "credential leak: key=" + awsKeyFixture,
 		Summary: &Summary{
-			Intent: "leak: key=AKIAYRWQG5EJLPZLBYNP",
+			Intent: "leak: key=" + awsKeyFixture,
 		},
 	}
 	b, err := json.Marshal(meta)
@@ -5408,7 +5408,7 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RedactBlobBytes() error = %v", err)
 	}
-	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+	if strings.Contains(string(got), awsKeyFixture) {
 		t.Errorf("expected AWS key redacted in metadata.json blob, got %s", string(got))
 	}
 	if !strings.Contains(string(got), "REDACTED") {
@@ -5445,7 +5445,7 @@ func TestRedactBlobBytes_ScannerDegraded(t *testing.T) {
 	// even while the flag is set — the sentinel is confined to transcript-shaped
 	// blobs whose only scanner produced no coverage. The AWS-key shaped secret
 	// is caught by the always-on regex layers, independent of scanner selection.
-	secretContent := []byte("credential leak: key=AKIAYRWQG5EJLPZLBYNP")
+	secretContent := []byte("credential leak: key=" + awsKeyFixture)
 	got, err = RedactBlobBytes(context.Background(), secretContent, "prompt.txt", false)
 	if err != nil {
 		t.Fatalf("RedactBlobBytes(.txt) error = %v, want nil", err)
@@ -5453,7 +5453,7 @@ func TestRedactBlobBytes_ScannerDegraded(t *testing.T) {
 	if want := redact.Bytes(secretContent); string(got) != string(want) {
 		t.Errorf("RedactBlobBytes(.txt) = %q, want redact.Bytes output %q", got, want)
 	}
-	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+	if strings.Contains(string(got), awsKeyFixture) {
 		t.Error("RedactBlobBytes(.txt) left the secret unredacted")
 	}
 	if !strings.Contains(string(got), "REDACTED") {

@@ -36,6 +36,22 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
+// Fixture git identity used by every repo this harness initializes.
+const (
+	testAuthorName  = "Test User"
+	testAuthorEmail = "test@example.com"
+)
+
+// Values from the agent transcript JSONL wire formats the harness synthesizes.
+const (
+	entryTypeMessage    = "message"
+	roleUser            = "user"
+	roleAssistant       = "assistant"
+	blockTypeText       = "text"
+	blockTypeToolUse    = "tool_use"
+	blockTypeToolResult = "tool_result"
+)
+
 // testBinaryPath holds the path to the CLI binary built once in TestMain.
 // All tests share this binary to avoid repeated builds.
 var testBinaryPath string
@@ -227,8 +243,8 @@ func (env *TestEnv) InitRepo() {
 	if err != nil {
 		env.T.Fatalf("failed to get repo config: %v", err)
 	}
-	cfg.User.Name = "Test User"
-	cfg.User.Email = "test@example.com"
+	cfg.User.Name = testAuthorName
+	cfg.User.Email = testAuthorEmail
 
 	// Disable GPG signing for test commits (prevents failures if user has commit.gpgsign=true globally)
 	if cfg.Raw == nil {
@@ -484,8 +500,8 @@ func (env *TestEnv) GitCommit(message string) {
 
 	_, err = worktree.Commit(message, &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
+			Name:  testAuthorName,
+			Email: testAuthorEmail,
 			When:  time.Now(),
 		},
 	})
@@ -515,8 +531,8 @@ func (env *TestEnv) GitCommitWithCheckpointID(message, checkpointID string) {
 
 	_, err = worktree.Commit(fullMessage, &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
+			Name:  testAuthorName,
+			Email: testAuthorEmail,
 			When:  time.Now(),
 		},
 	})
@@ -552,8 +568,8 @@ func (env *TestEnv) GitCommitWithMultipleCheckpoints(message string, checkpointI
 
 	_, err = worktree.Commit(sb.String(), &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
+			Name:  testAuthorName,
+			Email: testAuthorEmail,
 			When:  time.Now(),
 		},
 	})
@@ -1034,8 +1050,8 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 
 	_, err = worktree.Commit(string(modifiedMsg), &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
+			Name:  testAuthorName,
+			Email: testAuthorEmail,
 			When:  time.Now(),
 		},
 	})
@@ -1112,8 +1128,8 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 
 	_, err = worktree.Commit(string(modifiedMsg), &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
+			Name:  testAuthorName,
+			Email: testAuthorEmail,
 			When:  time.Now(),
 		},
 		Amend: true,
@@ -1218,8 +1234,8 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 
 	_, err = worktree.Commit(cleanedMsg, &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
+			Name:  testAuthorName,
+			Email: testAuthorEmail,
 			When:  time.Now(),
 		},
 	})
@@ -1293,8 +1309,8 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 
 	_, err = worktree.Commit(string(modifiedMsg), &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
+			Name:  testAuthorName,
+			Email: testAuthorEmail,
 			When:  time.Now(),
 		},
 	})
@@ -1823,8 +1839,8 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 
 	// Configure git user (clone doesn't inherit local config from the bare repo)
 	for _, kv := range [][2]string{
-		{"user.name", "Test User"},
-		{"user.email", "test@example.com"},
+		{"user.name", testAuthorName},
+		{"user.email", testAuthorEmail},
 		{"commit.gpgsign", "false"},
 	} {
 		testutil.RunGit(env.T, cloneDir, "config", kv[0], kv[1])

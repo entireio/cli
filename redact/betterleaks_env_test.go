@@ -42,7 +42,10 @@ replace github.com/entireio/cli => %q
 		t.Fatalf("write go.sum: %v", err)
 	}
 
-	mainGo := `package main
+	// The generated program cannot see this package's constant, so the fixture is
+	// substituted in at write time. A placeholder rather than fmt.Sprintf: the
+	// template contains its own %s verbs.
+	mainGo := strings.ReplaceAll(`package main
 
 import (
 	"fmt"
@@ -52,7 +55,7 @@ import (
 )
 
 func main() {
-	_ = redact.String("key=AKIAYRWQG5EJLPZLBYNP")
+	_ = redact.String("key=__AWS_KEY_FIXTURE__")
 	for _, name := range []string{
 		"GIT_CONFIG_GLOBAL",
 		"GIT_CONFIG_NOSYSTEM",
@@ -65,7 +68,7 @@ func main() {
 		}
 	}
 }
-`
+`, "__AWS_KEY_FIXTURE__", awsKeyFixture)
 	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0o644); err != nil {
 		t.Fatalf("write main.go: %v", err)
 	}

@@ -16,6 +16,11 @@ Rules, in order:
 2. **Reserved names are skipped.** Names beginning with `agent-` are reserved for the [agent protocol](external-agent-protocol.md). The resolver refuses to invoke them as external commands.
 3. **Path-traversal candidates are rejected.** Names containing `/` or `\` never resolve.
 4. **Found-but-not-executable surfaces as a launch error.** If `entire-<name>` exists on `$PATH` but lacks the executable bit, the resolver reports `Failed to run plugin entire-<name>` with exit code 1, rather than falling through to Cobra's "unknown command" path.
+5. **Missing Graph offers installation.** When `entire-graph` is absent, `entire graph <command>` resolves `graph` in the configured plugin index and asks `Install the entire-graph plugin from <repo url>?` with Yes selected by default. The repository is named because this prompt is the only human checkpoint on the path — an index-listed install never prompts inside `runRemoteInstall`, since the catalog is the trust decision. A name the index does not carry is reported instead of offered, rather than prompting and then failing on a request that could never be honored. Accepting installs `graph` through the normal managed installer, then executes the installed binary with all remaining arguments unchanged. This also works for bare `entire graph` and `entire graph --help`. Installation output goes to stderr, and the run that follows is announced as `Running entire-graph` — the binary's name only, never the arguments, which are the user's own command line and could carry a token, a newline or a terminal escape into stderr and anything capturing it. Declining or a failed installation exits nonzero without running the command; a cancelled one terminates by signal, so a single Ctrl-C escapes an enclosing shell loop. Non-interactive sessions receive an `entire plugin install graph` hint instead of a prompt. Other missing plugin names still fall through to Cobra.
+
+   A `graph` that is already in the [managed install directory](#managed-install-directory) but unreachable through `$PATH` — a managed dir that could not be prepended at startup — is **executed**, not offered for installation. Installing over it cannot work: an existing install needs `--force`, which the on-demand path deliberately does not pass, so prompting would spend the user's Yes and several network round-trips on a guaranteed "already installed; use --force to replace".
+
+   A managed entry that exists but **cannot be run** — a local-dev symlink whose target moved, an empty file, or a directory in its place — is reported with its path and the same repair `entire plugin doctor` gives: for a release install, a reinstall from the recorded source (`entire plugin install <url> --force`, keeping `--pin` and `--allow-unverified`); for a manifest-less local-dev entry, rebuild the target or `entire plugin remove <name>`. It is neither executed (a `fork/exec` ENOENT names a path the user never chose) nor reinstalled over: replacing a developer's deliberate symlink with a released binary is their call.
 
 ### Managed install directory
 
@@ -28,6 +33,14 @@ The CLI prepends this directory to `$PATH` at startup via `cli.PrependPluginBinD
 
 `entire plugin install/list/remove/upgrade` manage the contents of this directory. Authors who prefer the raw "drop a binary on `$PATH`" model don't need to use it.
 
+### Install progress and confirmations
+
+`entire plugin install`, `entire plugin upgrade`, dependency installs, and the on-demand `entire graph` install report their stages — index lookup, release metadata, download and checksum verification, placement — on **stderr**, so stdout carries only the result and stays pipeable. A styled terminal gets a spinner; a non-terminal writer and accessibility mode get one plain line per stage as it starts. Progress stops before any confirmation or result is printed, including on failure. Asset-name probing shares one download status per release rather than one per candidate.
+
+Progress travels on the context (`withPluginProgress`), so a caller that has not opted in prints nothing — a library caller never writes to the process's terminal on its own.
+
+Confirmations read from the **controlling terminal**, never stdin, so a plugin's piped input survives being prompted about. They render to the writer the caller supplies, except when that writer is not itself a terminal (`entire graph 2>log`): then the prompt renders on the terminal the answer is read from, because a prompt nobody can see still blocks on a keypress — and with Yes as the default, an unwitting Enter would authorize the install. An input that reaches EOF never becomes a Yes, but the two modes get there differently: accessibility mode declines outright — huh's scanner would otherwise read EOF as the field's default, which is Yes here — while the default full-screen prompt keeps waiting until the context is cancelled. Both fail closed; only one of them answers. Cancellation stops the prompt either way, and still terminates by signal.
+
 ### Remote install
 
 `entire plugin install` accepts three source forms:
@@ -36,7 +49,7 @@ The CLI prepends this directory to `$PATH` at startup via `cli.PrependPluginBinD
 |---|---|---|
 | bare name | `entire plugin install run` | Resolved through the [plugin index](#plugin-index-discovery) |
 | repository URL | `entire plugin install https://github.com/entireio/entire-run` | Installs from any git host. Also accepts git's scp-like form with any SSH username (`deploy@git.corp.io:group/entire-foo.git`) — the same set `validatePluginRepoURL` allows |
-| local path | `entire plugin install ./dist/entire-run` | Symlink/copy into the managed dir (unchanged) |
+| local path | `entire plugin install ./dist/entire-run` | Linked into the managed dir on Unix, copied on Windows (see step 5 below) |
 
 Remote installs are deliberately forge-agnostic:
 
@@ -46,7 +59,7 @@ Remote installs are deliberately forge-agnostic:
 2. **Metadata** is read from `entire-plugin.yml` at the repo root via a blobless shallow clone (with a plain shallow-clone fallback for servers that don't allow partial-clone filters). The file is optional; without it the plugin name derives from the repo basename (`entire-run` → `run`).
 3. **Asset download** is the one forge-specific step, contained in a small URL-convention table: GitHub/Gitea-style `<repo>/releases/download/<tag>/<asset>`, GitLab-style `<repo>/-/releases/<tag>/downloads/<asset>`, unknown hosts default to GitHub-style. Authors on other hosts declare a `download_url` template in `entire-plugin.yml` (placeholders: `{name}` `{tag}` `{version}` `{os}` `{arch}` `{asset}`).
 4. **Asset selection** goes through the release's `checksums.txt`: the manifest lists what was actually published, and the download is verified against it. Candidate names follow goreleaser conventions (`entire-<name>_<version>_<os>_<arch>.tar.gz` and friends, with `x86_64`/`aarch64` aliases and a `darwin_all` universal-binary fallback (`all` occupies the *arch* slot, which is where goreleaser puts it)). A pushed tag with no published assets falls back to the next-highest tag with a warning.
-5. The binary lands in `pkg/<name>/` next to a `manifest.yml` — written atomically, and *before* the `bin/` link — recording provenance (repo URL, tag, asset, asset SHA-256, **binary SHA-256**, verification state, pin state, dependency list), and is linked into `bin/` through the same symlink→hardlink→copy fallback as local installs. The dispatcher never changes.
+5. The binary lands in `pkg/<name>/` next to a `manifest.yml` — written atomically, and *before* the `bin/` link — recording provenance (repo URL, tag, asset, asset SHA-256, **binary SHA-256**, verification state, pin state, dependency list), and is linked into `bin/` through the same fallback ladder as local installs: symlink → hardlink → copy on Unix, hardlink → copy on Windows (`os.Root.Symlink` produces unfollowable absolute links there; see `plugin_store_windows.go`). The dispatcher never changes.
 
 The manifest is written immediately after the binary swap and before the `bin/` link, which is ordering that matters rather than style. `replaceBinary` has already mutated `pkg/<name>/`; until the manifest catches up it records the *previous* tag and `binary_sha256` while the new binary is on disk, and `doctor`'s integrity check reads that as tampering — a permanent false alarm on a healthy install. Writing it first leaves only a local re-hash in that window, and if the link then fails, `doctor` reports the real problem ("has an install manifest but no entry in the managed bin dir") with a fix that works.
 
@@ -156,7 +169,7 @@ Resolution is **install-time only** — dispatch stays zero-cost. The outcome is
 Planning tracks the strictest `min_version` seen per plugin rather than a plain visited set. In a diamond where two requirers demand different minimums of the same plugin (A needs `sem >= v1.0.0`, B needs `sem >= v2.0.0`), a name-only set would mark `sem` handled on A's satisfied requirement and skip B's stricter one entirely — no action, no warning — completing the install with B running against a too-old `sem`. `doctor` caught that afterwards, since it walks each manifest's requirements independently, but the install plans the upgrade instead of deferring the discovery. One action per plugin name either way. The requirement list is copied into the install manifest so reverse-dependency checks work offline:
 
 - `entire plugin remove sem` refuses when another manifest requires it (`--force` overrides).
-- `entire plugin doctor` reports missing/outdated dependencies, manifest/bin-dir drift, binaries that no longer match the `binary_sha256` recorded at install, installs that were never checksum-verified, dangling local-dev symlinks, and (macOS) a `com.apple.quarantine` attribute that would block execution. Exit code 1 when issues are found. The integrity check covers the `pkg/` binary the manifest describes; where `bin/` holds a copy rather than a link (Windows without Developer Mode), the dangling/non-executable link check is what guards that surface.
+- `entire plugin doctor` reports missing/outdated dependencies, manifest/bin-dir drift, binaries that no longer match the `binary_sha256` recorded at install, installs that were never checksum-verified, dangling local-dev symlinks, and (macOS) a `com.apple.quarantine` attribute that would block execution. Exit code 1 when issues are found; a `note:` line (a `bin/` entry that a local `plugin install <path> --force` replaced) is informational and does not affect the exit code. The integrity check covers the `pkg/` binary the manifest describes and any `bin/` entry that is not that same file; every `bin/` entry is also checked to be runnable (not dangling, unfollowable, a directory, or empty).
 
 > **Compatibility note:** the `entire plugin` command group is itself a built-in. Per the "built-ins win" rule above, it shadows any external command named `entire-plugin` that may have existed on `$PATH` previously. The collision is intentional — managing plugins is a built-in concern — but worth flagging for anyone who shipped an `entire-plugin` external command before this layer landed.
 
@@ -279,6 +292,7 @@ The resolver lives in `cmd/entire/cli/plugin.go`. The entry point is `MaybeRunPl
 Key files:
 
 - `cmd/entire/cli/plugin.go` — entry point, `resolvePlugin`, `runPlugin`
+- `cmd/entire/cli/plugin_on_demand.go` — missing Graph installation prompt and managed-install handoff
 - `cmd/entire/cli/plugin_env.go` — `pluginEnv`, the allowlist, and `ENTIRE_PLUGIN_ENV` parsing
 - `cmd/entire/cli/plugin_official.go` — `officialPlugins` allowlist, `IsOfficialPlugin`
 - `cmd/entire/cli/plugin_store.go` — managed install directory, `PluginBinDir`, `PluginDataDir`, `InstallPluginFromPath`, `ListInstalledPlugins`, `RemoveInstalledPlugin`, `PrependPluginBinDirToPATH`

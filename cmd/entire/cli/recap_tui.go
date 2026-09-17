@@ -261,6 +261,14 @@ func (m recapTUIModel) withViewport() recapTUIModel {
 	return m
 }
 
+// Footer key-hint labels, repeated across the progressively shorter footer
+// variants renderFooter picks between.
+const (
+	recapHintView  = "view"
+	recapHintAgent = "agent"
+	recapHintQuit  = "quit"
+)
+
 func (m recapTUIModel) renderFooter() string {
 	choices := []string{
 		recapFooterLine(m.color, []recapHelpItem{
@@ -268,24 +276,24 @@ func (m recapTUIModel) renderFooter() string {
 			{"w", "week"},
 			{"m", "month"},
 			{"r", "90d"},
-			{"v", "view"},
-			{"a", "agent"},
+			{"v", recapHintView},
+			{"a", recapHintAgent},
 			{"R", "reload"},
-			{"q", "quit"},
+			{"q", recapHintQuit},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
 			{"d/w/m/r", "range"},
-			{"v", "view"},
-			{"a", "agent"},
-			{"q", "quit"},
+			{"v", recapHintView},
+			{"a", recapHintAgent},
+			{"q", recapHintQuit},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
 			{"d/w/m/r", "range"},
-			{"v", "view"},
-			{"q", "quit"},
+			{"v", recapHintView},
+			{"q", recapHintQuit},
 		}),
 		recapFooterLine(m.color, []recapHelpItem{
-			{"q", "quit"},
+			{"q", recapHintQuit},
 		}),
 	}
 	for _, choice := range choices {

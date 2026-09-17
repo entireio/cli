@@ -13,14 +13,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
 
 	"github.com/spf13/cobra"
@@ -181,68 +178,10 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	}
 }
 
-func TestExecuteAgentHookSessionStartSkipsCaptureWhenPolicyUnsupported(t *testing.T) {
-	setupStopTestRepo(t)
-	repoRoot := mustGetwd(t)
-	enableEntire(t, repoRoot)
-
-	repo, err := git.PlainOpen(repoRoot)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = repo.Close() })
-	writeUnsupportedCheckpointPolicyForCLITest(t, repo)
-
-	sessionID := "policy-session-start"
-	payload, err := json.Marshal(map[string]string{
-		"session_id":      sessionID,
-		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
-	})
-	require.NoError(t, err)
-
-	cmd := &cobra.Command{}
-	cmd.SetIn(bytes.NewReader(payload))
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-
-	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
-
-	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
-	_, statErr := os.Stat(hintPath)
-	require.True(t, os.IsNotExist(statErr), "session-start must not claim the session when checkpoint policy is unsupported")
-}
-
-func TestExecuteAgentHookSessionStartSkipsCaptureWhenPolicyUnreadable(t *testing.T) {
-	setupStopTestRepo(t)
-	repoRoot := mustGetwd(t)
-	enableEntire(t, repoRoot)
-
-	repo, err := git.PlainOpen(repoRoot)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = repo.Close() })
-	writeMalformedCheckpointPolicyForCLITest(t, repo)
-
-	sessionID := "policy-unreadable-session-start"
-	payload, err := json.Marshal(map[string]string{
-		"session_id":      sessionID,
-		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
-	})
-	require.NoError(t, err)
-
-	cmd := &cobra.Command{}
-	cmd.SetIn(bytes.NewReader(payload))
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-
-	require.NoError(t, executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameSessionStart, false))
-
-	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
-	_, statErr := os.Stat(hintPath)
-	require.True(t, os.IsNotExist(statErr), "session-start must not claim the session when checkpoint policy is unreadable")
-}
-
 // TestExecuteAgentHookShortCircuitsWhenDisabled is a regression test for #524:
 // a hook must not perform any dispatch/strategy work when Entire is
-// disabled. Asserted via the same "session was never claimed" signal the
-// checkpoint-policy tests above use, rather than a timing assertion.
+// disabled. Asserted via a "session was never claimed" signal rather than a
+// timing assertion.
 func TestExecuteAgentHookShortCircuitsWhenDisabled(t *testing.T) {
 	setupStopTestRepo(t)
 	repoRoot := mustGetwd(t)
@@ -407,176 +346,6 @@ func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
 
 	hintPath := filepath.Join(repoRoot, ".git", session.SessionStateDirName, sessionID+".agent")
 	require.FileExists(t, hintPath, "SessionStart must dispatch and claim the session when Entire is enabled via settings.local.json only")
-}
-
-func TestAgentHookPolicyFailsWhenRepoCannotOpen(t *testing.T) {
-	_, err := agentHookPolicy(context.Background(), filepath.Join(t.TempDir(), "missing"))
-
-	require.ErrorIs(t, err, errUnreadableCheckpointPolicy)
-	require.Contains(t, err.Error(), "failed to open repository")
-}
-
-func TestShouldSkipAgentHookForPolicy(t *testing.T) {
-	t.Parallel()
-
-	require.False(t, shouldSkipAgentHookForPolicy(checkpointpolicy.DefaultPolicy()))
-	require.True(t, shouldSkipAgentHookForPolicy(checkpointpolicy.Policy{
-		CheckpointVersion:    "refs-v2",
-		CheckpointMinVersion: "branch-v1",
-	}))
-}
-
-func TestHookWritesCheckpointData(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name                         string
-		eventType                    agent.EventType
-		claudePostTodoCheckpointHook bool
-		want                         bool
-	}{
-		{name: "session start warns only", eventType: agent.SessionStart},
-		{name: "turn start initializes session", eventType: agent.TurnStart},
-		{name: "turn end writes session checkpoint", eventType: agent.TurnEnd, want: true},
-		{name: "compaction updates state only", eventType: agent.Compaction},
-		{name: "session end updates state", eventType: agent.SessionEnd},
-		{name: "subagent start captures pre-task state", eventType: agent.SubagentStart},
-		{name: "subagent end writes task checkpoint", eventType: agent.SubagentEnd, want: true},
-		{name: "model update stores hint", eventType: agent.ModelUpdate},
-		{name: "tool use records files touched", eventType: agent.ToolUse},
-		{name: "claude post todo writes incremental checkpoint", claudePostTodoCheckpointHook: true, want: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			require.Equal(t, tt.want, hookWritesCheckpointData(tt.eventType, tt.claudePostTodoCheckpointHook))
-		})
-	}
-}
-
-func TestAgentWriteHookLabel(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name                         string
-		eventType                    agent.EventType
-		claudePostTodoCheckpointHook bool
-		want                         string
-	}{
-		{name: "post todo takes priority", claudePostTodoCheckpointHook: true, want: "post-todo"},
-		{name: "subagent end", eventType: agent.SubagentEnd, want: "subagent-end"},
-		{name: "turn end is the default", eventType: agent.TurnEnd, want: "turn-end"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			require.Equal(t, tt.want, agentWriteHookLabel(tt.eventType, tt.claudePostTodoCheckpointHook))
-		})
-	}
-}
-
-func TestExecuteAgentHookTurnStartDispatchesWhenPolicyUnsupported(t *testing.T) {
-	setupStopTestRepo(t)
-	repoRoot := mustGetwd(t)
-	enableEntire(t, repoRoot)
-
-	repo, err := git.PlainOpen(repoRoot)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = repo.Close() })
-	writeUnsupportedCheckpointPolicyForCLITest(t, repo)
-
-	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
-	payload, err := json.Marshal(map[string]string{
-		"session_id":      "policy-turn-start",
-		"transcript_path": transcriptPath,
-		"prompt":          "hello",
-	})
-	require.NoError(t, err)
-
-	var stderr bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetIn(bytes.NewReader(payload))
-	cmd.SetErr(&stderr)
-	cmd.SetContext(context.Background())
-
-	err = executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameUserPromptSubmit, false)
-	require.NoError(t, err)
-	require.NotContains(t, stderr.String(), "Checkpoint capture is disabled for this repository.")
-
-	state, err := strategy.LoadSessionState(context.Background(), "policy-turn-start")
-	require.NoError(t, err)
-	require.NotNil(t, state, "TurnStart must dispatch so InitializeSession can create session state")
-}
-
-func TestExecuteAgentHookTurnStartDispatchesWhenPolicyUnreadable(t *testing.T) {
-	setupStopTestRepo(t)
-	repoRoot := mustGetwd(t)
-	enableEntire(t, repoRoot)
-
-	repo, err := git.PlainOpen(repoRoot)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = repo.Close() })
-	writeMalformedCheckpointPolicyForCLITest(t, repo)
-
-	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600))
-	payload, err := json.Marshal(map[string]string{
-		"session_id":      "policy-unreadable-turn-start",
-		"transcript_path": transcriptPath,
-		"prompt":          "hello",
-	})
-	require.NoError(t, err)
-
-	var stderr bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetIn(bytes.NewReader(payload))
-	cmd.SetErr(&stderr)
-	cmd.SetContext(context.Background())
-
-	err = executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNameUserPromptSubmit, false)
-	require.NoError(t, err)
-	require.NotContains(t, stderr.String(), "Checkpoint capture is disabled for this repository.")
-
-	state, err := strategy.LoadSessionState(context.Background(), "policy-unreadable-turn-start")
-	require.NoError(t, err)
-	require.NotNil(t, state, "TurnStart must dispatch so InitializeSession can create session state")
-}
-
-func TestExecuteAgentHookPostTodoFailsWhenPolicyUnsupported(t *testing.T) {
-	setupStopTestRepo(t)
-	repoRoot := mustGetwd(t)
-	enableEntire(t, repoRoot)
-
-	repo, err := git.PlainOpen(repoRoot)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = repo.Close() })
-	writeUnsupportedCheckpointPolicyForCLITest(t, repo)
-
-	payload, err := json.Marshal(map[string]any{
-		"session_id":      "policy-post-todo",
-		"transcript_path": filepath.Join(repoRoot, "transcript.jsonl"),
-		"tool_name":       "TodoWrite",
-		"tool_use_id":     "tool-1",
-		"tool_input":      map[string]any{"todos": []any{}},
-		"tool_response":   map[string]any{},
-	})
-	require.NoError(t, err)
-
-	var stderr bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetIn(bytes.NewReader(payload))
-	cmd.SetErr(&stderr)
-	cmd.SetContext(context.Background())
-
-	err = executeAgentHook(cmd, agent.AgentNameClaudeCode, claudecode.HookNamePostTodo, false)
-	require.Error(t, err)
-	require.Contains(t, stderr.String(), "Checkpoint capture is disabled for this repository.")
-	require.Contains(t, stderr.String(), "No Entire checkpoints will be created until the CLI is upgraded.")
 }
 
 // TestAgentHooksCmd_AttachesHookSessionContext pins where each agent hook tree

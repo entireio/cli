@@ -135,6 +135,5 @@ type subagentStopRaw struct {
 	HookEventName        string  `json:"hook_event_name"`
 	Model                string  `json:"model"`
 	PermissionMode       string  `json:"permission_mode"`
-	StopHookActive       bool    `json:"stop_hook_active"`
 	TurnID               string  `json:"turn_id"`
 }

@@ -37,15 +37,31 @@ func (t *PromptTTY) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// Close closes the prompt terminal handles.
+// Output returns the terminal output handle. Callers that hand terminal output
+// to a library such as Bubble Tea need the concrete file so it can enable the
+// console's VT processing.
+func (t *PromptTTY) Output() *os.File {
+	return t.out
+}
+
+// Close closes the prompt terminal handles. A read still pending on the input
+// is released first: os.File.Close waits for it, and on Windows a console read
+// only completes on a keypress, so a prompt whose reader loop had already
+// issued its next read (Bubble Tea's, after the answer) would otherwise make
+// the user press a key a second time. See releasePendingReads. A release
+// failure is reported alongside the close, never instead of it: the handles
+// are closed regardless.
 func (t *PromptTTY) Close() error {
+	var errs []error
+	if err := releasePendingReads(t.in); err != nil {
+		errs = append(errs, fmt.Errorf("release prompt terminal input: %w", err))
+	}
 	if t.in == t.out {
 		if err := t.in.Close(); err != nil {
-			return fmt.Errorf("close prompt terminal: %w", err)
+			errs = append(errs, fmt.Errorf("close prompt terminal: %w", err))
 		}
-		return nil
+		return errors.Join(errs...)
 	}
-	var errs []error
 	if err := t.in.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("close prompt terminal input: %w", err))
 	}

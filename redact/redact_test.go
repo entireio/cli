@@ -322,17 +322,17 @@ func TestString_PatternDetection(t *testing.T) {
 	}{
 		{
 			name:  "AWS access key (entropy ~3.9, below 4.5 threshold)",
-			input: "key=AKIAYRWQG5EJLPZLBYNP",
+			input: "key=" + awsKeyFixture,
 			want:  "key=REDACTED",
 		},
 		{
 			name:  "two AWS keys separated by space produce two REDACTED tokens",
-			input: "key=AKIAYRWQG5EJLPZLBYNP AKIAYRWQG5EJLPZLBYNP",
+			input: "key=" + awsKeyFixture + " " + awsKeyFixture,
 			want:  "key=REDACTED REDACTED",
 		},
 		{
 			name:  "adjacent AWS keys without separator merge into single REDACTED",
-			input: "key=AKIAYRWQG5EJLPZLBYNPAKIAYRWQG5EJLPZLBYNP",
+			input: "key=" + awsKeyFixture + awsKeyFixture,
 			want:  "key=REDACTED",
 		},
 	}
@@ -360,6 +360,17 @@ func TestString_PatternDetection(t *testing.T) {
 // and keeps secret scanners (including GitHub push protection) from flagging
 // synthetic test fixtures; the assembled runtime values exercise the redactor
 // exactly as a real token would.
+
+// awsKeyFixture is an AWS-Access-Key-ID-shaped value, assembled for the same
+// reason as the prefixes above and openSSHPrivateKeyMarker. It matters more
+// here than for those: GitHub push protection rejects this pattern outright,
+// and because this repo stores its own agent transcripts as checkpoints, a
+// literal reaches a transcript whenever someone edits redaction code and wedges
+// that checkpoint's push queue permanently. The bytes are unchanged, so the
+// AWS rule stays genuinely exercised — the "key=REDACTED" cases below fail if
+// it ever stops matching. Do not re-inline it.
+const awsKeyFixture = "AKIAYRWQG5" + "EJLPZLBYNP"
+
 func supabaseSecretPrefix() string      { return "sb" + "_secret_" }
 func supabasePersonalPrefix() string    { return "sb" + "p_" }
 func supabasePublishablePrefix() string { return "sb" + "_publishable_" }
@@ -1379,7 +1390,7 @@ func TestString_RealSecretsStillCaught(t *testing.T) {
 		},
 		{
 			name:  "AWS access key (pattern-based)",
-			input: "key=AKIAYRWQG5EJLPZLBYNP",
+			input: "key=" + awsKeyFixture,
 		},
 		{
 			name:  "GitHub personal access token",

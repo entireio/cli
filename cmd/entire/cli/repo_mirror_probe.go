@@ -15,7 +15,7 @@ import (
 )
 
 // gitHubHTTPSRe / gitHubSSHRe / gitHubBareRe parse the GitHub URL shapes
-// `mirror create`/`remove` accept, mirroring the standalone entiredb CLI:
+// `mirror add`/`remove` accept, mirroring the standalone entiredb CLI:
 //
 //	https://github.com/<owner>/<repo>(.git)
 //	git@github.com:<owner>/<repo>(.git)

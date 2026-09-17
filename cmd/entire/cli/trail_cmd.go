@@ -49,7 +49,7 @@ func newTrailCmd() *cobra.Command {
 	var repoOverride string
 
 	cmd := &cobra.Command{
-		Use:    "trail",
+		Use:    cmdTrail,
 		Short:  "Manage trails for your branches",
 		Hidden: true,
 		// Hidden from root help while the surface matures, but advertised to
@@ -470,7 +470,7 @@ func newTrailListCmd() *cobra.Command {
 	var opts trailListOptions
 
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List recent trails",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts.InsecureHTTP = trailInsecureHTTP(cmd)
@@ -2274,7 +2274,7 @@ func resolveTrailBranch(ctx context.Context, branchOverride string) (string, err
 
 // defaultTrailPushRemote is where a trail branch goes when git config declares
 // nothing — git's own fallback for a bare push. Not defaultMirrorRemote, which
-// shares the value but means "the remote `mirror use` repoints".
+// shares the value but means "the remote `remote use` repoints".
 const defaultTrailPushRemote = "origin"
 
 // resolveTrailPushRemote returns the remote a trail's branch is delivered to,

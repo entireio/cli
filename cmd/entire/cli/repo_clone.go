@@ -167,15 +167,19 @@ func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repo
 	if err != nil {
 		return "", err
 	}
+	// The host is server-provided but interpolated into the entire:// clone URL,
+	// so apply the same anti-token-leak guard as the mirror path (see the
+	// validateClusterHost call on the /gh/ branch). Checked before the URL is
+	// built: repoRemoteURL applies the same guard and answers "" for a bad
+	// host, which would otherwise be reported as a repo still provisioning.
+	if host := strings.TrimSpace(repo.ClusterHost.Or("")); host != "" {
+		if err := validateClusterHost(host); err != nil {
+			return "", fmt.Errorf("repo has an invalid cluster host %q: %w", host, err)
+		}
+	}
 	cloneURL := repoRemoteURL(*repo)
 	if cloneURL == "" {
 		return "", fmt.Errorf("repo %s/%s has no clone URL yet (still provisioning?)", project, repoName)
-	}
-	// The host is server-provided but interpolated into the entire:// clone URL,
-	// so apply the same anti-token-leak guard as the mirror path (see the
-	// validateClusterHost call on the /gh/ branch).
-	if err := validateClusterHost(repo.ClusterHost.Or("")); err != nil {
-		return "", fmt.Errorf("repo has an invalid cluster host %q: %w", repo.ClusterHost.Or(""), err)
 	}
 	return cloneURL, nil
 }
@@ -223,27 +227,50 @@ func declaresForge(ref, token string) bool {
 // is never itself a ref that would fail next. Nil unless ref is exactly two
 // slash-separated segments.
 //
+// forges narrows the grammars considered to those the calling command serves;
+// empty means both, which is `repo clone`. A command that serves one forge must
+// name it, or it suggests a ref it refuses on the next line — the mirror verbs
+// are GitHub-only, and that is exactly how this contract was first broken.
+//
 // This is the input the removed `<project>/<repo>` shorthand used to take
 // (#2252), so it is what arrives from habit, and both forges take that shape.
 // Naming both candidates is the honest answer: the ambiguity is precisely why
 // the shorthand went, so guessing one would reintroduce it, and printing the
 // whole grammar makes the reader do the substitution themselves. Re-running the
 // parsers rather than re-deriving their charsets is what keeps the two in step.
-func bareRefSuggestions(ref string) []string {
+func bareRefSuggestions(ref string, forges ...string) []string {
 	trimmed := trimRefPrefix(ref)
 	if strings.Count(trimmed, "/") != 1 {
 		return nil
 	}
 	var out []string
 	native := "/" + nativeCloneForge + "/" + trimmed
-	if _, _, err := parseNativeCloneRef(native); err == nil {
-		out = append(out, native)
+	if suggestsForge(forges, nativeCloneForge) {
+		if _, _, err := parseNativeCloneRef(native); err == nil {
+			out = append(out, native)
+		}
 	}
 	mirror := "/" + mirrorCloneForge + "/" + trimmed
-	if _, _, _, err := parseMirrorCloneRef(mirror); err == nil {
-		out = append(out, mirror)
+	if suggestsForge(forges, mirrorCloneForge) {
+		if _, _, _, err := parseMirrorCloneRef(mirror); err == nil {
+			out = append(out, mirror)
+		}
 	}
 	return out
+}
+
+// suggestsForge reports whether a caller that named forges wants this one. No
+// forges named means every grammar, so the common caller says nothing.
+func suggestsForge(forges []string, forge string) bool {
+	if len(forges) == 0 {
+		return true
+	}
+	for _, f := range forges {
+		if f == forge {
+			return true
+		}
+	}
+	return false
 }
 
 // cloneRefShapes lists every ref shape `repo clone` accepts, for error text.
@@ -393,7 +420,7 @@ func newRepoCloneCmd() *cobra.Command {
 			// different context is active failed with "not mirrored on ..."). Dial
 			// the core fronting that cluster — discovered from its well-known and
 			// authenticated with the matching local context, the same path
-			// `mirror create <url> [cluster]` uses — so the lookup resolves against
+			// `mirror add <repo> --cluster <host>` uses — so the lookup resolves against
 			// the right federation. With no --cluster, list from the active context.
 			runWithCore := runCore
 			if cluster != "" {
@@ -409,7 +436,7 @@ func newRepoCloneCmd() *cobra.Command {
 			}
 
 			if len(placements) == 0 {
-				return fmt.Errorf("no mirror found for /gh/%s/%s; run 'entire repo mirror create github.com/%s/%s' to onboard it", owner, repo, owner, repo)
+				return fmt.Errorf("no mirror found for /gh/%s/%s; run 'entire repo mirror add /gh/%s/%s' to onboard it", owner, repo, owner, repo)
 			}
 
 			chosen, err := selectCloneTarget(cmd, placements, cluster)

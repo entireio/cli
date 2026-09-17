@@ -29,7 +29,7 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 	progress agent.ProgressFn,
 ) (string, error) {
 	if model == "" {
-		model = "haiku"
+		model = modelHaiku
 	}
 
 	commandRunner := c.CommandRunner

@@ -140,8 +140,8 @@ func FileBackendPath() string {
 //
 // The config-directory case is checked here rather than being left to the root
 // that opens it, because there is no such root: fileStore.dir anchors on
-// filepath.Dir of this path (one of the two places CLAUDE.md permits that, since
-// PathEnvVar names a file the caller chose) and reaches it through
+// filepath.Dir of this path (an exception in docs/development/filesystem-safety.md,
+// since PathEnvVar names a file the caller chose) and reaches it through
 // filepath.Abs. That Abs is exactly the laundering the contexts and discovery
 // roots stopped doing. Without a check here, ENTIRE_CONFIG_DIR=foo silently put
 // bearer tokens at ./foo/tokens.json, which for a CLI run from a repository

@@ -831,9 +831,9 @@ func printTrailResumeSkippedSessions(w io.Writer, skipped int) {
 	if skipped == 0 {
 		return
 	}
-	label := "session"
+	label := nounSession
 	if skipped != 1 {
-		label = "sessions"
+		label = nounSessions
 	}
 	fmt.Fprintf(w, "    skipped %d checkpoint %s due to read errors\n", skipped, label)
 }
@@ -1000,7 +1000,7 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 func trailRestoredSessionKindLabel(kind string) string {
 	switch sessionpkg.Kind(kind) {
 	case sessionpkg.KindAgentReview:
-		return "review"
+		return sessionKindLabelReview
 	case sessionpkg.KindAgentInvestigate:
 		return "investigation"
 	case sessionpkg.KindImported:

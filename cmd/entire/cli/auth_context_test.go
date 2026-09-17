@@ -324,7 +324,7 @@ func setupContextsForUse(t *testing.T, hosts ...string) []string {
 	return names
 }
 
-// TestSelectContextToUse_NoContexts pins that a bare `entire auth use` with
+// TestSelectContextToUse_NoContexts pins that a bare `entire auth switch` with
 // nothing saved points at login instead of erroring or opening an empty picker.
 func TestSelectContextToUse_NoContexts(t *testing.T) {
 	setupContextsForUse(t)
@@ -348,7 +348,7 @@ func TestSelectContextToUse_NoContexts(t *testing.T) {
 
 // TestSelectContextToUse_SingleContextNeedsNoPicker pins that one saved login
 // resolves directly — a one-row picker asks a question with one answer, and this
-// is the branch that keeps a bare `auth use` working with no terminal.
+// is the branch that keeps a bare `auth switch` working with no terminal.
 func TestSelectContextToUse_SingleContextNeedsNoPicker(t *testing.T) {
 	names := setupContextsForUse(t, "core-a.example.com")
 
@@ -385,8 +385,8 @@ func TestSelectContextToUse_NoTerminalNamesThePositional(t *testing.T) {
 		t.Fatalf("selected %q, want an error when the picker can't render", got)
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "entire auth use") {
-		t.Fatalf("error = %q, want it to name `entire auth use`", msg)
+	if !strings.Contains(msg, "entire auth switch") {
+		t.Fatalf("error = %q, want it to name `entire auth switch`", msg)
 	}
 	for _, name := range names {
 		if !strings.Contains(msg, name) {
@@ -490,7 +490,7 @@ func TestContextPickerTable_ColumnsAlign(t *testing.T) {
 }
 
 // TestContextTableMatchesPicker pins what one builder buys: `entire auth
-// contexts` and the `entire auth use` picker print the same table, down to the
+// contexts` and the `entire auth switch` picker print the same table, down to the
 // column widths and the trailing "(active)". A column added to one cannot go
 // missing from the other, and the marker cannot drift back to two spellings.
 // The picker's rows are indented by huh's cursor gutter; nothing else differs.
@@ -542,13 +542,13 @@ func columnOffsets(line string) []int {
 	return offsets
 }
 
-// TestAuthUseCmd_ArgsAndSwitch pins the command surface: a name still switches
-// without asking, and the argument is now optional so a bare `entire auth use`
+// TestAuthSwitchCmd_ArgsAndSwitch pins the command surface: a name switches
+// without asking, and the argument is optional so a bare `entire auth switch`
 // reaches the picker instead of failing argument validation.
-func TestAuthUseCmd_ArgsAndSwitch(t *testing.T) {
+func TestAuthSwitchCmd_ArgsAndSwitch(t *testing.T) {
 	names := setupContextsForUse(t, "core-a.example.com", "core-b.example.com")
 
-	cmd := newAuthUseCmd()
+	cmd := newAuthSwitchCmd()
 	if err := cmd.Args(cmd, nil); err != nil {
 		t.Fatalf("Args(no args) = %v, want the picker form to be accepted", err)
 	}
@@ -561,7 +561,7 @@ func TestAuthUseCmd_ArgsAndSwitch(t *testing.T) {
 	cmd.SetErr(&out)
 	cmd.SetArgs([]string{names[1]})
 	if err := cmd.ExecuteContext(t.Context()); err != nil {
-		t.Fatalf("auth use %s: %v", names[1], err)
+		t.Fatalf("auth switch %s: %v", names[1], err)
 	}
 	if !strings.Contains(out.String(), names[1]) {
 		t.Fatalf("output = %q, want confirmation naming %q", out.String(), names[1])

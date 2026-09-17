@@ -35,6 +35,7 @@ var rootOpeners = []string{".OpenRoot(", "osroot.Shared("}
 // (entiredir, gitdir, worktreedir, userdirs, agent.SessionStore) over a new
 // root; those exist so a call site does not have to decide what its base is.
 var allowedRootBases = map[string]string{
+	"cmd/entire/cli/agent/codex/codex.go": "configured Codex session and archive roots, resolved independently of hook-supplied transcript paths",
 	// The anchors themselves. Each opens exactly one directory, resolved
 	// independently of anything it is later asked to read.
 	"cmd/entire/cli/osroot/osroot.go":            "the registry",
@@ -117,7 +118,7 @@ func TestRootBasesAreTrusted(t *testing.T) {
 				"path that arrived as data. Prefer an existing anchor (entiredir, "+
 				"gitdir, worktreedir, userdirs, agent.SessionStore); if this really "+
 				"needs its own root, add it to allowedRootBases with the reason its "+
-				"base is trusted. See \"The Root Anchors\" in CLAUDE.md.", file, line)
+				"base is trusted. See docs/development/filesystem-safety.md#the-root-anchors.", file, line)
 		}
 	}
 

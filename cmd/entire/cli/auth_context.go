@@ -12,19 +12,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newAuthUseCmd switches the active login context, by name or by picking one
+// newAuthSwitchCmd switches the active login context, by name or by picking one
 // from the saved contexts.
 //
 // The active context is the preferred identity for both `git clone entire://…`
 // (it authenticates any cluster fronted by its login server) and the
-// control-plane commands (auth status, org/project/repo/grant), which dial the
+// control-plane commands (auth status, org/project/repo), which dial the
 // context's core. Switching takes effect on the next operation; resolution
 // recomputes every time. Activity/search/dispatch take their host from
 // ENTIRE_API_BASE_URL; trail commands route to the repository's owning cell.
 // All use the active identity.
-func newAuthUseCmd() *cobra.Command {
+func newAuthSwitchCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "use [context]",
+		Use:   "switch [context]",
 		Short: "Switch the active login context",
 		Long: "Switch the active login context.\n\n" +
 			"With no argument this lists the saved contexts and asks which to switch\n" +
@@ -32,7 +32,7 @@ func newAuthUseCmd() *cobra.Command {
 			"a time.\n\n" +
 			"The active context is the identity for every authenticated operation:\n" +
 			"`git clone entire://…`, the control-plane commands (auth status,\n" +
-			"org/project/repo/grant), and the data-API commands (activity, search,\n" +
+			"org/project/repo), and the data-API commands (activity, search,\n" +
 			"trail, dispatch). The switch takes effect on the next operation.\n\n" +
 			"This is persistent and machine-wide — it changes the identity for every\n" +
 			"shell, worktree, and background git hook until you switch back. To act as\n" +
@@ -105,7 +105,7 @@ func selectContextToUse(cmd *cobra.Command) (string, error) {
 	}
 
 	if !interactive.CanPromptInteractively() {
-		return "", fmt.Errorf("%d login contexts saved; name one, e.g. `entire auth use %s` (list them with `entire auth contexts`): %s",
+		return "", fmt.Errorf("%d login contexts saved; name one, e.g. `entire auth switch %s` (list them with `entire auth contexts`): %s",
 			len(named), named[0].Name, strings.Join(contextNames(named), ", "))
 	}
 
@@ -237,7 +237,7 @@ const activeContextMarker = "(active)"
 // context in use, and returns the header line followed by one line per
 // context.
 //
-// One function because `entire auth contexts` and the `entire auth use` picker
+// One function because `entire auth contexts` and the `entire auth switch` picker
 // print the same table; they differ only in styling, and sty carries that. An
 // unset authTableStyles renders every cell plain, which is what the picker
 // passes.

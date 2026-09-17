@@ -256,27 +256,6 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 	assert.ElementsMatch(t, refs, remaining, "disabled push leaves refs queued")
 }
 
-func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
-	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
-	t.Chdir(workDir)
-	paths.ClearWorktreeRootCache()
-
-	repo, err := git.PlainOpen(workDir)
-	require.NoError(t, err)
-	writeUnsupportedCheckpointPolicy(t, repo)
-	queue := enqueueRefs(t, repo, refs)
-
-	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
-	require.ErrorContains(t, err, "checkpoint policy")
-	assert.Equal(t, 0, pushed)
-
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.ElementsMatch(t, refs, remaining, "blocked push leaves refs queued")
-
-	assertRefsAbsentFromRemote(t, bareDir, refs, "blocked push must not reach the remote")
-}
-
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
 	workDir, _, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)

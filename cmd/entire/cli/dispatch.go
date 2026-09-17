@@ -147,7 +147,7 @@ func runDispatchCommand(ctx context.Context, outW io.Writer, opts dispatchpkg.Op
 }
 
 func isTerminalStdin(file *os.File) bool {
-	return term.IsTerminal(int(file.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+	return term.IsTerminal(int(file.Fd()))
 }
 
 func shouldRunDispatchWizard(flagCount int, stdinIsTerminal bool, stdoutIsTerminal bool) bool {

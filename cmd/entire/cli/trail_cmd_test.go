@@ -2297,7 +2297,7 @@ func TestTrailUpdateRequestCountsEveryFieldAsMetadata(t *testing.T) {
 			// Fail rather than skip: a skipped subtest passes quietly, so a
 			// non-pointer field would silently retire the guarantee this test
 			// exists to provide, exactly when it starts mattering.
-			require.Equalf(t, reflect.Ptr, field.Type.Kind(),
+			require.Equalf(t, reflect.Pointer, field.Type.Kind(),
 				"field %s is not a pointer; decide its zero/set semantics and extend this test before adding it", field.Name)
 			var req api.TrailUpdateRequest
 			// A pointer to the zero value is still "provided" — that is how a

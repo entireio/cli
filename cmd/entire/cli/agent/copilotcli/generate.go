@@ -7,6 +7,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+// flagDenyTool withholds one built-in tool from the generation run; Entire's
+// summaries need no tools at all, so every one it knows about is denied.
+const flagDenyTool = "--deny-tool"
+
 // generateTextArgs is the pinned tool policy for text generation.
 //
 // Summary generation is a text-in text-out call, and its prompt carries
@@ -48,9 +52,9 @@ import (
 // TestGenerateText_PinsMinimalToolSurface pins the argv so a future flag
 // change is a reviewed decision rather than a drive-by edit.
 var generateTextArgs = []string{
-	"--deny-tool", "shell",
-	"--deny-tool", "write",
-	"--deny-tool", "url",
+	flagDenyTool, "shell",
+	flagDenyTool, "write",
+	flagDenyTool, "url",
 	"--no-ask-user",
 	"--no-custom-instructions",
 	"--disable-builtin-mcps",

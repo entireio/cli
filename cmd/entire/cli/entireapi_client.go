@@ -31,9 +31,15 @@ const currentRepoRefTimeout = 5 * time.Second
 // This keeps the migration transparent and non-regressive; non-obvious
 // fallbacks are logged for diagnosis. Both backends expose the same /me/* paths,
 // so fn is agnostic to which client it receives.
+//
+// The fallback is taken only while the data API can act as the same login
+// (auth.DataAPIServesSelectedLogin); otherwise the cell error is reported.
 func runAuthenticatedActivityAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, fn func(context.Context, *api.Client) error) error {
 	client, err := auth.NewEntireAPICellClient(ctx, insecureHTTP, nil)
 	if err != nil {
+		if !auth.DataAPIServesSelectedLogin() {
+			return renderDataAPIAuthError(ctx, errW, "", err)
+		}
 		logCellClientFallback(ctx, err)
 		return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, fn)
 	}

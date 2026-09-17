@@ -331,6 +331,9 @@ type State struct {
 	// cumulative total on every checkpoint.
 	SubagentTokensBaseline *agent.TokenUsage `json:"subagent_tokens_baseline,omitempty"`
 
+	// SubagentTokensBaselineComplete records whether the baseline is exact.
+	SubagentTokensBaselineComplete *bool `json:"subagent_tokens_baseline_complete,omitempty"`
+
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
 	// without mutating the raw agent transcript.
@@ -423,6 +426,22 @@ type State struct {
 	// TaskRecords tracks subagents dispatched by this session — the durable
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
+
+	// SubagentInventory retains Codex child identities independently of task
+	// records so follow-up turns remain discoverable after materialization.
+	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
+	// SubagentLedgerVersion advances on a new child identity or non-empty turn.
+	SubagentLedgerVersion uint64 `json:"subagent_ledger_version,omitempty"`
+	// SubagentInventoryComplete distinguishes exact empty from legacy unknown.
+	SubagentInventoryComplete *bool `json:"subagent_inventory_complete,omitempty"`
+}
+
+type SubagentInventoryEntry struct {
+	AgentID                string   `json:"agent_id"`
+	DeclaredTranscriptPath string   `json:"declared_transcript_path,omitempty"`
+	ResolvedTranscriptPath string   `json:"resolved_transcript_path,omitempty"`
+	ObservedTurnIDs        []string `json:"observed_turn_ids,omitempty"`
+	FinalizedTurnIDs       []string `json:"finalized_turn_ids,omitempty"`
 }
 
 // TaskRecord is the durable pointer ledger entry for a subagent dispatched by
@@ -504,6 +523,128 @@ func (s *State) AddTaskRecord(task TaskRecord) {
 		}
 	}
 	s.TaskRecords = append(s.TaskRecords, task)
+}
+
+// EnsureTaskRecord adds a follow-up record only after an earlier completed
+// record was materialized and removed. Existing unmaterialized content wins,
+// but missing launch metadata is enriched for stop-before-start delivery.
+func (s *State) EnsureTaskRecord(task TaskRecord) bool {
+	if task.ToolUseID == "" {
+		return false
+	}
+	if existing := s.FindTaskRecord(task.ToolUseID); existing != nil {
+		if existing.AgentID == "" {
+			existing.AgentID = task.AgentID
+		}
+		if existing.StartedAt.IsZero() {
+			existing.StartedAt = task.StartedAt
+		}
+		if existing.SubagentType == "" {
+			existing.SubagentType = task.SubagentType
+		}
+		if existing.TaskDescription == "" {
+			existing.TaskDescription = task.TaskDescription
+		}
+		if existing.DeclaredTranscriptPath == "" {
+			existing.DeclaredTranscriptPath = task.DeclaredTranscriptPath
+		}
+		return false
+	}
+	s.AddTaskRecord(task)
+	return true
+}
+
+// FindSubagentInventory returns an entry that aliases state. Callers must use
+// it only inside their current MutateSessionState closure.
+func (s *State) FindSubagentInventory(agentID string) *SubagentInventoryEntry {
+	for i := range s.SubagentInventory {
+		if s.SubagentInventory[i].AgentID == agentID {
+			return &s.SubagentInventory[i]
+		}
+	}
+	return nil
+}
+
+// RegisterSubagent observes a stable child identity and optionally one child
+// turn. Only a first child or first non-empty turn invalidates cached totals.
+func (s *State) RegisterSubagent(agentID, turnID string) bool {
+	if agentID == "" {
+		return false
+	}
+	entry := s.FindSubagentInventory(agentID)
+	newObservation := false
+	if entry == nil {
+		s.SubagentInventory = append(s.SubagentInventory, SubagentInventoryEntry{AgentID: agentID})
+		entry = &s.SubagentInventory[len(s.SubagentInventory)-1]
+		newObservation = true
+	}
+	if turnID != "" && !containsString(entry.ObservedTurnIDs, turnID) {
+		entry.ObservedTurnIDs = append(entry.ObservedTurnIDs, turnID)
+		newObservation = true
+	}
+	if newObservation {
+		s.invalidateSubagentTokenUsage()
+	}
+	return newObservation
+}
+
+// RecordSubagentStop records a provisional stop. Stops can arrive before
+// starts, so the same mutation also preserves a pending task record. A late
+// start enriches that placeholder through EnsureTaskRecord.
+func (s *State) RecordSubagentStop(agentID, turnID string) bool {
+	newObservation := s.RegisterSubagent(agentID, turnID)
+	if newObservation {
+		s.EnsureTaskRecord(TaskRecord{ToolUseID: agentID, AgentID: agentID})
+	}
+	return newObservation
+}
+
+// UpdateSubagentTranscriptPaths enriches an already-observed child's path
+// metadata. Resolution is not an inventory observation, so it deliberately
+// does not advance SubagentLedgerVersion or invalidate token coverage.
+func (s *State) UpdateSubagentTranscriptPaths(agentID, declaredPath, resolvedPath string) bool {
+	entry := s.FindSubagentInventory(agentID)
+	if entry == nil {
+		return false
+	}
+	changed := false
+	if declaredPath != "" && entry.DeclaredTranscriptPath != declaredPath {
+		entry.DeclaredTranscriptPath = declaredPath
+		changed = true
+	}
+	if resolvedPath != "" && entry.ResolvedTranscriptPath != resolvedPath {
+		entry.ResolvedTranscriptPath = resolvedPath
+		changed = true
+	}
+	return changed
+}
+
+// FinalizeSubagentTurn marks an observed turn finalized exactly once.
+func (s *State) FinalizeSubagentTurn(agentID, turnID string) bool {
+	if agentID == "" || turnID == "" {
+		return false
+	}
+	entry := s.FindSubagentInventory(agentID)
+	if entry == nil || !containsString(entry.ObservedTurnIDs, turnID) || containsString(entry.FinalizedTurnIDs, turnID) {
+		return false
+	}
+	entry.FinalizedTurnIDs = append(entry.FinalizedTurnIDs, turnID)
+	return true
+}
+
+func (s *State) invalidateSubagentTokenUsage() {
+	s.SubagentLedgerVersion++
+	s.TokenUsage = types.WithClearedSubagentTokens(s.TokenUsage, false)
+	s.CheckpointTokenUsage = types.WithClearedSubagentTokens(s.CheckpointTokenUsage, false)
+}
+
+func containsString(values []string, value string) bool {
+	for _, existing := range values {
+		if existing == value {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveTaskRecord clears the record for toolUseID, if present. No-op when no
@@ -661,6 +802,27 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	if s.DivergenceNoticeShown && s.AttributionBaseCommit == s.BaseCommit {
 		s.DivergenceNoticeShown = false
 	}
+
+	// Codex states saved before the authoritative child ledger cannot claim an
+	// exact child aggregate. Keep any exact task-record IDs as discovery hints,
+	// but make their coverage conservative and invalidate old totals.
+	if s.AgentType == agent.AgentTypeCodex {
+		if s.SubagentInventoryComplete == nil {
+			incomplete := false
+			s.SubagentInventoryComplete = &incomplete
+			for _, record := range s.TaskRecords {
+				if record.AgentID != "" && s.FindSubagentInventory(record.AgentID) == nil {
+					s.SubagentInventory = append(s.SubagentInventory, SubagentInventoryEntry{AgentID: record.AgentID})
+				}
+			}
+			s.TokenUsage = types.WithClearedSubagentTokens(s.TokenUsage, false)
+			s.CheckpointTokenUsage = types.WithClearedSubagentTokens(s.CheckpointTokenUsage, false)
+		}
+		if s.SubagentTokensBaselineComplete == nil {
+			incomplete := false
+			s.SubagentTokensBaselineComplete = &incomplete
+		}
+	}
 }
 
 // ClearLegacyTranscriptOffsets clears deprecated transcript offset fields so
@@ -714,9 +876,22 @@ func (s *State) ClearCondensationAttempt() {
 // helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
 // opens a fresh target-local window. Sharing this here keeps the two in step.
 func (s *State) RebaselineSubagentTokens() {
-	if s.TokenUsage != nil {
-		s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
+	// Legacy agents without a snapshot retain their existing window baseline.
+	if s.TokenUsage == nil && s.AgentType != agent.AgentTypeCodex {
+		return
 	}
+	if s.TokenUsage == nil || (s.TokenUsage.SubagentTokensComplete != nil && !*s.TokenUsage.SubagentTokensComplete) {
+		incomplete := false
+		s.SubagentTokensBaseline = nil
+		s.SubagentTokensBaselineComplete = &incomplete
+		return
+	}
+	// A nil marker retains the historic behaviour: the implicit initial
+	// baseline is exact zero. An explicit complete marker can intentionally
+	// snapshot a nil aggregate for an authoritative empty inventory.
+	complete := true
+	s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
+	s.SubagentTokensBaselineComplete = &complete
 }
 
 // RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
@@ -955,6 +1130,13 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
+	return s.load(ctx, sessionID, true)
+}
+
+// load reads one session. When deleteStale is false the record is returned
+// as-is instead of being cleaned up, so a passive caller can report what
+// exists without observation changing it.
+func (s *StateStore) load(ctx context.Context, sessionID string, deleteStale bool) (*State, error) {
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)
@@ -985,6 +1167,9 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	state.NormalizeAfterLoad(ctx)
 
 	if state.IsStale() {
+		if !deleteStale {
+			return &state, nil
+		}
 		logCtx := logging.WithComponent(ctx, "session")
 		logging.Debug(logCtx, "deleting stale session state",
 			slog.String("session_id", sessionID),
@@ -1088,8 +1273,22 @@ func (s *StateStore) RemoveAll() error {
 	return nil
 }
 
-// List returns all session states.
+// List returns all session states, deleting any that have gone stale.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, true)
+}
+
+// ListReadOnly returns every persisted session without deleting or hiding
+// stale records.
+//
+// `entire status` is the caller this exists for: asking what is happening must
+// not change what is happening. Cleanup stays with the callers that own it —
+// doctor and the session sweeper — which keep using List.
+func (s *StateStore) ListReadOnly(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, false)
+}
+
+func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, error) {
 	root, err := s.dirRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
@@ -1112,7 +1311,7 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
-		state, err := s.Load(ctx, sessionID)
+		state, err := s.load(ctx, sessionID, deleteStale)
 		if err != nil {
 			continue // Skip corrupted state files
 		}
