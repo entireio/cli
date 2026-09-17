@@ -343,7 +343,7 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `entire login`   | Log in to Entire (browser by default; `--device` for the device-code flow)            |
 | `entire logout`  | Log out of Entire                                                                    |
-| `entire auth`    | Manage authentication (`status`, `contexts`, `use`, `token`, `login`, `logout`)       |
+| `entire auth`    | Manage authentication (`status`, `contexts`, `switch`, `token`, `login`, `logout`)       |
 
 ### Control Plane
 
@@ -352,7 +352,7 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | `entire cluster` | Show the Entire clusters you can place projects and repos on (`list`)              |
 | `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`, `grant`)           |
 | `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`, `grant`)                |
-| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`, `protection`, `grant`) |
+| `entire repo`    | Manage Entire repositories (`create`, `list`, `view`, `edit`, `delete`, `clone`, `mirror`, `remote`, `access`, `visibility`, `protection`, `grant`) |
 | `entire api`     | Make an authenticated request to an Entire API and print the response              |
 
 ### Other

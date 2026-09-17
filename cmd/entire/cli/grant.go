@@ -58,7 +58,7 @@ func newGrantSubtreeCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Short: "Manage " + t.noun + " access",
 	}
 	cmd.AddCommand(newGrantAddCmd(t), newGrantListCmd(t), newGrantRemoveCmd(t))
-	return cmd
+	return requireSubcommand(cmd)
 }
 
 func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {

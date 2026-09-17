@@ -36,7 +36,7 @@ func TestRepoGetAuthoritativeSnapshot(t *testing.T) {
 			}))
 			defer srv.Close()
 			for _, args := range [][]string{{testDeleteULID}, {testDeleteULID, "--json"}} {
-				out, _, err := runCoreCmd(t, newRepoGetCmd, srv.URL, append(args, "--authoritative")...)
+				out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, append(args, "--authoritative")...)
 				require.NoError(t, err)
 				require.Contains(t, out, "max retries exhausted")
 				if len(args) > 1 {
@@ -188,7 +188,7 @@ func TestRepoCreateReadinessResults(t *testing.T) {
 				if tc.wantErr {
 					require.Error(t, err)
 					require.Contains(t, stderr, "creation succeeded")
-					require.Contains(t, stderr, "repo get "+testDeleteULID)
+					require.Contains(t, stderr, "repo view "+testDeleteULID)
 					require.Contains(t, stderr, "support")
 					require.Contains(t, stderr, "--authoritative")
 					if tc.pollStatus == 422 {
@@ -487,13 +487,17 @@ func TestRepoCreateMirrorReadinessFlags(t *testing.T) {
 	for _, value := range []string{"-1s", "oops"} {
 		t.Run(value, func(t *testing.T) {
 			t.Parallel()
-			for _, constructor := range []func() *cobra.Command{newRepoCreateCmd, newRepoMirrorCreateCmd} {
+			for _, constructor := range []func() *cobra.Command{newRepoCreateCmd, newRepoMirrorAddCmd} {
 				cmd := constructor()
 				cmd.RunE = func(*cobra.Command, []string) error { t.Error("invalid timeout reached RunE"); return nil }
 				var out bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&out)
-				args := []string{"foo", "--wait-timeout=" + value}
+				timeoutFlag := "--timeout="
+				if cmd.Flags().Lookup("wait-timeout") != nil {
+					timeoutFlag = "--wait-timeout="
+				}
+				args := []string{"foo", timeoutFlag + value}
 				if cmd.Flags().Lookup("project") != nil {
 					args = append(args, "--project", testProjectULID)
 				}
@@ -506,7 +510,7 @@ func TestRepoCreateMirrorReadinessFlags(t *testing.T) {
 }
 
 // Not parallel: runCoreCmd replaces the shared client constructor.
-func TestRepoGetAuthoritativeFlag(t *testing.T) {
+func TestRepoViewAuthoritativeFlag(t *testing.T) {
 	// hint marks the failures a plain read could still answer. Every other
 	// status is a statement about the repository, so retrying without the
 	// readiness check changes nothing and the hint must stay away.
@@ -550,7 +554,7 @@ func TestRepoGetAuthoritativeFlag(t *testing.T) {
 			if tc.flag != "" {
 				args = append(args, tc.flag)
 			}
-			_, stderr, err := runCoreCmd(t, newRepoGetCmd, srv.URL, args...)
+			_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, args...)
 			if tc.status != 0 {
 				require.Error(t, err)
 				var silent *SilentError
@@ -560,7 +564,7 @@ func TestRepoGetAuthoritativeFlag(t *testing.T) {
 				// The server's own message reaches the user either way.
 				require.Contains(t, stderr, "repository read failed")
 				if tc.hint {
-					require.Contains(t, stderr, "entire repo get "+testDeleteULID+" to inspect")
+					require.Contains(t, stderr, "entire repo view "+testDeleteULID+" to inspect")
 					require.Contains(t, stderr, "without a readiness check")
 				} else {
 					require.NotContains(t, stderr, "readiness check")
@@ -686,10 +690,10 @@ func TestAwaitRepoActiveRetainsOnlyCreationCoordinates(t *testing.T) {
 
 func TestRepoMirrorZeroTimeout(t *testing.T) {
 	t.Parallel()
-	cmd := newRepoMirrorCreateCmd()
+	cmd := newRepoMirrorAddCmd()
 	called := false
 	cmd.RunE = func(*cobra.Command, []string) error { called = true; return nil }
-	cmd.SetArgs([]string{"foo", "--wait-timeout=0"})
+	cmd.SetArgs([]string{"foo", "--timeout=0"})
 	require.NoError(t, cmd.ExecuteContext(t.Context()))
 	require.True(t, called)
 }

@@ -14,7 +14,7 @@ import (
 //
 // The old design registered --json persistently on each group root, so it was
 // inherited by every subcommand — including side-effect verbs (delete, clone,
-// mirror create/remove, grant remove) that ignored it, silently accepting a
+// mirror add/remove, grant remove) that ignored it, silently accepting a
 // no-op flag. Now the flag exists exactly on the commands that honor it, so the
 // non-honoring commands reject --json with "unknown flag" and their help never
 // advertises it.
@@ -36,20 +36,20 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		// repo
 		"repo create":        true,
 		"repo list":          true,
-		"repo get":           true,
+		"repo view":          true,
+		"repo edit":          true,
 		"repo delete":        false,
 		"repo clone":         false,
-		"repo mirror create": false,
+		"repo mirror add":    false,
 		"repo mirror list":   true,
 		"repo mirror get":    true,
 		"repo mirror remove": false,
-		// `use` writes local git config and reports what it changed; there is no
-		// object to render, so it stays off the --json surface like the other
-		// side-effect verbs.
-		"repo mirror use":                false,
-		"repo mirror collaborators list": true,
-		"repo visibility get":            true,
-		"repo visibility set":            true,
+		// `remote use` writes local git config and reports what it changed;
+		// there is no object to render, so it stays off the --json surface like
+		// the other side-effect verbs.
+		"repo remote use":     false,
+		"repo access list":    true,
+		"repo visibility get": true,
 		// add/remove print the resulting rule list, so they render JSON too.
 		"repo protection list":   true,
 		"repo protection add":    true,

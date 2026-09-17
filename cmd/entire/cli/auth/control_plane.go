@@ -38,7 +38,7 @@ type ControlPlaneTarget struct {
 // ResolveControlPlaneTarget chooses which core the control-plane commands talk
 // to and how their bearer is obtained. The control-plane host *is* a core, so
 // there is no /.well-known discovery here — the active context names the core,
-// which is what makes `entire auth use <ctx>` retarget the control plane onto
+// which is what makes `entire auth switch <ctx>` retarget the control plane onto
 // that login server. The bearer is a per-context refreshing provider (silent
 // JWT re-mint from the stored refresh token).
 //
@@ -62,7 +62,7 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 
 // ResolveControlPlaneTargetForCluster chooses which core a *resource-provider*
 // control-plane command should dial — one whose subject is a mirror on a
-// specific cluster (mirror create/remove, mirror collaborators list)
+// specific cluster (mirror add/remove, access list)
 // rather than the caller's own account.
 //
 // Unlike ResolveControlPlaneTarget, the core is NOT taken from the active
@@ -76,7 +76,7 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 //
 // When the active context isn't trusted by the cluster the discovery resolver
 // says so and names the saved logins that are (or, when none is, the cluster's
-// cores), so the user switches with `entire auth use` or logs in to the right
+// cores), so the user switches with `entire auth switch` or logs in to the right
 // federation rather than seeing an opaque "unknown cluster_host" 400.
 func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string) (ControlPlaneTarget, error) {
 	if clusterHost == "" {

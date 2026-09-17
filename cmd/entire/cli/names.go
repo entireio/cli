@@ -8,6 +8,7 @@ const (
 	cmdCheckpoint = "checkpoint"
 	cmdCreateName = "create <name>"
 	cmdList       = "list"
+	cmdListRepo   = "list <repo>"
 	cmdGrant      = "grant"
 	cmdOrg        = "org"
 	cmdRepo       = "repo"

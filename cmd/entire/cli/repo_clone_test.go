@@ -216,7 +216,7 @@ func TestCloneRefAlwaysRequiresItsForgePrefix(t *testing.T) {
 	})
 
 	// `repo clone` is no longer the only command parsing a forge-prefixed ref:
-	// resolveRepoRef took the native grammar for `repo get`, `repo delete`, and
+	// resolveRepoRef took the native grammar for `repo view`, `repo delete`, and
 	// the visibility and protection subtrees (COR-1632); `repo grant` parses
 	// the path with parseNativeCloneRef first (resolveRepoPath), so the guard
 	// covers it by construction. The guard follows the requirement rather than the command, so

@@ -237,7 +237,7 @@ func contextUnreachableError(c *contexts.Context, coreURL string, err error) err
 		return nil
 	}
 	return fmt.Errorf(
-		"cannot reach the login server for %q (%s): %w; run `entire login` to sign in again, or `entire auth use <context>` to switch to another login",
+		"cannot reach the login server for %q (%s): %w; run `entire login` to sign in again, or `entire auth switch <context>` to switch to another login",
 		c.Name, coreURL, urlErr.Err,
 	)
 }

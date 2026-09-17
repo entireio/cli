@@ -379,7 +379,7 @@ func noProjectNamedErr(name string) error {
 }
 
 func noRepoNamedErr(name string) error {
-	return &namedRefNotFoundError{message: fmt.Sprintf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", name)}
+	return &namedRefNotFoundError{message: fmt.Sprintf("no repo named %q in that project (run `entire repo list --project <project>` to see names, or pass a ULID)", name)}
 }
 
 // resolvedRefLabel formats a reference for a success message so it always

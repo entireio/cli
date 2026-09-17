@@ -19,7 +19,7 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// defaultMirrorRemote is the remote `mirror use` repoints by default: the one
+// defaultMirrorRemote is the remote `remote use` repoints by default: the one
 // git itself defaults to for fetch/push, so pointing it at the mirror is what
 // "use the mirror" means with no further flags.
 const defaultMirrorRemote = "origin"
@@ -33,7 +33,7 @@ const defaultMirrorUpstreamRemote = "upstream"
 // mirror alongside their existing remote rather than replace it.
 const defaultMirrorSideRemote = "entire"
 
-// gitRemoteNameRe is the remote-name charset `mirror use` accepts. Git itself is
+// gitRemoteNameRe is the remote-name charset `remote use` accepts. Git itself is
 // laxer, but these names are written into `.git/config` section headers and
 // passed as argv to `git remote`, so the value is pinned to a conservative
 // shape: it must start alphanumeric (so it can never be read as a flag) and
@@ -100,7 +100,7 @@ func listGitRemotes(ctx context.Context, dir string) (map[string]bool, error) {
 	return remotes, nil
 }
 
-// mirrorRemotePlan is the resolved set of git-config writes `mirror use` will
+// mirrorRemotePlan is the resolved set of git-config writes `remote use` will
 // perform. It is computed in full before anything is written so the command can
 // echo exactly what it is about to do (and so the planning is unit-testable
 // without touching a repo).
@@ -129,7 +129,7 @@ type mirrorRemotePlan struct {
 	noop bool
 }
 
-// planMirrorRemote resolves what to write for a `mirror use` invocation.
+// planMirrorRemote resolves what to write for a `remote use` invocation.
 // remotes is the set of already-configured remote names and currentURL the
 // URL of the target remote ("" when it does not exist).
 //
@@ -349,8 +349,8 @@ func runMirrorUseForm(cmd *cobra.Command, action string, form *huh.Form) error {
 // anywhere else cannot name a mirrorable upstream.
 const mirrorUseForge = "gh"
 
-// resolveMirrorUseUpstream determines the GitHub upstream `mirror use` should
-// look for mirrors of. An explicit [github-url] wins. Otherwise the coordinates
+// resolveMirrorUseUpstream determines the GitHub upstream `remote use` should
+// look for mirrors of. An explicit [repo] wins. Otherwise the coordinates
 // are read from a configured remote — which already names the repo the user is
 // standing in.
 //
@@ -365,9 +365,9 @@ const mirrorUseForge = "gh"
 // the URL path), so switching clusters never needs the repo retyped.
 func resolveMirrorUseUpstream(ctx context.Context, dir, remote, arg string) (owner, repo string, err error) {
 	if arg != "" {
-		owner, repo, err = parseGitHubURL(arg)
+		owner, repo, err = parseGitHubMirrorRepoRef(arg)
 		if err != nil {
-			return "", "", fmt.Errorf("invalid <github-url>: %w", err)
+			return "", "", err
 		}
 		return owner, repo, nil
 	}
@@ -396,13 +396,24 @@ func resolveMirrorUseUpstream(ctx context.Context, dir, remote, arg string) (own
 		}
 		return strings.ToLower(info.Owner), strings.ToLower(info.Repo), nil
 	}
-	return "", "", fmt.Errorf("cannot tell which repo to mirror from the git remotes (tried %s); pass the GitHub URL explicitly", strings.Join(tried, ", "))
+	return "", "", fmt.Errorf("cannot tell which repo to mirror from the git remotes (tried %s); pass a repository reference explicitly (for example, /gh/owner/repo)", strings.Join(tried, ", "))
 }
 
-func newRepoMirrorUseCmd() *cobra.Command {
+// newRepoRemoteCmd is the `entire repo remote` subtree: verbs that edit the
+// current clone's git remotes. `use` is the only one today.
+func newRepoRemoteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "remote",
+		Short: "Manage this clone's git remotes",
+	}
+	cmd.AddCommand(newRepoRemoteUseCmd())
+	return requireSubcommand(cmd)
+}
+
+func newRepoRemoteUseCmd() *cobra.Command {
 	var remote, upstream, cluster string
 	cmd := &cobra.Command{
-		Use:   "use [github-url] [cluster-host]",
+		Use:   "use [repo]",
 		Short: "Point this clone's git remote at an Entire mirror",
 		Long: "Rewrites the local git remote so fetch and push go through an " +
 			"Entire mirror instead of the forge.\n\n" +
@@ -415,14 +426,14 @@ func newRepoMirrorUseCmd() *cobra.Command {
 			"Non-interactively it repoints --remote (default `origin`) directly, " +
 			"preserving the replaced URL under --upstream. It only ever edits " +
 			"local git config — the mirror must already exist (`entire repo " +
-			"mirror create`); nothing server-side is changed.",
-		Example: "  entire repo mirror use\n" +
-			"  entire repo mirror use --cluster aws-us-east-2.entire.io\n" +
-			"  entire repo mirror use github.com/octocat/hello-world\n" +
-			"  entire repo mirror use github.com/octocat/hello-world aws-us-east-2.entire.io\n" +
-			"  entire repo mirror use --remote entire\n" +
-			"  entire repo mirror use --upstream ''",
-		Args: cobra.RangeArgs(0, 2),
+			"mirror add`); nothing server-side is changed.\n\n" + mirrorRepoRefHelp,
+		Example: "  entire repo remote use\n" +
+			"  entire repo remote use --cluster aws-us-east-2.entire.io\n" +
+			"  entire repo remote use /gh/octocat/hello-world\n" +
+			"  entire repo remote use /gh/octocat/hello-world --cluster aws-us-east-2.entire.io\n" +
+			"  entire repo remote use --remote entire\n" +
+			"  entire repo remote use --upstream ''",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 			if err := validateGitRemoteName(remote); err != nil {
@@ -435,27 +446,15 @@ func newRepoMirrorUseCmd() *cobra.Command {
 					return fmt.Errorf("invalid --upstream: %w", err)
 				}
 			}
-			// Positional args are validated before the repo is resolved so a
+			// Arguments are validated before the repo is resolved so a
 			// malformed invocation fails identically inside and outside a clone.
-			var upstreamArg, clusterArg string
+			var upstreamArg string
 			if len(args) > 0 {
 				upstreamArg = strings.TrimSpace(args[0])
 			}
-			if len(args) > 1 {
-				clusterArg = strings.TrimSpace(args[1])
-			}
-			// --cluster is the way to pin a cluster without also naming the repo
-			// (the positional slot is second, so it would otherwise need an empty
-			// first arg). Both forms setting different hosts is a contradiction,
-			// not a precedence question.
-			if cluster = strings.TrimSpace(cluster); cluster != "" {
-				if clusterArg != "" && !strings.EqualFold(clusterArg, cluster) {
-					return fmt.Errorf("[cluster-host] (%s) and --cluster (%s) disagree; pass only one", clusterArg, cluster)
-				}
-				clusterArg = cluster
-			}
-			if clusterArg != "" {
-				if err := validateClusterHost(clusterArg); err != nil {
+			clusterHost := strings.TrimSpace(cluster)
+			if clusterHost != "" {
+				if err := validateClusterHost(clusterHost); err != nil {
 					return fmt.Errorf("invalid cluster host: %w", err)
 				}
 			}
@@ -463,7 +462,7 @@ func newRepoMirrorUseCmd() *cobra.Command {
 			ctx := cmd.Context()
 			repoRoot, err := paths.WorktreeRoot(ctx)
 			if err != nil {
-				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run `entire repo mirror use` from inside the clone whose remote you want to repoint.")
+				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run `entire repo remote use` from inside the clone whose remote you want to repoint.")
 				return NewSilentError(errors.New("not a git repository"))
 			}
 
@@ -487,10 +486,10 @@ func newRepoMirrorUseCmd() *cobra.Command {
 				return err
 			}
 			if len(placements) == 0 {
-				return fmt.Errorf("%s/%s is not mirrored (or you have no access to its mirrors); create one first:\n  entire repo mirror create github.com/%s/%s", owner, repo, owner, repo)
+				return fmt.Errorf("%s/%s is not mirrored (or you have no access to its mirrors); create one first:\n  entire repo mirror add /gh/%s/%s", owner, repo, owner, repo)
 			}
 
-			chosen, err := selectPlacement(cmd, placements, clusterArg, placementPicker{
+			chosen, err := selectPlacement(cmd, placements, clusterHost, placementPicker{
 				selector: "--cluster",
 				title:    fmt.Sprintf("%s/%s is mirrored on more than one cluster — pick the one to use", owner, repo),
 				action:   "Remote update",
@@ -542,6 +541,6 @@ func newRepoMirrorUseCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&remote, "remote", defaultMirrorRemote, "Git remote to point at the mirror")
 	cmd.Flags().StringVar(&upstream, "upstream", defaultMirrorUpstreamRemote, "Remote to preserve the replaced URL under; empty to discard it")
-	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to use when the repo is mirrored on several (same as [cluster-host])")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to use when the repo is mirrored on several")
 	return cmd
 }

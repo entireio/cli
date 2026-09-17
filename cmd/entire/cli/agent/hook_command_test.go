@@ -319,3 +319,53 @@ func TestIsManagedHookCommand_LeavesUserCommandsAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestHookHostIsWindows(t *testing.T) {
+	// No t.Parallel(): mutates package-level probe/OS via the test seam.
+
+	// The probe reports a working sh throughout: HookHostIsWindows must ignore
+	// it. That is the whole difference from UseWindowsProductionHooks, and the
+	// reason Factory Droid uses this predicate instead.
+	shWorks := func(context.Context, string) bool { return true }
+
+	for _, tc := range []struct {
+		goos string
+		want bool
+	}{
+		{"linux", false},
+		{"darwin", false},
+		{windowsOS, true},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			restore := SetWindowsHookProbeForTesting(tc.goos, shWorks)
+			defer restore()
+			if got := HookHostIsWindows(); got != tc.want {
+				t.Fatalf("HookHostIsWindows() on %s = %v, want %v", tc.goos, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWrapProductionPlainTextWarningHookCommandForOS(t *testing.T) {
+	t.Parallel()
+
+	const command = "entire hooks factoryai-droid stop"
+
+	if got, want := WrapProductionPlainTextWarningHookCommandForOS(command, WarningFormatSingleLine, false),
+		WrapProductionPlainTextWarningHookCommand(command, WarningFormatSingleLine); got != want {
+		t.Fatalf("useWindows=false = %q, want the sh wrapper %q", got, want)
+	}
+
+	windows := WrapProductionPlainTextWarningHookCommandForOS(command, WarningFormatSingleLine, true)
+	if want := WrapWindowsProductionPlainTextWarningHookCommand(command, WarningFormatSingleLine); windows != want {
+		t.Fatalf("useWindows=true = %q, want the cmd.exe wrapper %q", windows, want)
+	}
+	if strings.Contains(windows, "sh -c") {
+		t.Fatalf("windows wrapper must not invoke sh, got %q", windows)
+	}
+	// The migration path depends on this: an install that switches wrapper form
+	// only replaces the old entry if the new one is still recognised as ours.
+	if !IsManagedHookCommand(windows) {
+		t.Fatalf("windows wrapper not recognised as a managed hook command: %q", windows)
+	}
+}

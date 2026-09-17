@@ -291,7 +291,10 @@ Machine-readable export modes (additive surface for external consumers):
                    says how many were skipped. Only meaningful with --json.
 
 Summary generation:
-  --generate    Generate an AI summary for the checkpoint
+  --generate    Generate an AI summary for the checkpoint. This is the only
+                part of this command that writes: it stores the summary on the
+                checkpoint and spends tokens with the configured summary
+                provider. Every other mode only reads.
   --force       Regenerate even if a summary already exists (requires --generate)
 
 Performance options:
@@ -796,10 +799,6 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Handle summary generation — uses raw transcript. Imported history was
 	// already rejected above, before the content load.
 	if generate {
-		if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, lookup.repo); err != nil {
-			stopLoad(false)
-			return err
-		}
 		stopLoad(false) // generation prints its own progress to w/errW
 		// RefFetcher: the summary backfill's absence probe fetches a ref that
 		// exists remotely but not locally (written/migrated on another

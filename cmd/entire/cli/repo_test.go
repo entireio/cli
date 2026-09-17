@@ -488,7 +488,7 @@ func TestRepoCreate_ObjectFormat(t *testing.T) {
 	})
 }
 
-// testProjectULID is a syntactically valid ULID so `repo list <project>` skips
+// testProjectULID is a syntactically valid ULID so `repo list --project` skips
 // the by-name resolution round-trip and goes straight to ListProjectRepos.
 const testProjectULID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
@@ -551,9 +551,16 @@ func serveProjectRepos(t *testing.T, pages []coreapi.ListProjectReposOutputBody)
 	return recCh
 }
 
-// execRepoList runs `repo list <project>` under a parent carrying the
-// control-plane persistent flags, mirroring execMirrorList.
+// execRepoList runs `repo list --project <project>` under a parent carrying
+// the control-plane persistent flags, mirroring execMirrorList.
 func execRepoList(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	return execRepoListRaw(t, append([]string{"--project", testProjectULID}, args...)...)
+}
+
+// execRepoListRaw is execRepoList without the project pre-filled, for the
+// tests about how the project itself is named.
+func execRepoListRaw(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	parent := &cobra.Command{Use: "repo"}
 	addControlPlaneFlags(parent)
@@ -561,9 +568,34 @@ func execRepoList(t *testing.T, args ...string) (stdout, stderr string, err erro
 	var out, errOut bytes.Buffer
 	parent.SetOut(&out)
 	parent.SetErr(&errOut)
-	parent.SetArgs(append([]string{"list", testProjectULID}, args...))
+	parent.SetArgs(append([]string{"list"}, args...))
 	err = parent.ExecuteContext(t.Context())
 	return out.String(), errOut.String(), err
+}
+
+// TestRepoList_ProjectFlag pins that the project is named by --project and
+// nothing else: the flag is required, and a positional is not an address.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoList_ProjectFlag(t *testing.T) {
+	t.Run("--project scopes the list", func(t *testing.T) {
+		serveProjectRepos(t, []coreapi.ListProjectReposOutputBody{{Repos: bulkRepos("r", 2)}})
+		stdout, _, err := execRepoListRaw(t, "--project", testProjectULID)
+		require.NoError(t, err)
+		require.Contains(t, stdout, "r-0000")
+	})
+
+	t.Run("no --project is refused", func(t *testing.T) {
+		serveProjectRepos(t, nil)
+		_, _, err := execRepoListRaw(t)
+		require.ErrorContains(t, err, `required flag(s) "project" not set`)
+	})
+
+	t.Run("a positional project is refused", func(t *testing.T) {
+		serveProjectRepos(t, nil)
+		_, _, err := execRepoListRaw(t, testProjectULID)
+		require.ErrorContains(t, err, "unknown command")
+	})
 }
 
 // TestRepoList_FetchBudget pins the bounded cursor walk on `repo list`: by
@@ -687,9 +719,12 @@ func TestRepoList_GroupedFlagHelp(t *testing.T) {
 	require.NoError(t, err)
 	// Anchor past the Long text (which mentions flags by name) so the order
 	// assertions see only the flag sections.
-	idx := strings.Index(stdout, "Navigation Flags:")
-	require.GreaterOrEqual(t, idx, 0, "expected a Navigation Flags section")
+	idx := strings.Index(stdout, "Scope Flags:")
+	require.GreaterOrEqual(t, idx, 0, "expected a Scope Flags section")
+	// --project is what the command cannot run without, so it leads; ungrouped
+	// flags render last, which is why it carries a group at all.
 	requireOrder(t, stdout[idx:],
+		"Scope Flags:", "--project",
 		"Navigation Flags:", "--all", "--limit", "--page-size", "--page-token",
 		"Formatting Flags:", "--json", "--no-pager",
 	)
@@ -718,7 +753,7 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	t.Run("a ULID ref warns that --project is ignored", func(t *testing.T) {
-		stdout, stderr, err := runCoreCmd(t, newRepoGetCmd, srv.URL, repoULID, "--project", "not-this-project")
+		stdout, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID, "--project", "not-this-project")
 		require.NoError(t, err, "the command must still succeed")
 		require.Contains(t, stdout, repoULID, "the repo must still be shown")
 		require.Contains(t, stderr, "--project")
@@ -728,13 +763,13 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	t.Run("an explicit empty --project still warns", func(t *testing.T) {
 		// Changed(), not a non-empty value: --project "" is still the user
 		// saying something about this repo's project, and it is still ignored.
-		_, stderr, err := runCoreCmd(t, newRepoGetCmd, srv.URL, repoULID, "--project", "")
+		_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID, "--project", "")
 		require.NoError(t, err)
 		require.Contains(t, stderr, "ignored")
 	})
 
 	t.Run("a ULID ref without the flag says nothing", func(t *testing.T) {
-		_, stderr, err := runCoreCmd(t, newRepoGetCmd, srv.URL, repoULID)
+		_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID)
 		require.NoError(t, err)
 		require.NotContains(t, stderr, "ignored")
 	})
@@ -745,10 +780,10 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 		// and missed for others. Asserting the PreRunE exists is what pins
 		// that, without standing up a server per command.
 		for name, newCmd := range map[string]func() *cobra.Command{
-			"repo get":               newRepoGetCmd,
+			"repo view":              newRepoViewCmd,
+			"repo edit":              newRepoEditCmd,
 			"repo delete":            newRepoDeleteCmd,
 			"repo visibility get":    newRepoVisibilityGetCmd,
-			"repo visibility set":    newRepoVisibilitySetCmd,
 			"repo protection list":   newRepoProtectionListCmd,
 			"repo protection add":    newRepoProtectionAddCmd,
 			"repo protection remove": newRepoProtectionRemoveCmd,
@@ -757,5 +792,47 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 			require.NotNilf(t, cmd.Flags().Lookup("project"), "%s must bind --project", name)
 			require.NotNilf(t, cmd.PreRunE, "%s must carry the redundancy check", name)
 		}
+	})
+}
+
+// TestRepoEdit_Visibility pins `repo edit --visibility`: the value is sent and
+// the server's answer printed, the flag is required, and an unknown value
+// fails before any request.
+//
+// Not parallel: swaps the package-level activeCoreClient seam via runCoreCmd.
+func TestRepoEdit_Visibility(t *testing.T) {
+	const repoULID = "0123456789ABCDEFGHJKMNPQR5"
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		bodies = append(bodies, strings.TrimSpace(string(raw)))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"visibility":"private"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Run("--visibility sends the value and prints the answer", func(t *testing.T) {
+		bodies = nil
+		stdout, _, err := runCoreCmd(t, newRepoEditCmd, srv.URL, repoULID, "--visibility", "private")
+		require.NoError(t, err)
+		require.Contains(t, stdout, "private")
+		require.Equal(t, []string{`{"visibility":"private"}`}, bodies)
+	})
+
+	t.Run("no --visibility is refused", func(t *testing.T) {
+		bodies = nil
+		_, _, err := runCoreCmd(t, newRepoEditCmd, srv.URL, repoULID)
+		require.ErrorContains(t, err, `required flag(s) "visibility" not set`)
+		require.Empty(t, bodies)
+	})
+
+	t.Run("an unknown value fails before any request", func(t *testing.T) {
+		bodies = nil
+		_, _, err := runCoreCmd(t, newRepoEditCmd, srv.URL, repoULID, "--visibility", "internal")
+		require.ErrorContains(t, err, "invalid visibility")
+		require.Empty(t, bodies)
 	})
 }
