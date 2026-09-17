@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -686,6 +687,131 @@ func TestHookCommand_SetsCurrentHookAgentName(t *testing.T) {
 	if currentHookAgentName != "" {
 		t.Errorf("after handler: currentHookAgentName = %q, want empty", currentHookAgentName)
 	}
+}
+
+// mockHookTimeoutAwareAgent wraps mockLifecycleAgent (lifecycle_test.go) and
+// additionally implements agent.HookTimeoutProvider, for exercising
+// runHookWithTimeout's override path without needing a real agent's hook
+// config machinery.
+type mockHookTimeoutAwareAgent struct {
+	mockLifecycleAgent
+
+	overrideEvent string
+	overrideValue time.Duration
+}
+
+var _ agent.HookTimeoutProvider = (*mockHookTimeoutAwareAgent)(nil)
+
+func (m *mockHookTimeoutAwareAgent) HookTimeout(hookName string) time.Duration {
+	if hookName == m.overrideEvent {
+		return m.overrideValue
+	}
+	return 0
+}
+
+// sleepHandler returns a hook handler stub that blocks for d then succeeds.
+func sleepHandler(d time.Duration) func() error {
+	return func() error {
+		time.Sleep(d)
+		return nil
+	}
+}
+
+// TestRunHookWithTimeout_CutsOffAtTheFlatDefault is REQUIREMENT 1 from the
+// differentiated-hook-timeout task (GitHub #2115, #1137, #957): today's flat
+// timeout must actually cut a slow hook handler off, uniformly, for an agent
+// that does not implement agent.HookTimeoutProvider — not just be a number
+// nobody enforces. Before runHookWithTimeout existed, the declared 30s value
+// was enforced only externally (Codex's own hooks.json kill; see #1137/#957's
+// "hook timed out after 30s" reports) — nothing on our side watched it for
+// any agent, including this one. agent.SetDefaultHookTimeoutForTesting is the
+// test seam that makes this provable without waiting out a real 30s.
+//
+// Not parallel across the whole test: it mutates the process-global default.
+func TestRunHookWithTimeout_CutsOffAtTheFlatDefault(t *testing.T) {
+	restore := agent.SetDefaultHookTimeoutForTesting(30 * time.Millisecond)
+	defer restore()
+
+	ag := &mockLifecycleAgent{name: agent.AgentNameClaudeCode}
+
+	// Two different hook names prove "flat" — the same default cuts off both,
+	// because this agent has no per-event override at all.
+	for _, hookName := range []string{"stop", "session-start"} {
+		t.Run(hookName, func(t *testing.T) {
+			start := time.Now()
+			err := runHookWithTimeout(context.Background(), ag, hookName, sleepHandler(300*time.Millisecond))
+			elapsed := time.Since(start)
+
+			require.ErrorIsf(t, err, ErrHookTimedOut,
+				"hook %q: a handler slower than the flat default must be reported as timed out", hookName)
+			require.Lessf(t, elapsed, 200*time.Millisecond,
+				"hook %q: expected the 30ms flat default to cut a 300ms handler off, took %s", hookName, elapsed)
+		})
+	}
+}
+
+// TestRunHookWithTimeout_HonorsAgentOverride is REQUIREMENT 2: an agent
+// implementing agent.HookTimeoutProvider gets its OWN declared value for the
+// event it overrides — even one longer than the flat default, so the
+// handler completes instead of being cut off — while an event it does not
+// override still falls back to the same flat default as any other agent.
+func TestRunHookWithTimeout_HonorsAgentOverride(t *testing.T) {
+	restore := agent.SetDefaultHookTimeoutForTesting(30 * time.Millisecond)
+	defer restore()
+
+	ag := &mockHookTimeoutAwareAgent{
+		mockLifecycleAgent: mockLifecycleAgent{name: agent.AgentNameClaudeCode},
+		overrideEvent:      "session-end",
+		overrideValue:      300 * time.Millisecond,
+	}
+
+	t.Run("overridden event gets its own longer budget and completes", func(t *testing.T) {
+		err := runHookWithTimeout(context.Background(), ag, "session-end", sleepHandler(100*time.Millisecond))
+		require.NoError(t, err,
+			"a 100ms handler must fit inside the agent's 300ms override for this event, not the 30ms default")
+	})
+
+	t.Run("non-overridden event on the same agent still uses the flat default", func(t *testing.T) {
+		err := runHookWithTimeout(context.Background(), ag, "stop", sleepHandler(100*time.Millisecond))
+		require.ErrorIs(t, err, ErrHookTimedOut,
+			"an event this agent does not override must still be cut off at the 30ms default")
+	})
+}
+
+// TestRunHookWithTimeout_LogsExceededTimeoutDistinctly is REQUIREMENT 3: a
+// hook that exceeds its declared timeout must leave a distinct, identifiable
+// log line — not just a generic error, and not folded into perf's unrelated
+// fixed slow-span threshold. This is #2115's core complaint ("the cap is
+// doing telemetry's job") made false: an exceeded timeout is now visible in
+// .entire/logs even for agents no external host kills.
+func TestRunHookWithTimeout_LogsExceededTimeoutDistinctly(t *testing.T) {
+	restore := agent.SetDefaultHookTimeoutForTesting(30 * time.Millisecond)
+	defer restore()
+
+	var buf bytes.Buffer
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(prevDefault)
+
+	ag := &mockLifecycleAgent{name: agent.AgentNameClaudeCode}
+	err := runHookWithTimeout(context.Background(), ag, "stop", sleepHandler(300*time.Millisecond))
+	require.ErrorIs(t, err, ErrHookTimedOut)
+
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var entry map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &entry), "log line must be valid JSON: %s", line)
+		if entry["msg"] != "hook exceeded its configured timeout" {
+			continue
+		}
+		found = true
+		require.Equal(t, "WARN", entry["level"], "an exceeded timeout must be distinctly visible, not DEBUG-only")
+		require.Equal(t, "stop", entry["hook"])
+		require.Contains(t, entry, "elapsed")
+		require.Contains(t, entry, "timeout")
+	}
+	require.Truef(t, found,
+		"expected a distinct 'hook exceeded its configured timeout' log line, got:\n%s", buf.String())
 }
 
 // writeTestSessionState creates a session state file in .git/entire-sessions/ for testing.
