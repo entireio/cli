@@ -505,6 +505,28 @@ func printProtectedRefBlock(w io.Writer, ref, target string) {
 	fmt.Fprintln(w, banner)
 }
 
+// maxFetchErrorDetail caps the git output appended to a failed fetch. The same
+// bound remote.PushWithOptions applies to push output, and for the same reasons:
+// this text reaches both a terminal inside a git hook and a log attribute.
+const maxFetchErrorDetail = 2000
+
+// withFetchDetail returns fetchErr with git's own output appended, or fetchErr
+// unchanged when git produced none.
+//
+// The output must not replace the error, which is what this path used to do. A
+// git killed by a cancelled context or an exhausted budget exits before writing
+// anything, so formatting the output alone yielded a bare "fetch failed: " — no
+// cause for the user, nothing for errors.Is to match, and no way to tell an
+// interrupted fetch from a rejected one. The error is the verdict; the output is
+// only the detail.
+func withFetchDetail(fetchErr error, fetchOutput []byte) error {
+	detail := strings.Join(strings.Fields(string(fetchOutput)), " ")
+	if detail == "" {
+		return fetchErr
+	}
+	return fmt.Errorf("%w (%s)", fetchErr, remote.ElideMiddle(detail, maxFetchErrorDetail))
+}
+
 // fetchAndRebaseRefCommon fetches a remote ref and rebases local commits on top
 // of the remote tip. Since checkpoint shards use unique paths, rebases always
 // apply cleanly.
@@ -549,7 +571,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	fetchSpan.RecordError(fetchErr)
 	fetchSpan.End()
 	if fetchErr != nil {
-		return fmt.Errorf("fetch failed: %s", fetchOutput)
+		return fmt.Errorf("fetch failed: %w", withFetchDetail(fetchErr, fetchOutput))
 	}
 
 	repo, err := OpenRepository(ctx)

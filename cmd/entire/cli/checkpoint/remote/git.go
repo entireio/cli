@@ -480,10 +480,10 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 		detail = strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
 	}
 	detail = strings.Join(strings.Fields(detail), " ")
-	return fmt.Errorf("%w (%s)", err, elideMiddle(detail, maxPushErrorDetail))
+	return fmt.Errorf("%w (%s)", err, ElideMiddle(detail, maxPushErrorDetail))
 }
 
-// elideMiddle shortens s to at most limit runes by dropping the middle, keeping
+// ElideMiddle shortens s to at most limit runes by dropping the middle, keeping
 // both ends.
 //
 // Truncating the tail would be wrong here, which is the whole reason this is not
@@ -500,7 +500,7 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 // git's own output carries multi-byte characters (em dashes in GitHub banners,
 // its own "…"), and slicing bytes through one would put invalid UTF-8 into a log
 // record.
-func elideMiddle(s string, limit int) string {
+func ElideMiddle(s string, limit int) string {
 	if limit <= 0 || len([]rune(s)) <= limit {
 		return s
 	}
