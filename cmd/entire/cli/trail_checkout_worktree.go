@@ -565,7 +565,7 @@ func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {
 	refSpec := fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)
 	// NoFilter: the worktree checkout needs full branch content; a partial
 	// clone would leave blobs missing.
-	output, err := remote.Fetch(ctx, remote.FetchOptions{
+	_, err := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   "origin",
 		RefSpecs: []string{refSpec},
 		NoFilter: true,
@@ -574,7 +574,7 @@ func fetchTrailWorktreeBranch(ctx context.Context, branch string) error {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return errors.New("fetch timed out after 2 minutes")
 		}
-		return fmt.Errorf("failed to fetch branch from origin: %s: %w", strings.TrimSpace(string(output)), err)
+		return fmt.Errorf("failed to fetch branch from origin: %w", err)
 	}
 	return nil
 }

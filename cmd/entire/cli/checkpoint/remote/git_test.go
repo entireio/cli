@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1320,9 +1321,9 @@ func TestFormatGitPushError_CollapsesAndCaps(t *testing.T) {
 	assert.Contains(t, formatted.Error(), "line one line two")
 	assert.NotContains(t, formatted.Error(), "\n")
 
-	long := formatGitPushError(context.Background(), err, []byte(strings.Repeat("x", maxPushErrorDetail*2)), "origin")
+	long := formatGitPushError(context.Background(), err, []byte(strings.Repeat("x", maxGitOutputDetail*2)), "origin")
 	require.Error(t, long)
-	assert.Less(t, len([]rune(long.Error())), maxPushErrorDetail+100)
+	assert.Less(t, len([]rune(long.Error())), maxGitOutputDetail+100)
 	assert.Contains(t, long.Error(), "[…]")
 }
 
@@ -1338,7 +1339,7 @@ func TestFormatGitPushError_KeepsTailOfLongOutput(t *testing.T) {
 		b.WriteString("remote: GITHUB PUSH PROTECTION blocked a secret; unblock at https://github.com/o/r/security/secret-scanning/unblock-secret/xxxxxxxxxxxxxxxxxxxx ")
 	}
 	b.WriteString("! [remote rejected] refs/entire/checkpoints/W1/X -> refs/entire/checkpoints/W1/X (" + reason + ")")
-	require.Greater(t, b.Len(), maxPushErrorDetail, "precondition: output must exceed the cap")
+	require.Greater(t, b.Len(), maxGitOutputDetail, "precondition: output must exceed the cap")
 
 	formatted := formatGitPushError(context.Background(), &exec.ExitError{ProcessState: nil}, []byte(b.String()), "origin")
 	require.Error(t, formatted)
@@ -1354,7 +1355,7 @@ func TestFormatGitPushError_KeepsTailOfLongOutput(t *testing.T) {
 func TestFormatGitPushError_TruncationIsRuneSafe(t *testing.T) {
 	t.Parallel()
 
-	output := strings.Repeat("—", maxPushErrorDetail*2)
+	output := strings.Repeat("—", maxGitOutputDetail*2)
 	formatted := formatGitPushError(context.Background(), &exec.ExitError{ProcessState: nil}, []byte(output), "origin")
 	require.Error(t, formatted)
 	assert.True(t, utf8.ValidString(formatted.Error()), "truncated detail must remain valid UTF-8")
@@ -1402,4 +1403,37 @@ func TestPushWithOptions_ErrorCarriesRemoteRejectionReason(t *testing.T) {
 	assert.Contains(t, err.Error(), reason,
 		"the remote's reason must reach the caller, not just \"exit status 1\"")
 	assert.Contains(t, err.Error(), "remote rejected")
+}
+
+// A failed fetch used to return a bare "git fetch: exit status N", so the
+// strategy layer grew its own copy of this folding — without the URL redaction
+// that makes it safe to log. Both now live here, for every Fetch caller.
+func TestFetch_ErrorCarriesRedactedGitOutput(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	url := "https://user:s3cr3t@example.invalid/missing.git"
+
+	out, err := Fetch(t.Context(), FetchOptions{Dir: dir, Remote: url, RefSpecs: []string{"refs/heads/main"}, NoFilter: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "git fetch:", "the cause must stay wrapped")
+	assert.NotEmpty(t, out)
+	assert.NotContains(t, err.Error(), "s3cr3t", "a credential-bearing target must be redacted before it reaches a log")
+	assert.NotContains(t, err.Error(), "\n", "the detail must stay a single log-safe line")
+}
+
+// A process killed before it wrote anything must keep its cause rather than
+// being replaced by an empty detail — the regression that produced a bare
+// "fetch failed: " once per queued checkpoint ref.
+func TestErrWithGitOutput_KeepsCauseWhenGitIsSilent(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("signal: killed")
+
+	silent := errWithGitOutput(sentinel, nil, "origin")
+	require.ErrorIs(t, silent, sentinel)
+	assert.Equal(t, sentinel.Error(), silent.Error())
+
+	detailed := errWithGitOutput(sentinel, []byte("fatal: couldn't find remote ref\n"), "origin")
+	require.ErrorIs(t, detailed, sentinel, "detail must annotate the cause, not replace it")
+	assert.Contains(t, detailed.Error(), "couldn't find remote ref")
 }
