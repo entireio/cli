@@ -96,7 +96,8 @@ func TestFlushCheckpointRefs_StopsAfterConsecutiveFailures(t *testing.T) {
 		"the fallback must not walk the whole queue against a refusing remote")
 	assert.Contains(t, output, "Stopped retrying")
 	assert.Contains(t, output, fmt.Sprintf("%d consecutive failures", maxConsecutiveRefPushFailures))
-	assert.Contains(t, output, "stay queued for the next push")
+	assert.Contains(t, output, fmt.Sprintf("%d checkpoint ref(s) stay queued", queued),
+		"refs that were attempted and failed stay queued too, not just the ones never reached")
 
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
@@ -116,24 +117,32 @@ func TestFlushCheckpointRefs_StopsWhenBudgetExhausted(t *testing.T) {
 	checkpointFlushBudget = time.Nanosecond
 	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
 
+	l, logErr := logging.New(logging.Config{Root: entiredir.OpenerAt(workDir), Dir: logging.LogsName})
+	require.NoError(t, logErr)
+	t.Cleanup(func() { _ = l.Close() })
+
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
 	defer repo.Close()
 	queue := enqueueRefs(t, repo, refs)
 
 	restore := captureStderr(t)
-	err = NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
+	err = NewManualCommitStrategy().PrePushFromGitHook(logging.WithLogger(t.Context(), l), "origin")
 	output := restore()
 	require.NoError(t, err)
+	require.NoError(t, l.Close()) // flush the buffered writer
 
-	// An exhausted budget still buys one attempt: aborting before any work
-	// would starve the queue instead of draining it a little at a time. The
-	// remaining count pins that, and holds whether or not the already-dead
-	// deadline let the attempt reach the remote at all.
 	assert.Contains(t, output, "budget")
 	assert.Contains(t, output, "exhausted")
-	assert.Contains(t, output, fmt.Sprintf("%d checkpoint ref(s) stay queued", len(refs)-1))
+	assert.Contains(t, output, fmt.Sprintf("%d checkpoint ref(s) stay queued", len(refs)),
+		"nothing landed, so the whole queue stays")
 	assert.LessOrEqual(t, countedAttempts(t, countFile), 2, "the deadline must cut the fallback, not let it walk the queue")
+
+	// An exhausted budget still buys one attempt: aborting before any work would
+	// starve the queue instead of draining it a little at a time.
+	logged, readErr := os.ReadFile(filepath.Join(workDir, logging.LogsDir, "entire.log"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(logged), `"attempted":1`, "a flush must always try at least one ref")
 
 	remaining, err := queue.Drain()
 	require.NoError(t, err)

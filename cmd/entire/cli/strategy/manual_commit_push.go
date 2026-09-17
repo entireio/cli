@@ -632,8 +632,11 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// Printed before the rejection warning so the more specific reason lands
 	// closest to the prompt.
 	if abortReason != "" {
+		// Everything this flush did not land stays queued, not just the refs it
+		// never reached: only `pushed` is removed, so the ones that were
+		// attempted and failed are still there too.
 		fmt.Fprintf(os.Stderr, "[entire] Stopped retrying: %s; %d checkpoint ref(s) stay queued for the next push.\n",
-			abortReason, len(existing)-attempted)
+			abortReason, len(existing)-len(pushed))
 	}
 	// One actionable reason per flush, after the progress line. Do not print
 	// the batch error too, or diagnose speculative recovery as divergence.

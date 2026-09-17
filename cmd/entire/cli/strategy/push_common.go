@@ -209,8 +209,9 @@ var checkpointPushBudget = 2 * time.Minute
 // Applied as a context deadline, not a wall-clock check between refs, so it can
 // cut a ref that is already hung rather than waiting out its own budget first.
 // context.WithTimeout keeps the earlier of parent and child deadlines, so the
-// per-ref checkpointPushBudget automatically shrinks to whatever is left. var so
-// tests can shrink it.
+// per-ref checkpointPushBudget automatically shrinks to whatever is left.
+//
+// Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
 
 // maxConsecutiveRefPushFailures stops the individual-retry fallback once this
