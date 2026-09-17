@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"sync"
-	"sync/atomic"
 )
 
 // fallbackNoticeW receives every store warning: the notice printed when the
@@ -94,13 +93,16 @@ func setBackend(s store) {
 // unavailable keyring is treated as absent (see secretServicePlatforms for
 // why that is acceptable).
 //
-// Once the keyring has answered in this process — a success, or an
-// ErrNotFound, which also proves it is reachable — no later call falls back:
-// a keyring that worked a moment ago is present, so the failure is transient,
-// and reporting it beats moving half of a login elsewhere. Login writes the
-// refresh and access slots as two calls, and falling back on only the second
-// would leave the refresh token in the keyring and the access token in the
-// file, which the next process cannot reassemble.
+// Once the keyring has answered for an account in this process — a success,
+// or an ErrNotFound, which also proves it is reachable — no later call for
+// that account falls back: a keyring that worked a moment ago is present, so
+// the failure is transient, and reporting it beats moving half of a login
+// elsewhere. Login writes the refresh and access slots as two calls under one
+// user, and falling back on only the second would leave the refresh token in
+// the keyring and the access token in the file, which the next process cannot
+// reassemble. The latch is per user rather than per process because logout
+// --all-contexts walks every saved account in one process, and an account
+// whose credential lives only in the file must still be reachable there.
 type fallbackStore struct {
 	primary store
 	// newFile builds the file store; injectable for tests. file() memoizes
@@ -118,8 +120,9 @@ type fallbackStore struct {
 	// rememberWarn dedupes the could-not-remember warning; the marker write
 	// itself is retried on every adoption (see switchTo).
 	rememberWarn sync.Once
-	// primaryWorked is set once the keyring has answered; see mayFallBack.
-	primaryWorked atomic.Bool
+	// answered holds the users for which the keyring has answered; see
+	// mayFallBack.
+	answered sync.Map
 }
 
 func newFallbackStore(primary store) *fallbackStore {
@@ -136,19 +139,23 @@ func (f *fallbackStore) file() store {
 }
 
 // mayFallBack reports whether a keyring result allows the retry against the
-// file store, and records a keyring that answered so that no later call in
-// this process falls back (see the type comment).
-func (f *fallbackStore) mayFallBack(err error) bool {
+// file store, and records a keyring that answered for user so that no later
+// call for that user in this process falls back (see the type comment).
+func (f *fallbackStore) mayFallBack(user string, err error) bool {
 	if err == nil || errors.Is(err, ErrNotFound) {
-		f.primaryWorked.Store(true)
+		f.answered.Store(user, struct{}{})
 		return false
 	}
-	return fallbackEligible(err) && !f.primaryWorked.Load()
+	if !fallbackEligible(err) {
+		return false
+	}
+	_, answered := f.answered.Load(user)
+	return !answered
 }
 
 func (f *fallbackStore) Get(service, user string) (string, error) {
 	v, err := f.primary.Get(service, user)
-	if !f.mayFallBack(err) {
+	if !f.mayFallBack(user, err) {
 		//nolint:wrapcheck // thin wrapper, callers handle errors
 		return v, err
 	}
@@ -170,7 +177,7 @@ func (f *fallbackStore) Get(service, user string) (string, error) {
 
 func (f *fallbackStore) Set(service, user, password string) error {
 	err := f.primary.Set(service, user, password)
-	if !f.mayFallBack(err) {
+	if !f.mayFallBack(user, err) {
 		//nolint:wrapcheck // thin wrapper, callers handle errors
 		return err
 	}
@@ -184,7 +191,7 @@ func (f *fallbackStore) Set(service, user, password string) error {
 
 func (f *fallbackStore) Delete(service, user string) error {
 	err := f.primary.Delete(service, user)
-	if !f.mayFallBack(err) {
+	if !f.mayFallBack(user, err) {
 		//nolint:wrapcheck // thin wrapper, callers handle errors
 		return err
 	}

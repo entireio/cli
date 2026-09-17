@@ -558,6 +558,20 @@ func TestFallbackStore_DoesNotFallBackOnceTheKeyringHasAnswered(t *testing.T) {
 		t.Fatalf("nothing may be adopted or announced; adopted=%v notice=%q", *adopted, notice.String())
 	}
 
+	// The latch is per account: another user's credential that lives only in
+	// the file must still be reachable (logout --all-contexts walks every
+	// saved account in one process).
+	if err := file.Set("svc", "carol", "c1"); err != nil {
+		t.Fatal(err)
+	}
+	primary.getErr = errNoSecretService
+	if got, err := f.Get("svc", "carol"); err != nil || got != "c1" {
+		t.Fatalf("Get for an account the keyring never answered for = %q, %v; want the file's token", got, err)
+	}
+	if *adopted != store(file) {
+		t.Fatal("the fallback for another account must still adopt the file store")
+	}
+
 	// An ErrNotFound answer counts as the keyring being reachable too.
 	primary2 := newScriptedStore()
 	f2, _, _, adopted2 := newTestFallback(t, primary2)

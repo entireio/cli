@@ -53,10 +53,10 @@ credential it is adopted, announced once on stderr, and remembered — except
 after a keyring *timeout on a write*, which is adopted for this process only:
 the abandoned write may still complete once the keyring answers, and a marker
 would orphan that copy (a timed-out read or delete orphans nothing and is
-remembered like any other availability failure). Once the keyring has answered in a process (a
-success or an `ErrNotFound`), no later call in that process falls back: login
-writes the refresh and access slots as two calls, and falling back on only the
-second would split one login across two stores. A fallback whose file
+remembered like any other availability failure). Once the keyring has answered
+for an account in a process (a success or an `ErrNotFound`), no later call for
+that account falls back: login writes the refresh and access slots as two calls,
+and falling back on only the second would split one login across two stores. A fallback whose file
 operation also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint` and
 `storeReadError` check so they never recommend the store that just failed
 (they point at `ENTIRE_TOKEN_STORE_PATH` instead). macOS and Windows never
