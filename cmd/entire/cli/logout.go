@@ -31,7 +31,7 @@ func newLogoutCmd() *cobra.Command {
 				revoke = revokeAllAuthSessions
 			}
 			return runLogout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				auth.StoredContexts, auth.LoginTokenForContext, revoke, auth.RemoveContext,
+				auth.StoredContexts, loginToken, revoke, auth.RemoveContext,
 				applyInsecureHTTPAuth(insecureHTTPAuth))
 		},
 	}
@@ -61,13 +61,21 @@ func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
 	return firstErr
 }
 
+// loginToken returns c's bearer, refreshed when possible.
+func loginToken(ctx context.Context, c *contexts.Context) (string, error) {
+	if tok, err := auth.RefreshedLoginToken(ctx, c); err == nil && tok != "" {
+		return tok, nil
+	}
+	return auth.LoginTokenForContext(c) //nolint:wrapcheck // names the context already
+}
+
 // revokeTargetFunc revokes sessions on one core.
 type revokeTargetFunc func(ctx context.Context, coreURL, token string) error
 
 // runLogout sweeps every stored login.
 func runLogout(ctx context.Context, outW, errW io.Writer,
 	listContexts contextsProvider,
-	tokenForContext func(*contexts.Context) (string, error),
+	tokenForContext func(context.Context, *contexts.Context) (string, error),
 	revoke revokeTargetFunc,
 	removeContext func(name string) error,
 	insecureHTTPAuth bool,
@@ -83,7 +91,10 @@ func runLogout(ctx context.Context, outW, errW io.Writer,
 
 	removed, failed := 0, 0
 	for _, c := range all {
-		token, terr := tokenForContext(c)
+		if c == nil || c.Name == "" {
+			continue
+		}
+		token, terr := tokenForContext(ctx, c)
 		if terr != nil {
 			fmt.Fprintf(errW, "Warning: couldn't read token for %q; removing locally only: %v\n", c.Name, terr)
 			token = ""

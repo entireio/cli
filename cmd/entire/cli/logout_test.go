@@ -63,7 +63,7 @@ func TestRunLogout_RevokesAndRemovesEachContext(t *testing.T) {
 		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
 	)
 	tokens := map[string]string{"eu": "tok-eu", "us": "tok-us"}
-	tokenFor := func(c *contexts.Context) (string, error) { return tokens[c.Name], nil }
+	tokenFor := func(_ context.Context, c *contexts.Context) (string, error) { return tokens[c.Name], nil }
 
 	revoked := map[string]string{} // coreURL -> token
 	revoke := func(_ context.Context, coreURL, token string) error {
@@ -89,6 +89,33 @@ func TestRunLogout_RevokesAndRemovesEachContext(t *testing.T) {
 	}
 	if errOut.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", errOut.String())
+	}
+}
+
+// A hand-edited contexts.json can hold null or nameless entries.
+func TestRunLogout_SkipsMalformedEntries(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(
+		nil,
+		&contexts.Context{CoreURL: "https://eu.auth.entire.io"},
+		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
+	)
+	tokenFor := func(context.Context, *contexts.Context) (string, error) { return testLogoutToken, nil }
+	revoked := 0
+	revoke := func(context.Context, string, string) error { revoked++; return nil }
+	var removed []string
+	remove := func(name string) error { removed = append(removed, name); return nil }
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, provider, tokenFor, revoke, remove, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if revoked != 1 || len(removed) != 1 || removed[0] != "us" {
+		t.Fatalf("revoked=%d removed=%v, want only the named login handled", revoked, removed)
+	}
+	if !strings.Contains(out.String(), "Logged out of 1 saved login(s).") {
+		t.Fatalf("stdout = %q, want count of 1", out.String())
 	}
 }
 
@@ -135,7 +162,7 @@ func TestRunLogout_RevokeFailureWarnsButContinues(t *testing.T) {
 		&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"},
 		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
 	)
-	tokenFor := func(*contexts.Context) (string, error) { return testLogoutToken, nil }
+	tokenFor := func(context.Context, *contexts.Context) (string, error) { return testLogoutToken, nil }
 	revoke := func(_ context.Context, coreURL, _ string) error {
 		if coreURL == "https://eu.auth.entire.io" {
 			return errors.New("connection refused")
@@ -164,7 +191,7 @@ func TestRunLogout_UnauthorizedRevokeIsSilent(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
-	tokenFor := func(*contexts.Context) (string, error) { return testLogoutToken, nil }
+	tokenFor := func(context.Context, *contexts.Context) (string, error) { return testLogoutToken, nil }
 	revoke := func(context.Context, string, string) error {
 		return &api.HTTPError{StatusCode: http.StatusUnauthorized, Message: "Not authenticated"}
 	}
@@ -183,7 +210,7 @@ func TestRunLogout_UnreadableTokenRemovesLocallyOnly(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
-	tokenFor := func(*contexts.Context) (string, error) { return "", errors.New("keyring locked") }
+	tokenFor := func(context.Context, *contexts.Context) (string, error) { return "", errors.New("keyring locked") }
 	revokeCalled := false
 	revoke := func(context.Context, string, string) error { revokeCalled = true; return nil }
 	removed := false
@@ -211,7 +238,7 @@ func TestRunLogout_InsecureCoreSkipsRevoke(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(&contexts.Context{Name: "local", CoreURL: "http://insecure.example.com"})
-	tokenFor := func(*contexts.Context) (string, error) { return testLogoutToken, nil }
+	tokenFor := func(context.Context, *contexts.Context) (string, error) { return testLogoutToken, nil }
 	revokeCalled := false
 	revoke := func(context.Context, string, string) error { revokeCalled = true; return nil }
 	removed := false
@@ -239,7 +266,7 @@ func TestRunLogout_RemoveFailureWarnsAndFails(t *testing.T) {
 		&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"},
 		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
 	)
-	tokenFor := func(*contexts.Context) (string, error) { return testLogoutToken, nil }
+	tokenFor := func(context.Context, *contexts.Context) (string, error) { return testLogoutToken, nil }
 	revoke := func(context.Context, string, string) error { return nil }
 	remove := func(name string) error {
 		if name == "eu" {
