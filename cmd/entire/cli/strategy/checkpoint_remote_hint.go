@@ -10,42 +10,26 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
-// warnIgnoredCheckpointRemote tells the user, during their own push, that the
-// checkpoint store they configured is not the one their checkpoints are going
-// to, and gives the single command that fixes it.
+// warnIgnoredCheckpointRemote tells the user, in their own push output, that
+// the checkpoint store they configured is not where checkpoints are going, and
+// names the command that fixes it.
 //
-// The rejection is not new: checkpointRemoteIsInherited has always refused a
-// committed checkpoint_remote whose owner does not match every remote
-// identifying this repo, and has always said so in a Warn log. But a log is
-// read by someone who already suspects a problem, and the visible symptom here
-// — checkpoints arriving in the code repository — is a working setup, just not
-// the one the user asked for. Pre-push stderr is where the condition reaches
-// them without being looked for, and where an agent pushing on their behalf
-// sees it too.
+// checkpointRemoteIsInherited has always refused an inherited store and always
+// logged it, but a log is read by someone who already suspects a problem, and
+// the symptom here — checkpoints arriving in the code repository — looks like a
+// working setup. It blocks nothing: refusing the push would turn a
+// misconfiguration into lost work, and claiming the store re-delivers what
+// already went to the wrong one.
 //
-// It blocks nothing, deliberately. Checkpoints keep flowing to the elected
-// remote, because refusing to push them turns a misconfiguration into lost
-// work, and a ref delivered to the code repo is not stranded there: claiming
-// the store re-delivers everything already pushed
-// (resyncCheckpointRefsOnDestinationChange on git-refs; on git-branch the whole
-// v1 branch travels by construction).
-//
-// Every push while the condition holds, not once ever — a one-shot notice is
-// seen by whoever set the repo up and not by whoever hits the problem.
+// Fires on every push while the condition holds. A one-shot notice is seen by
+// whoever set the repo up, not by whoever hits the problem.
 func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
-	// Two jobs, and neither is redundant with the ownership verdict below.
-	//
-	// checkpointRemoteConfigured is the free half: an empty checkpointURL means
-	// "none configured" as often as "configured and refused", and only the
-	// second is worth a settings load and two git subprocesses.
-	//
-	// hasCheckpointURL is the authoritative half. PushURL is what decided where
-	// this push sends checkpoints, and InheritedCheckpointRemote re-runs the
-	// ownership vote over an identity set that PushURL's own derivation can
-	// diverge from (the entire:// mirror path, and the divergence
-	// computeCheckpointSyncInfo already documents). Asking the second question
-	// about a store the first one ADOPTED would warn about a destination that
-	// is working, on every push.
+	// hasCheckpointURL is the authoritative half: PushURL decided where this
+	// push sends checkpoints, while InheritedCheckpointRemote re-runs the vote
+	// over an identity set that can diverge from it, so asking the second about a
+	// store the first ADOPTED would warn about a working destination on every
+	// push. checkpointRemoteConfigured is the free half — an empty checkpointURL
+	// means "none configured" as often as "configured and refused".
 	if ps.hasCheckpointURL() || !ps.checkpointRemoteConfigured {
 		return
 	}
