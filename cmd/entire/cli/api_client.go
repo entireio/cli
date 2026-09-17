@@ -20,6 +20,8 @@ import (
 func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Client, error) {
 	if insecureHTTP {
 		auth.EnableInsecureHTTP()
+	} else if err := requireSecureDataOverride(); err != nil {
+		return nil, err
 	}
 	target, err := auth.ResolveDataAPI(ctx)
 	if err != nil {
@@ -35,6 +37,17 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 		}
 	}
 	return api.NewClientWithBaseURL(target.Token, target.BaseURL), nil
+}
+
+// requireSecureDataOverride rejects an http ENTIRE_API_BASE_URL before any
+// credential resolution runs against it.
+func requireSecureDataOverride() error {
+	if dataURL, ok := api.BaseURLOverride(); ok {
+		if err := api.RequireSecureURL(dataURL); err != nil {
+			return fmt.Errorf("base URL check: %w", err)
+		}
+	}
+	return nil
 }
 
 // NewAuthenticatedEntireAPICellClient creates an API client for repo-scoped

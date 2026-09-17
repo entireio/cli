@@ -22,6 +22,10 @@ var requireSecureDispatchURL = api.RequireSecureURL
 func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 	if opts.InsecureHTTPAuth {
 		auth.EnableInsecureHTTP()
+	} else if override, ok := api.BaseURLOverride(); ok {
+		if err := requireSecureDispatchURL(override); err != nil {
+			return nil, fmt.Errorf("dispatch base URL: %w", err)
+		}
 	}
 	target, err := resolveDataAPI(ctx)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
