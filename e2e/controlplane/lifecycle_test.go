@@ -83,11 +83,11 @@ func waitForRepoClonable(t *testing.T, dir, ref string) repoJSON {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
-		stdout, stderr, err := runEntire(t, dir, "repo", "get", ref, "--json")
+		stdout, stderr, err := runEntire(t, dir, "repo", "view", ref, "--json")
 		var pending string
 		if err != nil {
 			require.True(t, strings.Contains(stderr, "no repo named") || strings.Contains(stderr, "no project named"),
-				"entire repo get %s --json: %v\nstdout:\n%s\nstderr:\n%s", ref, err, stdout, stderr)
+				"entire repo view %s --json: %v\nstdout:\n%s\nstderr:\n%s", ref, err, stdout, stderr)
 			pending = strings.TrimSpace(stderr)
 		} else {
 			repo := decodeJSON[repoJSON](t, stdout)

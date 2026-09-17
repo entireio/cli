@@ -118,14 +118,8 @@ linters:
       # RFC 7807 problem detail via errors.As. Per-call-site wrapping would
       # only be unwrapped again, so the command closures return coreapi
       # errors verbatim.
-      #
-      # checkpointpolicy.EnsureCanReadVersion already returns a clean,
-      # user-facing message (including the checkpoint ID and version), and
-      # callers classify it via IsUnsupportedVersion. Wrapping would obscure
-      # that purpose-built message, so call sites return it verbatim.
       ignore-package-globs:
         - github.com/entireio/cli/internal/coreapi
-        - github.com/entireio/cli/cmd/entire/cli/checkpointpolicy
     forbidigo:
       analyze-types: true
       forbid:

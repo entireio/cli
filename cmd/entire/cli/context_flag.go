@@ -54,10 +54,10 @@ func addContextFlag(cmd *cobra.Command) {
 }
 
 // completeContextFlag completes saved context names for --context. It reuses the
-// same listing `auth use` completes against, so both offer the same names with
+// same listing `auth switch` completes against, so both offer the same names with
 // the same descriptions.
 func completeContextFlag(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	// completeContextNames takes the positional args of `auth use <context>`; pass
+	// completeContextNames takes the positional args of `auth switch <context>`; pass
 	// none so it treats this as completing the first (and only) value.
 	return completeContextNames(cmd, nil, toComplete)
 }

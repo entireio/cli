@@ -711,17 +711,13 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		return
 	}
 
-	states, err := store.List(ctx)
+	// ListReadOnly, not List: asking what is happening must not change what is
+	// happening. List deletes stale records as it reads them, and status is the
+	// command people run to look. Cleanup stays with doctor and the sweeper,
+	// which still call List.
+	states, err := store.ListReadOnly(ctx)
 	if err != nil || len(states) == 0 {
 		return
-	}
-
-	// Finalize any non-ended session whose agent process has exited without a
-	// SessionStop hook firing, so it doesn't linger as "active" until the
-	// inactivity timeout. The sweep marks them ended in place, so the filter
-	// below drops them.
-	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
-		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
 	// Filter to active sessions only, per session.State.IsEnded — the same rule
@@ -1110,9 +1106,16 @@ func codexHooksStatusFromIssue(issue *codexHookIssue) *codexHooksStatusJSON {
 }
 
 type sessionBriefJSON struct {
-	Agent  string `json:"agent"`
-	Model  string `json:"model,omitempty"`
-	Status string `json:"status"`
+	Agent string `json:"agent"`
+	// SessionID distinguishes two sessions for the same agent, which the
+	// previous one-entry-per-agent shape could not represent.
+	SessionID string `json:"session_id,omitempty"`
+	// WorktreePath and Branch say WHERE a session is, which is the whole
+	// reason two entries for one agent are distinguishable in practice.
+	WorktreePath string `json:"worktree_path,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Status       string `json:"status"`
 	// CaptureDegraded reports that a session for this agent last turned with a
 	// status scan over budget, so new-file detection was skipped.
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
@@ -1174,52 +1177,41 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
 
 		if store, err := session.NewStateStore(ctx); err == nil {
-			if states, err := store.List(ctx); err == nil {
-				// Finalize sessions whose agent has exited (matches the human
-				// status path) so --json doesn't leave them orphaned or
-				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
-				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
-				type agentEntry struct {
-					brief    sessionBriefJSON
-					isActive bool
-				}
-				byAgent := make(map[string]*agentEntry)
+			// Read-only, and one entry per session. Collapsing by agent hid a
+			// second session for the same agent in another worktree, and the
+			// finalize-on-read this replaces made `status --json` mutate the
+			// state it reports.
+			if states, err := store.ListReadOnly(ctx); err == nil {
 				for _, st := range states {
 					if st.IsEnded() {
 						continue
 					}
-					agent := string(st.AgentType)
-					if agent == "" {
-						agent = unknownPlaceholder
+					agentName := string(st.AgentType)
+					if agentName == "" {
+						agentName = unknownPlaceholder
 					}
-					active := st.Phase == session.PhaseActive
-					if existing, ok := byAgent[agent]; ok {
-						if active && !existing.isActive {
-							existing.brief.Model = st.ModelName
-							existing.brief.Status = sessionStatusLabel(st)
-							existing.isActive = true
-						}
-						// Degradation is sticky across the dedupe: any degraded
-						// session for this agent must not be hidden by a healthy one.
-						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
-					} else {
-						byAgent[agent] = &agentEntry{
-							brief: sessionBriefJSON{
-								Agent:           agent,
-								Model:           st.ModelName,
-								Status:          sessionStatusLabel(st),
-								CaptureDegraded: st.CaptureDegradedAt != nil,
-							},
-							isActive: active,
-						}
+					branch := st.Branch
+					if branch == "" && st.WorktreePath != "" {
+						branch = resolveWorktreeBranch(ctx, st.WorktreePath)
 					}
+					result.ActiveSessions = append(result.ActiveSessions, sessionBriefJSON{
+						Agent:           agentName,
+						SessionID:       st.SessionID,
+						WorktreePath:    st.WorktreePath,
+						Branch:          branch,
+						Model:           st.ModelName,
+						Status:          sessionStatusLabel(st),
+						CaptureDegraded: st.CaptureDegradedAt != nil,
+					})
 				}
-				for _, e := range byAgent {
-					result.ActiveSessions = append(result.ActiveSessions, e.brief)
-				}
+				// Agent first so the listing stays grouped and readable;
+				// session ID breaks ties so two sessions for one agent have a
+				// deterministic order.
 				sort.Slice(result.ActiveSessions, func(i, j int) bool {
-					return result.ActiveSessions[i].Agent < result.ActiveSessions[j].Agent
+					if result.ActiveSessions[i].Agent != result.ActiveSessions[j].Agent {
+						return result.ActiveSessions[i].Agent < result.ActiveSessions[j].Agent
+					}
+					return result.ActiveSessions[i].SessionID < result.ActiveSessions[j].SessionID
 				})
 			}
 		}

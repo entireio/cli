@@ -236,20 +236,10 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 	}
 	defer repo.Close()
 
-	// Gate on the checkpoint policy before writing any checkpoint data, matching
-	// the standalone `entire import` command. Best-effort: an unsupported or
-	// unreadable policy skips the import (logged and noted) instead of failing
-	// enable, since the offer must never break enable.
-	if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, repo); err != nil {
-		logging.Warn(ctx, "session import skipped: checkpoint policy not satisfied", "error", err)
-		fmt.Fprintf(w, "Note: skipping agent history import: %v\n", err)
-		return
-	}
-
 	// Load repo/user-configured redaction before any checkpoint write, matching
 	// import_cmd.go; without it only always-on secret scanning would run.
 	// Scanner-config failures skip the import (this offer must never break
-	// enable), mirroring the policy-failure handling above.
+	// enable).
 	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
 		logging.Warn(ctx, "session import skipped: redaction configuration failed", "error", err)
 		fmt.Fprintf(w, "Note: skipping agent history import: %v\n", err)

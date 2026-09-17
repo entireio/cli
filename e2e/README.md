@@ -60,7 +60,7 @@ Run it with `mise run test:e2e:controlplane [filter]`; the task installs the Pla
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
+| `E2E_AGENT` | Runner filter (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor-cli`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`, `roger-roger`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
 | `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. | per runner: 60s (codex, copilot-cli, gemini), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |

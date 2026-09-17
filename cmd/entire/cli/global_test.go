@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,6 +38,20 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(isolationDir, "auth-tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
+
+	// ENTIRE_TOKEN is isolated by ABSENCE, not by a redirected path, so it is
+	// not in the block above. Left set, it outranks every stored context in
+	// resolveEntireIdentityProfile, so a test driving the production identity
+	// resolver sends the developer's own bearer to the host in that token's aud
+	// claim — a live request to a real core from a unit test — and then fails,
+	// because the resolver returns a transport error instead of the guidance
+	// the test asserts. Unset, not set-to-blank: blank is "set but blank",
+	// which ParseEnvToken maps to errEntireEnvTokenRejected, whose guidance also
+	// carries the git-config line the tests look for — so they would pass
+	// without exercising the path they exist to pin.
+	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
+		panic(fmt.Errorf("failed to unset %s: %w", auth.EnvTokenVar, err))
+	}
 
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with

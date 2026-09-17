@@ -52,24 +52,32 @@ func TestOrgCreate_JSONOnRequest(t *testing.T) {
 
 // testRepoCreateProjectULID is the --project value for the repo-create tests
 // below: a syntactically valid ULID so resolveProjectRef skips the by-name
-// lookup and the fake server only needs to answer POST /api/v1/repos.
+// lookup and the fake server only needs to answer repository requests.
 const testRepoCreateProjectULID = "01HZX7QABCDEFGHJKMNPQRSTV2"
 
-// newCreateRepoServer answers POST /api/v1/repos with a created repo whose
+// newCreateRepoServer answers creation and authoritative GETs with a repo whose
 // clusterHost/path resolve to a clone URL. The 201 status is load-bearing,
 // same as newCreateOrgServer.
 func newCreateRepoServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		if r.Method == http.MethodPost {
+			assert.Equal(t, "/api/v1/repos", r.URL.Path)
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			assert.Equal(t, http.MethodGet, r.Method)
+			assert.Equal(t, "/api/v1/repos/"+testDeleteULID, r.URL.Path)
+			assert.Equal(t, "true", r.URL.Query().Get("authoritative"))
+		}
 		repo := &coreapi.Repo{
 			ID:              testDeleteULID,
 			Name:            "web",
 			OwningProjectId: testRepoCreateProjectULID,
-			ClusterHost:     coreapi.NewOptString("c.example.com"),
-			Path:            coreapi.NewOptString("/gh/o/web"),
+			// The authoritative GET confirms the creation fixture is active.
+			State:       coreapi.NewOptString("active"),
+			ClusterHost: coreapi.NewOptString("c.example.com"),
+			Path:        coreapi.NewOptString("/gh/o/web"),
 		}
 		if err := printJSON(w, repo); err != nil {
 			t.Errorf("encode repo: %v", err)
@@ -86,7 +94,7 @@ func TestRepoCreate_HumanByDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, "✓ Created repository web ("+testDeleteULID+")")
 	require.Contains(t, out, "Remote: entire://c.example.com/gh/o/web")
-	require.Empty(t, errOut)
+	require.Contains(t, errOut, "Waiting for repository web to become active")
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.

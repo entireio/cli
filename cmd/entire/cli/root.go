@@ -51,6 +51,23 @@ func inGroup(c *cobra.Command, groupID string) *cobra.Command {
 	return c
 }
 
+// requireSubcommand makes a command group answer an unknown subcommand with an
+// error instead of printing help and reporting success, so a verb that no
+// longer exists fails the shell rather than silently doing nothing.
+//
+// Both halves are load-bearing, and NoArgs alone is a no-op. Cobra rejects an
+// unknown subcommand only on a parentless command; below the root it returns
+// flag.ErrHelp for any command with no RunE *before* it validates arguments, so
+// the leftover word is never examined. Giving the group a RunE is what gets
+// execution as far as NoArgs. The bare group still prints its help.
+func requireSubcommand(cmd *cobra.Command) *cobra.Command {
+	cmd.Args = cobra.NoArgs
+	cmd.RunE = func(c *cobra.Command, _ []string) error {
+		return c.Help()
+	}
+	return cmd
+}
+
 // Run every ancestor's persistent hook, root first, not only the closest one
 // cobra picks by default. Without this, the `checkpoint`, `session`, and `agent`
 // pre-runs shadow the root's and it never builds a logger — silently, since the
@@ -175,10 +192,10 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromEntireDirCheck(newLabsCmd()))                                // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newPluginGroupCmd(), groupSetup)))    // 'plugin' (managed install/list/remove)
 	experimental.Register(cmd, newImportCmd())                                            // 'import' (experimental; import pre-existing agent history)
+	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newClusterCmd(), groupControlPlane))) // 'cluster' — control-plane cluster catalog
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newOrgCmd(), groupControlPlane)))     // 'org' — control-plane org management
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newProjectCmd(), groupControlPlane))) // 'project' — control-plane project management
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newRepoCmd(), groupControlPlane)))    // 'repo' — control-plane repo lifecycle
-	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newGrantCmd(), groupControlPlane)))   // 'grant' — control-plane access grants
 
 	// Top-level lifecycle and standalone commands.
 	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)

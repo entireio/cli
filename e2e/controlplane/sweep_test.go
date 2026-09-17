@@ -49,7 +49,7 @@ func sweepLeaked(t *testing.T, dir string) {
 			var repos []struct {
 				ID string `json:"id"`
 			}
-			if !sweepList(t, dir, &repos, "repo", "list", project.ID, "--json") {
+			if !sweepList(t, dir, &repos, "repo", "list", "--project", project.ID, "--json") {
 				continue
 			}
 			for _, repo := range repos {
