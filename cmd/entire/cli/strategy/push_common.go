@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -94,7 +95,15 @@ func scrubPushOutput(output, target string) string {
 		out = strings.ReplaceAll(out, target, remote.RedactURLOrPath(target))
 	}
 	if len(out) > maxLoggedPushOutput {
-		out = out[:maxLoggedPushOutput] + "\n… truncated"
+		// Back off to a rune boundary. git's output carries file paths, commit
+		// messages and whatever the server chose to say, any of which can be
+		// non-ASCII, so a cut landing mid-character would leave invalid UTF-8
+		// in the log line. At most three bytes are dropped.
+		cut := maxLoggedPushOutput
+		for cut > 0 && !utf8.RuneStart(out[cut]) {
+			cut--
+		}
+		out = out[:cut] + "\n… truncated"
 	}
 	return out
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
@@ -1665,6 +1666,30 @@ func TestNonInteractiveSSHAuthFailure(t *testing.T) {
 // git anonymizes userinfo in the URLs it prints but leaves a query string
 // intact, so a credential passed that way in a user-supplied checkpoint_remote
 // would otherwise reach .entire/logs verbatim.
+// TestScrubPushOutput_TruncatesOnARuneBoundary pins that bounding the logged
+// output cannot emit invalid UTF-8. git's output carries file paths, commit
+// messages and whatever the server said; a byte-offset cut landing inside a
+// multi-byte character would put a broken rune in the log.
+//
+// The fixture puts a 3-byte character astride the limit: 8191 ASCII bytes then
+// "…", so the cut at 8192 falls one byte into it.
+func TestScrubPushOutput_TruncatesOnARuneBoundary(t *testing.T) {
+	t.Parallel()
+
+	out := scrubPushOutput(strings.Repeat("a", maxLoggedPushOutput-1)+"…"+strings.Repeat("b", 100), "")
+
+	if !utf8.ValidString(out) {
+		t.Error("truncated output must stay valid UTF-8")
+	}
+	if !strings.HasSuffix(out, "… truncated") {
+		t.Errorf("should still carry the truncation marker, got tail %q", out[max(0, len(out)-20):])
+	}
+	// The straddling character is dropped whole rather than halved.
+	if body := strings.TrimSuffix(out, "\n… truncated"); strings.HasSuffix(body, "\ufffd") {
+		t.Error("a partial rune was kept and became a replacement character")
+	}
+}
+
 func TestScrubPushOutput(t *testing.T) {
 	t.Parallel()
 	const target = "https://example.test/org/checkpoints.git?token=SUPERSECRET"
