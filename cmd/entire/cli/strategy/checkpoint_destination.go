@@ -26,18 +26,9 @@ import (
 // resyncCheckpointRefsOnDestinationChange.
 const pushedDestinationFileName = "entire-checkpoint-destination.json"
 
-// pushedDestinationFile stores a FINGERPRINT rather than the destination
-// itself. The file answers one question — "is this the same place as last
-// time" — and a hash answers it exactly, so the destination never has to be
-// written down: which repository a developer sends transcripts to is worth not
-// recording in the clear, and a target that did arrive carrying credentials
-// (git hands a pre-push hook whatever URL it was invoked with) leaves none
-// here.
-//
-// NOT because the derived checkpoint URLs embed a token. deriveTokenOriginURL
-// and deriveCheckpointURLFromInfo both build a plain
-// https://host/owner/repo.git; an earlier version of this comment cited them
-// and was wrong.
+// pushedDestinationFile stores a FINGERPRINT rather than the destination: the
+// file only answers "same place as last time", and where a developer sends
+// transcripts is worth not recording in the clear.
 type pushedDestinationFile struct {
 	Fingerprint string `json:"fingerprint"`
 }
@@ -71,28 +62,14 @@ func loadPushedDestination(ctx context.Context) string {
 // the record costs at most one redundant re-sync later, which is idempotent, so
 // it must never fail a push that already succeeded.
 //
-// Deliberately UNLOCKED, unlike its neighbour in checkpoint_sync_capture.go,
-// which pairs its state file with entire-checkpoint-sync-remotes.lock. The
-// difference is the invariant, not the file layout. That one enforces "first
-// capture sticks" over a permanent election, so two hooks both observing
-// "nothing captured" turns a stated guarantee into a coin flip. This file holds
-// a latest-delivery marker where last-write-wins IS the intended reading, and
-// WriteFileAtomicIn already keeps readers from seeing a torn file.
-//
-// The concurrent cases all settle without one. Two hooks re-syncing at once
-// both enqueue, but the push queue has its own flock and Drain de-duplicates,
-// so the second finds it empty, pushes nothing and records nothing. Two hooks
-// delivering to DIFFERENT destinations leave whichever recorded last, and the
-// next push to the other one sees a changed fingerprint and re-syncs, which is
-// the correct outcome rather than a lost update. A partial re-queue declines to
-// record at all (see mayRecord above).
-//
-// So the residual is a redundant re-sync, which is a large push and not a
-// broken guarantee. What a lock would NOT fix is the case actually worth
-// worrying about: two worktrees of one clone disagreeing about the destination,
-// because .entire/settings.local.json resolves per worktree while this file
-// lives in the shared common dir. That is a settings-scope question, and a lock
-// here would only make it look handled.
+// Deliberately UNLOCKED, unlike its neighbour in checkpoint_sync_capture.go.
+// That one enforces "first capture sticks" over a permanent election, where a
+// race turns a stated guarantee into a coin flip. This is a latest-delivery
+// marker where last-write-wins is the intended reading, WriteFileAtomicIn keeps
+// readers off a torn file, and the residual is a redundant re-sync rather than a
+// lost update. A lock would not fix the case that matters — two worktrees of one
+// clone disagreeing, since settings.local.json is per-worktree and this file is
+// common-dir — it would only make it look handled.
 func recordPushedDestination(ctx context.Context, target string) {
 	root, err := gitdir.Open(ctx)
 	if err != nil {
@@ -117,32 +94,21 @@ func recordPushedDestination(ctx context.Context, target string) {
 // earlier one where it landed. Re-queueing is safe because a ref already
 // present on the destination pushes as a no-op.
 //
-// git-branch needs no equivalent, because its push sends the whole
+// git-branch needs no equivalent: its push sends the whole
 // entire/checkpoints/v1 branch. That is a property of pushRefIfNeeded rather
 // than an assumption, so TestV1BranchCarriesItsWholeHistoryToANewDestination
-// pins it: the "has unpushed" shortcut there consults a remote-tracking ref,
-// and a remote-agnostic one would strand the history exactly as the emptied
-// queue does here.
+// pins it.
 //
 // Two suppressions. Nothing recorded means a first push, not a change, so a
-// fresh clone does not offer its whole history unasked. And the key is the
-// push target as the caller resolved it — an elected remote's NAME, or a
-// checkpoint_remote URL — which is what makes the check cost nothing on an
-// ordinary push; repointing an elected remote's URL therefore reads as the
-// same destination, since "origin" is still "origin". Seeing that would mean
-// resolving the remote's push URL on every pre-push, and the misrouted
-// checkpoint_remote this exists for changes the target string itself.
+// fresh clone does not offer its whole history unasked. And the key is the push
+// target as the caller resolved it, which is what makes the check free on an
+// ordinary push — so repointing an elected remote's URL reads as the same
+// destination.
 //
-// Every local checkpoint ref, including ones fetched from the store being left
-// — the same history a git-branch push would carry, for the same reason.
-//
-// Reports whether the destination may now be recorded as delivered. A re-sync
-// that did not finish — the queue would not resolve, the refs would not
-// enumerate, an enqueue failed part way — must NOT be followed by a record:
-// recording makes the stored fingerprint equal the current destination, so the
-// refs that never reached the queue would never be noticed again. Leaving the
-// old fingerprint costs a repeated re-sync on the next push, which is
-// idempotent; recording early strands them for good.
+// Reports whether the destination may now be recorded. A re-sync that did not
+// finish must NOT be followed by a record: the stored fingerprint would equal
+// the current destination and the refs that never reached the queue would never
+// be noticed again.
 func resyncCheckpointRefsOnDestinationChange(ctx context.Context, repo *git.Repository, target string) (mayRecord bool) {
 	previous := loadPushedDestination(ctx)
 	if previous == "" || previous == destinationFingerprint(target) {
