@@ -27,6 +27,7 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	}
 	policyDotGitInspections := map[string]string{
 		"agent/codex/hook_root.go:hasDotGitEntry":   "Codex policy checks whether a candidate checkout owns a .git entry",
+		"binding_tap.go:nestedRepoRootFor":          "binding evidence identifies nested repository boundaries before resolving them",
 		"dispatch_wizard.go:discoverLocalRepoRoots": "dispatch discovery filters sibling repository candidates",
 		"gitrepo/status.go:insideNestedCheckout":    "status walking stops at nested checkout boundaries",
 		"plugin_index.go:SyncPluginIndex":           "plugin index sync checks whether Entire's cache directory contains its clone",
@@ -34,6 +35,8 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	allowedMetadataQueries := map[guardMetadataQuery]string{
 		{source: "dispatch/mode_local.go:resolveRepoRoots", flag: "--show-toplevel"}:                    "local dispatch resolves explicit repository candidates",
 		{source: "dispatch_wizard.go:resolveGitTopLevel", flag: "--show-toplevel"}:                      "dispatch discovery resolves explicit repository candidates",
+		{source: "binding/resolve.go:runRevParse", flag: "--git-common-dir"}:                            "binding discovers clone identity from arbitrary evidence paths",
+		{source: "binding/resolve.go:runRevParse", flag: "--show-toplevel"}:                             "binding discovers the owning worktree from arbitrary evidence paths",
 		{source: "gitdir/gitdir.go:CommonDir", flag: "--git-common-dir"}:                                "session removes the current-worktree resolver in the session split",
 		{source: "gitdir/gitdir.go:CommonDirForWorktree", flag: "--git-common-dir"}:                     "session removes the explicit-worktree resolver in the session split",
 		{source: "paths/paths.go:resolveWorktreeRoot", flag: "--show-toplevel"}:                         "worktree-root discovery remains separate from explicit-root metadata resolution",

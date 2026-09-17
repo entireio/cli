@@ -446,65 +446,91 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 		untrackedFiles = nil
 	}
 
-	now := time.Now()
 	adopted := cloneAdoptSourceState(source)
 
 	// Keep the source live transcript path. In cross-repo adoption the transcript
 	// belongs to the continuing agent session, not the target repository; clearing
 	// or recomputing it from the target repo would drop live transcript capture.
-	adopted.CLIVersion = versioninfo.Version
 	adopted.TranscriptPath = source.TranscriptPath
-	adopted.BaseCommit = head.Hash().String()
-	adopted.RealignAttributionBase(head.Hash().String())
-	adopted.WorktreePath = worktreeRoot
-	adopted.WorktreeID = worktreeID
-	adopted.AdoptedIntoWorktreePath = ""
-	adopted.AdoptedIntoWorktreeID = ""
-	adopted.Branch = branch
-	adopted.LastInteractionTime = &now
-	adopted.Phase = session.PhaseActive
-	adopted.EndedAt = nil
-	adopted.FilesTouched = filesTouched
-
-	// Reset target-local checkpoint bookkeeping. Source checkpoint IDs can point
-	// at metadata in another repository or checkpoint branch; carrying them into
-	// this repo would let amend and turn-finalization paths operate on unrelated
-	// checkpoints.
-	adopted.StepCount = 0
-	adopted.CheckpointTranscriptStart = 0
-	adopted.CheckpointTranscriptSize = 0
-	adopted.TranscriptIdentifierAtStart = ""
-	adopted.ClearLegacyTranscriptOffsets()
-	adopted.TurnID = ""
-	adopted.TurnCheckpointIDs = nil
-	adopted.LastCheckpointID = id.EmptyCheckpointID
-	adopted.ClearCondensationAttempt()
-	adopted.LastCheckpointCommitHash = ""
-	adopted.CheckpointTokenUsage = nil
-	// Re-baseline the subagent cumulative for the fresh target-local window. The
-	// cloned TokenUsage carries the SOURCE session's full cumulative subagent
-	// total; without re-baselining here, the first post-adopt checkpoint would
-	// subtract the source's (stale or nil) baseline and over-report — potentially
-	// the source session's entire subagent usage. Mirrors resetCheckpointWindow's
-	// baseline capture so the first adopted checkpoint only counts target-side
-	// subagent growth, consistent with the PromptWindowBase reset below.
-	adopted.RebaselineSubagentTokens()
-
-	adopted.FullyCondensed = false
-	adopted.UntrackedFilesAtStart = untrackedFiles
-	adopted.PromptAttributions = nil
-	adopted.PendingPromptAttribution = nil
-	// Preserve cumulative turn/context metrics for the continuing agent session,
-	// but start the target checkpoint prompt window at the current turn count so
-	// the first adopted checkpoint only counts target-side turns.
-	adopted.PromptWindowBase = adopted.SessionTurnCount
-	adopted.PromptWindowResetPending = false
-	adopted.AttachedManually = false
-	// The source process owner may already be gone; a new turn will capture the
-	// current owner, and until then liveness should fall back to the timeout.
-	adopted.Owner = nil
+	resetSessionStateForTarget(&adopted, sessionTargetSnapshot{
+		headHash:       head.Hash().String(),
+		worktreeRoot:   worktreeRoot,
+		worktreeID:     worktreeID,
+		branch:         branch,
+		filesTouched:   filesTouched,
+		untrackedFiles: untrackedFiles,
+		now:            time.Now(),
+	}, false)
 
 	return &adopted, filesTouched, nil
+}
+
+type sessionTargetSnapshot struct {
+	headHash       string
+	worktreeRoot   string
+	worktreeID     string
+	branch         string
+	filesTouched   []string
+	untrackedFiles []string
+	// dirtyTrackedFiles / deletedTrackedFiles: tracked paths already
+	// modified-or-staged / deleted in the target when the state is created
+	// there (see State.DirtyTrackedFilesAtStart).
+	dirtyTrackedFiles   []string
+	deletedTrackedFiles []string
+	now                 time.Time
+}
+
+// resetSessionStateForTarget applies the target-local half of adoption. The
+// caller chooses whether to preserve TurnID: additive replication keeps one
+// turn identity across repos, while the user-driven move starts a fresh turn
+// window in its sole surviving target.
+func resetSessionStateForTarget(state *session.State, target sessionTargetSnapshot, preserveTurnID bool) {
+	state.CLIVersion = versioninfo.Version
+	state.BaseCommit = target.headHash
+	state.RealignAttributionBase(target.headHash)
+	state.WorktreePath = target.worktreeRoot
+	state.WorktreeID = target.worktreeID
+	state.AdoptedIntoWorktreePath = ""
+	state.AdoptedIntoWorktreeID = ""
+	state.Branch = target.branch
+	state.LastInteractionTime = &target.now
+	state.Phase = session.PhaseActive
+	state.EndedAt = nil
+	state.FilesTouched = target.filesTouched
+
+	// Source checkpoint IDs can point at metadata in another repository or
+	// checkpoint branch; carrying them into this repo would let amend and turn
+	// finalization paths operate on unrelated checkpoints.
+	state.StepCount = 0
+	state.CheckpointTranscriptStart = 0
+	state.CheckpointTranscriptSize = 0
+	state.TranscriptIdentifierAtStart = ""
+	state.ClearLegacyTranscriptOffsets()
+	if !preserveTurnID {
+		state.TurnID = ""
+	}
+	state.TurnCheckpointIDs = nil
+	state.LastCheckpointID = id.EmptyCheckpointID
+	state.ClearCondensationAttempt()
+	state.LastCheckpointCommitHash = ""
+	state.CheckpointTokenUsage = nil
+	// The cloned TokenUsage carries the source session's cumulative subagent
+	// total. Re-baseline it so the first target checkpoint counts only growth
+	// after replication/adoption.
+	state.RebaselineSubagentTokens()
+
+	state.FullyCondensed = false
+	state.UntrackedFilesAtStart = target.untrackedFiles
+	state.DirtyTrackedFilesAtStart = target.dirtyTrackedFiles
+	state.DeletedTrackedFilesAtStart = target.deletedTrackedFiles
+	state.PromptAttributions = nil
+	state.PendingPromptAttribution = nil
+	state.PromptWindowBase = state.SessionTurnCount
+	state.PromptWindowResetPending = false
+	state.AttachedManually = false
+	// The source owner may already be gone; the next turn captures the current
+	// owner, and until then liveness safely falls back to the timeout.
+	state.Owner = nil
 }
 
 func cloneAdoptSourceState(source *session.State) session.State {
@@ -514,6 +540,8 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.ReviewSkills = slices.Clone(source.ReviewSkills)
 	adopted.TurnCheckpointIDs = slices.Clone(source.TurnCheckpointIDs)
 	adopted.UntrackedFilesAtStart = slices.Clone(source.UntrackedFilesAtStart)
+	adopted.DirtyTrackedFilesAtStart = slices.Clone(source.DirtyTrackedFilesAtStart)
+	adopted.DeletedTrackedFilesAtStart = slices.Clone(source.DeletedTrackedFilesAtStart)
 	adopted.FilesTouched = slices.Clone(source.FilesTouched)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)
 	adopted.SkillEvents = cloneSkillEvents(source.SkillEvents)
