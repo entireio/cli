@@ -4896,6 +4896,74 @@ func TestEnableYes_TelemetryRespectsOptOut(t *testing.T) {
 	})
 }
 
+// TestPromptTelemetryConsent_NoTerminalLeavesUnanswered pins the unit-level half
+// of the CI regression: with no terminal the confirm used to reach huh, whose
+// bubbletea program opens /dev/tty directly and returns a raw internal error.
+func TestPromptTelemetryConsent_NoTerminalLeavesUnanswered(t *testing.T) {
+	// Cannot use t.Parallel() because of t.Setenv.
+
+	// ENTIRE_TEST_TTY set to anything other than "1" forces
+	// CanPromptInteractively() false, whether or not `go test` owns a terminal.
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+	// Neutralize a developer/CI environment that already opted out: that env var
+	// has its own branch above the one under test.
+	t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "")
+
+	s := &EntireSettings{}
+	if err := promptTelemetryConsent(s, true); err != nil {
+		t.Fatalf("promptTelemetryConsent() error = %v, want nil when there is no terminal to ask on", err)
+	}
+	if s.Telemetry != nil {
+		t.Errorf("telemetry must stay unanswered (nil) when the question could not be asked, got %v", *s.Telemetry)
+	}
+	if s.IsTelemetryEnabled() {
+		t.Error("an unanswered telemetry question must read as disabled")
+	}
+}
+
+// TestRunEnableInteractive_NoTerminalSucceedsAndDefersTelemetry pins the whole
+// bug: `entire enable` in CI (or any agent subprocess, or a non-interactive ssh)
+// installed the hooks, wrote settings, and *then* exited 1 with
+// "telemetry consent: telemetry prompt: huh: bubbletea: error opening TTY" —
+// a false failure that aborts a pipeline on a repo that is in fact enabled.
+func TestRunEnableInteractive_NoTerminalSucceedsAndDefersTelemetry(t *testing.T) {
+	// Cannot use t.Parallel() because of t.Chdir and t.Setenv.
+	tmpDir := setupTestRepo(t)
+	testutil.WriteFile(t, tmpDir, "README.md", "initial\n")
+	testutil.GitAdd(t, tmpDir, "README.md")
+	testutil.GitCommit(t, tmpDir, "initial")
+
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+	t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "")
+
+	ag, err := agent.Get(types.AgentName("claude-code"))
+	if err != nil {
+		t.Fatalf("agent.Get(claude-code) error = %v", err)
+	}
+
+	// Yes is deliberately false: --yes has its own telemetry branch in
+	// runEnableInteractive, and the failure was on the path a bare
+	// `entire enable` takes.
+	var out bytes.Buffer
+	if err := runEnableInteractive(t.Context(), &out, []agent.Agent{ag}, EnableOptions{Telemetry: true}); err != nil {
+		t.Fatalf("runEnableInteractive() with no terminal error = %v, want nil (enable must not fail for a question it cannot ask)", err)
+	}
+
+	s, err := LoadEntireSettings(t.Context())
+	if err != nil {
+		t.Fatalf("LoadEntireSettings() error = %v", err)
+	}
+	if !s.Enabled {
+		t.Error("expected the repo to be enabled after a successful enable")
+	}
+	if s.Telemetry != nil {
+		t.Errorf("telemetry must stay unanswered (nil) so a later interactive run still asks, got %v", *s.Telemetry)
+	}
+	if s.IsTelemetryEnabled() {
+		t.Error("an unanswered telemetry question must read as disabled")
+	}
+}
+
 func TestEnableCmd_YesFreshRepo_SkipsPromptsAndEnables(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
