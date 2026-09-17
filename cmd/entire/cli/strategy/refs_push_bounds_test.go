@@ -240,3 +240,33 @@ func refHashOf(t *testing.T, repo *git.Repository, ref plumbing.ReferenceName) s
 	require.NoError(t, err)
 	return r.Hash().String()
 }
+
+// TestFlushCheckpointRefs_BudgetAbortRotatesToo pins that rotation is not
+// confined to the consecutive-failure cap. A slow remote exhausts the budget at
+// roughly the same position on every push, so without rotating here too the tail
+// of the queue starves exactly as it does behind a failing prefix — rotation is
+// fair scheduling, not a verdict on the ref that happened to be in flight.
+func TestFlushCheckpointRefs_BudgetAbortRotatesToo(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, 4)
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installCheckpointRejectHook(t, bareDir, false, "")
+
+	restoreBudget := checkpointFlushBudget
+	checkpointFlushBudget = time.Nanosecond
+	t.Cleanup(func() { checkpointFlushBudget = restoreBudget })
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	output := restore()
+	require.Contains(t, output, "exhausted", "precondition: this flush must stop on the budget, not the failure cap")
+
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Equal(t, append(append([]plumbing.ReferenceName{}, refs[1:]...), refs[0]),
+		remaining, "the attempted ref moves to the back so the next push starts somewhere new")
+}

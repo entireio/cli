@@ -653,9 +653,17 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// Rotating this flush's failures to the back makes the "stay queued for the
 	// next push" promise true for the refs that were skipped.
 	//
-	// Not after an interruption: those failures say nothing about the refs, only
-	// that the user pressed Ctrl-C, so reordering the queue on the way out would
-	// be churn at best.
+	// Deliberately also on an exhausted budget, not only on the failure cap.
+	// Rotation is fair scheduling, not a verdict on a ref: it drops nothing and
+	// only changes order, so it does not matter that a ref cut mid-flight by the
+	// deadline failed for reasons of its own. What matters is that a slow remote
+	// expires the budget at roughly the same position on every push, which
+	// starves the tail of the queue exactly the way a failing prefix does.
+	// Rotating only after the failure cap would leave that case unfixed.
+	//
+	// Not after an interruption, though: there the whole flush is abandoned
+	// rather than bounded, nothing was fairly "skipped", and the process is on
+	// its way out — reordering the queue then is churn at best.
 	if abortReason != "" && pushCtx.Err() == nil && len(failed) > 0 {
 		if err := queue.Rotate(failed); err != nil {
 			logging.Warn(ctx, "git-refs push: rotate failed refs to queue back failed",
