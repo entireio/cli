@@ -16,16 +16,18 @@ import (
 // later.
 var claimRepoPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 
-// ClaimCheckpointRemoteCommand returns the command that claims a refused
-// checkpoint_remote for this clone, so every surface reporting the rejection
-// names the same fix. Empty when the configured entry is not something
-// `entire enable --checkpoint-remote` would accept.
+// ClaimCheckpointRemoteFlagValue returns the validated `provider:repo` value for
+// `entire enable --checkpoint-remote`, or empty when the configured entry is not
+// something that flag would accept. The single source of truth for both the
+// command printed to the user and the value written on their behalf — building
+// them separately let a field with surrounding whitespace pass the check and
+// fail the write.
 //
 // The provider is pinned to the one value parseCheckpointRemoteFlag takes. The
 // resolver is wider — providerHost maps gitlab, GetCheckpointRemote validates
 // nothing — so a hand-written gitlab store resolves while the command naming it
 // is rejected. Do not widen this without widening the flag first.
-func ClaimCheckpointRemoteCommand(config *settings.CheckpointRemoteConfig) string {
+func ClaimCheckpointRemoteFlagValue(config *settings.CheckpointRemoteConfig) string {
 	if config == nil {
 		return ""
 	}
@@ -36,5 +38,16 @@ func ClaimCheckpointRemoteCommand(config *settings.CheckpointRemoteConfig) strin
 	if !claimRepoPattern.MatchString(repo) {
 		return ""
 	}
-	return "entire enable --local --checkpoint-remote github:" + repo
+	return "github:" + repo
+}
+
+// ClaimCheckpointRemoteCommand returns the command that claims a refused
+// checkpoint_remote for this clone, so every surface reporting the rejection
+// names the same fix. Empty when the entry is not one the flag would accept.
+func ClaimCheckpointRemoteCommand(config *settings.CheckpointRemoteConfig) string {
+	value := ClaimCheckpointRemoteFlagValue(config)
+	if value == "" {
+		return ""
+	}
+	return "entire enable --local --checkpoint-remote " + value
 }

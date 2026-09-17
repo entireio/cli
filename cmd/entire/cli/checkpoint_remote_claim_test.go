@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,6 +50,11 @@ func TestClaimCommandParsesAsACheckpointRemoteFlag(t *testing.T) {
 		{"quote", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/fo\"o"}, ""},
 		{"redirect", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo>out"}, ""},
 		{"three segments", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo/bar"}, ""},
+		// Surrounding whitespace is tolerated because the validation trims —
+		// but then the value WRITTEN must be the trimmed one too. Building the
+		// command and the write separately let this pass the check and fail the
+		// write, prompting the user and then erroring.
+		{"padded fields", settings.CheckpointRemoteConfig{Provider: " github ", Repo: " acme/checkpoints "}, "github:acme/checkpoints"},
 		{"repo with a space", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/check points"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,10 +66,18 @@ func TestClaimCommandParsesAsACheckpointRemoteFlag(t *testing.T) {
 			}
 			require.Equal(t, "entire enable --local --checkpoint-remote "+tc.wantFlag, got)
 
+			// The value written on the user's behalf must be the same one the
+			// printed command carries, or the prompt accepts a claim the write
+			// then rejects.
+			assert.Equal(t, tc.wantFlag, checkpointremote.ClaimCheckpointRemoteFlagValue(&tc.config),
+				"the written value must match the printed command")
+
 			provider, repo, err := parseCheckpointRemoteFlag(tc.wantFlag)
 			require.NoError(t, err, "the offered command must parse")
-			assert.Equal(t, tc.config.Provider, provider)
-			assert.Equal(t, tc.config.Repo, repo)
+			// Trimmed, because that is what the value carries and what gets
+			// written — the padded case exists to pin exactly that.
+			assert.Equal(t, strings.TrimSpace(tc.config.Provider), provider)
+			assert.Equal(t, strings.TrimSpace(tc.config.Repo), repo)
 		})
 	}
 

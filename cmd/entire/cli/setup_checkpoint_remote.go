@@ -480,7 +480,8 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 	// --checkpoint-remote <provider>:<owner>/<repo>` already performs exactly
 	// this write in one command; the prompt makes the existing remedy
 	// discoverable to someone who does not know it exists.
-	if verdict == remote.OwnershipUnprovable && offerToClaimCheckpointRemote(ctx, w, cr, repo) {
+	if verdict == remote.OwnershipUnprovable &&
+		offerToClaimCheckpointRemote(ctx, w, remote.ClaimCheckpointRemoteFlagValue(cr), repo) {
 		return
 	}
 
@@ -500,14 +501,18 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 // prompt nobody can answer must not become an implicit yes — and because an
 // agent reading the output should be handed the command rather than have the
 // decision made for the human it works for.
-func offerToClaimCheckpointRemote(ctx context.Context, w io.Writer, cr *settings.CheckpointRemoteConfig, repo string) bool {
+// Takes the already-validated claimValue rather than the config it came from,
+// so the value written can never diverge from the one validated and printed —
+// reconstructing it here from raw fields let surrounding whitespace pass the
+// check and fail the write.
+func offerToClaimCheckpointRemote(ctx context.Context, w io.Writer, claimValue, repo string) bool {
 	if !interactive.CanPromptInteractively() {
 		return false
 	}
-	// A provider the flag cannot express has no command and no write path; fall
+	// A provider the flag cannot express has no value and no write path; fall
 	// through to the settings-file message rather than prompting for something
 	// that cannot be carried out.
-	if remote.ClaimCheckpointRemoteCommand(cr) == "" {
+	if claimValue == "" {
 		return false
 	}
 
@@ -528,7 +533,7 @@ func offerToClaimCheckpointRemote(ctx context.Context, w io.Writer, cr *settings
 
 	if err := updateStrategyOptions(ctx, w, EnableOptions{
 		UseLocalSettings: true,
-		CheckpointRemote: cr.Provider + ":" + cr.Repo,
+		CheckpointRemote: claimValue,
 	}); err != nil {
 		fmt.Fprintf(w, "Could not save the checkpoint destination: %v\n", err)
 		return false
