@@ -634,9 +634,14 @@ type authStatusJSON struct {
 	ActiveSessions *int   `json:"active_sessions,omitempty"`
 	SessionsError  string `json:"sessions_error,omitempty"`
 	// Sessions is populated only when --sessions was passed, mirroring the text
-	// view. ActiveSessions is the authoritative count either way.
-	Sessions          []authSessionJSON `json:"sessions,omitempty"`
-	AvailableContexts int               `json:"available_contexts,omitempty"`
+	// view; ActiveSessions is the authoritative count either way. It is a
+	// pointer so that asking for the list and getting none emits an explicit
+	// [], distinguishable from the collapsed default where the key is absent.
+	Sessions *[]authSessionJSON `json:"sessions,omitempty"`
+	// AvailableContexts is a pointer for the same reason ActiveSessions is: a
+	// genuine zero must be emitted, while "not counted" (ENTIRE_TOKEN mode
+	// never reads contexts.json) must be absent.
+	AvailableContexts *int `json:"available_contexts,omitempty"`
 }
 
 // authSessionJSON is one login session (an OAuth refresh-token family).
@@ -654,10 +659,16 @@ type authSessionJSON struct {
 func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSON {
 	t := d.target
 	out := authStatusJSON{
-		LoggedIn:          d.loggedIn,
-		Server:            authServerHost(t.coreURL),
-		Context:           t.activeContext,
-		AvailableContexts: t.totalContexts,
+		LoggedIn: d.loggedIn,
+		Server:   authServerHost(t.coreURL),
+		Context:  t.activeContext,
+	}
+	// ENTIRE_TOKEN mode never reads contexts.json, so its zero means "not
+	// counted" rather than "none saved"; every other path counted for real,
+	// zero included.
+	if !t.envToken {
+		total := t.totalContexts
+		out.AvailableContexts = &total
 	}
 	if d.invalid {
 		out.Error = "login is no longer valid; run 'entire login' to re-authenticate"
@@ -690,7 +701,7 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 		out.ExpiresAt = d.sessions[d.current].ExpiresAt
 	}
 	if opts.Sessions {
-		out.Sessions = make([]authSessionJSON, 0, len(d.sessions))
+		listed := make([]authSessionJSON, 0, len(d.sessions))
 		for i, sess := range d.sessions {
 			row := authSessionJSON{
 				ID:        sess.ID,
@@ -703,8 +714,11 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 			if sess.LastUsedAt != nil {
 				row.LastUsedAt = *sess.LastUsedAt
 			}
-			out.Sessions = append(out.Sessions, row)
+			listed = append(listed, row)
 		}
+		// Assigned after the loop: an explicit [] when the listing was asked
+		// for and came back empty, never a nil the encoder would drop.
+		out.Sessions = &listed
 	}
 	return out
 }

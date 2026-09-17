@@ -48,6 +48,16 @@ func rejecting(err error) profileFetcher {
 	return func(context.Context, string, string) (*authProfile, error) { return nil, err }
 }
 
+// unusedSessions is an authSessionLister that fails the test if called — for
+// paths that must return before any listing.
+func unusedSessions(t *testing.T) authSessionLister {
+	return func(context.Context, string, string) ([]api.AuthSession, error) {
+		t.Helper()
+		t.Fatal("listSessions must not be called on this path")
+		return nil, nil
+	}
+}
+
 // noSessions is a authSessionLister returning an empty list (no table rendered).
 func noSessions(context.Context, string, string) ([]api.AuthSession, error) { return nil, nil }
 
@@ -161,8 +171,8 @@ func TestRunAuthStatusJSON_CountsByDefaultAndListsOnRequest(t *testing.T) {
 	if brief.ActiveSessions == nil || *brief.ActiveSessions != 2 {
 		t.Errorf("active_sessions = %v, want 2", brief.ActiveSessions)
 	}
-	if len(brief.Sessions) != 0 {
-		t.Errorf("sessions = %+v, want the array omitted without --sessions", brief.Sessions)
+	if brief.Sessions != nil {
+		t.Errorf("sessions = %+v, want the key absent without --sessions", *brief.Sessions)
 	}
 	if brief.CurrentSessionID != "fam-2" {
 		t.Errorf("current_session_id = %q, want fam-2", brief.CurrentSessionID)
@@ -172,11 +182,11 @@ func TestRunAuthStatusJSON_CountsByDefaultAndListsOnRequest(t *testing.T) {
 	}
 
 	full := decodeAuthStatusJSON(t, okProfile, twoSessions, target, authStatusOptions{Sessions: true})
-	if len(full.Sessions) != 2 {
+	if full.Sessions == nil || len(*full.Sessions) != 2 {
 		t.Fatalf("sessions = %+v, want both rows", full.Sessions)
 	}
 	var current []authSessionJSON
-	for _, sess := range full.Sessions {
+	for _, sess := range *full.Sessions {
 		if sess.Current {
 			current = append(current, sess)
 		}
@@ -211,6 +221,47 @@ func TestRunAuthStatusJSON_ListingFailureIsNotZeroSessions(t *testing.T) {
 	}
 	if got.ExpiresAt != "" {
 		t.Errorf("expires_at = %q, want none without a listing to read it from", got.ExpiresAt)
+	}
+}
+
+// Asking for the list and getting none must emit an explicit [], or a caller
+// cannot tell a satisfied --sessions request from the collapsed default, where
+// the key is absent.
+func TestRunAuthStatusJSON_EmptyListingStillEmitsTheArray(t *testing.T) {
+	t.Parallel()
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "a", totalContexts: 1}
+
+	full := decodeAuthStatusJSON(t, okProfile, noSessions, target, authStatusOptions{Sessions: true})
+	if full.Sessions == nil {
+		t.Fatal("sessions = absent, want an explicit empty array when --sessions was asked for")
+	}
+	if len(*full.Sessions) != 0 {
+		t.Fatalf("sessions = %+v, want empty", *full.Sessions)
+	}
+	if full.ActiveSessions == nil || *full.ActiveSessions != 0 {
+		t.Errorf("active_sessions = %v, want 0", full.ActiveSessions)
+	}
+}
+
+// Zero saved contexts is a real answer and must be emitted; only ENTIRE_TOKEN
+// mode, which never reads contexts.json, may omit the field.
+func TestRunAuthStatusJSON_ContextCountDistinguishesZeroFromUncounted(t *testing.T) {
+	t.Parallel()
+
+	zero := statusTarget{coreURL: testCoreURL, token: "tok", totalContexts: 0}
+	got := decodeAuthStatusJSON(t, okProfile, noSessions, zero, authStatusOptions{})
+	if got.AvailableContexts == nil {
+		t.Fatal("available_contexts = absent, want an explicit 0")
+	}
+	if *got.AvailableContexts != 0 {
+		t.Errorf("available_contexts = %d, want 0", *got.AvailableContexts)
+	}
+
+	env := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	envGot := decodeAuthStatusJSON(t, okProfile, unusedSessions(t), env, authStatusOptions{})
+	if envGot.AvailableContexts != nil {
+		t.Errorf("available_contexts = %d, want absent — env-token mode never counted them", *envGot.AvailableContexts)
 	}
 }
 
