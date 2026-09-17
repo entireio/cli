@@ -49,8 +49,11 @@ func newLogoutCmd() *cobra.Command {
 			if everywhere {
 				deps.revoke = revokeAllAuthSessions
 			}
-			if path, err := contexts.FilePath(userdirs.Config()); err == nil {
-				deps.contextsFile = path
+			// Only names the file in a hint; nothing is created.
+			if dir, err := userdirs.ConfigDirChecked(); err == nil {
+				if path, err := contexts.FilePath(dir); err == nil {
+					deps.contextsFile = path
+				}
 			}
 			return runLogout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), deps)
 		},
