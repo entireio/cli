@@ -632,6 +632,53 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
+	// A Lefthook repo is judged on Entire's registration with Lefthook, not on
+	// .git/hooks/*: Lefthook owns those files and rewrites them constantly, so
+	// their contents say nothing about whether Entire runs. Every other
+	// manager only overwrites at install time, so for those the hook files
+	// remain the answer and the check below is the right one.
+	delivery := strategy.CheckHookDelivery(ctx)
+	if delivery.Declined != "" {
+		// Entire's own hooks are the arrangement here, so the checks below are
+		// the right ones — but say why Lefthook is not carrying it, since
+		// otherwise a Lefthook repo silently looks like any other.
+		fmt.Fprintf(w, "Note: Entire is not registered in Lefthook's config (%s,\n", delivery.Declined)
+		fmt.Fprintln(w, "  and Entire will not modify it). Entire's own Git hooks are used instead.")
+	}
+	if delivery.Manager == strategy.LefthookManagerName {
+		if delivery.OK {
+			// --force also reconciles .git/hooks/*, which is where a repo left
+			// mid-fight — Entire's own hook chaining to Lefthook's displaced
+			// launcher, so every hook runs Entire twice — gets straightened
+			// out. Delivery reads OK in that state, so it needs asking for.
+			if force {
+				if _, err := strategy.EnsureLefthookIntegration(ctx); err != nil {
+					return fmt.Errorf("reconcile %s hooks: %w", delivery.Manager, err)
+				}
+			}
+			fmt.Fprintf(w, "✓ Git hooks: OK (via %s)\n", delivery.Manager)
+			return nil
+		}
+		fmt.Fprintf(w, "Git hooks: NOT DELIVERING (%s)\n", delivery.Manager)
+		fmt.Fprintf(w, "  %s\n", delivery.Reason)
+		fmt.Fprintln(w, "  Fix: re-register Entire in Lefthook's configuration.")
+		if !force {
+			fmt.Fprintln(w, "  Run `entire doctor --force` to apply it.")
+			return nil
+		}
+		if _, err := strategy.EnsureLefthookIntegration(ctx); err != nil {
+			return fmt.Errorf("register Entire with Lefthook: %w", err)
+		}
+		// Registering is not enough when Lefthook has no hook file for a hook
+		// — git runs nothing there. The native install fills exactly those
+		// gaps: it skips every path Lefthook already owns.
+		if _, err := strategy.ReinstallGitHooks(ctx); err != nil {
+			return fmt.Errorf("install git hooks alongside Lefthook: %w", err)
+		}
+		fmt.Fprintln(w, "  ✓ Re-registered")
+		return nil
+	}
+
 	switch strategy.CheckGitHookState(ctx) {
 	case strategy.GitHooksCurrent:
 		fmt.Fprintln(w, "✓ Git hooks: OK")
