@@ -176,3 +176,58 @@ func TestFlushCheckpointRefs_LogsBatchFailureCause(t *testing.T) {
 	assert.NotContains(t, output, "does not appear to be a git repository",
 		"the batch error is logged, not printed into the user's git push")
 }
+
+// installSelectiveRejectHook rejects any push whose ref updates include a ref
+// other than allowRef. A pre-receive hook declines the whole push, so a batch
+// carrying one blocked ref takes every healthy ref down with it — the shape that
+// forces the per-ref fallback to be the only way the healthy refs can land.
+func installSelectiveRejectHook(t *testing.T, bareDir, allowRef string) {
+	t.Helper()
+	hook := "#!/bin/sh\nblocked=0\nwhile read -r old new ref; do\n" +
+		"  [ \"$ref\" = '" + allowRef + "' ] || blocked=1\ndone\n" +
+		"if [ \"$blocked\" = 1 ]; then echo '" + checkpointRejectReason + "' >&2; exit 1; fi\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+}
+
+// TestFlushCheckpointRefs_BlockedPrefixDoesNotStarveHealthyRefs pins the fairness
+// half of the bound. The queue drains in first-seen order, so a prefix that
+// always fails — five checkpoints blocked by a ruleset, say — would otherwise be
+// retried in the same order on every push and the healthy ref behind them would
+// never be attempted at all, despite the abort line promising another try.
+func TestFlushCheckpointRefs_BlockedPrefixDoesNotStarveHealthyRefs(t *testing.T) {
+	blocked := maxConsecutiveRefPushFailures
+	workDir, bareDir, refs := setupRepoWithNCheckpointRefs(t, blocked+1)
+	healthy := refs[blocked]
+	prepareGitRefsPrePush(t, workDir, bareDir)
+	installSelectiveRejectHook(t, bareDir, healthy.String())
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	queue := enqueueRefs(t, repo, refs)
+
+	// First flush: the blocked prefix exhausts the cap and the healthy ref is
+	// never reached, which is exactly why it must not stay last in the queue.
+	restore := captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	restore()
+	assertRefsAbsentFromRemote(t, bareDir, refs, "nothing can land while the prefix is attempted first")
+
+	// Second flush: the rotated queue puts the healthy ref first, so it lands.
+	restore = captureStderr(t)
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	restore()
+
+	assert.Equal(t, remoteRefHash(t, bareDir, healthy),
+		refHashOf(t, repo, healthy), "a healthy ref must not be starved by a permanently blocked prefix")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs[:blocked], remaining, "only the blocked refs stay queued")
+}
+
+func refHashOf(t *testing.T, repo *git.Repository, ref plumbing.ReferenceName) string {
+	t.Helper()
+	r, err := repo.Reference(ref, true)
+	require.NoError(t, err)
+	return r.Hash().String()
+}

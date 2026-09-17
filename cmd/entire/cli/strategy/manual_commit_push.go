@@ -594,6 +594,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	consecutiveFailures := 0
 	attempted := 0
 	var abortReason string
+	var failed []plumbing.ReferenceName
 	for _, ref := range existing {
 		// Before the attempt but never before the first: a flush always tries at
 		// least one ref, and only aborts while refs are left to skip.
@@ -621,6 +622,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 			if firstErr == nil {
 				firstErr = err
 			}
+			failed = append(failed, ref)
 		} else {
 			consecutiveFailures = 0
 			pushed = append(pushed, ref)
@@ -641,6 +643,21 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))
+	}
+	// A bounded flush always stops at the same place unless the queue moves: it
+	// is drained in first-seen order, so a prefix that always fails is retried
+	// in that same order on every push and the refs behind it are never reached.
+	// Rotating this flush's failures to the back makes the "stay queued for the
+	// next push" promise true for the refs that were skipped.
+	//
+	// Not after an interruption: those failures say nothing about the refs, only
+	// that the user pressed Ctrl-C, so reordering the queue on the way out would
+	// be churn at best.
+	if abortReason != "" && pushCtx.Err() == nil && len(failed) > 0 {
+		if err := queue.Rotate(failed); err != nil {
+			logging.Warn(ctx, "git-refs push: rotate failed refs to queue back failed",
+				slog.String("error", err.Error()))
+		}
 	}
 	if firstErr != nil {
 		// Counts attempts, not the queue: refs skipped by an early abort were
