@@ -196,7 +196,7 @@ func Contexts() ([]*contexts.Context, string, error) {
 func ActiveContext() (c *contexts.Context, ok bool, err error) {
 	f, c, ok, err := activeContextIn()
 	if ok {
-		announceContext(f, c)
+		announceContext(len(f.Contexts), c)
 	}
 	return c, ok, err
 }

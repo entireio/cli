@@ -91,7 +91,7 @@ func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string
 	}
 	// Cluster discovery announces an auto-selected login itself.
 	if f, selected, ok, serr := activeContextIn(); serr == nil && ok && selected.Name == c.Name {
-		announceContext(f, c)
+		announceContext(len(f.Contexts), c)
 	}
 	return targetForContext(c)
 }

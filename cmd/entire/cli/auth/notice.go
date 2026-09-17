@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
-	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // contextNoticeW receives the acting-login notice.
@@ -19,8 +18,8 @@ var contextAnnounced atomic.Bool
 //
 // Only when several logins are saved: with one, the answer is obvious and the
 // line would be noise on every command.
-func announceContext(f *contexts.File, c *contexts.Context) {
-	if f == nil || c == nil || len(f.Contexts) < 2 {
+func announceContext(saved int, c *contexts.Context) {
+	if c == nil || saved < 2 {
 		return
 	}
 	if contextAnnounced.Swap(true) {
@@ -31,11 +30,11 @@ func announceContext(f *contexts.File, c *contexts.Context) {
 
 // announceLogin is announceContext for a login picked by host discovery.
 func announceLogin(c *contexts.Context) {
-	f, err := contexts.Load(userdirs.Config())
+	all, _, err := StoredContexts()
 	if err != nil {
 		return
 	}
-	announceContext(f, c)
+	announceContext(len(all), c)
 }
 
 // CaptureContextNoticeForTest redirects the notice into w and re-arms it.
