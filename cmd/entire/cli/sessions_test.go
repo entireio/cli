@@ -894,8 +894,8 @@ func TestInfoCmd_TextOutput(t *testing.T) {
 		"Status:      active",
 		"Worktree:    my-feature",
 		"Turns:       3",
-		"Checkpoints: 2",
-		"Checkpoint:  a3b2c4d5e6f7",
+		"Uncondensed: 2 checkpoints",
+		"Condensed:   a3b2c4d5e6f7 (most recent)",
 		"7.6k",
 		"Input: 100",
 		"Cache read: 5k",
@@ -2985,9 +2985,81 @@ func TestInfoCmd_EndedSession(t *testing.T) {
 	if !strings.Contains(out, "Ended:") {
 		t.Errorf("expected 'Ended:' line in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Checkpoint:  b79b35cd956d") {
+	if !strings.Contains(out, "Condensed:   b79b35cd956d (most recent)") {
 		t.Errorf("expected checkpoint ID in output, got:\n%s", out)
 	}
+}
+
+// TestInfoCmd_CheckpointLinesAreNotContradictory is the regression test for
+// `session info` printing "Checkpoints: 0" directly above
+// "Checkpoint:  <id>". The two lines report different things — the count of
+// checkpoints this session has NOT condensed yet (reset to 0 by a commit) and
+// the ID of the most recent one that WAS condensed — so sharing the word
+// "checkpoint" unqualified made the output read as a self-contradiction.
+// Field values and JSON are unchanged; only the labels are.
+func TestInfoCmd_CheckpointLinesAreNotContradictory(t *testing.T) {
+	setupStopTestRepo(t)
+
+	ctx := context.Background()
+
+	// The exact shape that produced the contradiction: a condensed session, so
+	// the pending count is 0 while a last-condensed checkpoint ID exists.
+	state := makeSessionState("test-info-contradiction", session.PhaseIdle)
+	state.AgentType = testAgentClaude
+	state.StepCount = 0
+	state.LastCheckpointID = "01M2KR4JQN8P1HD8PJXDRR6A89"
+
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	cmd := newInfoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"test-info-contradiction"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	out := stdout.String()
+
+	// Both facts still reach the reader.
+	if !strings.Contains(out, "Uncondensed: 0 checkpoints") {
+		t.Errorf("expected the uncondensed count to be labelled as such, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Condensed:   01M2KR4JQN8P1HD8PJXDRR6A89 (most recent)") {
+		t.Errorf("expected the last condensed checkpoint to be labelled as such, got:\n%s", out)
+	}
+
+	// Neither of the ambiguous labels survives: "Checkpoints: 0" above
+	// "Checkpoint: <id>" is the contradiction this test exists to prevent.
+	for _, banned := range []string{"Checkpoints: ", "Checkpoint:  "} {
+		if strings.Contains(out, banned) {
+			t.Errorf("label %q is ambiguous between the pending count and the condensed checkpoint; got:\n%s", banned, out)
+		}
+	}
+
+	// Belt and braces: no two adjacent lines may differ only by a plural "s"
+	// on the same leading word.
+	lines := strings.Split(out, "\n")
+	for i := 1; i < len(lines); i++ {
+		prev, cur := labelOf(lines[i-1]), labelOf(lines[i])
+		if prev == "" || cur == "" {
+			continue
+		}
+		if prev == cur+"s" || cur == prev+"s" {
+			t.Errorf("adjacent labels %q and %q differ only by a plural; got:\n%s", prev, cur, out)
+		}
+	}
+}
+
+// labelOf returns the "Label:" prefix of a session-info line, or "" when the
+// line carries none.
+func labelOf(line string) string {
+	label, _, found := strings.Cut(line, ":")
+	if !found || strings.ContainsAny(label, " \t") {
+		return ""
+	}
+	return label
 }
 
 func TestInfoCmd_TranscriptStreamsRawAgentBytes(t *testing.T) {
