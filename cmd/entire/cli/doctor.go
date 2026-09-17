@@ -17,6 +17,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -167,6 +168,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Codex hook trust state.
 	checkCodexHookTrust(cmd)
+
+	// Agent-specific: Cursor IDE on Windows opening this WSL repo over UNC
+	// (\\wsl$), which runs no hooks at all.
+	checkCursorUNCMode(cmd)
 
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
@@ -1596,6 +1601,53 @@ func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
 func writeCodexTrackedHooksRemedy(w io.Writer) {
 	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the root worktree has it")
 	fmt.Fprintln(w, "  (merge to the default branch, or check that branch out there).")
+}
+
+// cursorWindowsUsersRoot is the Windows user-profile root as seen from WSL.
+// Package var so tests can override it. Assumes Windows is on C: with the
+// default WSL automount; other drive-letter mappings of \\wsl$ are missed.
+var cursorWindowsUsersRoot = "/mnt/c/Users"
+
+// checkCursorUNCMode warns when Cursor IDE on the Windows host has opened
+// this WSL repo via a \\wsl$ UNC path: Cursor executes no hooks in that mode
+// (see cursor/AGENT.md § Windows + WSL for the verified behavior), so
+// sessions silently never track. Detection is the Windows-side project-dir
+// fingerprint (cursor.DetectUNCProjectDirs). Stays silent outside WSL, when
+// cursor hooks aren't installed in this repo, or when nothing matches.
+// Warn-only: there is no CLI-side fix — the user must reopen the folder in
+// WSL mode.
+func checkCursorUNCMode(cmd *cobra.Command) {
+	distro := os.Getenv("WSL_DISTRO_NAME")
+	if distro == "" {
+		return
+	}
+	ctx := cmd.Context()
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	ca := &cursor.CursorAgent{}
+	installed, err := ca.AreHooksInstalled(ctx)
+	if err != nil {
+		logging.Debug(ctx, "doctor: cursor hooks-installed check failed, skipping UNC-mode check", "error", err)
+		return
+	}
+	if !installed {
+		return
+	}
+	matches := cursor.DetectUNCProjectDirs(cursorWindowsUsersRoot, distro, repoRoot, time.Now())
+	if len(matches) == 0 {
+		return
+	}
+	logging.Debug(ctx, "doctor: cursor UNC-mode fingerprint matched", "count", len(matches))
+	w := cmd.OutOrStdout()
+	fmt.Fprintln(w, "Cursor IDE hooks: NOT FIRING (recent sessions ran over \\\\wsl$)")
+	fmt.Fprintln(w, "  Sessions opened this way are never tracked.")
+	fmt.Fprintln(w, "  Fix: in Cursor, run \"Reopen Folder in WSL\" (Ctrl+Shift+P). The window")
+	fmt.Fprintln(w, "  title should end in [WSL: "+distro+"]. From a WSL terminal, `cursor .`")
+	fmt.Fprintln(w, "  also works once the WSL server is installed.")
+	fmt.Fprintln(w, "  Already switched? This warning stops once the leftover Windows-side")
+	fmt.Fprintf(w, "  activity is older than %d days.\n", int(cursor.UNCEvidenceWindow.Hours()/24))
 }
 
 // canDeleteShadowBranch checks if a shadow branch can be safely deleted.
