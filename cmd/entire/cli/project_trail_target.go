@@ -77,7 +77,7 @@ func projectTrailCellTarget(clusters []coreapi.Cluster, cell, jurisdiction strin
 	return cellTargetFromCluster(cluster)
 }
 
-func openProjectTrailTarget(ctx context.Context, core projectTrailCoreClient, ref api.TrailParentReference, insecure bool) (*projectTrailTarget, error) {
+func projectTrailTargetForReference(ref api.TrailParentReference) (*projectTrailTarget, error) {
 	host, project, err := parseTrailProjectRef(ref.Host + "/" + ref.Project)
 	if err != nil {
 		return nil, err
@@ -88,6 +88,16 @@ func openProjectTrailTarget(ctx context.Context, core projectTrailCoreClient, re
 	}
 	if ref.ID != "" && (!looksLikeULID(ref.ID) || ref.Path != base+"/"+ref.ID) {
 		return nil, errors.New("parent reference has an invalid trail ID or canonical path")
+	}
+	return &projectTrailTarget{ProjectID: ref.ProjectID, Host: host, Project: project, BasePath: base, TrailID: ref.ID}, nil
+}
+
+// Branch parent navigation currently supplies a cell ID but no apiUrl. Keep
+// its addressed catalog route so repo-only readers need not resolve a project.
+func openProjectTrailTarget(ctx context.Context, core projectTrailCoreClient, ref api.TrailParentReference, insecure bool) (*projectTrailTarget, error) {
+	target, err := projectTrailTargetForReference(ref)
+	if err != nil {
+		return nil, err
 	}
 	clusters, err := core.ListClusters(ctx)
 	if err != nil {
@@ -101,7 +111,8 @@ func openProjectTrailTarget(ctx context.Context, core projectTrailCoreClient, re
 	if err != nil {
 		return nil, fmt.Errorf("open project trail cell: %w", err)
 	}
-	return &projectTrailTarget{Client: client, ProjectID: ref.ProjectID, Host: host, Project: project, BasePath: base, TrailID: ref.ID}, nil
+	target.Client = client
+	return target, nil
 }
 
 func resolveProjectTrailCollection(cmd *cobra.Command) (*projectTrailTarget, error) {
@@ -126,10 +137,47 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 	if resolved.Project == nil || resolved.Reference.Host != host || !strings.EqualFold(resolved.Reference.Project, project) {
 		return nil, errors.New("core returned a different project reference")
 	}
-	return openProjectTrailTarget(ctx, core, api.TrailParentReference{
+	target, err := projectTrailTargetForReference(api.TrailParentReference{
 		ProjectID: resolved.Project.ID, Host: resolved.Reference.Host, Project: resolved.Reference.Project,
-		Jurisdiction: resolved.Project.Region, PrimaryProcessingCell: resolved.Project.PrimaryProcessingCell,
-	}, insecure)
+	})
+	if err != nil {
+		return nil, err
+	}
+	cell, err := projectTrailResolvedCellTarget(resolved.Project.APIURL, resolved.Project.PrimaryProcessingCell, resolved.Project.Region)
+	if err != nil {
+		return nil, fmt.Errorf("route project %s/%s: %w", host, project, err)
+	}
+	target.Client, err = newProjectTrailCellClient(ctx, insecure, cell)
+	if err != nil {
+		return nil, fmt.Errorf("open project trail cell: %w", err)
+	}
+	return target, nil
+}
+
+// Core resolves the stored cell, including hidden clusters and API overrides.
+// An absent URL is authoritative unavailability, not a catalog/default fallback.
+func projectTrailResolvedCellTarget(apiURL, cell, jurisdiction string) (*auth.CellTarget, error) {
+	if strings.TrimSpace(cell) == "" {
+		return nil, errors.New("core did not return primaryProcessingCell; project assignment is unavailable")
+	}
+	if strings.TrimSpace(jurisdiction) == "" {
+		return nil, errors.New("core did not return the project's jurisdiction (region)")
+	}
+	if strings.TrimSpace(apiURL) == "" {
+		return nil, errors.New("core did not return apiUrl for the assigned processing cell; project routing is unavailable")
+	}
+	u, err := url.Parse(apiURL)
+	if err != nil || (u.Scheme != schemeHTTPS && u.Scheme != schemeHTTP) || u.Hostname() == "" || u.User != nil ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(apiURL, "#") {
+		return nil, errors.New("core returned an invalid project apiUrl; expected an HTTP(S) origin")
+	}
+	region, err := auth.NormalizeJurisdiction(jurisdiction)
+	if err != nil {
+		return nil, fmt.Errorf("invalid project jurisdiction: %w", err)
+	}
+	// The cell client enforces HTTPS (or the explicit local-development policy)
+	// before sending credentials; this helper only validates the response shape.
+	return &auth.CellTarget{BaseURL: strings.TrimSuffix(apiURL, "/"), Jurisdiction: region}, nil
 }
 
 func resolveTrailProjectReference(cmd *cobra.Command) (string, string, error) {

@@ -17,6 +17,7 @@ type ProjectResolution struct {
 		ID                    string `json:"id"`
 		Region                string `json:"region"`
 		PrimaryProcessingCell string `json:"primaryProcessingCell"`
+		APIURL                string `json:"apiUrl"`
 	} `json:"project"`
 	Reference struct {
 		Host    string `json:"host"`

@@ -25,18 +25,26 @@ const (
 )
 
 type fakeProjectTrailCore struct {
-	resolveCalls int
-	clusters     []coreapi.Cluster
+	resolveCalls   int
+	catalogCalls   int
+	apiURL         string
+	resolutionJSON string
+	clusters       []coreapi.Cluster
 }
 
 func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, host, project string) (*coreapi.ProjectResolution, error) {
 	f.resolveCalls++
 	var out coreapi.ProjectResolution
-	err := json.Unmarshal(fmt.Appendf(nil, `{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell"},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, host, project), &out)
+	body := f.resolutionJSON
+	if body == "" {
+		body = fmt.Sprintf(`{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell","apiUrl":%q},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, f.apiURL, host, project)
+	}
+	err := json.Unmarshal([]byte(body), &out)
 	return &out, err
 }
 
 func (f *fakeProjectTrailCore) ListClusters(context.Context) (*coreapi.ListClustersOutputBody, error) {
+	f.catalogCalls++
 	return &coreapi.ListClustersOutputBody{Clusters: f.clusters}, nil
 }
 
@@ -46,7 +54,7 @@ func setupProjectTrailTest(t *testing.T, handler http.HandlerFunc) (*fakeProject
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	core := &fakeProjectTrailCore{clusters: []coreapi.Cluster{{Slug: "project-cell", Jurisdiction: "eu", ApiUrl: coreapi.NewOptString(server.URL)}}}
+	core := &fakeProjectTrailCore{apiURL: server.URL, clusters: []coreapi.Cluster{{Slug: "project-cell", Jurisdiction: "eu", ApiUrl: coreapi.NewOptString(server.URL)}}}
 	oldCore, oldCell := newProjectTrailCoreClient, newProjectTrailCellClient
 	newProjectTrailCoreClient = func() (projectTrailCoreClient, error) { return core, nil }
 	newProjectTrailCellClient = func(_ context.Context, _ bool, target *auth.CellTarget) (*api.Client, error) {

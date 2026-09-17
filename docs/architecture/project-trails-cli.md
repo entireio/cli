@@ -82,11 +82,15 @@ not an aggregation of project discussions and all repositories.
 
 ## Routing and safety
 
-- Explicit selectors use Core `/projects/resolve/{host}/{project}`, then its cell
-  catalog. Routes use the canonical public reference, not an internal GitHub
-  project storage name.
-- Branch discovery follows the backing row's `parent` through the catalog,
-  without requiring a project-collection lookup. A missing parent may be hidden,
+- Creation and explicit selectors use Core `/projects/resolve/{host}/{project}`
+  and its returned `project.apiUrl`, with the stored `primaryProcessingCell` and
+  `region`. No separate catalog lookup is needed, including for hidden assigned
+  clusters. Routes use the canonical public reference, not an internal GitHub
+  project storage name. Missing fields (older Core), an unassigned project, or
+  an unavailable URL fail closed; a catalog or region default is not a fallback.
+- Branch discovery follows the backing row's `parent` through the catalog
+  (parent references currently carry a cell ID, not an API URL), without
+  requiring a project-collection lookup. A missing parent may be hidden,
   stale, or unresolved; it is never a reason to fall back to legacy semantics.
 - Branch operations validate membership through the owned project route before
   using the repository-local ID/number for findings, approvals, or streams.

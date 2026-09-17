@@ -15,7 +15,7 @@ func TestResolveProjectPublicReference(t *testing.T) {
 		assert.Equal(t, "/api/v1/projects/resolve/gh/Acme", r.URL.Path)
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
 		assert.Equal(t, "application/json", r.Header.Get("Accept"))
-		_, err := w.Write([]byte(`{"project":{"id":"project-id","name":"private-storage-name","region":"eu","primaryProcessingCell":"cell-eu"},"reference":{"host":"gh","project":"acme"}}`))
+		_, err := w.Write([]byte(`{"project":{"id":"project-id","name":"private-storage-name","region":"eu","primaryProcessingCell":"cell-eu","apiUrl":"https://assigned.api.example"},"reference":{"host":"gh","project":"acme"}}`))
 		assert.NoError(t, err)
 	}))
 	t.Cleanup(server.Close)
@@ -26,6 +26,7 @@ func TestResolveProjectPublicReference(t *testing.T) {
 	require.Equal(t, "acme", out.Reference.Project)
 	require.Equal(t, "eu", out.Project.Region)
 	require.Equal(t, "cell-eu", out.Project.PrimaryProcessingCell)
+	require.Equal(t, "https://assigned.api.example", out.Project.APIURL)
 }
 
 func TestResolveProjectFailure(t *testing.T) {
