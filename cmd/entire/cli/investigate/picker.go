@@ -7,12 +7,14 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"charm.land/huh/v2"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/spawn"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
@@ -123,6 +125,11 @@ func loadPickerFormOverride() pickerFormFn {
 // Eligibility: agent has a non-nil Spawner AND has hooks installed.
 // Non-spawnable agents (cursor, opencode, factoryai-droid, copilot-cli)
 // are filtered out at the SpawnerFor check.
+//
+// Returns (nil, nil) when there is no terminal to render the picker on: the
+// non-interactive equivalent is printed to out and the caller should treat it
+// as a clean no-op (both call sites already guard on a nil cfg). Callers must
+// therefore check cfg for nil before dereferencing it, even when err is nil.
 func RunInvestigateConfigPicker(
 	ctx context.Context,
 	out io.Writer,
@@ -146,6 +153,29 @@ func RunInvestigateConfigPicker(
 		)
 	}
 
+	// The picker is a full-screen huh/Bubble Tea form. Without a controlling
+	// terminal it dies inside Bubble Tea ("error opening TTY: ... /dev/tty"),
+	// and the caller surfaced that raw library error after this function had
+	// already printed "Configuring investigate with N eligible agent(s)" —
+	// a progress line implying work was underway. Degrade the way `entire
+	// agent` and `entire review --configure` do instead: name the
+	// non-interactive equivalent and leave cleanly, before any pre-print.
+	//
+	// A test-installed form override bypasses the check, mirroring how
+	// runManageAgents' selectFn bypasses the same gate in setup.go.
+	//
+	// Ordering: this sits after the eligibility check so that a repo with no
+	// launchable agents still gets the more specific "run `entire configure`"
+	// error, and so the guidance below can name the agents actually available.
+	formFn := loadPickerFormOverride()
+	if formFn == nil && !interactive.CanPromptInteractively() {
+		printNonInteractivePickerGuidance(out, eligible)
+		return nil, nil
+	}
+	if formFn == nil {
+		formFn = runInvestigatePickerForm
+	}
+
 	// Defaults: select all eligible agents, MaxTurns=2, Quorum=0 (== all).
 	picks := make([]string, len(eligible))
 	for i, c := range eligible {
@@ -158,10 +188,6 @@ func RunInvestigateConfigPicker(
 	fmt.Fprintln(out, "(Space to toggle, enter to confirm.)")
 	fmt.Fprintln(out)
 
-	formFn := loadPickerFormOverride()
-	if formFn == nil {
-		formFn = runInvestigatePickerForm
-	}
 	if err := formFn(ctx, eligible, &picks, &maxTurns, &quorum); err != nil {
 		return nil, fmt.Errorf("investigate picker: %w", err)
 	}
@@ -187,6 +213,27 @@ func RunInvestigateConfigPicker(
 	// after persistence succeeds — printing here before the caller writes
 	// the file would lie when SaveLocal then errors out.
 	return cfg, nil
+}
+
+// printNonInteractivePickerGuidance prints the complete non-interactive
+// equivalent of the picker: the file to edit, the exact JSON shape the picker
+// would have produced, and the agent names that are actually eligible in this
+// repo. Per CLAUDE.md's agent-safe-fallback rule, an agent reading this must be
+// able to finish the workflow without a terminal, so the example is a
+// ready-to-paste block rather than a pointer at the docs.
+func printNonInteractivePickerGuidance(out io.Writer, eligible []AgentChoice) {
+	names := make([]string, 0, len(eligible))
+	quoted := make([]string, 0, len(eligible))
+	for _, c := range eligible {
+		names = append(names, c.Name)
+		quoted = append(quoted, strconv.Quote(c.Name))
+	}
+	fmt.Fprintln(out, "Cannot show the investigate config picker in non-interactive mode.")
+	fmt.Fprintln(out, "Use: set \"investigate\" in .entire/settings.local.json, for example:")
+	fmt.Fprintf(out, "  {\"investigate\": {\"agents\": [%s], \"max_turns\": 2, \"quorum\": 0}}\n", strings.Join(quoted, ", "))
+	fmt.Fprintf(out, "Eligible agents: %s\n", strings.Join(names, ", "))
+	fmt.Fprintln(out, "max_turns is the per-agent turn budget; quorum is the approve count needed to stop (0 = all).")
+	fmt.Fprintln(out, "Or re-run `entire investigate --edit` from an interactive terminal.")
 }
 
 // runInvestigatePickerForm renders the production huh picker form.

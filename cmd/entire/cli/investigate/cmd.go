@@ -469,6 +469,10 @@ func runEdit(ctx context.Context, cmd *cobra.Command, deps Deps) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 		return wrapSilent(deps.NewSilentError, err)
 	}
+	// A nil cfg with no error means the picker declined to run and already
+	// printed the non-interactive equivalent (no TTY). Nothing to save, and
+	// nothing failed — exit 0, matching `entire agent` and
+	// `entire review --configure` in the same situation.
 	if cfg == nil {
 		return nil
 	}

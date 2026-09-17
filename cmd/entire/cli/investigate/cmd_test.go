@@ -980,3 +980,152 @@ func TestRunInvestigate_SoftWarnSilentInNonInteractive(t *testing.T) {
 	_ = cmd.ExecuteContext(context.Background()) //nolint:errcheck // non-interactive path proceeds
 	require.True(t, loopCalled, "loop must run when soft-warn is silent (non-interactive)")
 }
+
+// TestRunEdit_NonInteractiveDegradesGracefully is the regression guard for
+// `entire investigate --edit` in a non-interactive environment (CI, an agent
+// subprocess, a piped shell). Before the fix the picker printed a progress
+// line and then ran a huh/Bubble Tea form unconditionally, so the command
+// emitted the raw library error
+//
+//	investigate picker: picker form: huh: bubbletea: error opening TTY: ...
+//
+// and exited 1 — leaving an agent with no way to finish the workflow, which
+// CLAUDE.md's "Agent-Safe CLI Fallbacks" rule forbids.
+//
+// Not parallel: t.Setenv + t.Chdir.
+func TestRunEdit_NonInteractiveDegradesGracefully(t *testing.T) {
+	// Force the non-interactive branch explicitly rather than relying on
+	// testing.Testing(): ENTIRE_TEST_TTY is the highest-precedence input to
+	// interactive.CanPromptInteractively, so any non-"1" value pins it off.
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+	repo := setupInvestigateRepo(t)
+
+	deps := newTestDeps(t, []types.AgentName{"claude-code"}, []string{"claude-code"})
+	cmd := investigate.NewCommand(deps)
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"--edit"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("--edit must exit 0 in non-interactive mode, got error: %v\nstdout: %s\nstderr: %s",
+			err, stdout.String(), stderr.String())
+	}
+
+	combined := stdout.String() + stderr.String()
+
+	// 1. No raw TUI-library error leaks to the user.
+	for _, leak := range []string{"bubbletea", "Bubble Tea", "opening TTY", "/dev/tty", "picker form", "investigate picker:"} {
+		if strings.Contains(combined, leak) {
+			t.Errorf("output leaked internal TUI error fragment %q:\n%s", leak, combined)
+		}
+	}
+
+	// 2. The misleading progress pre-print must not appear — nothing was
+	//    configured, so claiming otherwise is the other half of the bug.
+	if strings.Contains(combined, "Configuring investigate with") {
+		t.Errorf("output printed the misleading progress line before declining:\n%s", combined)
+	}
+
+	// 3. An actionable non-interactive alternative is offered, complete
+	//    enough for an agent to finish the job without a terminal.
+	for _, want := range []string{
+		"Cannot show the investigate config picker in non-interactive mode.",
+		".entire/settings.local.json",
+		`"agents": ["claude-code"]`,
+		"max_turns",
+		"quorum",
+		"Eligible agents: claude-code",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("output missing actionable guidance %q:\n%s", want, combined)
+		}
+	}
+
+	// 4. Declining must not write a half-configured settings file.
+	if _, err := os.Stat(filepath.Join(repo, ".entire", "settings.local.json")); !os.IsNotExist(err) {
+		t.Errorf(".entire/settings.local.json should not be written when the picker declines (stat err = %v)", err)
+	}
+}
+
+// TestRunEdit_PickerOverrideBypassesInteractivityGate pins the other side of
+// the gate: a caller that supplies its own picker form (the test seam, and the
+// same shape as runManageAgents' selectFn) still reaches the picker and saves a
+// config even though CanPromptInteractively is false. Without this, the fix
+// above could silently disable the whole --edit flow under test.
+//
+// Not parallel: t.Setenv, t.Chdir, and a process-global picker override.
+func TestRunEdit_PickerOverrideBypassesInteractivityGate(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+	repo := setupInvestigateRepo(t)
+
+	cleanup := investigate.SetPickerFormFnForTest(func(_ context.Context, _ []investigate.AgentChoice, picks *[]string, maxTurns, quorum *int) error {
+		*picks = []string{"claude-code"}
+		*maxTurns = 4
+		*quorum = 1
+		return nil
+	})
+	defer cleanup()
+
+	deps := newTestDeps(t, []types.AgentName{"claude-code"}, []string{"claude-code"})
+	cmd := investigate.NewCommand(deps)
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"--edit"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("--edit with a picker override: %v\nstderr: %s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Cannot show the investigate config picker") {
+		t.Fatalf("picker override must bypass the interactivity gate, got:\n%s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".entire", "settings.local.json")); err != nil {
+		t.Fatalf("expected the picker override to persist a config: %v", err)
+	}
+}
+
+// TestRunInvestigateConfigPicker_NonInteractiveReturnsNoConfigNoError pins the
+// function-level contract the command path relies on: no TTY yields
+// (nil, nil), not an error, so callers exit 0 after printing the guidance.
+//
+// Not parallel: t.Setenv.
+func TestRunInvestigateConfigPicker_NonInteractiveReturnsNoConfigNoError(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+
+	out := &bytes.Buffer{}
+	cfg, err := investigate.RunInvestigateConfigPicker(context.Background(), out,
+		func(_ string) spawn.Spawner { return stubSpawner{name: "claude-code"} },
+		func(_ context.Context) []types.AgentName { return []types.AgentName{"claude-code"} },
+	)
+	if err != nil {
+		t.Fatalf("non-interactive picker must not error, got: %v", err)
+	}
+	if cfg != nil {
+		t.Fatalf("non-interactive picker must return a nil config, got: %+v", cfg)
+	}
+	if !strings.Contains(out.String(), "Cannot show the investigate config picker in non-interactive mode.") {
+		t.Errorf("missing non-interactive guidance:\n%s", out.String())
+	}
+}
+
+// TestRunInvestigateConfigPicker_NoEligibleAgentsWinsOverTTYGate pins the
+// ordering of the two non-interactive outcomes: with nothing launchable, the
+// specific "run `entire configure`" error is strictly more useful than "no
+// terminal", so eligibility must be checked first.
+//
+// Not parallel: t.Setenv.
+func TestRunInvestigateConfigPicker_NoEligibleAgentsWinsOverTTYGate(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+
+	out := &bytes.Buffer{}
+	_, err := investigate.RunInvestigateConfigPicker(context.Background(), out,
+		func(_ string) spawn.Spawner { return nil },
+		func(_ context.Context) []types.AgentName { return []types.AgentName{"claude-code"} },
+	)
+	if err == nil || !strings.Contains(err.Error(), "no launchable agents") {
+		t.Fatalf("want the launchability error to win over the TTY gate, got: %v\nout: %s", err, out.String())
+	}
+}
