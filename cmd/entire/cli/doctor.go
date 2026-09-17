@@ -69,7 +69,14 @@ Checks performed:
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 
-  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  6. Unattributed authors: commits here under a reserved-host address that is
+     yours (e.g. you@Your-Laptop.local, synthesized when user.email was unset)
+     which Entire could not link to an account. Offered for linking when
+     logged in and interactive. This check never uses --force: linking is a
+     one-way attribution write and needs your confirmation; without a
+     terminal it only reports.
+
+  7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -178,6 +185,12 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// A configured summary provider that cannot generate text. After the hook
 	// checks: it breaks three commands, not capture, so it is the milder fault.
 	checkSummaryProvider(cmd)
+
+	// COR-1289: commits here under a reserved-host address that is the
+	// user's, which Entire could not link to an account. Never uses --force
+	// (linking is a one-way attribution write) and has no error return of its
+	// own — see checkUnattributedAuthors's doc comment.
+	checkUnattributedAuthors(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")

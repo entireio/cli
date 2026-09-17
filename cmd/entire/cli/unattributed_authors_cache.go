@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // Cache — <git common dir>/entire-unattributed-authors.json, ONE entry. A
@@ -125,6 +126,20 @@ func invalidateUnattributedAuthorsCache(ctx context.Context, commonDir string) {
 	}
 	if err := root.Remove(unattributedAuthorsCacheFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		logging.Debug(ctx, "unattributed authors: cache invalidate failed", "error", err)
+	}
+}
+
+// invalidateUnattributedAuthorsCacheForRepo resolves the current repo's git
+// common dir and invalidates its cache entry, absorbing "no repository" the
+// same way invalidateUnattributedAuthorsCache absorbs "no cache file" — a
+// caller with no git common dir has nothing to invalidate. Shared by
+// defaultUnattributedPromptDeps (declare) and defaultReleaseDeps (release) so
+// both invalidate identically; matches the releaseDeps/unattributedPromptDeps
+// `invalidate func(ctx context.Context)` shape directly, so it is assigned as
+// a bare function value rather than wrapped in a closure at either call site.
+func invalidateUnattributedAuthorsCacheForRepo(ctx context.Context) {
+	if dir, err := strategy.GetGitCommonDir(ctx); err == nil {
+		invalidateUnattributedAuthorsCache(ctx, dir)
 	}
 }
 
