@@ -58,7 +58,33 @@ the commands are always runnable in every build.
   `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
   bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
   env token's `aud`), else the active login. `auth status` shows the caller's
-  home jurisdiction so the slug is discoverable. `logout`
+  home jurisdiction so the slug is discoverable. It reports a count of active
+  sessions rather than the list — `--sessions` prints the full table, and
+  `--json` emits the same collapse (a count always, the `sessions` array only
+  with `--sessions`; timestamps stay RFC3339 there, since the relative form the
+  text view shows is a reading aid). A second count row, `available contexts`,
+  does the same for saved logins and replaces the trailing "N login contexts
+  saved" sentence. **Both count rows are dropped at exactly one** — the sole
+  session and the sole context are the ones already described by the verdict
+  line's expiry and the `context` row, so the row costs a line and carries
+  nothing; at one session the logout hint also drops its `--everywhere` clause,
+  which would otherwise read "end all 1". Zero sessions still reports, being a
+  contradiction worth seeing. The collapse is text-only, and in the JSON
+  `active_sessions`, `available_contexts` and `sessions` are all **pointers**
+  so absent and zero stay distinct: an unreadable listing omits
+  `active_sessions` while a real zero emits `0`; ENTIRE_TOKEN mode omits
+  `available_contexts` because it never reads contexts.json, while every other
+  path emits its genuine count; and `--sessions` always emits `sessions`, as
+  `[]` when empty, so a satisfied request is distinguishable from the collapsed
+  default where the key is absent. The JSON carries the provider-qualified
+  `user` and deliberately not a split `handle`/`provider`: one directly usable
+  field beats two a caller has to rejoin. `auth status` also marks the caller's
+  own row `(current)`, matching the login JWT's `fid` (refresh-token family id)
+  claim against the listed session ids, since a session IS a refresh-token
+  family. That match is the only thing entitling the verdict line to state an
+  expiry: an unmatched claim renders neither marker nor expiry rather than
+  borrowing another session's, because everything reachable from here
+  (`logout`, `logout --everywhere`) ends a session. `logout`
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`

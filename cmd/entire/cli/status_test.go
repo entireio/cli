@@ -393,6 +393,9 @@ func TestTimeAgo(t *testing.T) {
 		{"23 hours", 23 * time.Hour, "23h ago"},
 		{"1 day", 24 * time.Hour, "1d ago"},
 		{"7 days", 7 * 24 * time.Hour, "7d ago"},
+		{"59 days", 59 * 24 * time.Hour, "59d ago"},
+		{"60 days", 60 * 24 * time.Hour, "2mo ago"},
+		{"200 days", 200 * 24 * time.Hour, "6mo ago"},
 	}
 
 	for _, tt := range tests {
@@ -400,6 +403,39 @@ func TestTimeAgo(t *testing.T) {
 			got := timeAgo(time.Now().Add(-tt.duration))
 			if got != tt.want {
 				t.Errorf("timeAgo(%v ago) = %q, want %q", tt.duration, got, tt.want)
+			}
+		})
+	}
+}
+
+// formatRelativeDuration is signed: `entire auth status` reports session
+// expiries, which are in the future. The sign test has to precede the
+// near-zero test, or a negative duration satisfies d < time.Minute and a login
+// that expires in a month reports "just now".
+func TestFormatRelativeDuration_FutureAndPast(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"a minute from now", -1 * time.Minute, "in 1m"},
+		{"an hour from now", -1 * time.Hour, "in 1h"},
+		{"a day from now", -24 * time.Hour, "in 1d"},
+		{"30 days from now", -30 * 24 * time.Hour, "in 30d"},
+		{"59 days from now", -59 * 24 * time.Hour, "in 59d"},
+		{"60 days from now", -60 * 24 * time.Hour, "in 2mo"},
+		{"just past", 30 * time.Second, "just now"},
+		{"just future (clock skew)", -30 * time.Second, "just now"},
+		{"exactly now", 0, "just now"},
+		{"a day ago", 24 * time.Hour, "1d ago"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatRelativeDuration(tt.d); got != tt.want {
+				t.Errorf("formatRelativeDuration(%v) = %q, want %q", tt.d, got, tt.want)
 			}
 		})
 	}
