@@ -106,10 +106,17 @@ func TestFirstCheckpointPushDoesNotRedeliver(t *testing.T) {
 	assertRefsAbsentFromRemote(t, store, refs, "a first push must not sweep up local refs")
 }
 
-// TestPushedDestinationRecordsNoCredential pins why the file stores a hash: a
-// checkpoint push target can be a URL carrying a token (deriveTokenOriginURL
-// builds one), and the only question this file answers is "same place as last
-// time", which a hash answers without putting the secret on disk.
+// TestPushedDestinationRecordsNoCredential pins why the file stores a hash: the
+// only question it answers is "same place as last time", which a hash answers
+// exactly, so the destination never has to be written down. Which repository a
+// developer sends transcripts to is worth not recording in the clear, and a
+// target that did arrive carrying credentials — git hands a pre-push hook
+// whatever URL it was invoked with — leaves none here.
+//
+// The derived checkpoint URLs do NOT embed a token; deriveTokenOriginURL and
+// deriveCheckpointURLFromInfo both build a plain https://host/owner/repo.git.
+// The credential below is planted by hand to exercise the property, not because
+// any code path produces that shape.
 //
 // Not parallel: t.Chdir.
 func TestPushedDestinationRecordsNoCredential(t *testing.T) {
@@ -276,4 +283,54 @@ func TestFlushDoesNotRecordADestinationTheResyncDidNotReach(t *testing.T) {
 
 	assert.Empty(t, loadPushedDestination(ctx),
 		"an unfinished re-sync leaves the destination unrecorded so the next push retries it")
+}
+
+// TestPrePushHookRedeliversWhenTheDestinationChanges drives the git pre-push
+// hook itself, which is the surface this whole feature exists for. Every other
+// test here goes through PushQueuedCheckpointRefs — the `doctor
+// migrate-checkpoints` path — so without this one, deleting the re-sync from
+// prePushCheckpointRefs passes the entire package.
+//
+// The destination is moved by changing which remote is elected
+// (checkpoint_push_remote), because the single-remote gate above the hook only
+// admits a push to the elected remote.
+//
+// Not parallel: t.Chdir.
+func TestPrePushHookRedeliversWhenTheDestinationChanges(t *testing.T) {
+	workDir, firstStore, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	secondStore := initBareRemote(t, "second-store.git")
+	testutil.RunGit(t, workDir, "remote", "add", "first", firstStore)
+	testutil.RunGit(t, workDir, "remote", "add", "second", secondStore)
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+	enqueueRefs(t, repo, refs)
+
+	electCheckpointRemote(t, workDir, "first")
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "first"))
+	for _, ref := range refs {
+		require.NotEmpty(t, remoteRefHash(t, firstStore, ref), "the hook delivers to the elected store")
+	}
+
+	// Queue is empty now — the destination change is the only thing that can
+	// put these refs back in flight.
+	electCheckpointRemote(t, workDir, "second")
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "second"))
+
+	for _, ref := range refs {
+		assert.NotEmpty(t, remoteRefHash(t, secondStore, ref),
+			"%s must follow the destination change through the pre-push hook", ref)
+	}
+}
+
+// electCheckpointRemote pins which remote carries checkpoints, so a test can
+// move the destination without a dedicated checkpoint_remote URL.
+func electCheckpointRemote(t *testing.T, dir, remote string) {
+	t.Helper()
+	writeSettingsJSON(t, dir, `{"enabled": true, "checkpoints": {"primary": {"type": "git-refs"}}, `+
+		`"strategy_options": {"checkpoint_push_remote": "`+remote+`"}}`)
 }
