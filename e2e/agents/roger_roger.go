@@ -49,7 +49,7 @@ func (r *RogerRoger) RunPrompt(ctx context.Context, dir string, prompt string, o
 
 	// No default, same reasoning as vogon: a local stub needs no ceiling of
 	// ours, but an explicitly requested one must still apply.
-	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	ctx, cancel, err := boundPrompt(ctx, r, 0, cfg)
 	if err != nil {
 		return Output{}, err
 	}
