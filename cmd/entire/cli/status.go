@@ -392,6 +392,12 @@ type checkpointSyncInfo struct {
 	// where a user finds out why — the hooks only log the rejection.
 	IgnoredRemote string
 	IgnoredReason string
+	// IgnoredRemedy is the command that claims the ignored store for this
+	// clone, empty when the configured entry is too malformed to name one or
+	// when the rejection is not one a local declaration fixes. Carried rather
+	// than rebuilt at render time so the text and the JSON cannot offer
+	// different fixes.
+	IgnoredRemedy string
 }
 
 // resolveDedicatedReadSource records where checkpoint READS land when the
@@ -530,6 +536,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 		if repo, reason, inherited := checkpointremote.InheritedCheckpointRemote(ctx, s, elected.Name); inherited {
 			info.IgnoredRemote = repo
 			info.IgnoredReason = reason
+			info.IgnoredRemedy = checkpointremote.ClaimCheckpointRemoteCommand(cr)
 		} else if info.PushDisabled {
 			// That verdict is ownership only, so it accepts a store the fetch
 			// side declined for another reason (an unparseable origin URL, an
@@ -626,10 +633,14 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString(sty.render(sty.dim, " (fallback; nothing was elected)"))
 	}
 	if info.IgnoredRemote != "" {
+		fix := "set checkpoint_remote in .entire/settings.local.json"
+		if info.IgnoredRemedy != "" {
+			fix = "run `" + info.IgnoredRemedy + "`"
+		}
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.yellow,
 			"  ! checkpoint_remote "+info.IgnoredRemote+" is not in use: "+info.IgnoredReason+
-				". If this checkpoint repo is yours, set checkpoint_remote in .entire/settings.local.json."))
+				". If this checkpoint repo is yours, "+fix+"."))
 	}
 	if info.Unpushed > 0 {
 		b.WriteString("\n  ")
@@ -1075,6 +1086,11 @@ type statusJSON struct {
 	// fall back to the elected remote). Mirrors the text path's warning line.
 	CheckpointRemoteIgnored       string `json:"checkpoint_remote_ignored,omitempty"`
 	CheckpointRemoteIgnoredReason string `json:"checkpoint_remote_ignored_reason,omitempty"`
+	// CheckpointRemoteIgnoredRemedy is the command that claims the ignored
+	// store for this clone. Emitted so an agent reading --json can act on the
+	// rejection rather than only report it; absent when no single command
+	// fixes it.
+	CheckpointRemoteIgnoredRemedy string `json:"checkpoint_remote_ignored_remedy,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -1175,6 +1191,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.UnpushedCheckpoints = syncInfo.Unpushed
 		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
+		result.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			// Read-only, and one entry per session. Collapsing by agent hid a
