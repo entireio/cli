@@ -106,3 +106,20 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 - **`.github/workflows/e2e-controlplane.yml`** runs the control-plane tests on pushes to main and on manual dispatch. Runs are serialized and never cancelled mid-flight, because the shared test account's resources are cleaned up by the test itself.
 
 The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary; `nightly-e2e.yml` checks the published nightly installation.
+
+### Empty test selections
+
+The E2E mise tasks fail when the regex selects no top-level tests. Reports are
+still written and show `NO TESTS RAN`. Named tests that skip remain successful;
+a regex matching a parent but no subtests is not treated as an empty selection.
+
+The reporter's `-fail-on-empty` flag enables this exit status. Without it, the
+reporter can still render empty or incomplete event files for diagnosis. Only
+parent tests with a terminal pass, fail, or skip event count as completed;
+strict mode fails if none completed. Incomplete runs show an `INCOMPLETE`
+banner, including when other tests completed. A retry must have its own
+terminal event to count as completed.
+
+Nightly retains its
+existing report check because it runs the test tasks from the installed tag,
+which may predate this flag.

@@ -32,14 +32,19 @@ mkdir -p "$E2E_ARTIFACT_DIR"
 echo "artifacts: $E2E_ARTIFACT_DIR"
 
 filter="${usage_filter:-}"
+rc=0
 
 gotestsum --format dots --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
   -tags=e2e -count=1 -timeout=10m \
   ${filter:+-run "$filter"} \
   ./e2e/tests/... || rc=$?
 
-go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
+report_rc=0
+go run ./e2e/cmd/testreport -fail-on-empty -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json" || report_rc=$?
 echo ""
-cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
+cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null || true
 echo "artifacts: $E2E_ARTIFACT_DIR"
-exit "${rc:-0}"
+if [ "$rc" -ne 0 ]; then
+  exit "$rc"
+fi
+exit "$report_rc"
