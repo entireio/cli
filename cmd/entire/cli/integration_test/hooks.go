@@ -109,6 +109,38 @@ func (r *HookRunner) SimulateStop(sessionID, transcriptPath string) error {
 	return r.runHookWithInput("stop", input)
 }
 
+// SimulateStopWithCwd simulates the Stop hook carrying Claude Code's "cwd"
+// field, which follows Claude into a worktree or after a `cd` rather than
+// naming the directory the session started in. The hook subprocess itself still
+// runs in r.RepoDir, which is the point: capture must follow the event, not the
+// directory the hook happens to be spawned in.
+func (r *HookRunner) SimulateStopWithCwd(sessionID, transcriptPath, cwd string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"cwd":             cwd,
+	}
+
+	return r.runHookWithInput("stop", input)
+}
+
+// SimulateUserPromptSubmitWithCwd is SimulateUserPromptSubmitWithPromptAndTranscriptPath
+// with Claude Code's "cwd" field attached. See SimulateStopWithCwd.
+func (r *HookRunner) SimulateUserPromptSubmitWithCwd(sessionID, prompt, transcriptPath, cwd string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"prompt":          prompt,
+		"cwd":             cwd,
+	}
+
+	return r.runHookWithInput("user-prompt-submit", input)
+}
+
 // SimulateSessionEnd simulates the Claude Code session-end hook.
 // This transitions a session from IDLE (or ACTIVE) to ENDED phase.
 func (r *HookRunner) SimulateSessionEnd(sessionID string) error {
