@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -55,7 +56,13 @@ func newLogoutCmd() *cobra.Command {
 					deps.contextsFile = path
 				}
 			}
-			return runLogout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), deps)
+			err := runLogout(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), deps)
+			// An env token is per-process, not a saved login,
+			// so it still authenticates after the sweep.
+			if os.Getenv(auth.EnvTokenVar) != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Context provided by %s.\n", auth.EnvTokenVar)
+			}
+			return err
 		},
 	}
 	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Also end browser and other machines' sessions")

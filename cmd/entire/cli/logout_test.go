@@ -492,6 +492,7 @@ func isolateLogoutState(t *testing.T) {
 	t.Helper()
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	t.Setenv(contexts.EnvContextVar, "")
+	t.Setenv(auth.EnvTokenVar, "")
 	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
 }
 
@@ -629,6 +630,18 @@ func TestLogoutCommand_SweepsEveryContext(t *testing.T) {
 		if out, _ := execLogout(t); !strings.Contains(out, "Not logged in.") {
 			t.Errorf("stdout = %q, want %q", out, "Not logged in.")
 		}
+	})
+
+	// An env token is not a saved login and survives the sweep, which
+	// `auth status` will then report; say so rather than surprise.
+	t.Run("ENTIRE_TOKEN set: note that it still authenticates", func(t *testing.T) {
+		seedTwoContexts(t)
+		t.Setenv(auth.EnvTokenVar, "env-bearer")
+		_, errOut := execLogout(t)
+		if !strings.Contains(errOut, "Context provided by ENTIRE_TOKEN.") {
+			t.Errorf("stderr = %q, want the ENTIRE_TOKEN note", errOut)
+		}
+		assertNoContextsLeft(t)
 	})
 }
 
