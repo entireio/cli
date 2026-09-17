@@ -734,7 +734,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		SkillEvents:                 opts.SkillEvents,
 		SessionMetrics:              opts.SessionMetrics,
 		Attribution:                 opts.Attribution,
-		PromptAttributions:          opts.PromptAttributionsJSON,
+		PromptAttributions:          CapPromptAttributions(ctx, opts.PromptAttributionsJSON, opts.SessionID),
 		Summary:                     RedactSummary(opts.Summary),
 		CLIVersion:                  versioninfo.Version,
 		Kind:                        opts.Kind,
@@ -1789,6 +1789,10 @@ func (s *treeWriter) updateSessionMetadata(sessionDir string, entries map[string
 		return fmt.Errorf("read session metadata: %w", err)
 	}
 	mutate(metadata)
+	// This path re-marshals metadata an earlier CLI wrote, so the write-time cap
+	// applies here too: otherwise a pre-v0.10.1 oversized prompt_attributions
+	// would be copied verbatim into every finalize or backfill rewrite.
+	metadata.PromptAttributions = CapPromptAttributions(context.Background(), metadata.PromptAttributions, metadata.SessionID)
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(metadata, "", "  ")
 	if err != nil {
