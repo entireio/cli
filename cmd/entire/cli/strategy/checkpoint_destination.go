@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -25,6 +26,11 @@ import (
 // lacks. git-branch keeps no equivalent because it needs none — see
 // resyncCheckpointRefsOnDestinationChange.
 const pushedDestinationFileName = "entire-checkpoint-destination.json"
+
+// pushedDestinationLockName serializes the read-decide-write, pairing with the
+// state file exactly as checkpoint_sync_capture.go and checkpoint/pushqueue.go
+// pair theirs in this same directory.
+const pushedDestinationLockName = "entire-checkpoint-destination.lock"
 
 // pushedDestinationFile stores a FINGERPRINT rather than the destination: the
 // file only answers "same place as last time", and where a developer sends
@@ -61,20 +67,18 @@ func loadPushedDestination(ctx context.Context) string {
 // recordPushedDestination stores where this push delivered. Best-effort: losing
 // the record costs at most one redundant re-sync later, which is idempotent, so
 // it must never fail a push that already succeeded.
-//
-// Deliberately UNLOCKED, unlike its neighbour in checkpoint_sync_capture.go.
-// That one enforces "first capture sticks" over a permanent election, where a
-// race turns a stated guarantee into a coin flip. This is a latest-delivery
-// marker where last-write-wins is the intended reading, WriteFileAtomicIn keeps
-// readers off a torn file, and the residual is a redundant re-sync rather than a
-// lost update. A lock would not fix the case that matters — two worktrees of one
-// clone disagreeing, since settings.local.json is per-worktree and this file is
-// common-dir — it would only make it look handled.
 func recordPushedDestination(ctx context.Context, target string) {
 	root, err := gitdir.Open(ctx)
 	if err != nil {
 		return
 	}
+	release, err := flock.AcquireIn(root, pushedDestinationLockName)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint destination: cannot acquire lock to record",
+			slog.String("error", err.Error()))
+		return
+	}
+	defer release()
 	data, err := json.Marshal(pushedDestinationFile{Fingerprint: destinationFingerprint(target)})
 	if err != nil {
 		return
@@ -110,14 +114,26 @@ func recordPushedDestination(ctx context.Context, target string) {
 // the current destination and the refs that never reached the queue would never
 // be noticed again.
 func resyncCheckpointRefsOnDestinationChange(ctx context.Context, repo *git.Repository, target string) (mayRecord bool) {
+	root, err := gitdir.Open(ctx)
+	if err != nil {
+		return true
+	}
+	release, err := flock.AcquireIn(root, pushedDestinationLockName)
+	if err != nil {
+		logging.Debug(ctx, "checkpoint destination: cannot acquire lock to re-sync",
+			slog.String("error", err.Error()))
+		return true
+	}
+	defer release()
+
 	previous := loadPushedDestination(ctx)
 	if previous == "" || previous == destinationFingerprint(target) {
 		return true
 	}
-	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
-	if err != nil {
+	queue, qErr := checkpoint.PushQueueForRepo(ctx, repo)
+	if qErr != nil {
 		logging.Warn(ctx, "checkpoint destination: resolve push queue for re-sync failed",
-			slog.String("error", err.Error()))
+			slog.String("error", qErr.Error()))
 		return false
 	}
 	refs, err := localCheckpointRefs(repo)
