@@ -1,9 +1,24 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/url"
+	"os"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strings"
+	"time"
+
+	"github.com/go-git/go-git/v6/plumbing"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // reservedHostSuffixes mirrors regional.reservedHostSuffixes in entiredb
@@ -107,4 +122,180 @@ func filterCandidateAuthors(authors []string, username string) []string {
 		}
 	}
 	return out
+}
+
+type unattributedAuthor struct {
+	Email string `json:"email"`
+	Count int    `json:"count"`
+}
+
+type unattributedAuthorsWire struct {
+	Authors []struct {
+		Email string `json:"email"`
+		N     int    `json:"unattributedCommits"`
+	} `json:"authors"`
+}
+
+// nonZero drops addresses the cell holds no unattributed commits for: an
+// address present locally but not broken on entire.io is not offered.
+func (w unattributedAuthorsWire) nonZero() []unattributedAuthor {
+	var out []unattributedAuthor
+	for _, a := range w.Authors {
+		if a.N > 0 {
+			out = append(out, unattributedAuthor{Email: a.Email, Count: a.N})
+		}
+	}
+	return out
+}
+
+// localCandidateAuthors lists the reserved-host author addresses in this
+// repo's history that pass the OS-username gate. Never errors: a git failure
+// (including the output cap) is logged and treated as "no candidates" — local
+// detection must not fail doctor or slow status. shortlog applies .mailmap
+// unconditionally; a mailmap that rewrites a reserved-host address hides it
+// here while the cell still holds the raw author — accepted.
+func localCandidateAuthors(ctx context.Context, username string) []string {
+	// Walk the user's refs only. --all would also walk Entire's own refs —
+	// refs/entire/checkpoints/* and refs/entire/policies/* (git-refs store,
+	// potentially thousands of refs), the entire/checkpoints/v1 branch and
+	// entire/<sha>-<hash> shadow branches (git-branch store), and their
+	// remote-tracking copies. Checkpoint commits are written with the USER'S
+	// git identity (checkpoint.GetGitAuthorFromRepo; fallback
+	// "Unknown <unknown@local>"), so a user whose user.email was unset has
+	// checkpoint commits under the very reserved-host address this detects —
+	// and the cell never counts checkpoint commits, only code commits.
+	// Excluding these refs is therefore correctness, not just speed.
+	// --exclude must precede --all to apply to it.
+	out, err := runGitQuiet(ctx, 1<<20, "shortlog", "-se",
+		"--exclude=refs/entire/*",
+		"--exclude=refs/heads/entire/*",
+		"--exclude=refs/remotes/*/entire/*",
+		"--all")
+	if err != nil {
+		logging.Debug(ctx, "unattributed authors: git shortlog failed; treating as none", "error", err)
+		return nil
+	}
+	return filterCandidateAuthors(authorsFromShortlog(out), username)
+}
+
+const maxUnattributedAuthorEmails = 50 // the cell rejects more with 422
+
+func fetchUnattributedAuthors(ctx context.Context, client *api.Client, repoID string, emails []string) ([]unattributedAuthor, error) {
+	if len(emails) == 0 {
+		return nil, nil
+	}
+	if len(emails) > maxUnattributedAuthorEmails {
+		logging.Debug(ctx, "unattributed authors: truncating candidates to the cell's cap", "candidates", len(emails))
+		emails = emails[:maxUnattributedAuthorEmails]
+	}
+	path := "/api/v1/repos/" + url.PathEscape(repoID) + "/authors/unattributed"
+	resp, err := client.Post(ctx, path, map[string]any{"emails": emails})
+	if err != nil {
+		return nil, fmt.Errorf("cell: unattributed authors: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := api.CheckResponse(resp); err != nil {
+		return nil, fmt.Errorf("cell: unattributed authors: %w", err)
+	}
+	var wire unattributedAuthorsWire
+	if err := api.DecodeJSON(resp, &wire); err != nil {
+		return nil, fmt.Errorf("cell: unattributed authors: %w", err)
+	}
+	return wire.nonZero(), nil
+}
+
+// Cache — <git common dir>/entire-unattributed-authors.json, ONE entry. A
+// successful outcome is valid while the origin default-branch tip is
+// unchanged; a skipped outcome for skippedCacheTTL, so a failing network call
+// is not re-paid by every `entire status`. Best-effort: any I/O or decode
+// error is a miss.
+const (
+	unattributedAuthorsCacheFile = "entire-unattributed-authors.json"
+	skippedCacheTTL              = 10 * time.Minute
+)
+
+type cachedDetection struct {
+	Tip       string               `json:"tip"`
+	RepoID    string               `json:"repo_id,omitempty"` // empty when placement failed
+	Authors   []unattributedAuthor `json:"authors,omitempty"`
+	Skipped   string               `json:"skipped,omitempty"`
+	FetchedAt time.Time            `json:"fetched_at"`
+}
+
+// readUnattributedAuthorsCache hits when the stored tip equals tip and, if
+// repoID is non-empty, the stored repo id equals repoID. repoID "" accepts
+// whatever id is stored: detection reads the cache before it has resolved
+// placement, and the stored id is what it needs back.
+func readUnattributedAuthorsCache(commonDir, tip, repoID string, now time.Time) (cachedDetection, bool) {
+	if tip == "" {
+		return cachedDetection{}, false
+	}
+	b, err := os.ReadFile(filepath.Join(commonDir, unattributedAuthorsCacheFile)) //nolint:gosec // commonDir is the resolved git common dir, not user input
+	if err != nil {
+		return cachedDetection{}, false
+	}
+	var c cachedDetection
+	if json.Unmarshal(b, &c) != nil || c.Tip != tip {
+		return cachedDetection{}, false
+	}
+	if repoID != "" && c.RepoID != repoID {
+		return cachedDetection{}, false
+	}
+	if c.Skipped != "" && now.Sub(c.FetchedAt) > skippedCacheTTL {
+		return cachedDetection{}, false
+	}
+	return c, true
+}
+
+func writeUnattributedAuthorsCache(commonDir string, c cachedDetection) error {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("encode unattributed-authors cache: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(commonDir, unattributedAuthorsCacheFile), b, 0o600); err != nil {
+		return fmt.Errorf("write unattributed-authors cache: %w", err)
+	}
+	return nil
+}
+
+// invalidateUnattributedAuthorsCache is called after a declare or release so
+// status stops showing a count the user just repaired. Absence is not an error.
+func invalidateUnattributedAuthorsCache(ctx context.Context, commonDir string) {
+	if err := os.Remove(filepath.Join(commonDir, unattributedAuthorsCacheFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		logging.Debug(ctx, "unattributed authors: cache invalidate failed", "error", err)
+	}
+}
+
+// originDefaultTip is the SHA of origin's default branch via the existing
+// chain (origin/HEAD → origin/main → origin/master, getDefaultBranchFromRemote).
+// "" on any failure → the cache is bypassed.
+func originDefaultTip(ctx context.Context) string {
+	repo, err := gitrepo.OpenCurrent(ctx) // caller owns and closes
+	if err != nil {
+		return ""
+	}
+	defer repo.Close()
+	branch := getDefaultBranchFromRemote(repo)
+	if branch == "" {
+		return ""
+	}
+	ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branch), true)
+	if err != nil {
+		return ""
+	}
+	return ref.Hash().String()
+}
+
+// shortNetErr renders a network/auth failure as the one-line reason doctor
+// shows after "skipped (": a deadline is named as such; otherwise the first
+// line of the error, capped at 80 runes.
+func shortNetErr(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timed out reaching Entire"
+	}
+	msg, _, _ := strings.Cut(err.Error(), "\n")
+	if r := []rune(msg); len(r) > 80 {
+		return string(r[:79]) + "…"
+	}
+	return msg
 }

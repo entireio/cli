@@ -1,8 +1,18 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 // A superset of entire-core's TestIsReservedHostEmail so parity
@@ -104,5 +114,120 @@ func TestAuthorsFromShortlog(t *testing.T) {
 	want := []string{"coledriver@Coles-MacBook-Pro.local", "lizziesiegle@lizzies.local"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseUnattributedAuthorsResponse(t *testing.T) {
+	t.Parallel()
+	body := `{"authors":[{"email":"me@h.local","unattributedCommits":9},{"email":"me@old.local","unattributedCommits":0}]}`
+	var wire unattributedAuthorsWire
+	if err := json.Unmarshal([]byte(body), &wire); err != nil {
+		t.Fatal(err)
+	}
+	got := wire.nonZero()
+	// zero-count entries are dropped: there is nothing on the web to repair
+	if len(got) != 1 || got[0].Email != "me@h.local" || got[0].Count != 9 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestFetchUnattributedAuthors_PostsEmailsAndRepoID(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	var gotBody struct {
+		Emails []string `json:"emails"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		// errcheck runs with check-blank in this repo, so no `_ =` discards:
+		// t.Error (not Fatal — this is the server goroutine) and fmt.Fprint
+		// (exempted by the std-error-handling preset), as defaultAPIHandler in
+		// checkpoint_api_reader_test.go does.
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"authors":[{"email":"me@h.local","unattributedCommits":3}]}`)
+	}))
+	defer srv.Close()
+	client := api.NewClientWithBaseURL("test-token", srv.URL)
+	got, err := fetchUnattributedAuthors(t.Context(), client, "01REPO", []string{"me@h.local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/v1/repos/01REPO/authors/unattributed" || len(gotBody.Emails) != 1 {
+		t.Fatalf("path=%s body=%+v", gotPath, gotBody)
+	}
+	if len(got) != 1 || got[0].Count != 3 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestFetchUnattributedAuthors_NonOKIsError(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	defer srv.Close()
+	if _, err := fetchUnattributedAuthors(t.Context(), api.NewClientWithBaseURL("t", srv.URL), "01REPO", []string{"me@h.local"}); err == nil {
+		t.Fatal("403 must be an error")
+	}
+}
+
+func TestUnattributedAuthorsCache(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Now()
+	ok := cachedDetection{Tip: "tip-a", RepoID: "01REPO", Authors: []unattributedAuthor{{Email: "me@h.local", Count: 2}}, FetchedAt: now}
+	if err := writeUnattributedAuthorsCache(dir, ok); err != nil {
+		t.Fatal(err)
+	}
+	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", "01REPO", now.Add(time.Hour)); !hit || len(got.Authors) != 1 {
+		t.Fatalf("same tip+repo, success outcome never expires: hit=%v got=%+v", hit, got)
+	}
+	// "" accepts whatever repo id is stored — detection reads before placement
+	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now); !hit || got.RepoID != "01REPO" {
+		t.Fatalf(`repoID "" must accept the stored id: hit=%v got=%+v`, hit, got)
+	}
+	if _, hit := readUnattributedAuthorsCache(dir, "tip-b", "", now); hit {
+		t.Fatal("moved tip must miss even with repoID \"\"")
+	}
+	if _, hit := readUnattributedAuthorsCache(dir, "tip-a", "01OTHER", now); hit {
+		t.Fatal("a non-empty, different repo id must miss")
+	}
+	if _, hit := readUnattributedAuthorsCache(dir, "", "01REPO", now); hit {
+		t.Fatal("empty tip must miss (no key)")
+	}
+	// a skipped outcome is cached, but only briefly; RepoID may be empty
+	skipped := cachedDetection{Tip: "tip-a", Skipped: "could not reach Entire", FetchedAt: now}
+	if err := writeUnattributedAuthorsCache(dir, skipped); err != nil {
+		t.Fatal(err)
+	}
+	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now.Add(5*time.Minute)); !hit || got.Skipped == "" {
+		t.Fatalf("skipped within TTL must hit: hit=%v got=%+v", hit, got)
+	}
+	if _, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now.Add(11*time.Minute)); hit {
+		t.Fatal("skipped past TTL must miss")
+	}
+	invalidateUnattributedAuthorsCache(t.Context(), dir)
+	if _, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now); hit {
+		t.Fatal("invalidated cache must miss")
+	}
+}
+
+func TestShortNetErr(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{context.DeadlineExceeded, "timed out reaching Entire"},
+		{fmt.Errorf("resolve experts cell: %w", context.DeadlineExceeded), "timed out reaching Entire"},
+		{errors.New("control plane unavailable: dial tcp 1.2.3.4: connection refused"), "control plane unavailable: dial tcp 1.2.3.4: connection refused"},
+		{errors.New("first line\nsecond line"), "first line"},
+		{errors.New(strings.Repeat("x", 100)), strings.Repeat("x", 79) + "…"},
+	}
+	for _, c := range cases {
+		if got := shortNetErr(c.err); got != c.want {
+			t.Errorf("shortNetErr(%v) = %q, want %q", c.err, got, c.want)
+		}
 	}
 }
