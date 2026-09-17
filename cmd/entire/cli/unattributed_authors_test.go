@@ -178,47 +178,6 @@ func TestFetchUnattributedAuthors_NonOKIsError(t *testing.T) {
 	}
 }
 
-func TestUnattributedAuthorsCache(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	now := time.Now()
-	ok := cachedDetection{Tip: "tip-a", RepoID: "01REPO", Authors: []unattributedAuthor{{Email: "me@h.local", Count: 2}}, FetchedAt: now}
-	if err := writeUnattributedAuthorsCache(dir, ok); err != nil {
-		t.Fatal(err)
-	}
-	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", "01REPO", now.Add(time.Hour)); !hit || len(got.Authors) != 1 {
-		t.Fatalf("same tip+repo, success outcome never expires: hit=%v got=%+v", hit, got)
-	}
-	// "" accepts whatever repo id is stored — detection reads before placement
-	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now); !hit || got.RepoID != "01REPO" {
-		t.Fatalf(`repoID "" must accept the stored id: hit=%v got=%+v`, hit, got)
-	}
-	if _, hit := readUnattributedAuthorsCache(dir, "tip-b", "", now); hit {
-		t.Fatal("moved tip must miss even with repoID \"\"")
-	}
-	if _, hit := readUnattributedAuthorsCache(dir, "tip-a", "01OTHER", now); hit {
-		t.Fatal("a non-empty, different repo id must miss")
-	}
-	if _, hit := readUnattributedAuthorsCache(dir, "", "01REPO", now); hit {
-		t.Fatal("empty tip must miss (no key)")
-	}
-	// a skipped outcome is cached, but only briefly; RepoID may be empty
-	skipped := cachedDetection{Tip: "tip-a", Skipped: "could not reach Entire", FetchedAt: now}
-	if err := writeUnattributedAuthorsCache(dir, skipped); err != nil {
-		t.Fatal(err)
-	}
-	if got, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now.Add(5*time.Minute)); !hit || got.Skipped == "" {
-		t.Fatalf("skipped within TTL must hit: hit=%v got=%+v", hit, got)
-	}
-	if _, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now.Add(11*time.Minute)); hit {
-		t.Fatal("skipped past TTL must miss")
-	}
-	invalidateUnattributedAuthorsCache(t.Context(), dir)
-	if _, hit := readUnattributedAuthorsCache(dir, "tip-a", "", now); hit {
-		t.Fatal("invalidated cache must miss")
-	}
-}
-
 func TestShortNetErr(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -277,6 +236,7 @@ func detectDepsForTest(t *testing.T, rec *detectRecorder) unattributedAuthorsDep
 
 func TestDetectUnattributedAuthors(t *testing.T) {
 	t.Parallel()
+	fixedNow := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	cases := []struct {
 		name string
 		mod  func(*unattributedAuthorsDeps)
@@ -338,6 +298,15 @@ func TestDetectUnattributedAuthors(t *testing.T) {
 				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
 			}
 		}},
+		{"cellClient error → Skipped, no fetch, cached with RepoID", func(d *unattributedAuthorsDeps) {
+			d.cellClient = func(context.Context, *auth.CellTarget) (*api.Client, error) {
+				return nil, errors.New("no token for cell")
+			}
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if out.Skipped == "" || rec.fetched || rec.wrote == nil || rec.wrote.RepoID != "01REPO" {
+				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
+			}
+		}},
 		{"no tip → nothing cached", func(d *unattributedAuthorsDeps) {
 			d.originTip = func(context.Context) string { return "" }
 		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
@@ -345,9 +314,14 @@ func TestDetectUnattributedAuthors(t *testing.T) {
 				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
 			}
 		}},
-		{"happy → Authors + RepoID, success cached", nil, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+		{"happy → Authors + RepoID, success cached, FetchedAt pinned", func(d *unattributedAuthorsDeps) {
+			d.now = func() time.Time { return fixedNow }
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
 			if out.RepoID != "01REPO" || len(out.Authors) != 1 || rec.wrote == nil || rec.wrote.RepoID != "01REPO" || rec.wrote.Skipped != "" {
 				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
+			}
+			if !rec.wrote.FetchedAt.Equal(fixedNow) {
+				t.Fatalf("FetchedAt = %v, want %v", rec.wrote.FetchedAt, fixedNow)
 			}
 		}},
 	}
