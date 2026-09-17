@@ -62,6 +62,26 @@ func (c *Client) ListAuthSessions(ctx context.Context) ([]AuthSession, error) {
 	return out.Sessions, nil
 }
 
+// RevokeAllAuthSessions revokes every login session of the authenticated
+// user in one call (DELETE on the collection). A login server that predates
+// the endpoint answers 404 or 405; callers fall back to list + revoke by id.
+func (c *Client) RevokeAllAuthSessions(ctx context.Context) error {
+	base, err := c.authSessionsBasePath()
+	if err != nil {
+		return fmt.Errorf("revoke all sessions: %w", err)
+	}
+	resp, err := c.Delete(ctx, base)
+	if err != nil {
+		return fmt.Errorf("revoke all sessions: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := CheckResponse(resp); err != nil {
+		return fmt.Errorf("revoke all sessions: %w", err)
+	}
+	return nil
+}
+
 // RevokeCurrentAuthSession revokes the login session this client is authenticating
 // with (the family the current bearer belongs to).
 func (c *Client) RevokeCurrentAuthSession(ctx context.Context) error {

@@ -130,23 +130,6 @@ func TestRemoveContext_LeavesOtherAccountsJurisdictionTokens(t *testing.T) {
 	}
 }
 
-// TestRemoveCurrentContext_DeletesJurisdictionTokens covers the default
-// `entire logout` path (active context, not selected by name).
-func TestRemoveCurrentContext_DeletesJurisdictionTokens(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
-
-	const audience = "https://eu.example.io"
-	seedLoginWithJurisdictionTokens(t, audience)
-
-	if err := RemoveCurrentContext(); err != nil {
-		t.Fatalf("RemoveCurrentContext: %v", err)
-	}
-	if v, err := tokenstore.Get(tokenstore.JurisdictionService(audience), "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
-		t.Fatalf("jurisdiction token survived logout: value=%q err=%v", v, err)
-	}
-}
-
 // TestRemoveContext_SkipsBlankRecordedAudience covers a hand-edited or
 // corrupted contexts.json: a blank audience would resolve to the bare service
 // prefix, so it must be skipped rather than looked up, and it must not stop the

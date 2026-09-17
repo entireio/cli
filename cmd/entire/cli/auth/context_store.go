@@ -11,34 +11,9 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
-// RemoveCurrentContext deletes the acting context's keyring tokens and its
-// contexts.json entry, clearing current_context when it pointed there. It is a
-// no-op (returns nil) when there is no acting context. Used by logout.
-//
-// It resolves through File.Active, so `entire logout --context staging` removes
-// the login it just revoked. Resolving the removal target differently from the
-// revocation target (which comes from resolveStatusTarget, also via Active)
-// would end one session server-side while deleting a different login's
-// credentials locally.
-func RemoveCurrentContext() error {
-	if err := removeContextLocked(func(f *contexts.File) *contexts.Context {
-		sel, err := f.Active()
-		if err != nil {
-			// Unresolvable explicit selection: remove nothing rather than
-			// falling back to current_context, which is not what was asked for.
-			return nil
-		}
-		return sel.Context
-	}); err != nil {
-		return fmt.Errorf("remove current context: %w", err)
-	}
-	return nil
-}
-
 // RemoveContext deletes the named context's keyring tokens, then its
-// contexts.json entry. A missing context is a no-op. Used by logout.
-// File.Delete clears current_context when name was the active one, so
-// removing the current context this way also logs it out.
+// contexts.json entry. A missing context is a no-op. File.Delete clears
+// current_context when name was the active one.
 func RemoveContext(name string) error {
 	if err := removeContextLocked(func(f *contexts.File) *contexts.Context {
 		return f.Find(name)
