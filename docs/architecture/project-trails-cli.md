@@ -16,11 +16,13 @@ entire trail show
 entire trail show 42 --project gh/entireio
 entire trail update --body 'Updated intent' --status open
 
-# Creation links the current remote branch atomically with the new intent.
+# Creation publishes the local branch, then links it with the new intent.
+# No separate commit/push is required. On the base branch, derive a new name
+# from the title; on a feature branch, use that branch.
 entire trail create --title 'Cross-repository work'
 # Intent without a branch is explicit.
 entire trail create --project gh/entireio --title 'Plan' --no-branch
-# Ask the server to create a branch rather than link existing remote work.
+# Alternatively, ask the server to create the branch without a local push.
 entire trail create --title 'Intent' --branch feature/work --base main --branch-action create
 ```
 
@@ -99,8 +101,12 @@ not an aggregation of project discussions and all repositories.
   text warns that the repository/branch list may be incomplete.
 - Missing ETags refuse protected mutations; a 412 never causes an unconditional
   retry. Creation and link print an Idempotency-Key before sending the request;
-  retry with that key and identical inputs. The CLI never pushes or deletes
-  remote branches to compensate for a failed server-side operation.
+  retry with that key and identical inputs. Local `create` publishes the branch
+  before the API request, running push hooks and preserving the local tip. It
+  never commits uncommitted work, force-pushes, or deletes branches to compensate
+  for an API failure. A rejected push prevents the creation request. `--repo`
+  targets remote work without publishing the local clone; `--no-branch` and
+  `--branch-action create` also skip local publication.
 
 Project-wide streaming, batch multi-repository creation inputs, and direct
 project metadata/scope editing remain follow-up work.

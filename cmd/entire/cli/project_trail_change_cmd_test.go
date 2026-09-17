@@ -55,14 +55,8 @@ func TestProjectTrailCreateWithInitialChange(t *testing.T) {
 
 func TestProjectTrailCreateLinksCurrentBranchByDefault(t *testing.T) {
 	// Not parallel: isolates git CWD and replaces project/repository constructors.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "initial.txt", "initial")
-	testutil.GitAdd(t, dir, "initial.txt")
-	testutil.GitCommit(t, dir, "initial")
+	dir, remote := setupProjectTrailPublication(t)
 	testutil.RunGit(t, dir, "checkout", "-b", "feature/current")
-	testutil.RunGit(t, dir, "remote", "add", "origin", "git@github.com:acme/widget.git")
-	t.Chdir(dir)
 	setupProjectTrailRepoPlacement(t)
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
@@ -80,6 +74,7 @@ func TestProjectTrailCreateLinksCurrentBranchByDefault(t *testing.T) {
 	_, _, err := executeProjectTrailTest(t, "create", "--title", "Intent")
 	require.NoError(t, err)
 	require.Equal(t, "feature/current\n", testutil.RunGit(t, dir, "branch", "--show-current"))
+	require.True(t, gitBranchExistsTrailTest(t, remote, "feature/current"))
 }
 
 func TestProjectTrailLinkRequiresParentAndRetryHeaders(t *testing.T) {

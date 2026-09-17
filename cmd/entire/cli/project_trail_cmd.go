@@ -16,6 +16,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
+const trailBranchActionLink = "link"
+
 func projectTrailSelector(args []string) string {
 	if len(args) == 1 {
 		return strings.TrimSpace(args[0])
@@ -232,16 +234,15 @@ func newProjectTrailUpdateCmd() *cobra.Command {
 	return cmd
 }
 
-// Creation links the current branch unless --no-branch is explicit. The server
-// commits intent and membership together; the CLI never compensates a failed
-// request by deleting potentially shared remote work.
+// Local creation publishes the branch, then links it atomically with intent.
+// The CLI never compensates a failed request by deleting shared remote work.
 func newProjectTrailCreateCmd() *cobra.Command {
 	var fields projectTrailFields
 	var branch, base, action, key string
 	var noBranch bool
 	cmd := &cobra.Command{
-		Use: cmdCreate, Short: "Create a trail and link the current branch",
-		Long: "Create project intent and link the current branch atomically. Use --branch to select another remote branch, or --no-branch for intent only. Linking requires an existing remote branch; --branch-action create asks the server to create it from --base. This command does not change the local checkout.",
+		Use: cmdCreate, Short: "Create a trail and publish its branch",
+		Long: "Create project intent and link a branch atomically. In the current repository, publish the local branch first; no separate commit or push is required. Uses the current feature branch, or derives a new branch from the title when on the base branch. Use --branch to choose a branch, or --no-branch for intent only. With --repo, no local branch is published: link existing remote work or use --branch-action create to create it on the server from --base. This command does not commit changes or change the local checkout. Branches are preserved if creation fails.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := fields.validate(cmd, true); err != nil {
@@ -251,13 +252,10 @@ func newProjectTrailCreateCmd() *cobra.Command {
 				return errors.New("--no-branch cannot be combined with --branch, --base, or --branch-action")
 			}
 			if !noBranch {
-				if err := requireTrailWorkingTarget(trailRepoFlag(cmd), "", branch); err != nil {
-					return err
-				}
 				var err error
-				branch, err = resolveTrailBranch(cmd.Context(), branch)
+				branch, base, err = resolveProjectTrailCreateBranch(cmd, fields.Title, branch, base)
 				if err != nil {
-					return fmt.Errorf("select a branch or use --no-branch for intent only: %w", err)
+					return err
 				}
 			}
 			if err := validateProjectTrailBranch(cmd, branch, action); err != nil {
@@ -279,6 +277,11 @@ func newProjectTrailCreateCmd() *cobra.Command {
 				request.Changes = []api.ChangeCreateRequest{change}
 			}
 			key = projectTrailIdempotencyKey(cmd.ErrOrStderr(), key)
+			if branch != "" && action == trailBranchActionLink && trailRepoFlag(cmd) == "" {
+				if err := publishProjectTrailBranch(cmd, branch); err != nil {
+					return err
+				}
+			}
 			var out api.ProjectTrail
 			if _, err := target.Client.ProjectTrailRequest(cmd.Context(), http.MethodPost, target.BasePath, request, http.Header{"Idempotency-Key": {key}}, &out); err != nil {
 				return fmt.Errorf("create project trail (retry with --idempotency-key %s and the same fields): %w", key, err)
@@ -297,14 +300,14 @@ func newProjectTrailCreateCmd() *cobra.Command {
 }
 
 func addProjectTrailCreationFlags(cmd *cobra.Command, branch, base, action, key *string) {
-	cmd.Flags().StringVar(branch, "branch", "", "Remote branch to link (defaults to the current branch)")
+	cmd.Flags().StringVar(branch, "branch", "", "Branch to use (defaults to the current feature branch; create derives one from the title on the base branch)")
 	cmd.Flags().StringVar(base, "base", "", "Base branch for new code work")
-	cmd.Flags().StringVar(action, "branch-action", "link", "Branch action: link existing remote work, or create a new branch")
+	cmd.Flags().StringVar(action, "branch-action", trailBranchActionLink, "Branch action: link existing remote work, or create a new branch")
 	cmd.Flags().StringVar(key, "idempotency-key", "", "Creation retry key; generated and printed to stderr if omitted (reuse with identical fields)")
 }
 
 func validateProjectTrailBranch(cmd *cobra.Command, branch, action string) error {
-	if action != "link" && action != cmdCreate {
+	if action != trailBranchActionLink && action != cmdCreate {
 		return errors.New("--branch-action must be link or create")
 	}
 	if branch == "" && (cmd.Flags().Changed("base") || cmd.Flags().Changed("branch-action")) {
