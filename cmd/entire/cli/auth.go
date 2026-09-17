@@ -652,7 +652,11 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("%d %s", len(d.sessions), pluralize("session", len(d.sessions)))))
 	}
 
-	if d.sessionErr == nil && len(d.sessions) > 0 {
+	// Nothing to offer when the caller's own session is already gone: "end this
+	// session" would contradict the notice above it, and the sessions that are
+	// listed belong to the login that replaced this one. The banner's `entire
+	// login` is the action.
+	if d.sessionErr == nil && len(d.sessions) > 0 && !d.revoked {
 		// --everywhere is offered only alongside the table. It ends every
 		// session at once, and in the collapsed view those sessions are a count
 		// the reader cannot inspect — browser logins included. The count row

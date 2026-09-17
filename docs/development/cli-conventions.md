@@ -97,7 +97,10 @@ the commands are always runnable in every build.
   every session revoked while the current bearer still had hours to run. Zero sessions still reports, being a contradiction worth seeing.
   `logout --everywhere` is offered **only alongside the table**: it ends every
   session at once, and in the collapsed view those sessions are a count the
-  reader cannot inspect, browser logins included.
+  reader cannot inspect, browser logins included. The whole logout hint is
+  withheld once a login is known revoked — "end this session" would contradict
+  the notice above it, there being no session of the caller's left to end, and
+  any session still listed belongs to the login that replaced it.
   The drop-at-one collapse is text-only — `--json` never applies it. What the
   JSON does omit is anything it could not determine, which is why
   `active_sessions`, `available_contexts` and `sessions` are **pointers**:

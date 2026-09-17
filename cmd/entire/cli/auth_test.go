@@ -904,6 +904,11 @@ func TestRunAuthStatus_RevokedLoginIsNamed(t *testing.T) {
 	if !strings.Contains(got, "expires in 46m") && !strings.Contains(got, "expires in 47m") {
 		t.Fatalf("output = %q, want the access token's remaining life on the verdict line", got)
 	}
+	// "end this session" would contradict the notice: there is no session of
+	// the caller's left to end, and the listed one belongs to the replacement.
+	if strings.Contains(got, "entire logout") {
+		t.Fatalf("output = %q, must not offer to end a session that is already gone", got)
+	}
 
 	asJSON := decodeAuthStatusJSON(t, okProfile, replaced, target, authStatusOptions{})
 	if !asJSON.LoginRevoked {
