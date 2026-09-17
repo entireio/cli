@@ -36,9 +36,9 @@ func RemoveCurrentContext() error {
 }
 
 // RemoveContext deletes the named context's keyring tokens, then its
-// contexts.json entry. A missing context is a no-op. Used by logout and
-// `logout --all-contexts`. File.Delete clears current_context when name was
-// the active one, so removing the current context this way also logs it out.
+// contexts.json entry. A missing context is a no-op. Used by logout.
+// File.Delete clears current_context when name was the active one, so
+// removing the current context this way also logs it out.
 func RemoveContext(name string) error {
 	if err := removeContextLocked(func(f *contexts.File) *contexts.Context {
 		return f.Find(name)
@@ -215,12 +215,10 @@ func ActiveContext() (c *contexts.Context, ok bool, err error) {
 // StoredContexts returns all stored login contexts and the STORED
 // current_context, ignoring any `--context`/$ENTIRE_CONTEXT override.
 //
-// Use this for questions about what is *persisted* — does a default exist, what
-// should become the new default — as opposed to which identity is *acting*,
-// which is Contexts. Resolving the acting identity here would answer the wrong
-// question: after `logout --context staging` the override names a context that
-// no longer exists, so Active fails and a caller asking "is a default still
-// set?" would silently get an error instead of "no".
+// Use this for questions about what is *persisted* — which logins exist, does
+// a default exist — as opposed to which identity is *acting*, which is
+// Contexts. `logout` sweeps every stored login through this, so an override
+// naming a context that does not exist neither narrows nor fails it.
 func StoredContexts() ([]*contexts.Context, string, error) {
 	f, err := contexts.Load(userdirs.Config())
 	if err != nil {

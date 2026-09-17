@@ -38,8 +38,8 @@ const (
 
 // applyInsecureHTTPAuth relaxes the tokenmanager's HTTP guard when the user
 // passed --insecure-http-auth, and reports whether per-target TLS checks
-// should be skipped. status/logout enforce TLS on the specific core they
-// dial (the active context's), not on any global origin.
+// should be skipped. status/logout enforce TLS on the specific cores they
+// dial, not on any global origin.
 func applyInsecureHTTPAuth(insecureHTTPAuth bool) bool {
 	if insecureHTTPAuth {
 		auth.EnableInsecureHTTP()
@@ -480,7 +480,7 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 		sortAuthSessionsByRecency(sessions)
 		fmt.Fprintf(w, "\nActive sessions (%d):\n", len(sessions))
 		renderAuthSessionsTable(w, newAuthTableStyles(w), sessions)
-		fmt.Fprintln(w, "\nRun 'entire logout' to end this session, or 'entire logout --everywhere' to end all of them.")
+		fmt.Fprintln(w, "\nRun 'entire logout --everywhere' to end all of them.")
 	}
 
 	if t.totalContexts > 1 {

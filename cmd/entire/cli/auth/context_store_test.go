@@ -299,11 +299,8 @@ func TestRecordLoginContext_ReloginKeepsJurisdictionAudiences(t *testing.T) {
 }
 
 // Contexts reports the ACTING identity (honouring --context/$ENTIRE_CONTEXT) while
-// StoredContexts reports the PERSISTED default. Conflating them made
-// `entire logout --context X` and a plain `entire logout` leave different state
-// for the same target: promoteNextLogin asked for the acting identity, which by
-// then named the just-deleted context, so Active failed and the promotion was
-// silently skipped.
+// StoredContexts reports the PERSISTED default. `logout` sweeps StoredContexts,
+// so an override naming a missing context must not fail it.
 //
 // Mutates the process-wide override and env, so no t.Parallel.
 func TestContextsVsStoredContexts_OverrideScope(t *testing.T) {
@@ -335,7 +332,6 @@ func TestContextsVsStoredContexts_OverrideScope(t *testing.T) {
 	if err != nil || stored != defaultCtx {
 		t.Fatalf("StoredContexts() stored = %q, %v; want prod (the persisted default)", stored, err)
 	}
-	// promoteNextLogin picks all[0] as the next default, so the list matters too.
 	if len(all) != 2 || all[0].Name != defaultCtx {
 		t.Fatalf("StoredContexts() list = %v, want the saved contexts in on-disk order", all)
 	}
