@@ -19,28 +19,44 @@ import (
 )
 
 // Cache — <git common dir>/entire-unattributed-authors.json, ONE entry. A
-// successful outcome is valid while the origin default-branch tip, else HEAD,
-// is unchanged; a skipped outcome for skippedCacheTTL, so a failing network
-// call is not re-paid by every `entire status`. Best-effort: any I/O or decode
-// error is a miss.
+// successful outcome with candidates is valid while the origin default-branch
+// tip, else HEAD, is unchanged; a no-candidates or skipped outcome only for
+// transientCacheTTL, so neither a clean history nor a failing network call is
+// re-paid (a `git shortlog` walk, or a cell round trip) by every
+// `entire status`. Best-effort: any I/O or decode error is a miss.
 const (
 	unattributedAuthorsCacheFile = "entire-unattributed-authors.json"
-	skippedCacheTTL              = 10 * time.Minute
+	// transientCacheTTL bounds how long a no-candidates or skipped outcome is
+	// served before detection tries again. Both are transient for the same
+	// reason: candidates come from local refs, not just the cell, so keying a
+	// no-candidates entry to the tip alone would let doctor miss a brand-new
+	// local commit under a bad address for too long — a quiet repo's tip can
+	// go unchanged for weeks. An outcome that did find candidates and got a
+	// clean read from the cell keeps the until-tip-moves rule below.
+	transientCacheTTL = 10 * time.Minute
 )
 
 // cachedDetection is the on-disk cache entry. A placement-failed entry
-// (RepoID == "") is served, Skipped and all, for skippedCacheTTL and
+// (RepoID == "") is served, Skipped and all, for transientCacheTTL and
 // short-circuits placement resolution until then — that repeated skip is
 // intended, not a bug: it is what keeps a down cell from being re-dialed on
 // every `entire status`. `entire login` does not clear it on its own; a caller
 // that wants the next detection to try the network again (doctor's fix path,
 // a future `entire login` hook) must call invalidateUnattributedAuthorsCache.
+//
+// Candidates rides along so a cache hit can be served without ever running
+// `git shortlog`: detection reads the cache by tip before it computes
+// Candidates, and a hit returns the stored list in its place. An entry with
+// no Candidates (logged-in, clean history) is written and read back the same
+// way, but — like a Skipped entry — only within transientCacheTTL; see
+// readUnattributedAuthorsCache.
 type cachedDetection struct {
-	Tip       string               `json:"tip"`
-	RepoID    string               `json:"repo_id,omitempty"` // empty when placement failed
-	Authors   []unattributedAuthor `json:"authors,omitempty"`
-	Skipped   string               `json:"skipped,omitempty"`
-	FetchedAt time.Time            `json:"fetched_at"`
+	Tip        string               `json:"tip"`
+	RepoID     string               `json:"repo_id,omitempty"` // empty when placement failed
+	Candidates []string             `json:"candidates,omitempty"`
+	Authors    []unattributedAuthor `json:"authors,omitempty"`
+	Skipped    string               `json:"skipped,omitempty"`
+	FetchedAt  time.Time            `json:"fetched_at"`
 }
 
 // unattributedAuthorsCacheRoot opens the shared *os.Root over commonDir, the
@@ -51,11 +67,18 @@ func unattributedAuthorsCacheRoot(commonDir string) (*os.Root, error) {
 	return gitdir.OpenAt(commonDir) //nolint:wrapcheck // gitdir already names the directory and the failure
 }
 
-// readUnattributedAuthorsCache hits when the stored tip equals tip and, if
-// repoID is non-empty, the stored repo id equals repoID. repoID "" accepts
-// whatever id is stored: detection reads the cache before it has resolved
-// placement, and the stored id is what it needs back.
-func readUnattributedAuthorsCache(commonDir, tip, repoID string, now time.Time) (cachedDetection, bool) {
+// readUnattributedAuthorsCache hits when the stored tip equals tip. Detection
+// reads the cache before placement is resolved, so there is no repo id yet to
+// filter by; the stored RepoID (if any) rides along on the returned entry
+// instead.
+//
+// A transient entry — no Candidates, or Skipped — is served only within
+// transientCacheTTL and misses beyond that: candidates come from local refs
+// too, so tip-only invalidation would let a brand-new local commit under a
+// bad address go unnoticed for as long as the tip doesn't move. An entry
+// that did find candidates and got a clean read from the cell has none of
+// that risk and keeps the plain until-tip-moves rule.
+func readUnattributedAuthorsCache(commonDir, tip string, now time.Time) (cachedDetection, bool) {
 	if tip == "" {
 		return cachedDetection{}, false
 	}
@@ -71,10 +94,7 @@ func readUnattributedAuthorsCache(commonDir, tip, repoID string, now time.Time) 
 	if json.Unmarshal(b, &c) != nil || c.Tip != tip {
 		return cachedDetection{}, false
 	}
-	if repoID != "" && c.RepoID != repoID {
-		return cachedDetection{}, false
-	}
-	if c.Skipped != "" && now.Sub(c.FetchedAt) > skippedCacheTTL {
+	if (c.Skipped != "" || len(c.Candidates) == 0) && now.Sub(c.FetchedAt) > transientCacheTTL {
 		return cachedDetection{}, false
 	}
 	return c, true

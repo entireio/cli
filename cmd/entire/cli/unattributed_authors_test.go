@@ -214,7 +214,7 @@ func detectDepsForTest(t *testing.T, rec *detectRecorder) unattributedAuthorsDep
 		activeContext: func() (*contexts.Context, bool, error) { return &contexts.Context{}, true, nil },
 		commonDir:     func(context.Context) (string, error) { return t.TempDir(), nil },
 		originTip:     func(context.Context) string { return "tip" },
-		readCache:     func(string, string, string, time.Time) (cachedDetection, bool) { return cachedDetection{}, false },
+		readCache:     func(string, string, time.Time) (cachedDetection, bool) { return cachedDetection{}, false },
 		writeCache: func(_ string, c cachedDetection) error {
 			rec.wrote = &c
 			return nil
@@ -340,16 +340,27 @@ func TestDetectUnattributedAuthors(t *testing.T) {
 }
 
 // A warm cache short-circuits placement and fetch — and still carries RepoID,
-// which the doctor fix path needs to declare against.
+// which the doctor fix path needs to declare against. It also short-circuits
+// `git shortlog` itself: a logged-in cache hit must never walk history, and
+// the Candidates it returns come from the cache, not a fresh shortlog.
 func TestDetectUnattributedAuthors_CacheHitSkipsNetworkKeepsRepoID(t *testing.T) {
 	t.Parallel()
 	var rec detectRecorder
 	d := detectDepsForTest(t, &rec)
-	d.readCache = func(_, tip, repoID string, _ time.Time) (cachedDetection, bool) {
-		if tip != "tip" || repoID != "" {
-			t.Fatalf("readCache(tip=%q, repoID=%q), want (\"tip\", \"\")", tip, repoID)
+	d.localAuthors = func(context.Context, string) []string {
+		t.Fatal("shortlog must not run on a warm cache")
+		return nil
+	}
+	d.readCache = func(_, tip string, _ time.Time) (cachedDetection, bool) {
+		if tip != "tip" {
+			t.Fatalf("readCache(tip=%q), want \"tip\"", tip)
 		}
-		return cachedDetection{Tip: "tip", RepoID: "01REPO", Authors: []unattributedAuthor{{Email: "me@h.local", Count: 4}}}, true
+		return cachedDetection{
+			Tip:        "tip",
+			RepoID:     "01REPO",
+			Candidates: []string{"me@h.local"},
+			Authors:    []unattributedAuthor{{Email: "me@h.local", Count: 4}},
+		}, true
 	}
 	d.resolvePlacement = func(context.Context) (repoCellPlacement, error) {
 		t.Fatal("placement must not be resolved on a warm cache")
@@ -359,15 +370,102 @@ func TestDetectUnattributedAuthors_CacheHitSkipsNetworkKeepsRepoID(t *testing.T)
 	if rec.fetched || out.RepoID != "01REPO" || len(out.Authors) != 1 || out.Authors[0].Count != 4 || rec.wrote != nil {
 		t.Fatalf("%+v fetched=%v wrote=%+v", out, rec.fetched, rec.wrote)
 	}
+	if len(out.Candidates) != 1 || out.Candidates[0] != "me@h.local" {
+		t.Fatalf("out.Candidates = %v, want cached [\"me@h.local\"]", out.Candidates)
+	}
 }
 
-// The production wiring is otherwise unreferenced until Chunk 2 wires it into
-// doctor and status; `unused` (U1000) would fail the lint gate. This one
+// TestDetectUnattributedAuthors_NoCandidatesCachedTransiently exercises the
+// real cache (not the fixture stubs) end-to-end: a logged-in user with a
+// clean history is the common case, so that outcome must be cached too —
+// briefly — or every `entire status` pays for a full `git shortlog --all`.
+// A second call within transientCacheTTL is served from the cache without
+// running shortlog again; one past the TTL runs shortlog again.
+func TestDetectUnattributedAuthors_NoCandidatesCachedTransiently(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Now()
+	shortlogCalls := 0
+
+	var rec detectRecorder
+	d := detectDepsForTest(t, &rec)
+	d.localAuthors = func(context.Context, string) []string {
+		shortlogCalls++
+		return nil
+	}
+	d.commonDir = func(context.Context) (string, error) { return dir, nil }
+	d.readCache = readUnattributedAuthorsCache
+	d.writeCache = writeUnattributedAuthorsCache
+	d.now = func() time.Time { return now }
+
+	out := detectUnattributedAuthors(t.Context(), d)
+	if shortlogCalls != 1 || len(out.Candidates) != 0 || !out.LoggedIn {
+		t.Fatalf("first call: shortlogCalls=%d out=%+v", shortlogCalls, out)
+	}
+
+	d.now = func() time.Time { return now.Add(5 * time.Minute) }
+	out = detectUnattributedAuthors(t.Context(), d)
+	if shortlogCalls != 1 || len(out.Candidates) != 0 || !out.LoggedIn {
+		t.Fatalf("within TTL: shortlogCalls=%d out=%+v, want cache hit (no new shortlog)", shortlogCalls, out)
+	}
+
+	d.now = func() time.Time { return now.Add(11 * time.Minute) }
+	out = detectUnattributedAuthors(t.Context(), d)
+	if shortlogCalls != 2 || len(out.Candidates) != 0 || !out.LoggedIn {
+		t.Fatalf("past TTL: shortlogCalls=%d out=%+v, want a second shortlog", shortlogCalls, out)
+	}
+}
+
+// TestDetectUnattributedAuthors_LocalAuthorsTimeoutBounded proves both
+// localAuthors call sites — logged-out (immediate shortlog) and logged-in on
+// a cache miss — are bounded by networkTimeout. Production wraps `git
+// shortlog` in its own subprocess timeout, but the deps seam itself must not
+// let an injected (or future) localAuthors implementation that ignores ctx
+// hang detection forever; a fake that only returns once its ctx is Done
+// proves the call is actually cancelled, not just slow.
+func TestDetectUnattributedAuthors_LocalAuthorsTimeoutBounded(t *testing.T) {
+	t.Parallel()
+	blocking := func(ctx context.Context, _ string) []string {
+		<-ctx.Done()
+		return nil
+	}
+	cases := []struct {
+		name string
+		mod  func(*unattributedAuthorsDeps)
+	}{
+		{"logged out", func(d *unattributedAuthorsDeps) {
+			d.activeContext = func() (*contexts.Context, bool, error) { return nil, false, nil }
+		}},
+		{"logged in, cache miss", func(*unattributedAuthorsDeps) {}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rec detectRecorder
+			d := detectDepsForTest(t, &rec)
+			d.localAuthors = blocking
+			d.networkTimeout = 50 * time.Millisecond
+			tc.mod(&d)
+
+			start := time.Now()
+			out := detectUnattributedAuthors(t.Context(), d)
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("detectUnattributedAuthors took %v, want well under 1s", elapsed)
+			}
+			if len(out.Candidates) != 0 {
+				t.Fatalf("out.Candidates = %v, want none", out.Candidates)
+			}
+		})
+	}
+}
+
+// A nil-field guard for the production wiring used by doctor and status;
+// `unused` (U1000) would fail the lint gate without a reference. This one
 // reference clears it for defaultUnattributedAuthorsDeps and, through it,
 // defaultOSUsername, localCandidateAuthors and originDefaultTip.
 func TestDefaultUnattributedAuthorsDeps_Wired(t *testing.T) {
 	t.Parallel()
-	d := defaultUnattributedAuthorsDeps(false, time.Second)
+	d := defaultUnattributedAuthorsDeps(time.Second)
 	if d.username == nil || d.localAuthors == nil || d.lookupEnv == nil || d.activeContext == nil ||
 		d.commonDir == nil || d.originTip == nil || d.readCache == nil || d.writeCache == nil ||
 		d.resolvePlacement == nil || d.cellClient == nil || d.fetch == nil || d.now == nil {
