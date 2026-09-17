@@ -36,6 +36,7 @@ import (
 
 func newDoctorCmd() *cobra.Command {
 	var forceFlag bool
+	var releaseFlag string
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
@@ -76,6 +77,9 @@ Checks performed:
      one-way attribution write and needs your confirmation; without a
      terminal it only reports.
 
+     --release <address> undoes a link made by this check (account-wide);
+     commits already linked stay linked.
+
   7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
@@ -111,11 +115,26 @@ points at --force instead of prompting.`,
 			return strategy.EnsureRedactionConfigured(cmd.Context())
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// PersistentPreRunE/PreRunE above still run before this
+			// short-circuit (broken-.entire-dir report, redaction config load) —
+			// benign and deliberate: --release is itself a doctor invocation and
+			// should see the same environment checks as the normal scan.
+			//
+			// Gated on Changed, not releaseFlag != "": an explicit
+			// `--release ""` must still short-circuit into runReleaseAlias so it
+			// is refused with the reserved-host message, rather than silently
+			// falling through to the unrelated normal scan.
+			if cmd.Flags().Changed("release") {
+				cmd.SilenceUsage = true
+				return runReleaseAlias(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), releaseFlag, defaultReleaseDeps())
+			}
 			return runSessionsFix(cmd, forceFlag)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Auto-fix all issues without prompting")
+	cmd.Flags().StringVar(&releaseFlag, "release", "", "Unlink a reserved-host author address from your account (account-wide); commits already linked stay linked")
+	cmd.MarkFlagsMutuallyExclusive("release", "force")
 
 	// Diagnostic subcommands.
 	cmd.AddCommand(newTraceCmd())
