@@ -803,14 +803,16 @@ func TestRunAuthStatus_MultipleContextsHint(t *testing.T) {
 
 // A count of one is dropped on both rows: the sole context and the sole session
 // are the ones already described above, so the row costs a line and carries no
-// information.
+// information. The session half requires the sole session to actually be the
+// caller's — see TestRunAuthStatus_UnidentifiedSingleSessionStillCounts.
 func TestRunAuthStatus_CountRowsAreDroppedAtOne(t *testing.T) {
 	t.Parallel()
 
 	oneSession := func(context.Context, string, string) ([]api.AuthSession, error) {
 		return []api.AuthSession{{ID: "fam-1", Name: "this login", CreatedAt: "2026-01-01T00:00:00Z", ExpiresAt: "2026-12-01T00:00:00Z"}}, nil
 	}
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "a", totalContexts: 1}
+	token := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","fid":"fam-1"}`)
+	target := statusTarget{coreURL: testCoreURL, token: token, activeContext: "a", totalContexts: 1}
 
 	var out bytes.Buffer
 	if err := runAuthStatus(context.Background(), &out, okProfile, oneSession, target, authStatusOptions{}); err != nil {
@@ -828,6 +830,44 @@ func TestRunAuthStatus_CountRowsAreDroppedAtOne(t *testing.T) {
 	}
 	if !strings.Contains(got, "Run 'entire logout' to end this session.") {
 		t.Fatalf("output = %q, want the plain logout hint", got)
+	}
+}
+
+// The drop-at-one rule rests on the verdict line's expiry standing in for the
+// sole session, so it must not fire when that session was never identified.
+//
+// Reproduces the real window: a family is revoked while its access token is
+// still inside its own lifetime, so resolveStatusTarget falls back to the stale
+// bearer, /me honours it, and fid names a family the listing no longer holds.
+// Dropping the row there left the default view with no count, no expiry and no
+// route to --sessions — and the one session listed is the login that replaced
+// yours, which is exactly the one worth looking at.
+func TestRunAuthStatus_UnidentifiedSingleSessionStillCounts(t *testing.T) {
+	t.Parallel()
+
+	replaced := func(context.Context, string, string) ([]api.AuthSession, error) {
+		return []api.AuthSession{{
+			ID: "fam-new", Name: "the login that replaced yours",
+			CreatedAt: "2026-09-17T00:00:00Z", ExpiresAt: "2026-10-17T00:00:00Z",
+		}}, nil
+	}
+	revoked := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","fid":"fam-revoked"}`)
+	target := statusTarget{coreURL: testCoreURL, token: revoked, activeContext: "a", totalContexts: 1}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, replaced, target, authStatusOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !hasMetadataLabel(got, activeSessionsRowLabel) {
+		t.Fatalf("output = %q, want the session count when the caller's own session was not identified", got)
+	}
+	if !strings.Contains(got, "entire auth status --sessions") {
+		t.Fatalf("output = %q, want a route to the listing", got)
+	}
+	// Nothing identified the caller, so no expiry may be claimed.
+	if strings.Contains(got, "expires") {
+		t.Fatalf("output = %q, must not claim an expiry it could not attribute", got)
 	}
 }
 

@@ -578,7 +578,7 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 		rows = append(rows, authContextsCountRow(sty, t.totalContexts))
 	}
 	rows = append(rows, explainRow{Label: authTokenRowLabel, Value: tokenstore.BackendDescription()})
-	if row, ok := authSessionsRow(sty, d.sessions, d.sessionErr, opts.Sessions); ok {
+	if row, ok := authSessionsRow(sty, d.sessions, d.sessionErr, opts.Sessions, d.current); ok {
 		rows = append(rows, row)
 	}
 	fmt.Fprint(w, sty.metadataRows(rows))
@@ -770,15 +770,24 @@ func authContextRow(sty statusStyles, name, coreURL string) explainRow {
 // A listing failure is reported in the row rather than raised: the token is
 // already known good, so the rest of the status is still worth printing.
 //
-// The second return is false when the row should be dropped: exactly one
-// session is the one you are on, already described by the verdict line's
-// expiry, so counting it adds a row and no information. Zero still reports —
-// logged in with no sessions is a contradiction worth seeing.
-func authSessionsRow(sty statusStyles, sessions []api.AuthSession, listErr error, showSessions bool) (explainRow, bool) {
+// The second return is false when the row should be dropped: a single session
+// that IS the caller's is already described by the verdict line's expiry, so
+// counting it adds a row and no information. Zero still reports — logged in
+// with no sessions is a contradiction worth seeing.
+//
+// current gates that drop, and must not be assumed. A caller whose session was
+// not identified gets no expiry on the verdict line, so dropping the row there
+// would leave the default view with no count, no expiry and no route to
+// --sessions — and the one listed session is precisely the one worth looking
+// at, being some other login than the token in hand. That happens when a
+// family is revoked while its access token is still inside its own lifetime:
+// resolveStatusTarget falls back to the stale bearer, /me still honours it, and
+// fid names a family the listing no longer contains.
+func authSessionsRow(sty statusStyles, sessions []api.AuthSession, listErr error, showSessions bool, current int) (explainRow, bool) {
 	if listErr != nil {
 		return explainRow{Label: activeSessionsRowLabel, Value: fmt.Sprintf("(unavailable: %v)", listErr)}, true
 	}
-	if len(sessions) == 1 {
+	if len(sessions) == 1 && current >= 0 {
 		return explainRow{}, false
 	}
 	value := strconv.Itoa(len(sessions))

@@ -72,7 +72,15 @@ the commands are always runnable in every build.
   saved" sentence. **Both count rows are dropped at exactly one** — the sole
   session and the sole context are the ones already described by the verdict
   line's expiry and the `context` row, so the row costs a line and carries
-  nothing. Zero sessions still reports, being a contradiction worth seeing.
+  nothing. The session half additionally requires that sole session to have been
+  *identified* as the caller's: without a `fid` match there is no expiry on the
+  verdict line to stand in for it, and dropping the row would leave the default
+  view with no count, no expiry and no route to `--sessions` — while the one
+  session listed is the login that replaced yours, which is the one worth
+  looking at. That window is reachable whenever a family is revoked inside its
+  access token's lifetime: `resolveStatusTarget` falls back to the stale bearer,
+  `/me` honours it, and `fid` names a family the listing no longer holds. Zero
+  sessions still reports, being a contradiction worth seeing.
   `logout --everywhere` is offered **only alongside the table**: it ends every
   session at once, and in the collapsed view those sessions are a count the
   reader cannot inspect, browser logins included.
