@@ -17,8 +17,14 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
 // reservedHostSuffixes mirrors regional.reservedHostSuffixes in entiredb
@@ -153,7 +159,10 @@ func (w unattributedAuthorsWire) nonZero() []unattributedAuthor {
 // (including the output cap) is logged and treated as "no candidates" — local
 // detection must not fail doctor or slow status. shortlog applies .mailmap
 // unconditionally; a mailmap that rewrites a reserved-host address hides it
-// here while the cell still holds the raw author — accepted.
+// here while the cell still holds the raw author — accepted. The 1 MiB output
+// cap admits roughly 15-20k distinct authors; beyond that, detection silently
+// degrades to "no candidates" (debug-logged) — deliberate, since a repo with
+// that many distinct reserved-host authors is not one this feature is aimed at.
 func localCandidateAuthors(ctx context.Context, username string) []string {
 	// Walk the user's refs only. --all would also walk Entire's own refs —
 	// refs/entire/checkpoints/* and refs/entire/policies/* (git-refs store,
@@ -252,7 +261,11 @@ func writeUnattributedAuthorsCache(commonDir string, c cachedDetection) error {
 	if err != nil {
 		return fmt.Errorf("encode unattributed-authors cache: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(commonDir, unattributedAuthorsCacheFile), b, 0o600); err != nil {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", commonDir, err)
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, unattributedAuthorsCacheFile, b, 0o600); err != nil {
 		return fmt.Errorf("write unattributed-authors cache: %w", err)
 	}
 	return nil
@@ -266,24 +279,28 @@ func invalidateUnattributedAuthorsCache(ctx context.Context, commonDir string) {
 	}
 }
 
-// originDefaultTip is the SHA of origin's default branch via the existing
-// chain (origin/HEAD → origin/main → origin/master, getDefaultBranchFromRemote).
-// "" on any failure → the cache is bypassed.
+// originDefaultTip is the SHA of origin's default-branch tip, else HEAD; ""
+// only when neither resolves. The default-branch chain is the existing one
+// (origin/HEAD → origin/main → origin/master, getDefaultBranchFromRemote); a
+// repo whose remote default branch is something else (e.g. a `develop`
+// default added via `git remote add`) falls back to the current HEAD hash so
+// the cache key still moves with the repo instead of being bypassed on every
+// call.
 func originDefaultTip(ctx context.Context) string {
 	repo, err := gitrepo.OpenCurrent(ctx) // caller owns and closes
 	if err != nil {
 		return ""
 	}
 	defer repo.Close()
-	branch := getDefaultBranchFromRemote(repo)
-	if branch == "" {
-		return ""
+	if branch := getDefaultBranchFromRemote(repo); branch != "" {
+		if ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branch), true); err == nil {
+			return ref.Hash().String()
+		}
 	}
-	ref, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branch), true)
-	if err != nil {
-		return ""
+	if h, err := repo.Head(); err == nil {
+		return h.Hash().String()
 	}
-	return ref.Hash().String()
+	return ""
 }
 
 // shortNetErr renders a network/auth failure as the one-line reason doctor
@@ -298,4 +315,126 @@ func shortNetErr(err error) string {
 		return string(r[:79]) + "…"
 	}
 	return msg
+}
+
+// unattributedAuthorsDeps is the dependency seam detectUnattributedAuthors
+// composes: doctor and status both call detectUnattributedAuthors(ctx,
+// defaultUnattributedAuthorsDeps(...)) in production, while tests inject every
+// network/auth edge as a func field instead of touching a package-level
+// variable (the pattern of identityProfileDependencies, setup_identity.go).
+type unattributedAuthorsDeps struct {
+	username         func() string
+	localAuthors     func(ctx context.Context, username string) []string
+	lookupEnv        func(string) (string, bool)
+	activeContext    func() (*contexts.Context, bool, error)
+	commonDir        func(ctx context.Context) (string, error)
+	originTip        func(ctx context.Context) string
+	readCache        func(commonDir, tip, repoID string, now time.Time) (cachedDetection, bool)
+	writeCache       func(commonDir string, c cachedDetection) error
+	resolvePlacement func(ctx context.Context) (repoCellPlacement, error)
+	cellClient       func(ctx context.Context, target *auth.CellTarget) (*api.Client, error)
+	fetch            func(ctx context.Context, c *api.Client, repoID string, emails []string) ([]unattributedAuthor, error)
+	now              func() time.Time
+	networkTimeout   time.Duration
+}
+
+func defaultUnattributedAuthorsDeps(insecure bool, networkTimeout time.Duration) unattributedAuthorsDeps {
+	return unattributedAuthorsDeps{
+		username:      defaultOSUsername,
+		localAuthors:  localCandidateAuthors,
+		lookupEnv:     os.LookupEnv,
+		activeContext: auth.ActiveContext,
+		commonDir:     strategy.GetGitCommonDir,
+		originTip:     originDefaultTip,
+		readCache:     readUnattributedAuthorsCache,
+		writeCache:    writeUnattributedAuthorsCache,
+		resolvePlacement: func(ctx context.Context) (repoCellPlacement, error) {
+			_, owner, repo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
+			if err != nil {
+				return repoCellPlacement{}, fmt.Errorf("resolve repo from origin: %w", err)
+			}
+			return resolveRepoCellPlacement(ctx, owner, repo)
+		},
+		cellClient: func(ctx context.Context, t *auth.CellTarget) (*api.Client, error) {
+			// Bare return, no nolint: wrapcheck does not analyse returns inside
+			// function literals, so a //nolint:wrapcheck here is unused and
+			// nolintlint fails the build.
+			return auth.NewEntireAPICellClient(ctx, insecure, t)
+		},
+		fetch:          fetchUnattributedAuthors,
+		now:            time.Now,
+		networkTimeout: networkTimeout,
+	}
+}
+
+// detectionOutcome is what doctor and status render from.
+type detectionOutcome struct {
+	Candidates []string             // local, gated; present even when logged out
+	LoggedIn   bool                 // ENTIRE_TOKEN set or an active context
+	RepoID     string               // placement id; set whenever placement resolved (so whenever Authors is)
+	Authors    []unattributedAuthor // Entire's counts (>0 only); nil when not fetched
+	Skipped    string               // one-line reason the cell step was skipped ("" = not skipped)
+}
+
+// detectUnattributedAuthors never fails: every network/auth problem lands in
+// Skipped, every local problem in an empty Candidates. Order: local
+// candidates → logged-in → cache (by tip; stored RepoID comes back with it)
+// → placement → cell → cache write.
+func detectUnattributedAuthors(ctx context.Context, d unattributedAuthorsDeps) detectionOutcome {
+	username := d.username()
+	if username == "" {
+		logging.Debug(ctx, "unattributed authors: no OS username; offering nothing")
+		return detectionOutcome{}
+	}
+	out := detectionOutcome{Candidates: d.localAuthors(ctx, username)}
+	if len(out.Candidates) == 0 {
+		return out
+	}
+	if _, ok := d.lookupEnv(auth.EnvTokenVar); ok {
+		out.LoggedIn = true
+	} else if _, ok, err := d.activeContext(); err != nil {
+		logging.Debug(ctx, "unattributed authors: active context unavailable; treating as logged out", "error", err)
+	} else {
+		out.LoggedIn = ok
+	}
+	if !out.LoggedIn {
+		return out
+	}
+
+	commonDir, cdErr := d.commonDir(ctx)
+	tip := d.originTip(ctx)
+	if cdErr == nil {
+		if c, hit := d.readCache(commonDir, tip, "", d.now()); hit {
+			out.RepoID, out.Authors, out.Skipped = c.RepoID, c.Authors, c.Skipped
+			return out
+		}
+	}
+
+	nctx, cancel := context.WithTimeout(ctx, d.networkTimeout)
+	defer cancel()
+	placement, err := d.resolvePlacement(nctx)
+	switch {
+	case err != nil:
+		out.Skipped = shortNetErr(err)
+	default:
+		out.RepoID = placement.RepoID
+		client, err := d.cellClient(nctx, placement.Target)
+		if err != nil {
+			out.Skipped = shortNetErr(err)
+			break
+		}
+		authors, err := d.fetch(nctx, client, placement.RepoID, out.Candidates)
+		if err != nil {
+			out.Skipped = shortNetErr(err)
+			break
+		}
+		out.Authors = authors
+	}
+	if cdErr == nil && tip != "" {
+		c := cachedDetection{Tip: tip, RepoID: out.RepoID, Authors: out.Authors, Skipped: out.Skipped, FetchedAt: d.now()}
+		if err := d.writeCache(commonDir, c); err != nil {
+			logging.Debug(ctx, "unattributed authors: cache write failed", "error", err)
+		}
+	}
+	return out
 }

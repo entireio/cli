@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
 // A superset of entire-core's TestIsReservedHostEmail so parity
@@ -133,12 +135,13 @@ func TestParseUnattributedAuthorsResponse(t *testing.T) {
 
 func TestFetchUnattributedAuthors_PostsEmailsAndRepoID(t *testing.T) {
 	t.Parallel()
-	var gotPath string
+	var gotPath, gotMethod string
 	var gotBody struct {
 		Emails []string `json:"emails"`
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotMethod = r.Method
 		// errcheck runs with check-blank in this repo, so no `_ =` discards:
 		// t.Error (not Fatal — this is the server goroutine) and fmt.Fprint
 		// (exempted by the std-error-handling preset), as defaultAPIHandler in
@@ -157,6 +160,9 @@ func TestFetchUnattributedAuthors_PostsEmailsAndRepoID(t *testing.T) {
 	}
 	if gotPath != "/api/v1/repos/01REPO/authors/unattributed" || len(gotBody.Emails) != 1 {
 		t.Fatalf("path=%s body=%+v", gotPath, gotBody)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %s, want POST", gotMethod)
 	}
 	if len(got) != 1 || got[0].Count != 3 {
 		t.Fatalf("got %+v", got)
@@ -224,10 +230,176 @@ func TestShortNetErr(t *testing.T) {
 		{errors.New("control plane unavailable: dial tcp 1.2.3.4: connection refused"), "control plane unavailable: dial tcp 1.2.3.4: connection refused"},
 		{errors.New("first line\nsecond line"), "first line"},
 		{errors.New(strings.Repeat("x", 100)), strings.Repeat("x", 79) + "…"},
+		{errors.New(strings.Repeat("é", 100)), strings.Repeat("é", 79) + "…"}, // rune-not-byte truncation
 	}
 	for _, c := range cases {
 		if got := shortNetErr(c.err); got != c.want {
 			t.Errorf("shortNetErr(%v) = %q, want %q", c.err, got, c.want)
 		}
+	}
+}
+
+type detectRecorder struct {
+	fetched bool
+	wrote   *cachedDetection
+}
+
+// detectDepsForTest returns fully-populated fakes: logged in via context, one
+// candidate, cache miss, placement + fetch succeed. Cases override fields.
+func detectDepsForTest(t *testing.T, rec *detectRecorder) unattributedAuthorsDeps {
+	t.Helper()
+	return unattributedAuthorsDeps{
+		username:      func() string { return "me" },
+		localAuthors:  func(context.Context, string) []string { return []string{"me@h.local"} },
+		lookupEnv:     func(string) (string, bool) { return "", false },
+		activeContext: func() (*contexts.Context, bool, error) { return &contexts.Context{}, true, nil },
+		commonDir:     func(context.Context) (string, error) { return t.TempDir(), nil },
+		originTip:     func(context.Context) string { return "tip" },
+		readCache:     func(string, string, string, time.Time) (cachedDetection, bool) { return cachedDetection{}, false },
+		writeCache: func(_ string, c cachedDetection) error {
+			rec.wrote = &c
+			return nil
+		},
+		resolvePlacement: func(context.Context) (repoCellPlacement, error) {
+			return repoCellPlacement{RepoID: "01REPO", Target: &auth.CellTarget{}}, nil
+		},
+		cellClient: func(context.Context, *auth.CellTarget) (*api.Client, error) {
+			return api.NewClientWithBaseURL("t", "http://unused"), nil
+		},
+		fetch: func(context.Context, *api.Client, string, []string) ([]unattributedAuthor, error) {
+			rec.fetched = true
+			return []unattributedAuthor{{Email: "me@h.local", Count: 9}}, nil
+		},
+		now:            time.Now,
+		networkTimeout: time.Second,
+	}
+}
+
+func TestDetectUnattributedAuthors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		mod  func(*unattributedAuthorsDeps)
+		want func(t *testing.T, out detectionOutcome, rec detectRecorder)
+	}{
+		{"no candidates → empty, nothing else runs", func(d *unattributedAuthorsDeps) {
+			d.localAuthors = func(context.Context, string) []string { return nil }
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if len(out.Candidates) != 0 || rec.fetched {
+				t.Fatalf("%+v fetched=%v", out, rec.fetched)
+			}
+		}},
+		{"logged out (no env token, no context) → candidates, no fetch", func(d *unattributedAuthorsDeps) {
+			d.activeContext = func() (*contexts.Context, bool, error) { return nil, false, nil }
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if out.LoggedIn || len(out.Candidates) != 1 || rec.fetched {
+				t.Fatalf("%+v fetched=%v", out, rec.fetched)
+			}
+		}},
+		{"ENTIRE_TOKEN counts as logged in", func(d *unattributedAuthorsDeps) {
+			d.activeContext = func() (*contexts.Context, bool, error) { return nil, false, nil }
+			d.lookupEnv = func(string) (string, bool) { return "tok", true }
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if !out.LoggedIn || !rec.fetched {
+				t.Fatalf("%+v fetched=%v", out, rec.fetched)
+			}
+		}},
+		{"activeContext error → treated as logged out", func(d *unattributedAuthorsDeps) {
+			d.activeContext = func() (*contexts.Context, bool, error) { return nil, false, errors.New("bad --context") }
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if out.LoggedIn || rec.fetched {
+				t.Fatalf("%+v", out)
+			}
+		}},
+		{"placement error → Skipped names the reason, cached with empty RepoID", func(d *unattributedAuthorsDeps) {
+			d.resolvePlacement = func(context.Context) (repoCellPlacement, error) {
+				return repoCellPlacement{}, errors.New("control plane unavailable: dial tcp")
+			}
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if out.Skipped == "" || rec.fetched || rec.wrote == nil || rec.wrote.Skipped == "" || rec.wrote.RepoID != "" {
+				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
+			}
+		}},
+		{"placement timeout → 'timed out reaching Entire'", func(d *unattributedAuthorsDeps) {
+			d.resolvePlacement = func(context.Context) (repoCellPlacement, error) {
+				return repoCellPlacement{}, fmt.Errorf("resolve: %w", context.DeadlineExceeded)
+			}
+		}, func(t *testing.T, out detectionOutcome, _ detectRecorder) {
+			if out.Skipped != "timed out reaching Entire" {
+				t.Fatalf("%+v", out)
+			}
+		}},
+		{"fetch error → Skipped, cached with RepoID", func(d *unattributedAuthorsDeps) {
+			d.fetch = func(context.Context, *api.Client, string, []string) ([]unattributedAuthor, error) {
+				return nil, errors.New("cell: 503")
+			}
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if out.Skipped == "" || rec.wrote == nil || rec.wrote.Skipped == "" || rec.wrote.RepoID != "01REPO" {
+				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
+			}
+		}},
+		{"no tip → nothing cached", func(d *unattributedAuthorsDeps) {
+			d.originTip = func(context.Context) string { return "" }
+		}, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if len(out.Authors) != 1 || rec.wrote != nil {
+				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
+			}
+		}},
+		{"happy → Authors + RepoID, success cached", nil, func(t *testing.T, out detectionOutcome, rec detectRecorder) {
+			if out.RepoID != "01REPO" || len(out.Authors) != 1 || rec.wrote == nil || rec.wrote.RepoID != "01REPO" || rec.wrote.Skipped != "" {
+				t.Fatalf("%+v wrote=%+v", out, rec.wrote)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rec detectRecorder
+			d := detectDepsForTest(t, &rec)
+			if tc.mod != nil {
+				tc.mod(&d)
+			}
+			out := detectUnattributedAuthors(t.Context(), d)
+			tc.want(t, out, rec)
+		})
+	}
+}
+
+// A warm cache short-circuits placement and fetch — and still carries RepoID,
+// which the doctor fix path needs to declare against.
+func TestDetectUnattributedAuthors_CacheHitSkipsNetworkKeepsRepoID(t *testing.T) {
+	t.Parallel()
+	var rec detectRecorder
+	d := detectDepsForTest(t, &rec)
+	d.readCache = func(_, tip, repoID string, _ time.Time) (cachedDetection, bool) {
+		if tip != "tip" || repoID != "" {
+			t.Fatalf("readCache(tip=%q, repoID=%q), want (\"tip\", \"\")", tip, repoID)
+		}
+		return cachedDetection{Tip: "tip", RepoID: "01REPO", Authors: []unattributedAuthor{{Email: "me@h.local", Count: 4}}}, true
+	}
+	d.resolvePlacement = func(context.Context) (repoCellPlacement, error) {
+		t.Fatal("placement must not be resolved on a warm cache")
+		return repoCellPlacement{}, nil
+	}
+	out := detectUnattributedAuthors(t.Context(), d)
+	if rec.fetched || out.RepoID != "01REPO" || len(out.Authors) != 1 || out.Authors[0].Count != 4 || rec.wrote != nil {
+		t.Fatalf("%+v fetched=%v wrote=%+v", out, rec.fetched, rec.wrote)
+	}
+}
+
+// The production wiring is otherwise unreferenced until Chunk 2 wires it into
+// doctor and status; `unused` (U1000) would fail the lint gate. This one
+// reference clears it for defaultUnattributedAuthorsDeps and, through it,
+// defaultOSUsername, localCandidateAuthors and originDefaultTip.
+func TestDefaultUnattributedAuthorsDeps_Wired(t *testing.T) {
+	t.Parallel()
+	d := defaultUnattributedAuthorsDeps(false, time.Second)
+	if d.username == nil || d.localAuthors == nil || d.lookupEnv == nil || d.activeContext == nil ||
+		d.commonDir == nil || d.originTip == nil || d.readCache == nil || d.writeCache == nil ||
+		d.resolvePlacement == nil || d.cellClient == nil || d.fetch == nil || d.now == nil {
+		t.Fatal("defaultUnattributedAuthorsDeps left a func field nil")
+	}
+	if d.networkTimeout != time.Second {
+		t.Fatalf("networkTimeout = %v, want 1s", d.networkTimeout)
 	}
 }
