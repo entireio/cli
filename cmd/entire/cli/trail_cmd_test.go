@@ -421,6 +421,7 @@ func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 	//
 	// Discovery selects a context whose keyring slot holds nothing, so the
 	// per-context provider reports ErrNotLoggedIn.
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
 	c := &contexts.Context{Name: "me@core", CoreURL: "https://core.example", Handle: "me", KeychainService: "kc:me"}
 	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
@@ -455,6 +456,7 @@ func TestRunTrailListAll_ValidatesOptionsBeforeAuth(t *testing.T) {
 	//
 	// Discovery must never run for invalid local options: validation has to
 	// short-circuit before any auth resolution.
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
 		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
 			t.Fatal("discovery should not run for invalid local options")
@@ -602,7 +604,7 @@ func TestPrintCreatedTrail(t *testing.T) {
 }
 
 func TestTrailDisplayURL(t *testing.T) {
-	t.Parallel()
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 
 	// Server URL wins, even when a number is present.
 	got := trailDisplayURL(api.TrailResource{Number: 5, URL: "https://server/url"}, "gh", "acme", "repo")

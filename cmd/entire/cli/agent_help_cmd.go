@@ -407,10 +407,7 @@ func agentHelpRepoContextWithRefresh(
 		return repoLine, decision == trailEnablementCacheEnabled
 	}
 
-	// ResolveDataAPIToken performs data-host discovery before it can reject a
-	// missing login. The scope already carries the locally resolved auth identity,
-	// so avoid making an unauthenticated first run wait on a network request that
-	// cannot produce an enabled decision.
+	// No login means no enabled decision; skip the refresh.
 	if scope.AuthKey == "" {
 		return repoLine, false
 	}

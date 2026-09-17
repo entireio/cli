@@ -130,7 +130,7 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	client, repoScope, repoName, err := newRecapClient(ctx, f.insecureHTTP)
 	if err != nil {
 		if errors.Is(err, api.ErrInsecureHTTP) {
-			fmt.Fprintf(errW, "ENTIRE_API_BASE_URL is set to an insecure http:// URL (%s). Use https:// for production, or pass --insecure-http-auth for local dev.\n", api.BaseURL())
+			fmt.Fprintf(errW, "%v\nUse https://, or pass --insecure-http-auth for local dev.\n", err)
 			return NewSilentError(err)
 		}
 		// Token resolution can fail for many reasons unrelated to the
@@ -173,17 +173,11 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 // 401s via recapLoadErrorMessage so flag effects (--week, --agent, ...)
 // and the real auth error are not collapsed into one "sign in" hint.
 //
-// Goes through auth.ResolveDataAPIToken (the same context-aware path as
-// activity/search/dispatch) so the data host's /.well-known/entire-api.json
-// picks the matching login context whose login JWT is the bearer; a host that
-// doesn't advertise discovery is a surfaced error, not a fallback.
-// ErrNotLoggedIn is collapsed back into an empty token so the caller's "render
-// with no bearer, let the server respond 401" path still fires. Every other
-// resolution failure (no eligible/ambiguous context, refresh rejected,
-// network error, keyring locked) surfaces verbatim to the caller — previously
-// these were all relabelled as keyring read failures via keyringReadError,
-// which sent users on wild goose chases when the keyring was fine and the real
-// problem was downstream.
+// Goes through auth.ResolveDataAPI (the same login-following path as
+// activity/search/dispatch). ErrNotLoggedIn is collapsed back into an empty
+// token so the caller's "render with no bearer, let the server respond 401"
+// path still fires. Every other resolution failure (refresh rejected, network
+// error, keyring locked) surfaces verbatim to the caller.
 // newRecapClient returns the recap client, the value to pass as /me/recap's
 // ?repo= (its team/contributors scope), and the repo's owner/repo display name.
 // The scope is the current repo's ULID when routed to an entire-api cell (which
@@ -219,22 +213,22 @@ func newRecapClient(ctx context.Context, insecureHTTP bool) (client *api.Client,
 	if insecureHTTP {
 		auth.EnableInsecureHTTP()
 	}
-	token, err := auth.ResolveDataAPIToken(ctx, api.BaseURL())
+	target, err := auth.ResolveDataAPI(ctx)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
-		token = ""
+		target = auth.DataAPI{BaseURL: api.BaseURL()}
 		err = nil
 	}
 	if err != nil {
 		return nil, "", "", err
 	}
-	if token != "" && !insecureHTTP {
-		if err := api.RequireSecureURL(api.BaseURL()); err != nil {
-			return nil, "", "", fmt.Errorf("base URL check: %w", err)
+	if target.Token != "" && !insecureHTTP {
+		if err := api.RequireSecureURL(target.BaseURL); err != nil {
+			return nil, "", "", fmt.Errorf("%s: %w", target.BaseURL, err)
 		}
 	}
 	// The data API scopes by slug, so scope and display name coincide.
 	slug := currentRepoSlug(ctx)
-	return api.NewClient(token), slug, slug, nil
+	return api.NewClientWithBaseURL(target.Token, target.BaseURL), slug, slug, nil
 }
 
 func handleRecapFetchError(w io.Writer, err error) error {

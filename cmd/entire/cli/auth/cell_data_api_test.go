@@ -61,7 +61,7 @@ func TestIsBFFOrigin(t *testing.T) {
 	}
 }
 
-func TestEntireDomainFamily(t *testing.T) {
+func TestEntireSite(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		core string
@@ -74,8 +74,8 @@ func TestEntireDomainFamily(t *testing.T) {
 		{"https://auth.example.com", ""},
 	}
 	for _, tc := range tests {
-		if got := entireDomainFamily(tc.core); got != tc.want {
-			t.Errorf("entireDomainFamily(%q) = %q, want %q", tc.core, got, tc.want)
+		if got := EntireSite(tc.core); got != tc.want {
+			t.Errorf("EntireSite(%q) = %q, want %q", tc.core, got, tc.want)
 		}
 	}
 }
@@ -978,13 +978,12 @@ func TestDataAPIServesSelectedLogin(t *testing.T) {
 		want     bool
 	}{
 		{"prod login, default host", "", prodFixture.name, "", true},
-		{"staging login, default host", "", stagingFixture.name, "", false},
+		{"staging login, default host", "", stagingFixture.name, "", true},
 		{"staging login, explicit staging host", "https://partial.to", stagingFixture.name, "", true},
 		{"staging login, explicit prod host (discovery decides)", "https://entire.io", stagingFixture.name, "", true},
 		{"no login selected", "", "", "", true},
 		// The data-API path never reads ENTIRE_TOKEN, so no fallback can act as
-		// the env-token login — whatever its environment, and even under an
-		// explicit data host.
+		// the env-token login, even under an explicit data host.
 		{"env token prod", "", "", prodCoreURL, false},
 		{"env token staging", "", "", stagingCoreURL, false},
 		{"env token invalid", "", "", "not-a-jwt", false},

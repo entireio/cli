@@ -182,12 +182,8 @@ func Contexts() ([]*contexts.Context, string, error) {
 	return f.Contexts, sel.Context.Name, nil
 }
 
-// ActiveContext returns the login context currently acting, or ok=false when
-// there is none. It exists so callers that need the context itself — its
-// CoreURL, to mint a token against — do not have to take the name from Contexts
-// and then re-find the object by looping over the slice. Three call sites grew
-// that loop independently and two of them dropped the CoreURL guard below, which
-// is the drift this accessor removes.
+// ActiveContext returns the login about to act, or ok=false when there is
+// none, and announces it when several logins are saved.
 //
 // A context with no CoreURL is reported as ok=false rather than returned: it is
 // an unusable pointer, and treating it as active means dialing an empty host
@@ -198,18 +194,33 @@ func Contexts() ([]*contexts.Context, string, error) {
 // saved context is a hard error, not ok=false: "you asked for a context that
 // doesn't exist" must not degrade into the `entire login` hint.
 func ActiveContext() (c *contexts.Context, ok bool, err error) {
-	f, err := contexts.Load(userdirs.Config())
+	f, c, ok, err := activeContextIn()
+	if ok {
+		announceContext(f, c)
+	}
+	return c, ok, err
+}
+
+// activeContext is ActiveContext without the notice, for callers that only
+// describe the login rather than act as it.
+func activeContext() (c *contexts.Context, ok bool, err error) {
+	_, c, ok, err = activeContextIn()
+	return c, ok, err
+}
+
+func activeContextIn() (f *contexts.File, c *contexts.Context, ok bool, err error) {
+	f, err = contexts.Load(userdirs.Config())
 	if err != nil {
-		return nil, false, fmt.Errorf("load contexts: %w", err)
+		return nil, nil, false, fmt.Errorf("load contexts: %w", err)
 	}
 	sel, err := f.Active()
 	if err != nil {
-		return nil, false, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+		return nil, nil, false, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
 	}
 	if sel.Context == nil || strings.TrimSpace(sel.Context.CoreURL) == "" {
-		return nil, false, nil
+		return f, nil, false, nil
 	}
-	return sel.Context, true, nil
+	return f, sel.Context, true, nil
 }
 
 // StoredContexts returns all stored login contexts and the STORED

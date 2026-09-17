@@ -170,3 +170,123 @@ func TestResolveDataAPIToken_NotLoggedInPreservesSentinel(t *testing.T) {
 		t.Fatalf("error must unwrap to ErrNotLoggedIn, got %v", err)
 	}
 }
+
+// The default path: no ENTIRE_API_BASE_URL, so the selected login decides both
+// host and bearer. A staging login talks to partial.to, never to entire.io.
+func TestResolveDataAPI_FollowsSelectedLogin(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "")
+	_, stagingJWT := seedProdAndStagingContexts(t, configDir, stagingFixture.name)
+
+	got, err := ResolveDataAPI(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveDataAPI: %v", err)
+	}
+	if got.BaseURL != "https://partial.to" {
+		t.Fatalf("BaseURL = %q, want https://partial.to", got.BaseURL)
+	}
+	if got.Token != stagingJWT {
+		t.Fatal("token must be the staging login JWT, verbatim")
+	}
+}
+
+// A local-dev login server serves the data API itself.
+func TestResolveDataAPI_LoopbackLoginServesDataAPI(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "")
+	const core = "http://localhost:8787"
+	svc := tokenstore.CoreKeyringService(core)
+	jwt := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"me","exp":%d}`, core, time.Now().Add(2*time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(jwt, 7200)); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	writeActiveContext(t, configDir, "dev", core, "me", svc)
+
+	got, err := ResolveDataAPI(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveDataAPI: %v", err)
+	}
+	if got.BaseURL != core {
+		t.Fatalf("BaseURL = %q, want %s", got.BaseURL, core)
+	}
+}
+
+// A login server outside entire.io / partial.to / loopback has no known site;
+// the error names the override that would supply one.
+func TestResolveDataAPI_UnknownLoginServerNamesOverride(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "")
+	writeActiveContext(t, configDir, "acme", "https://auth.acme.com", "me", "kc:acme")
+
+	_, err := ResolveDataAPI(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "ENTIRE_API_BASE_URL") {
+		t.Fatalf("err = %v, want it to name ENTIRE_API_BASE_URL", err)
+	}
+}
+
+func TestResolveDataAPI_NoLoginIsNotLoggedIn(t *testing.T) {
+	isolateCellClientEnv(t, "")
+
+	_, err := ResolveDataAPI(context.Background())
+	if !errors.Is(err, ErrNotLoggedIn) {
+		t.Fatalf("error must unwrap to ErrNotLoggedIn, got %v", err)
+	}
+	if _, err := DataBaseURL(); !errors.Is(err, ErrNotLoggedIn) {
+		t.Fatalf("DataBaseURL error must unwrap to ErrNotLoggedIn, got %v", err)
+	}
+}
+
+// ENTIRE_API_BASE_URL keeps host discovery: the named host says which saved
+// login it trusts.
+func TestResolveDataAPI_OverrideDiscoversAgainstHost(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "https://data.example")
+	prodJWT, _ := seedProdAndStagingContexts(t, configDir, stagingFixture.name)
+	stubResolveContextForAPI(t, func(_ context.Context, _, _, host string, _ *http.Client, _ clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+		if host != "data.example" {
+			return nil, fmt.Errorf("host = %q, want data.example", host)
+		}
+		return &contexts.Context{Name: prodFixture.name, CoreURL: prodCoreURL, Handle: "me", KeychainService: tokenstore.CoreKeyringService(prodCoreURL)}, nil
+	})
+
+	got, err := ResolveDataAPI(context.Background())
+	if err != nil {
+		t.Fatalf("ResolveDataAPI: %v", err)
+	}
+	if got.BaseURL != "https://data.example" || got.Token != prodJWT {
+		t.Fatalf("got %+v, want the override host with the login it trusts", got)
+	}
+}
+
+// With several logins saved the acting one is named once, on stderr; with one
+// there is nothing to say.
+func TestResolveDataAPI_AnnouncesContextAmongSeveral(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "")
+	seedProdAndStagingContexts(t, configDir, stagingFixture.name)
+	var notice strings.Builder
+	CaptureContextNoticeForTest(t, &notice)
+
+	for range 2 {
+		if _, err := ResolveDataAPI(context.Background()); err != nil {
+			t.Fatalf("ResolveDataAPI: %v", err)
+		}
+	}
+	if got := notice.String(); got != "Using context 'me@partial'.\n" {
+		t.Fatalf("notice = %q, want one 'Using context' line", got)
+	}
+}
+
+func TestResolveDataAPI_SingleLoginIsSilent(t *testing.T) {
+	configDir := isolateCellClientEnv(t, "")
+	svc := tokenstore.CoreKeyringService(prodCoreURL)
+	jwt := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"me","exp":%d}`, prodCoreURL, time.Now().Add(2*time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(jwt, 7200)); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	writeActiveContext(t, configDir, "me@entire", prodCoreURL, "me", svc)
+	var notice strings.Builder
+	CaptureContextNoticeForTest(t, &notice)
+
+	if _, err := ResolveDataAPI(context.Background()); err != nil {
+		t.Fatalf("ResolveDataAPI: %v", err)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("notice = %q, want none with a single login", notice.String())
+	}
+}

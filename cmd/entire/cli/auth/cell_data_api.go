@@ -250,7 +250,7 @@ func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (ce
 	if insecureHTTP {
 		EnableInsecureHTTP()
 	}
-	c, ok, err := activeContext()
+	c, ok, err := ActiveContext()
 	if err != nil {
 		return cellSubject{}, err
 	}
@@ -315,36 +315,17 @@ func resolveCellClientSubject(ctx context.Context, insecureHTTP bool) (cellSubje
 	return resolveDiscoveredCellSubject(ctx, insecureHTTP, dataURL)
 }
 
-// DataAPIServesSelectedLogin reports whether the data API at api.BaseURL() is
-// in the same environment as the login the cell path acts as. Commands that
-// fall back from a cell to the data API (activity, recap) consult it so a cell
-// failure under a staging login is reported rather than answered from
-// production: with no ENTIRE_API_BASE_URL the data host is the production
-// apex, and clusterdiscovery.selectLoginContext there would either refuse the
-// staging login or auto-select a saved prod one and render prod data.
+// DataAPIServesSelectedLogin reports whether the data API acts as the same
+// login the cell path does. Commands that fall back from a cell to the data
+// API (activity, recap) consult it.
 //
-// False whenever ENTIRE_TOKEN is set, valid or not, and before any other
-// consideration: the data-API path never reads the env token, so a fallback
-// would act as a stored login — a different identity, and possibly a different
-// environment — or would answer from one where the token error should have
-// surfaced. Otherwise true when ENTIRE_API_BASE_URL is set (the user named the
-// host, and discovery validates the login against it), when no login is
-// selected (the fallback renders its own not-logged-in outcome), or when the
-// login's core and the data host are in the same environment family. A
-// loopback or custom core has no family and never matches a non-loopback data
-// host.
+// False whenever ENTIRE_TOKEN is set, valid or not: the data-API path never
+// reads the env token, so a fallback would act as a stored login instead.
+// Otherwise the data API follows the selected login (ResolveDataAPI), so the
+// two always agree.
 func DataAPIServesSelectedLogin() bool {
-	if _, ok := os.LookupEnv(EnvTokenVar); ok {
-		return false
-	}
-	if _, overridden := api.BaseURLOverride(); overridden {
-		return true
-	}
-	c, ok, err := activeContext()
-	if err != nil || !ok {
-		return true
-	}
-	return entireDomainFamily(c.CoreURL) == entireDomainFamily(api.BaseURL())
+	_, ok := os.LookupEnv(EnvTokenVar)
+	return !ok
 }
 
 // resolveDiscoveredCellSubject builds the subject for an explicitly configured
@@ -568,11 +549,9 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// entireDomainFamily returns the registrable apex ("entire.io" / "partial.to")
-// derived from the discovered login core's host, or "" for loopback/custom
-// cores. It lets the audience/core templates follow the environment the user is
-// actually logged into (prod vs staging) instead of a hardcoded prod default.
-func entireDomainFamily(coreURL string) string {
+// EntireSite returns the Entire site ("entire.io" / "partial.to") a login
+// server or data host belongs to, or "" for loopback and custom hosts.
+func EntireSite(coreURL string) string {
 	u, err := url.Parse(coreURL)
 	if err != nil {
 		return ""
@@ -593,10 +572,10 @@ func entireDomainFamily(coreURL string) string {
 // most reliable signal for prod-vs-staging, so it wins when set; the login core
 // is the fallback, and the only signal when dataHost is "".
 func environmentFamily(dataHost, discoveredCore string) string {
-	if fam := entireDomainFamily(dataHost); fam != "" {
+	if fam := EntireSite(dataHost); fam != "" {
 		return fam
 	}
-	return entireDomainFamily(discoveredCore)
+	return EntireSite(discoveredCore)
 }
 
 // jurisdictionAudience returns the aud the entire-api cell for `jurisdiction`
