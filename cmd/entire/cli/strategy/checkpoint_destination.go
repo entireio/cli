@@ -70,6 +70,29 @@ func loadPushedDestination(ctx context.Context) string {
 // recordPushedDestination stores where this push delivered. Best-effort: losing
 // the record costs at most one redundant re-sync later, which is idempotent, so
 // it must never fail a push that already succeeded.
+//
+// Deliberately UNLOCKED, unlike its neighbour in checkpoint_sync_capture.go,
+// which pairs its state file with entire-checkpoint-sync-remotes.lock. The
+// difference is the invariant, not the file layout. That one enforces "first
+// capture sticks" over a permanent election, so two hooks both observing
+// "nothing captured" turns a stated guarantee into a coin flip. This file holds
+// a latest-delivery marker where last-write-wins IS the intended reading, and
+// WriteFileAtomicIn already keeps readers from seeing a torn file.
+//
+// The concurrent cases all settle without one. Two hooks re-syncing at once
+// both enqueue, but the push queue has its own flock and Drain de-duplicates,
+// so the second finds it empty, pushes nothing and records nothing. Two hooks
+// delivering to DIFFERENT destinations leave whichever recorded last, and the
+// next push to the other one sees a changed fingerprint and re-syncs, which is
+// the correct outcome rather than a lost update. A partial re-queue declines to
+// record at all (see mayRecord above).
+//
+// So the residual is a redundant re-sync, which is a large push and not a
+// broken guarantee. What a lock would NOT fix is the case actually worth
+// worrying about: two worktrees of one clone disagreeing about the destination,
+// because .entire/settings.local.json resolves per worktree while this file
+// lives in the shared common dir. That is a settings-scope question, and a lock
+// here would only make it look handled.
 func recordPushedDestination(ctx context.Context, target string) {
 	root, err := gitdir.Open(ctx)
 	if err != nil {
