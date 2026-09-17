@@ -69,8 +69,12 @@ func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 	if err := runAuthStatus(context.Background(), &out, unusedProfile(t), noSessions, target, authStatusOptions{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out.String(), "Not logged in to "+testCoreURL) {
-		t.Fatalf("output = %q, want 'Not logged in' message", out.String())
+	// The bare host, spelled the way every other row spells the login server.
+	if !strings.Contains(out.String(), "Not logged in to eu.auth.entire.io") {
+		t.Fatalf("output = %q, want 'Not logged in' naming the login server's host", out.String())
+	}
+	if strings.Contains(out.String(), testCoreURL) {
+		t.Fatalf("output = %q, want the host rather than the full URL", out.String())
 	}
 }
 
@@ -596,6 +600,8 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 			t.Fatalf("output = %q, want table to contain %q", got, want)
 		}
 	}
+	// The table is on screen here (--sessions), so the bulk action may be
+	// offered: its subject is visible.
 	if !strings.Contains(got, "entire logout --everywhere") {
 		t.Fatalf("output = %q, want logout hint tying the table to logout", got)
 	}
@@ -634,6 +640,11 @@ func TestRunAuthStatus_DefaultViewCountsSessionsInsteadOfListingThem(t *testing.
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("output = %q, default view must not render the table (%q)", got, unwanted)
 		}
+	}
+	// --everywhere ends every session at once, and here they are a count the
+	// reader cannot inspect. It is offered only alongside the table.
+	if strings.Contains(got, "--everywhere") {
+		t.Fatalf("output = %q, must not offer bulk logout over sessions it does not show", got)
 	}
 }
 

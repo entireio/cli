@@ -65,23 +65,28 @@ the commands are always runnable in every build.
   which this view renders any more, and what remained restated the
   `jurisdiction` and `context` rows either side of it. It reports a count of active
   sessions rather than the list — `--sessions` prints the full table, and
-  `--json` emits the same collapse (a count always, the `sessions` array only
-  with `--sessions`; timestamps stay RFC3339 there, since the relative form the
-  text view shows is a reading aid). A second count row, `available contexts`,
+  `--json` reports the same facts without the text view's collapse; timestamps
+  stay RFC3339 there, since the relative form the text view shows is a reading
+  aid. A second count row, `available contexts`,
   does the same for saved logins and replaces the trailing "N login contexts
   saved" sentence. **Both count rows are dropped at exactly one** — the sole
   session and the sole context are the ones already described by the verdict
   line's expiry and the `context` row, so the row costs a line and carries
-  nothing; at one session the logout hint also drops its `--everywhere` clause,
-  which would otherwise read "end all 1". Zero sessions still reports, being a
-  contradiction worth seeing. The collapse is text-only, and in the JSON
-  `active_sessions`, `available_contexts` and `sessions` are all **pointers**
-  so absent and zero stay distinct: an unreadable listing omits
+  nothing. Zero sessions still reports, being a contradiction worth seeing.
+  `logout --everywhere` is offered **only alongside the table**: it ends every
+  session at once, and in the collapsed view those sessions are a count the
+  reader cannot inspect, browser logins included.
+  The drop-at-one collapse is text-only — `--json` never applies it. What the
+  JSON does omit is anything it could not determine, which is why
+  `active_sessions`, `available_contexts` and `sessions` are **pointers**:
+  absent means "not known", never zero. An unreadable listing omits
   `active_sessions` while a real zero emits `0`; ENTIRE_TOKEN mode omits
-  `available_contexts` because it never reads contexts.json, while every other
-  path emits its genuine count; and `--sessions` always emits `sessions`, as
-  `[]` when empty, so a satisfied request is distinguishable from the collapsed
-  default where the key is absent. The JSON carries the provider-qualified
+  `available_contexts`, never having read contexts.json, while every other path
+  emits its genuine count; and `sessions` is emitted whenever `--sessions`
+  reached the listing, as `[]` when empty, so a satisfied request stays
+  distinguishable from the default where the key is absent. Paths that return
+  before the listing — not logged in, env token, a failed fetch — omit it
+  along with the rest. The JSON carries the provider-qualified
   `user` and deliberately not a split `handle`/`provider`: one directly usable
   field beats two a caller has to rejoin. `auth status` also marks the caller's
   own row `(current)`, matching the login JWT's `fid` (refresh-token family id)

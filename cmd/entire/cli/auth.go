@@ -527,15 +527,16 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 
 	if !d.loggedIn {
 		if d.invalid {
-			fmt.Fprintln(w, sty.render(sty.red, "✕")+" "+sty.render(sty.bold, "Login for "+t.coreURL+" is no longer valid"))
+			fmt.Fprintln(w, sty.render(sty.red, "✕")+" "+sty.render(sty.bold, "Login for "+authServerHost(t.coreURL)+" is no longer valid"))
 			fmt.Fprintln(w, sty.render(sty.dim, "Run 'entire login' to re-authenticate."))
 			return
 		}
 		headline := "Not logged in"
-		if t.coreURL != "" {
+		if host := authServerHost(t.coreURL); host != "" {
 			// Naming the server is the whole point of this message: the user
-			// may well be logged in to a different one.
-			headline += " to " + t.coreURL
+			// may well be logged in to a different one. Bare host, as every
+			// other row spells it.
+			headline += " to " + host
 		}
 		fmt.Fprintln(w, sty.render(sty.red, "○")+" "+sty.render(sty.bold, headline))
 		fmt.Fprintln(w, sty.render(sty.dim, "Run 'entire login' to authenticate."))
@@ -591,14 +592,18 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("%d %s", len(d.sessions), pluralize("session", len(d.sessions)))))
 	}
 
-	switch {
-	case d.sessionErr != nil:
-	case len(d.sessions) == 1:
+	if d.sessionErr == nil && len(d.sessions) > 0 {
+		// --everywhere is offered only alongside the table. It ends every
+		// session at once, and in the collapsed view those sessions are a count
+		// the reader cannot inspect — browser logins included. The count row
+		// already says how to bring them on screen; once they are, the bulk
+		// action arrives with its subject attached.
+		hint := "Run 'entire logout' to end this session."
+		if opts.Sessions && len(d.sessions) > 1 {
+			hint = fmt.Sprintf("Run 'entire logout' to end this session, or 'entire logout --everywhere' to end all %d.", len(d.sessions))
+		}
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Run 'entire logout' to end this session.")
-	case len(d.sessions) > 1:
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "Run 'entire logout' to end this session, or 'entire logout --everywhere' to end all %d.\n", len(d.sessions))
+		fmt.Fprintln(w, hint)
 	}
 }
 

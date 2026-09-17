@@ -699,19 +699,25 @@ func formatRelativeDuration(d time.Duration) string {
 // humanizeDuration renders a positive duration as a single coarse unit. It
 // holds the bucket ladder that formatRelativeDuration wraps with tense, so past
 // and future can never drift apart.
+//
+// Each unit's band starts at 1 — 1m, 1h, 1d, 1mo — which is why days stop at 30
+// rather than running to 60. A wider day band would make the first reachable
+// month "2mo", so a value ticking past the boundary would read 59d then 2mo and
+// look like it had doubled.
 func humanizeDuration(d time.Duration) string {
-	const day = 24 * time.Hour
+	const (
+		day   = 24 * time.Hour
+		month = 30 * day
+	)
 	switch {
 	case d < time.Hour:
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < day:
 		return fmt.Sprintf("%dh", int(d.Hours()))
-	case d < 60*day:
-		// Days up to 60 rather than switching at 30: a login that expires in
-		// exactly 30 days should read "in 30d", not "in 1mo".
+	case d < month:
 		return fmt.Sprintf("%dd", int(d/day))
 	default:
-		return fmt.Sprintf("%dmo", int(d/(30*day)))
+		return fmt.Sprintf("%dmo", int(d/month))
 	}
 }
 
