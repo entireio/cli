@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -548,12 +549,26 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	}
 	stop("")
 
+	// The batch error is the only account of a wholesale failure, so log it
+	// before anything else can swallow it. The per-ref retries below re-derive a
+	// *rejection* reason, but a transport failure — an unreachable remote, a
+	// stalled SSH connection — matches nothing in checkpointRefRejectionReason,
+	// and the non-auth path does not return batchErr either. Without this line
+	// the cause of a 300-ref failure reached neither the terminal nor
+	// .entire/logs, and the only record left was one "fetch failed" per ref from
+	// the speculative recovery that followed.
+	//
+	// Logged, not printed: this runs inside the user's `git push`, where the one
+	// actionable line printed below is the useful part.
+	logging.Warn(ctx, "git-refs push: batch checkpoint ref push failed; retrying individually",
+		slog.Int("refs", len(existing)), slog.String("error", batchErr.Error()))
+
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
-	// Deliberately does not print batchErr: it now carries git's own output, and
+	// Deliberately does not print batchErr: it carries git's own output, and
 	// this runs inside the user's `git push`. The hint below is the actionable
-	// part; the full error still reaches .entire/logs via the caller.
+	// part; the full error is in the log line above.
 	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
 		fmt.Fprintln(os.Stderr, "[entire] Warning: couldn't push checkpoint refs (SSH authentication failed).")
 		printNonInteractiveSSHAuthHint()
@@ -577,8 +592,20 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
 	var rejectionWarning string
-	for _, ref := range existing {
+	// Bounded: the fallback is serial, one or more network round-trips per ref,
+	// and it runs inside the user's `git push`. Walking a large queue to the end
+	// against a remote that is refusing or unreachable turns one failed push
+	// into an apparently hung one for as long as the queue is big. Whatever is
+	// not attempted stays queued and goes out next push.
+	deadline := time.Now().Add(checkpointFlushBudget)
+	consecutiveFailures := 0
+	attempted := 0
+	abortReason := ""
+	remaining := 0
+	for i, ref := range existing {
+		attempted++
 		if err := pushCheckpointRefWithRecovery(pushCtx, dest.target, ref); err != nil {
+			consecutiveFailures++
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
 			if nonInteractiveSSHAuthFailure(pushCtx, err) {
@@ -592,11 +619,30 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 			if firstErr == nil {
 				firstErr = err
 			}
-			continue
+		} else {
+			consecutiveFailures = 0
+			pushed = append(pushed, ref)
 		}
-		pushed = append(pushed, ref)
+		// After the attempt, never before: a flush always tries at least one
+		// ref, and only aborts while refs are actually left to skip.
+		if i == len(existing)-1 {
+			break
+		}
+		if abortReason = flushAbortReason(pushCtx, consecutiveFailures, deadline); abortReason != "" {
+			remaining = len(existing) - attempted
+			logging.Warn(ctx, "git-refs push: individual retry stopped early; remaining refs stay queued",
+				slog.String("reason", abortReason), slog.Int("remaining", remaining),
+				slog.Int("attempted", attempted), slog.Int("queued", len(existing)))
+			break
+		}
 	}
 	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
+	// Says what stopped the retry and that nothing was lost. Printed before the
+	// rejection warning so the more specific reason lands closest to the prompt.
+	if abortReason != "" {
+		fmt.Fprintf(os.Stderr, "[entire] Stopped retrying: %s; %d checkpoint ref(s) stay queued for the next push.\n",
+			abortReason, remaining)
+	}
 	// One actionable reason per flush, after the progress line. Do not print
 	// the batch error too, or diagnose speculative recovery as divergence.
 	if rejectionWarning != "" {
@@ -607,8 +653,11 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 			slog.String("error", err.Error()))
 	}
 	if firstErr != nil {
-		return len(pushed), fmt.Errorf("%d of %d checkpoint refs failed to push: %w",
-			len(existing)-len(pushed), len(existing), firstErr)
+		// Counts attempts, not the queue: refs skipped by an early abort were
+		// never tried, and reporting them as failures would overstate what the
+		// remote actually refused.
+		return len(pushed), fmt.Errorf("%d of %d attempted checkpoint refs failed to push: %w",
+			attempted-len(pushed), attempted, firstErr)
 	}
 	return len(pushed), nil
 }

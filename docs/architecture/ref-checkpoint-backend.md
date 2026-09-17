@@ -116,6 +116,10 @@ remote's diagnostic output. Plain non-fast-forward recovery stays quiet;
 SSH authentication failures retain their dedicated hint. Failures remain queued
 and **never fail the user's git push**.
 
+The fallback is bounded. It stops after `maxConsecutiveRefPushFailures` refs fail in a row, when `checkpointFlushBudget` expires, or when the context is cancelled — whichever comes first, and never before at least one ref has been attempted. A remote that is refusing or unreachable fails every ref the same way, and each ref in the fallback costs at least one network round-trip, so walking a large queue to the end turns one failed push into an apparently hung one for minutes or hours. Skipped refs stay queued and go out on the next push, and a success resets the consecutive count so one blocked checkpoint does not strand the refs queued behind it. The abort prints one line naming what stopped the retry and how many refs remain.
+
+Two diagnostics make a wholesale failure readable. The batch error is logged before the fallback runs: the per-ref retries re-derive a *rejection* reason, but a transport failure — an unreachable remote, a stalled connection — matches none of them, so without that line the cause reached neither the terminal nor `.entire/logs`. And a failed recovery fetch wraps git's error instead of being replaced by git's output, because a git killed by cancellation or an exhausted budget writes nothing and the path then reported a contentless `fetch failed:` per ref.
+
 ### Non-force, fast-forward-only
 
 All checkpoint-ref pushes are **fast-forward-only — never a force push.** There is no server-side ref protection, so a force push risks silently clobbering a checkpoint written elsewhere. Per-checkpoint refs normally advance by fast-forward (append-only per-checkpoint history), so this is the common case.
