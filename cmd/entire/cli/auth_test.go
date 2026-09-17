@@ -115,14 +115,12 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 func TestWriteProfileLines_Jurisdiction(t *testing.T) {
 	t.Parallel()
 
-	sty := newStatusStyles(io.Discard)
-
-	withJ := authProfileRows(sty, &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"}, statusTarget{})
+	withJ := authProfileRows(&authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"})
 	if !hasRow(withJ, "jurisdiction", "us") {
 		t.Fatalf("rows = %+v, want a jurisdiction row", withJ)
 	}
 
-	withoutJ := authProfileRows(sty, &authProfile{Handle: "alice", Provider: "github"}, statusTarget{})
+	withoutJ := authProfileRows(&authProfile{Handle: "alice", Provider: "github"})
 	if hasLabel(withoutJ, "jurisdiction") {
 		t.Fatalf("rows = %+v, want no jurisdiction row when the slug is empty", withoutJ)
 	}
@@ -409,46 +407,40 @@ func TestDefaultFetchProfile_HomeJurisdictionFromGlobal(t *testing.T) {
 	}
 }
 
-// The foreign-region note explains why the "Logged in to" host and the
-// jurisdiction disagree, and why the display name and email are absent.
-func TestRunAuthStatus_ForeignRegionNote(t *testing.T) {
+// A foreign-region login renders no note: the note this replaces existed
+// mostly to explain a display name and email that a foreign core withholds,
+// and neither is rendered any more. The condition still reaches machine
+// readers as the JSON foreign_region flag.
+func TestRunAuthStatus_ForeignRegionIsJSONOnly(t *testing.T) {
 	t.Parallel()
 
 	foreign := func(context.Context, string, string) (*authProfile, error) {
 		return &authProfile{Handle: "toothbrush", Provider: "github", Jurisdiction: "au", ForeignRegion: true}, nil
 	}
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
 
 	var out bytes.Buffer
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
 	if err := runAuthStatus(context.Background(), &out, foreign, noSessions, target, authStatusOptions{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	got := out.String()
 	if !hasMetadataRow(got, "jurisdiction", "au") {
 		t.Fatalf("output = %q, want the account's home region", got)
 	}
-	if !strings.Contains(got, "outside your home region") {
-		t.Fatalf("output = %q, want a note explaining the foreign region", got)
+	for _, unwanted := range []string{"outside your home region", "note"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("output = %q, must not carry a foreign-region note", got)
+		}
 	}
-	// The retired console deep link and the message that points at it must not
+	// The retired console deep link and the message pointing at it must never
 	// reach the user: a bare "/" redirects by role, never to a profile page.
 	if strings.Contains(got, "console.entire.io") || strings.Contains(got, "#/profile") {
 		t.Fatalf("output = %q, must not surface the dead console deep link", got)
 	}
-}
 
-// A same-region login gets no note — the common case must stay quiet.
-func TestRunAuthStatus_NoNoteForHomeRegion(t *testing.T) {
-	t.Parallel()
-
-	var out bytes.Buffer
-	target := statusTarget{coreURL: testCoreURL, token: "tok", totalContexts: 1}
-	if err := runAuthStatus(context.Background(), &out, okProfile, noSessions, target, authStatusOptions{}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if strings.Contains(out.String(), "outside your home region") {
-		t.Fatalf("output = %q, want no foreign-region note", out.String())
+	asJSON := decodeAuthStatusJSON(t, foreign, noSessions, target, authStatusOptions{})
+	if !asJSON.ForeignRegion {
+		t.Error("foreign_region = false, want the condition preserved for machine readers")
 	}
 }
 

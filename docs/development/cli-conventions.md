@@ -58,7 +58,12 @@ the commands are always runnable in every build.
   `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
   bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
   env token's `aud`), else the active login. `auth status` shows the caller's
-  home jurisdiction so the slug is discoverable. It reports a count of active
+  home jurisdiction so the slug is discoverable. A login served by a core
+  outside that home region reaches `--json` as `foreign_region` and is not
+  called out in the text view: the note that used to sit there existed mostly
+  to explain the display name and email a foreign core withholds, neither of
+  which this view renders any more, and what remained restated the
+  `jurisdiction` and `context` rows either side of it. It reports a count of active
   sessions rather than the list — `--sessions` prints the full table, and
   `--json` emits the same collapse (a count always, the `sessions` array only
   with `--sessions`; timestamps stay RFC3339 there, since the relative form the

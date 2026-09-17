@@ -272,9 +272,9 @@ type authProfile struct {
 	Jurisdiction string
 	// ForeignRegion is true when the core that served /me is not the
 	// account's home region — /me signals this with a regionalUnavailable
-	// block. `auth status` renders it as a note explaining why the context's
-	// host and the jurisdiction slug name different regions; the display name
-	// and email that core withholds are read by setup_identity, not shown here.
+	// block. It reaches `auth status --json` as foreign_region and is not
+	// rendered in the text view; the display name and email that core withholds
+	// are read by setup_identity, which is not this view.
 	ForeignRegion bool
 }
 
@@ -545,7 +545,7 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 	if t.envToken {
 		fmt.Fprintln(w, sty.render(sty.green, "●")+" "+sty.render(sty.bold, "Logged in"))
 		fmt.Fprintln(w)
-		rows := authProfileRows(sty, d.profile, t)
+		rows := authProfileRows(d.profile)
 		// With no context to name the server, say it outright — otherwise
 		// env-token mode names no server anywhere.
 		rows = append(rows,
@@ -569,7 +569,7 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 	fmt.Fprintln(w, headline)
 	fmt.Fprintln(w)
 
-	rows := authProfileRows(sty, d.profile, t)
+	rows := authProfileRows(d.profile)
 	if t.activeContext != "" {
 		rows = append(rows, authContextRow(sty, t.activeContext, t.coreURL))
 	}
@@ -730,7 +730,13 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 // grantee spelling every `entire grant` command accepts and `grant … list`
 // prints — so what status shows is a value the user can paste into the next
 // command, rather than a display form unique to this one.
-func authProfileRows(sty statusStyles, p *authProfile, t statusTarget) []explainRow {
+//
+// A foreign-region login gets no note here. The note this replaces existed
+// mostly to explain a display name and email that a foreign core withholds,
+// and neither is rendered any more; what was left restated the `jurisdiction`
+// and `context` rows it sat between. The condition still reaches machine
+// readers as the JSON `foreign_region` flag.
+func authProfileRows(p *authProfile) []explainRow {
 	var rows []explainRow
 	if p.Handle != "" {
 		rows = append(rows, explainRow{Label: "user", Value: formatQualifiedHandle(p.Provider, p.Handle)})
@@ -739,15 +745,6 @@ func authProfileRows(sty statusStyles, p *authProfile, t statusTarget) []explain
 	// takes; surface it so it's discoverable non-interactively.
 	if p.Jurisdiction != "" {
 		rows = append(rows, explainRow{Label: "jurisdiction", Value: p.Jurisdiction})
-	}
-	// Without this the block reads as a contradiction: a context naming
-	// eu.auth.entire.io sitting directly above "jurisdiction  au". Name the
-	// split rather than leaving the user to infer it.
-	if p.ForeignRegion {
-		rows = append(rows, explainRow{
-			Label: "note",
-			Value: sty.render(sty.yellow, "served by "+api.OriginOnly(t.coreURL)+", outside your home region"),
-		})
 	}
 	return rows
 }
