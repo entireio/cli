@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +10,7 @@ import (
 
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // TestClaimCommandParsesAsACheckpointRemoteFlag is the pin between the remedy
@@ -65,4 +68,105 @@ func TestClaimCommandParsesAsACheckpointRemoteFlag(t *testing.T) {
 	}
 
 	assert.Empty(t, checkpointremote.ClaimCheckpointRemoteCommand(nil))
+}
+
+// TestEnableReportsAnIgnoredCheckpointRemote fills the enable gap: `entire
+// enable` is where checkpoint configuration is fixed, and a checkpoint_remote
+// the ownership check refused used to leave it saying nothing at all — the
+// rejection reached the user only through .entire/logs.
+func TestEnableReportsAnIgnoredCheckpointRemote(t *testing.T) {
+	dir := setupTestRepo(t)
+	// origin belongs to alice, the configured store to acme: inherited by
+	// cloning as far as local git config can tell.
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	reportIgnoredCheckpointRemote(ctx, &out, s, "origin")
+
+	got := out.String()
+	assert.Contains(t, got, "acme/checkpoints is not in use")
+	assert.Contains(t, got, "entire enable --local --checkpoint-remote github:acme/checkpoints")
+}
+
+// TestEnableSaysNothingAboutACheckpointRemoteInUse is the control: the report
+// is above the `touched` gate, so it prints on every `entire enable`, and a
+// false positive would tell a correctly configured repo to fix itself.
+func TestEnableSaysNothingAboutACheckpointRemoteInUse(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	reportIgnoredCheckpointRemote(ctx, &out, s, "origin")
+	assert.Empty(t, out.String(), "a store whose owner matches every remote is the developer's own")
+}
+
+// TestEnableCommandSurfacesAnIgnoredCheckpointRemote proves the report is
+// reached by `entire enable` itself, and not just callable. The report sits
+// above the flow's `touched` gate precisely so a bare re-enable — the
+// invocation someone reaches for when checkpoints are not where they expected —
+// still names the fix.
+func TestEnableCommandSurfacesAnIgnoredCheckpointRemote(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	cmd := newEnableCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs(nil)
+	require.NoError(t, cmd.Execute())
+
+	assert.Contains(t, output.String(), "checkpoint_remote acme/checkpoints is not in use")
+	assert.Contains(t, output.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
+}
+
+// TestEnableDoesNotOfferAStoreAnotherOwnerHolds is the guard on the offer: it
+// exists for ownership that is UNPROVABLE, never for ownership that is
+// DISPROVED. Origin here names a different owner, which is the fork case the
+// check was built for — offering to adopt would walk a contributor into
+// publishing their transcripts to the upstream's store one keystroke deep.
+//
+// Asserted through the verdict rather than the prompt, because the prompt is
+// suppressed under test anyway and the verdict is what gates it.
+func TestEnableDoesNotOfferAStoreAnotherOwnerHolds(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, "origin")
+	require.True(t, verdict.Refused(), "a differently-owned store must be refused")
+	assert.Equal(t, checkpointremote.OwnershipDisproved, verdict,
+		"a readable, mismatched owner is disproof, not absence of evidence: %s", reason)
+}
+
+// TestEnableOffersOnlyWhenOwnershipCannotBeEstablished is the other side: a
+// single-segment origin yields no owner to compare, which is ordinary on
+// self-hosted git and is the case a human can settle.
+func TestEnableOffersOnlyWhenOwnershipCannotBeEstablished(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	verdict, _ := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, "origin")
+	require.True(t, verdict.Refused(), "an unprovable store is still refused non-interactively")
+	assert.Equal(t, checkpointremote.OwnershipUnprovable, verdict)
 }
