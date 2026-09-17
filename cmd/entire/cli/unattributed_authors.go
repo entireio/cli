@@ -25,21 +25,27 @@ import (
 // declaration.
 var reservedHostSuffixes = []string{"local", "localdomain", "localhost", "internal", "lan", "home", "home.arpa", "test", "example", "invalid"}
 
-// normalizeDeclaredEmail is regional.NormalizeDeclaredEmail's twin: lowercase,
-// trim, strip one trailing dot.
+// normalizeDeclaredEmail mirrors entire-core's NormalizeDeclaredEmail:
+// lowercase + trim, exactly the normalization ingest uses for author tokens,
+// so a declared address and the commits it should heal hash identically; a
+// trailing dot is a different address.
 func normalizeDeclaredEmail(s string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // reservedHostEmail reports whether the address's host is one nobody owns —
-// the shape git synthesizes when user.email is unset. Syntactic only.
+// the shape git synthesizes when user.email is unset. Syntactic only, and
+// self-contained like entire-core's IsReservedHostEmail: it tolerates one
+// trailing dot on the host (a canonical FQDN's root dot) on its own, rather
+// than through normalizeDeclaredEmail, which no longer strips it — ingest's
+// author token does not tolerate that dot, so the two must diverge here.
 func reservedHostEmail(email string) bool {
-	email = normalizeDeclaredEmail(email)
+	email = strings.ToLower(strings.TrimSpace(email))
 	at := strings.IndexByte(email, '@')
 	if at <= 0 || strings.Count(email, "@") != 1 {
 		return false
 	}
-	host := email[at+1:]
+	host := strings.TrimSuffix(email[at+1:], ".")
 	if host == "" {
 		return false
 	}
@@ -129,8 +135,8 @@ type unattributedAuthor struct {
 
 type unattributedAuthorsWire struct {
 	Authors []struct {
-		Email string `json:"email"`
-		N     int    `json:"unattributedCommits"`
+		Email                   string `json:"email"`
+		UnattributedCommitCount int    `json:"unattributedCommitCount"`
 	} `json:"authors"`
 }
 
@@ -139,8 +145,8 @@ type unattributedAuthorsWire struct {
 func (w unattributedAuthorsWire) nonZero() []unattributedAuthor {
 	var out []unattributedAuthor
 	for _, a := range w.Authors {
-		if a.N > 0 {
-			out = append(out, unattributedAuthor{Email: a.Email, Count: a.N})
+		if a.UnattributedCommitCount > 0 {
+			out = append(out, unattributedAuthor{Email: a.Email, Count: a.UnattributedCommitCount})
 		}
 	}
 	return out
@@ -189,7 +195,7 @@ func fetchUnattributedAuthors(ctx context.Context, client *api.Client, repoID st
 		logging.Debug(ctx, "unattributed authors: truncating candidates to the cell's cap", "candidates", len(emails))
 		emails = emails[:maxUnattributedAuthorEmails]
 	}
-	path := "/api/v1/repos/" + url.PathEscape(repoID) + "/authors/unattributed"
+	path := "/api/v1/repos/" + url.PathEscape(repoID) + "/authors:resolve-unattributed"
 	resp, err := client.Post(ctx, path, map[string]any{"emails": emails})
 	if err != nil {
 		return nil, fmt.Errorf("cell: unattributed authors: %w", err)

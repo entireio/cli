@@ -74,12 +74,12 @@ func TestFilterCandidateAuthors(t *testing.T) {
 		"coledriver@New-Laptop.local",            // same person, new machine — kept
 		"lizziesiegle@Lizzies-MacBook-Pro.local", // colleague — dropped
 		"coledriver@company.com",                 // not reserved-host — dropped
-		"COLEDRIVER@Old-Mac.local.",              // case + trailing dot — kept, normalized
+		"COLEDRIVER@Old-Mac.local.",              // case + trailing dot — kept, normalized, dot NOT stripped
 		"coledriver@Coles-MacBook-Pro.local",     // duplicate — deduped
 		"coledriver@host.local..",                // two trailing dots — dropped, same as the predicate
 	}
 	got := filterCandidateAuthors(authors, "coledriver")
-	want := []string{"coledriver@coles-macbook-pro.local", "coledriver@new-laptop.local", "coledriver@old-mac.local"}
+	want := []string{"coledriver@coles-macbook-pro.local", "coledriver@new-laptop.local", "coledriver@old-mac.local."}
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -121,7 +121,7 @@ func TestAuthorsFromShortlog(t *testing.T) {
 
 func TestParseUnattributedAuthorsResponse(t *testing.T) {
 	t.Parallel()
-	body := `{"authors":[{"email":"me@h.local","unattributedCommits":9},{"email":"me@old.local","unattributedCommits":0}]}`
+	body := `{"authors":[{"email":"me@h.local","unattributedCommitCount":9},{"email":"me@old.local","unattributedCommitCount":0}]}`
 	var wire unattributedAuthorsWire
 	if err := json.Unmarshal([]byte(body), &wire); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestFetchUnattributedAuthors_PostsEmailsAndRepoID(t *testing.T) {
 			t.Error(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"authors":[{"email":"me@h.local","unattributedCommits":3}]}`)
+		fmt.Fprint(w, `{"authors":[{"email":"me@h.local","unattributedCommitCount":3}]}`)
 	}))
 	defer srv.Close()
 	client := api.NewClientWithBaseURL("test-token", srv.URL)
@@ -158,7 +158,7 @@ func TestFetchUnattributedAuthors_PostsEmailsAndRepoID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/api/v1/repos/01REPO/authors/unattributed" || len(gotBody.Emails) != 1 {
+	if gotPath != "/api/v1/repos/01REPO/authors:resolve-unattributed" || len(gotBody.Emails) != 1 {
 		t.Fatalf("path=%s body=%+v", gotPath, gotBody)
 	}
 	if gotMethod != http.MethodPost {

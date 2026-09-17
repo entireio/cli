@@ -191,10 +191,10 @@ func TestReleaseAlias_NormalizesAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runReleaseAlias() error = %v, want nil", err)
 	}
-	if len(rec.releaseCalls) != 1 || rec.releaseCalls[0] != "me@h.local" {
-		t.Errorf("releaseCalls = %v, want [me@h.local]", rec.releaseCalls)
+	if len(rec.releaseCalls) != 1 || rec.releaseCalls[0] != "me@h.local." {
+		t.Errorf("releaseCalls = %v, want [me@h.local.]", rec.releaseCalls)
 	}
-	if !strings.Contains(out.String(), "me@h.local") {
+	if !strings.Contains(out.String(), "me@h.local.") {
 		t.Errorf("stdout = %q, want the normalized address", out.String())
 	}
 }
