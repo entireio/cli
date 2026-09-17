@@ -87,7 +87,11 @@ func migrateBranchToRefs(
 			return fmt.Errorf("normalize checkpoint %s: %w", cid, err)
 		}
 
-		refName, err := RefName(cid)
+		// Preserve the spelling of an existing folded ref. A migration can run
+		// again after a case-insensitive filesystem packed a ref under the
+		// alternate shard spelling; CASing the canonical name with that ref's
+		// tip would otherwise fail, and queuing it would leave an unpushable name.
+		refName, err := refsStore.writeRefName(cid)
 		if err != nil {
 			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
 		}

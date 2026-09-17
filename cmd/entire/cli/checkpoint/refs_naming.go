@@ -70,3 +70,46 @@ func ParseRef(name plumbing.ReferenceName) (id.CheckpointID, bool) {
 	}
 	return cid, true
 }
+
+// FoldedRefName returns the one alternate-cased spelling of cid's checkpoint
+// ref, reporting whether such a spelling exists.
+//
+// A shard bucket on disk has exactly two possible spellings, because each ID
+// format uses one case exclusively: a legacy ID is lowercase hex, a ULID is
+// uppercase Crockford base32. On a case-insensitive-but-case-preserving
+// filesystem (macOS APFS, Windows NTFS defaults) the bucket is named after
+// whichever format created it first and every later ref folds into it, so a
+// checkpoint's ref can live at its own ShardFor spelling OR at the other
+// format's. There is no third possibility, which is what makes a single
+// fallback lookup exhaustive rather than a heuristic — see resolveLocalRef.
+//
+// A shard of two digits has no alternate spelling (digits have no case) and
+// reports false: the two formats name that bucket identically, so nothing can
+// diverge.
+func FoldedRefName(cid id.CheckpointID) (plumbing.ReferenceName, bool) {
+	shard, ok := foldedShard(cid.ShardFor())
+	if !ok {
+		return "", false
+	}
+	return plumbing.ReferenceName(CheckpointRefPrefix + shard + "/" + cid.String()), true
+}
+
+// foldedShard returns shard in the opposite case, reporting whether that
+// differs from shard itself.
+func foldedShard(shard string) (string, bool) {
+	if lower := strings.ToLower(shard); lower != shard {
+		return lower, true
+	}
+	if upper := strings.ToUpper(shard); upper != shard {
+		return upper, true
+	}
+	return "", false
+}
+
+// isCanonicalRefName reports whether name is cid's canonical RefName spelling,
+// as opposed to the case-folded one FoldedRefName describes. An ID whose kind
+// RefName rejects has no canonical spelling and reports false.
+func isCanonicalRefName(cid id.CheckpointID, name plumbing.ReferenceName) bool {
+	canonical, err := RefName(cid)
+	return err == nil && canonical == name
+}
