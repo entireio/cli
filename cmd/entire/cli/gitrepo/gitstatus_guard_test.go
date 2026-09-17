@@ -26,7 +26,7 @@ var gitInvocationMarkers = []string{
 // renames a fresh index over .git/index. Entire only ever wants the porcelain
 // output, so that write is pure collateral — and it cost a user a commit that
 // deleted every tracked file (issue #2111). See the "`git status` Is a Write"
-// section of CLAUDE.md for the full chain.
+// section of docs/development/git-safety.md for the full chain.
 //
 // This is a source-level guard rather than a comment on purpose. The exact same
 // producer was diagnosed once before (ENT-242, Feb 2026), the fix was closed
@@ -114,6 +114,17 @@ type safeGitDiffCall struct {
 // Matching only the line containing "diff" is intentional: a wrapped argv
 // separates that line from exec.Command, so requiring an invocation marker
 // would make the guard silently miss exactly the call it exists to prevent.
+//
+// That is the opposite trade-off from TestGitStatusCallSitesPassNoOptionalLocks
+// 100 lines up, which keeps the gitInvocationMarkers filter, and the difference
+// is deliberate rather than an oversight. There, wrapping separates the flag
+// from the word "status", so a miss shows up as a false positive — loud, and
+// safe. Here the marker sits on the exec.Command line and "diff" on the argv
+// line, so wrapping would separate the marker instead and the miss would be
+// silent. The false-positive direction was chosen knowingly: an unrelated
+// "diff" literal (a JSON tag, a map key, a subcommand name) will fail this
+// guard, and the remedy is an allowlist entry whose reason says it is not a
+// worktree-comparing invocation, which the error text points at.
 var safeGitDiffCalls = []safeGitDiffCall{
 	{
 		path:     "cmd/entire/cli/experts_cmd.go",

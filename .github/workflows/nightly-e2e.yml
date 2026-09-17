@@ -1,8 +1,8 @@
 name: Nightly Install Smoke
 
 # Every other E2E workflow builds the CLI from source. This one installs the
-# published nightly the way a user does and runs one smoke test per agent
-# against it, on each OS.
+# published releases the way a user does: the nightly, with one smoke test per
+# agent against it on each OS, and the stable cask, which is install-only.
 
 on:
   schedule:
@@ -70,9 +70,7 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: |
           set -euo pipefail
-          brew tap entireio/tap
-          brew trust entireio/tap
-          brew install --cask entire@nightly
+          brew install --cask entireio/tap/entire@nightly
 
       # The README's nightly invocation. The installer updates only the stored
       # user PATH, which later steps do not re-read, hence GITHUB_PATH.
@@ -168,19 +166,21 @@ jobs:
         shell: pwsh
         run: |
           irm https://claude.ai/install.ps1 | iex
+          irm https://app.factory.ai/cli/windows | iex
           npm install -g @openai/codex @github/copilot opencode-ai
           # Stop does not cover native commands ($PSNativeCommandUseError-
           # ActionPreference defaults to $false), so npm's failure needs this.
           if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
-          # The iex line needs no such guard: that installer throws or exits on
-          # every failure path, and both end this step. Verified 2026-09-09.
+          # Neither iex line needs such a guard: both installers throw or exit
+          # on every failure path, and that ends this step. Verified 2026-09-09
+          # for claude, 2026-09-10 for droid, whose installer shadows
+          # Write-Error with one that exits 1.
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          # factoryai-droid is left out, installer included: on Windows it
-          # fails "checkpoint state did not advance within 30s" while passing on
-          # Linux and macOS (runs 34131195807, 34127634577) — a real defect in
-          # its hook path. Restoring means this name plus
-          # `irm https://app.factory.ai/cli/windows | iex` and ~\bin on PATH.
-          "AGENTS=claude-code codex copilot-cli opencode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # droid's Windows installer puts droid.exe in %USERPROFILE%\bin, not
+          # .local\bin, and updates only the stored user PATH, which later
+          # steps do not re-read.
+          "$HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "AGENTS=claude-code codex copilot-cli opencode factoryai-droid" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # One step per agent: a step timeout is the only per-agent bound that
       # works on all three runners (macOS has no timeout(1)), and one hung agent
@@ -362,11 +362,40 @@ jobs:
           path: e2e/artifacts/
           retention-days: 7
 
+  # Install-only: stable predates this checkout, so it gets no E2E (#2394).
+  stable-install:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Install stable CLI with the documented command
+        run: |
+          set -euo pipefail
+          brew install --cask entireio/tap/entire
+
+      - name: Verify the install
+        run: |
+          set -euo pipefail
+          # No `brew tap` ran, so the tap being present proves the auto-tap.
+          brew tap | grep -qx 'entireio/tap'
+          # The cask ships both binaries; git-remote-entire backs entire:// clones.
+          command -v entire
+          command -v git-remote-entire
+          version_line=$(entire version | head -1)
+          echo "$version_line"
+          case "$version_line" in
+            *nightly*)
+              echo "::error::stable cask returned a nightly build: $version_line"
+              exit 1
+              ;;
+          esac
+
   notify-slack:
     runs-on: ubuntu-latest
     permissions: {}
-    needs: [smoke]
-    if: ${{ always() && needs.smoke.result == 'failure' && github.event_name == 'schedule' }}
+    needs: [smoke, stable-install]
+    if: ${{ always() && (needs.smoke.result == 'failure' || needs['stable-install'].result == 'failure') && github.event_name == 'schedule' }}
     steps:
       - name: Notify Slack of nightly smoke failure
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
@@ -383,7 +412,7 @@ jobs:
                       "type": "section",
                       "text": {
                         "type": "mrkdwn",
-                        "text": ":red_circle: *Nightly install smoke failed* — the published nightly CLI did not pass the checkpoint smoke test on at least one OS.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                        "text": ":red_circle: *Install smoke failed* — a published CLI did not install or run cleanly on at least one channel/OS.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
                       }
                     }
                   ]

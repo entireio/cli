@@ -1,0 +1,54 @@
+name: E2E Control Plane
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+# One shared test account with a three-org quota: never two runs at once, and
+# never cancel one mid-flight — a cancelled run skips t.Cleanup and leaks the
+# resources it created.
+concurrency:
+  group: e2e-controlplane
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  controlplane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+
+      # The mise task installs Chromium itself; this step adds the OS packages
+      # Chromium needs, which require root.
+      - name: Install Playwright driver, Chromium, and system dependencies
+        run: |
+          version="$(go list -m -f '{{.Version}}' github.com/mxschmitt/playwright-go)"
+          go run "github.com/mxschmitt/playwright-go/cmd/playwright@$version" install --with-deps chromium
+
+      - name: Run control-plane E2E tests
+        env:
+          E2E_GH_USERNAME: ${{ secrets.E2E_GH_USERNAME }}
+          E2E_GH_PASSWORD: ${{ secrets.E2E_GH_PASSWORD }}
+          E2E_GH_TOTP_SECRET: ${{ secrets.E2E_GH_TOTP_SECRET }}
+        run: mise run test:e2e:controlplane
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-controlplane-artifacts
+          path: e2e/artifacts/
+          retention-days: 7

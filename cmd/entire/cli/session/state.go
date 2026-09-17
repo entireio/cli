@@ -1130,6 +1130,13 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
+	return s.load(ctx, sessionID, true)
+}
+
+// load reads one session. When deleteStale is false the record is returned
+// as-is instead of being cleaned up, so a passive caller can report what
+// exists without observation changing it.
+func (s *StateStore) load(ctx context.Context, sessionID string, deleteStale bool) (*State, error) {
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)
@@ -1160,6 +1167,9 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	state.NormalizeAfterLoad(ctx)
 
 	if state.IsStale() {
+		if !deleteStale {
+			return &state, nil
+		}
 		logCtx := logging.WithComponent(ctx, "session")
 		logging.Debug(logCtx, "deleting stale session state",
 			slog.String("session_id", sessionID),
@@ -1291,14 +1301,26 @@ type SkippedState struct {
 	Err error
 }
 
-// List returns all session states it can read.
+// List returns all session states it can read, deleting any that have gone
+// stale.
 //
 // A state file it cannot read or parse is SKIPPED rather than fatal. That is
 // deliberate — one corrupt file must not blind every caller to the rest of the
 // store — and it is lossy, which a caller weighing sessions against each other
 // cannot afford. Those callers use ListWithSkipped and decide for themselves.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
-	states, _, err := s.ListWithSkipped(ctx)
+	states, _, err := s.list(ctx, true)
+	return states, err
+}
+
+// ListReadOnly returns every persisted session without deleting or hiding
+// stale records.
+//
+// `entire status` is the caller this exists for: asking what is happening must
+// not change what is happening. Cleanup stays with the callers that own it —
+// doctor and the session sweeper — which keep using List.
+func (s *StateStore) ListReadOnly(ctx context.Context) ([]*State, error) {
+	states, _, err := s.list(ctx, false)
 	return states, err
 }
 
@@ -1308,9 +1330,17 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 // Skipped is empty on a healthy store, and non-empty only for a file that is
 // present and unusable. Entries that are not state files at all — temp files
 // mid-rename, subdirectories, anything without a .json name — are not skips,
-// and neither is a session Load reaps as stale: nothing was lost in either
-// case.
+// and neither is a session the stale reaper removes: nothing was lost in
+// either case.
+//
+// It reaps stale sessions like List rather than preserving them like
+// ListReadOnly, because its callers are List's — they want completeness
+// reported, not a different listing.
 func (s *StateStore) ListWithSkipped(ctx context.Context) ([]*State, []SkippedState, error) {
+	return s.list(ctx, true)
+}
+
+func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, []SkippedState, error) {
 	root, err := s.dirRoot()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open session state directory: %w", err)
@@ -1340,7 +1370,7 @@ func (s *StateStore) ListWithSkipped(ctx context.Context) ([]*State, []SkippedSt
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
-		state, err := s.Load(ctx, sessionID)
+		state, err := s.load(ctx, sessionID, deleteStale)
 		if err != nil {
 			// A broken repo condition rather than routine noise, and the only
 			// record of it for the callers that take List's lossy view.

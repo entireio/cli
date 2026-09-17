@@ -2,9 +2,13 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -167,4 +171,282 @@ func TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates(t *t
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a checkpoint_remote key must keep dedicated-store semantics even when malformed")
+}
+
+// Forge identities must survive get-url so ownership checks see the real
+// topology. Only transport arguments are mapped to isolated bare repositories.
+func dedicatedCandidatesFixture(t *testing.T, refOnFork, refOnOrigin bool) (string, plumbing.ReferenceName, string, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("transport mapping uses a bash git wrapper")
+	}
+	workDir, ref, forkHash, originHash := candidatesFixture(t, refOnFork, refOnOrigin)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	for _, remoteName := range []string{"upstream", "origin"} {
+		out, err := exec.CommandContext(t.Context(), realGit, "remote", "get-url", remoteName).Output()
+		require.NoError(t, err)
+		t.Setenv("CHECKPOINT_TEST_"+strings.ToUpper(remoteName), strings.TrimSpace(string(out)))
+	}
+	testutil.RunGit(t, workDir, "remote", "rename", "upstream", "fork")
+	testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/contributor/app.git")
+	testutil.RunGit(t, workDir, "remote", "set-url", "origin", "https://github.com/acme/app.git")
+	testutil.WriteFile(t, workDir, ".entire/settings.json", `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"},"checkpoint_push_remote":"fork"}}`)
+	t.Setenv("CHECKPOINT_TEST_GIT", realGit)
+	t.Setenv("CHECKPOINT_TEST_DEDICATED", filepath.Join(workDir, "missing-dedicated"))
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv(CheckpointTokenEnvVar, "")
+	binDir := t.TempDir()
+	// Deliberately a LITERAL script, duplicated with the near-identical shim in
+	// cmd/entire/cli/integration_test/checkpoint_read_remotes_test.go. The two
+	// differ on purpose — this one maps URLs for an in-process caller and
+	// matches ls-remote|fetch; that one also maps bare remote names and
+	// matches fetch-pack|push, because it drives a spawned binary.
+	//
+	// They were shared once, as a helper that built this script by
+	// interpolating the subcommand set and rewrite table. That turned two
+	// literals into a shell-code generator whose inputs reached an executable
+	// placed first on PATH, so a rewrite key carrying `;` or `)` was command
+	// execution. Keep them literal: dedupe by giving each caller its own
+	// script, never by generating one from parameters.
+	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
+args=("$@")
+for arg in "$@"; do
+  if [[ "$arg" == ls-remote || "$arg" == fetch ]]; then
+    for i in "${!args[@]}"; do
+      case "${args[$i]}" in
+        https://github.com/contributor/app.git) args[$i]="$CHECKPOINT_TEST_UPSTREAM" ;;
+        https://github.com/acme/app.git) args[$i]="$CHECKPOINT_TEST_ORIGIN" ;;
+        https://github.com/acme/checkpoints.git) args[$i]="$CHECKPOINT_TEST_DEDICATED" ;;
+      esac
+    done
+    break
+  fi
+done
+exec "$CHECKPOINT_TEST_GIT" "${args[@]}"
+`)
+	require.NoError(t, os.Chmod(filepath.Join(binDir, "git"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return workDir, ref, forkHash, originHash
+}
+
+func TestFetchCheckpointRefFrom_InheritedDedicatedUsesLeadCandidate(t *testing.T) {
+	workDir, ref, forkHash, _ := dedicatedCandidatesFixture(t, true, false)
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+	require.Equal(t, forkHash, localRefHash(t, workDir, ref))
+}
+
+func TestFetchCheckpointRefFrom_AcceptedDedicatedRemainsAuthoritative(t *testing.T) {
+	for _, localOverride := range []bool{false, true} {
+		name := "same owner"
+		if localOverride {
+			name = "explicit local override"
+		}
+		t.Run(name, func(t *testing.T) {
+			workDir, ref, forkHash, dedicatedHash := dedicatedCandidatesFixture(t, true, true)
+			t.Setenv("CHECKPOINT_TEST_DEDICATED", os.Getenv("CHECKPOINT_TEST_ORIGIN"))
+			if localOverride {
+				testutil.WriteFile(t, workDir, ".entire/settings.local.json", `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+			} else {
+				testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/acme/fork.git")
+			}
+			require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+			require.Equal(t, dedicatedHash, localRefHash(t, workDir, ref))
+			require.NotEqual(t, forkHash, localRefHash(t, workDir, ref))
+
+			missing := plumbing.ReferenceName("refs/entire/checkpoints/00/missing")
+			require.ErrorIs(t, FetchCheckpointRefFrom(t.Context(), missing, []string{"fork", "origin"}, nil), plumbing.ErrReferenceNotFound)
+		})
+	}
+}
+
+// A remote can fetch from one owner and push to another (remote.<name>.pushurl).
+// Voting on its fetch URL alone accepted the dedicated store here while the push
+// side had already vetoed it, so writes went to the fork and reads came from the
+// store — the same asymmetry this file exists to close, one topology over.
+//
+// fork FETCHES from acme/app (so the fetch-only vote saw all-acme and accepted)
+// and PUSHES to contributor/app. The dedicated store is unreachable, so before
+// the push URLs joined the vote this errored instead of reading the fork.
+func TestFetchCheckpointRefFrom_DedicatedVetoedByLeadPushOwner(t *testing.T) {
+	// Both repositories carry the ref at DIFFERENT hashes, so the assertion
+	// distinguishes which one was read. Without that the fixture seeds them
+	// such that either spelling satisfies the same expectation, and a target
+	// resolved from the wrong url passes unnoticed.
+	workDir, ref, pushDestHash, fetchRepoHash := dedicatedCandidatesFixture(t, true, true)
+	testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/acme/app.git")
+	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "fork", "https://github.com/contributor/app.git")
+
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+	// The refs are where the writes went: the PUSH destination, not the
+	// repository fork's fetch url names.
+	require.Equal(t, pushDestHash, localRefHash(t, workDir, ref))
+	require.NotEqual(t, fetchRepoHash, localRefHash(t, workDir, ref))
+}
+
+// The other direction of the same symmetry. fork FETCHES from contributor/app
+// and PUSHES to acme/app, so the push side sees only acme identities, accepts
+// the store, and writes go there — and reads must follow. Voting on the
+// candidate's fetch url too vetoed it and sent reads to the fork instead.
+func TestFetchCheckpointRefFrom_DedicatedAcceptedWhenLeadPushesToCheckpointOwner(t *testing.T) {
+	workDir, ref, forkHash, dedicatedHash := dedicatedCandidatesFixture(t, true, true)
+	t.Setenv("CHECKPOINT_TEST_DEDICATED", os.Getenv("CHECKPOINT_TEST_ORIGIN"))
+	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "fork", "https://github.com/acme/app.git")
+
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+	require.Equal(t, dedicatedHash, localRefHash(t, workDir, ref))
+	require.NotEqual(t, forkHash, localRefHash(t, workDir, ref), "reads must follow the writes to the dedicated store")
+}
+
+// The origin fallback is not the candidate, and its emptiness proves nothing.
+// It is reached precisely BECAUSE the candidate was unusable, so writes never
+// went there — unlike a vetoed store's candidate, where they did. Classifying
+// it as absence would report "no such checkpoint" for one that exists on a
+// remote nobody could ask.
+//
+// Reachability is narrow (every election tier passes isConfiguredRemote), so
+// the candidate is removed after the election, matching the observed shape.
+func TestFetchCheckpointRefFrom_OriginFallbackStillRefusesAbsence(t *testing.T) {
+	workDir, ref, _, _ := dedicatedCandidatesFixture(t, false, false)
+	testutil.RunGit(t, workDir, "remote", "remove", "fork")
+
+	err := FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"emptiness on the origin fallback must not be classified as absence")
+}
+
+// origin is not exempt from the push-url half of the vote. Its fetch url is
+// already counted, but a remote.origin.pushurl naming another owner makes the
+// push side veto the store while the fetch side — which skipped origin's push
+// urls entirely — still accepted it.
+func TestFetchCheckpointRefFrom_DedicatedVetoedByOriginPushOwner(t *testing.T) {
+	workDir, ref, pushDestHash, fetchRepoHash := dedicatedCandidatesFixture(t, true, true)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "origin", "https://github.com/contributor/app.git")
+
+	// origin alone, so it is the read candidate whose push urls must vote —
+	// and whose push destination must be read.
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"origin"}, nil))
+	require.Equal(t, pushDestHash, localRefHash(t, workDir, ref))
+	require.NotEqual(t, fetchRepoHash, localRefHash(t, workDir, ref))
+}
+
+// The name still holds: origin is never retried. What changed is how a MISS on
+// the vetoed target is classified — writes were routed there by the same veto,
+// so its emptiness means the ref does not exist, while an unreachable one still
+// means only that it could not be asked.
+//
+// Both halves matter. Classifying absence is what lets a caller tell "no such
+// checkpoint" from "could not reach it"; refusing to retry origin is what stops
+// a stale legacy tip being installed as the canonical local ref on the strength
+// of an elected-remote miss.
+func TestFetchCheckpointRefFrom_InheritedDedicatedDoesNotRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		unreachable bool
+		wantAbsence bool
+	}{
+		{name: "missing ref on the vetoed target is absence", wantAbsence: true},
+		{name: "selected transport failure is not absence", unreachable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir, ref, _, _ := dedicatedCandidatesFixture(t, false, true)
+			if tc.unreachable {
+				t.Setenv("CHECKPOINT_TEST_UPSTREAM", filepath.Join(workDir, "unreachable-fork"))
+			}
+
+			err := FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil)
+			require.Error(t, err)
+			if tc.wantAbsence {
+				require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			} else {
+				require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			}
+			// Names the remote the verdict came from. Without it these
+			// assertions pass on unfixed code, where the lead-less ownership
+			// vote accepts the dedicated store and the probe never reaches
+			// the fork at all.
+			require.ErrorContains(t, err, "contributor/app")
+
+			_, err = exec.CommandContext(t.Context(), "git", "rev-parse", "--verify", ref.String()).Output()
+			require.Error(t, err, "origin must not install a ref after the selected candidate fails")
+		})
+	}
+}
+
+func TestFetchCheckpointRefFrom_DedicatedWithoutElectedLeadKeepsLegacyTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		candidates []string
+		election   error
+	}{
+		{name: "failed election", candidates: []string{"fork", "origin"}, election: errors.New("election failed")},
+		{name: "empty candidates"},
+		{name: "empty first candidate", candidates: []string{"", "fork", "origin"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir, ref, _, dedicatedHash := dedicatedCandidatesFixture(t, true, true)
+			t.Setenv("CHECKPOINT_TEST_DEDICATED", os.Getenv("CHECKPOINT_TEST_ORIGIN"))
+			require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, tt.candidates, tt.election))
+			require.Equal(t, dedicatedHash, localRefHash(t, workDir, ref))
+		})
+	}
+}
+
+func TestFetchCheckpointRefFrom_InvalidSettingsKeepsLegacyTarget(t *testing.T) {
+	for _, state := range []string{"malformed", "unreadable", "invalid checkpoint remote"} {
+		t.Run(state, func(t *testing.T) {
+			workDir, ref, _, originHash := dedicatedCandidatesFixture(t, true, true)
+			switch state {
+			case "malformed":
+				testutil.WriteFile(t, workDir, ".entire/settings.json", "{")
+			case "unreadable":
+				settingsPath := filepath.Join(workDir, ".entire/settings.json")
+				require.NoError(t, os.Remove(settingsPath))
+				require.NoError(t, os.Mkdir(settingsPath, 0o755))
+			case "invalid checkpoint remote":
+				testutil.WriteFile(t, workDir, ".entire/settings.json", `{"strategy_options":{"checkpoint_remote":42}}`)
+			}
+			require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+			require.Equal(t, originHash, localRefHash(t, workDir, ref))
+		})
+	}
+}
+
+func TestFetchCheckpointRefFrom_ConfiguredCancelledContextIsFailure(t *testing.T) {
+	_, ref, _, _ := dedicatedCandidatesFixture(t, true, true)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := FetchCheckpointRefFrom(ctx, ref, []string{"fork", "origin"}, nil)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+}
+
+func TestFetchCheckpointRefFrom_ConfiguredHonorsFetchTimeout(t *testing.T) {
+	_, ref, _, _ := dedicatedCandidatesFixture(t, true, false)
+	started := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CHECKPOINT_TEST_UPSTREAM", server.URL+"/repo.git")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file:http") // Only the mapped loopback fixture uses HTTP.
+
+	// The parent bounds a regression without waiting for the two-minute default.
+	// A correct per-fetch timeout returns while this parent is still live.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	err := fetchCheckpointRefFrom(ctx, ref, []string{"fork", "origin"}, time.Second, ReadChainBudget, nil)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	require.NoError(t, ctx.Err(), "configured fetch must honor its shorter per-fetch timeout")
+	select {
+	case <-started:
+	default:
+		t.Fatal("fetch must reach the stalled loopback remote before timing out")
+	}
 }

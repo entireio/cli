@@ -46,9 +46,9 @@ func TestPluginAccessibleConfirmationCancellation(t *testing.T) { //nolint:paral
 			original := openPluginPromptTerminal
 			openPluginPromptTerminal = func() (pluginPromptTerminal, error) {
 				if fallback {
-					return pluginPromptTerminal{in: tracked}, nil
+					return pluginPromptTerminal{in: tracked, close: tracked.Close}, nil
 				}
-				return pluginPromptTerminal{in: input}, nil
+				return pluginPromptTerminal{in: input, close: input.Close}, nil
 			}
 			t.Cleanup(func() { openPluginPromptTerminal = original })
 			ctx, cancel := context.WithCancel(t.Context())

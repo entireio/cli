@@ -259,7 +259,8 @@ Viewing specific items:
   entire checkpoint explain --commit <ref>        Force interpretation as commit ref
 
 Checkpoints in another repo:
-  entire checkpoint explain <id> --repo owner/name
+  entire checkpoint explain <id> --repo gh/owner/name
+  entire checkpoint explain <id> --repo et/project/repo
                  Explain a checkpoint owned by another repository — the
                  drill-down for a cross-repo 'entire search' hit. Reads it from
                  that repo's Entire API; nothing is written to this repo.
@@ -290,7 +291,10 @@ Machine-readable export modes (additive surface for external consumers):
                    says how many were skipped. Only meaningful with --json.
 
 Summary generation:
-  --generate    Generate an AI summary for the checkpoint
+  --generate    Generate an AI summary for the checkpoint. This is the only
+                part of this command that writes: it stores the summary on the
+                checkpoint and spends tokens with the configured summary
+                provider. Every other mode only reads.
   --force       Regenerate even if a summary already exists (requires --generate)
 
 Performance options:
@@ -410,7 +414,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
-	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo (owner/name or gh/owner/name), read from that repo's Entire API")
+	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo ("+explainRepoFlagShapes+"), read from that repo's Entire API")
 	cmd.Flags().BoolVar(&insecureHTTPFlag, "insecure-http-auth", false, "Allow plain-HTTP auth for --repo (local dev only)")
 	cmd.Flags().IntVar(&summaryTimeoutSecondsFlag, "summary-timeout-seconds", 0, "Hard deadline in seconds for --generate summary generation; overrides summary_timeout_seconds setting. 0 = use setting; if setting is also unset or 0, no automatic deadline applies.")
 
@@ -795,10 +799,6 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Handle summary generation — uses raw transcript. Imported history was
 	// already rejected above, before the content load.
 	if generate {
-		if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, lookup.repo); err != nil {
-			stopLoad(false)
-			return err
-		}
 		stopLoad(false) // generation prints its own progress to w/errW
 		// RefFetcher: the summary backfill's absence probe fetches a ref that
 		// exists remotely but not locally (written/migrated on another

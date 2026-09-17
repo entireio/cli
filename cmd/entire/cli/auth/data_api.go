@@ -59,7 +59,7 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 // another environment therefore still takes two steps, because the acting
 // identity is never inferred from the target host:
 //
-//	entire auth use staging
+//	entire auth switch staging
 //	ENTIRE_API_BASE_URL=https://partial.to entire activity
 //
 // A host that doesn't advertise discovery (unreachable / 404 / 503 /

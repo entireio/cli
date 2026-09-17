@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -171,27 +172,7 @@ func newLoginCmd() *cobra.Command {
 		Use:   "login",
 		Short: "Log in to Entire",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			loginServer, err := parseLoginServer(server)
-			if err != nil {
-				return fmt.Errorf("invalid --server: %w", err)
-			}
-			if err := requireSecureLoginServer(loginServer, insecureHTTPAuth); err != nil {
-				return err
-			}
-			client := auth.NewClient(loginServer, nil, insecureHTTPAuth)
-			// Closure adapts the concrete *auth.BrowserAuthFlow result to the
-			// browserAuthFlow interface (func types are invariant, so the
-			// method value alone won't do). On error the flow is a typed nil,
-			// which is fine — runLoginAuto checks err before touching it.
-			startBrowser := func(ctx context.Context) (browserAuthFlow, error) {
-				return client.StartBrowserAuth(ctx)
-			}
-			return runLoginAuto(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(),
-				client, startBrowser, defaultLoginURLInteractor(cmd.ErrOrStderr()), loginFlowFacts{
-					useDevice:  useDevice,
-					canPrompt:  interactive.CanPromptInteractively(),
-					sshSession: isSSHSession(),
-				})
+			return runLoginCommand(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), server, insecureHTTPAuth, useDevice)
 		},
 	}
 	cmd.Flags().StringVar(&server, "server", api.DefaultAuthBaseURL,
@@ -199,6 +180,29 @@ func newLoginCmd() *cobra.Command {
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	cmd.Flags().BoolVar(&useDevice, "device", false, "Use the device-code flow (enter a code in your browser) instead of the default browser redirect")
 	return cmd
+}
+
+func runLoginCommand(ctx context.Context, outW, errW io.Writer, server string, insecureHTTPAuth, useDevice bool) error {
+	loginServer, err := parseLoginServer(server)
+	if err != nil {
+		return fmt.Errorf("invalid --server: %w", err)
+	}
+	if err := requireSecureLoginServer(loginServer, insecureHTTPAuth); err != nil {
+		return err
+	}
+	client := auth.NewClient(loginServer, nil, insecureHTTPAuth)
+	// Closure adapts the concrete *auth.BrowserAuthFlow result to the
+	// browserAuthFlow interface (func types are invariant, so the method value
+	// alone won't do).
+	startBrowser := func(ctx context.Context) (browserAuthFlow, error) {
+		return client.StartBrowserAuth(ctx)
+	}
+	return runLoginAuto(ctx, outW, errW, client, startBrowser, defaultLoginURLInteractor(errW), loginFlowFacts{
+		useDevice:  useDevice,
+		canPrompt:  interactive.CanPromptInteractively(),
+		sshSession: isSSHSession(),
+		noDisplay:  noLocalDisplay(runtime.GOOS, os.Getenv),
+	})
 }
 
 // parseLoginServer validates and canonicalises the --server value: an
@@ -310,16 +314,18 @@ type loginFlowFacts struct {
 	useDevice  bool // --device flag
 	canPrompt  bool // interactive terminal present
 	sshSession bool // running inside an SSH session
+	noDisplay  bool // Linux/BSD with no graphical display to open a browser on
 }
 
 // runLoginAuto picks between the browser (loopback authorization-code) and
 // device-code flows and runs the chosen one. The browser flow is the
 // default — no code to type, no poll latency — but it needs a browser that
 // can reach this machine's 127.0.0.1, so headless terminals (CI, piped
-// stdin), SSH sessions, and a loopback listener that fails to start all
-// fall back to the device flow with a one-line explanation; the same
-// both-flows-with-fallback shape gh / gcloud / aws sso ship. --device
-// forces the device flow without commentary.
+// stdin), SSH sessions, a machine with no graphical display, and a
+// loopback listener that fails to start all fall back to the device flow
+// with a one-line explanation; the same both-flows-with-fallback shape
+// gh / gcloud / aws sso ship. --device forces the device flow without
+// commentary.
 func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient deviceAuthClient, startBrowser func(context.Context) (browserAuthFlow, error), urlInteractor loginURLInteractor, facts loginFlowFacts) error {
 	if shouldUseBrowserLogin(facts) {
 		flow, err := startBrowser(ctx)
@@ -339,6 +345,8 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 		fmt.Fprintln(errW, "No interactive terminal detected; using device-code flow.")
 	case facts.sshSession:
 		fmt.Fprintln(errW, "SSH session detected; using device-code flow (a browser opened here couldn't reach this machine).")
+	case facts.noDisplay:
+		fmt.Fprintln(errW, "No graphical display detected; using device-code flow (a browser opened elsewhere couldn't reach this machine).")
 	}
 	return runLogin(ctx, outW, errW, deviceClient, urlInteractor, facts.canPrompt)
 }
@@ -347,11 +355,12 @@ func runLoginAuto(ctx context.Context, outW, errW io.Writer, deviceClient device
 // loopback authorization-code (browser) flow. The browser flow is the
 // default but needs a local browser + reachable 127.0.0.1, so it's only
 // chosen when --device wasn't passed, an interactive terminal is present,
-// and we're not inside an SSH session (where the loopback listener binds
-// on the remote host, out of the user's browser's reach); otherwise the
-// caller falls back to the device flow.
+// we're not inside an SSH session (where the loopback listener binds on
+// the remote host, out of the user's browser's reach), and there is a
+// graphical display to open the browser on; otherwise the caller falls
+// back to the device flow.
 func shouldUseBrowserLogin(f loginFlowFacts) bool {
-	return !f.useDevice && f.canPrompt && !f.sshSession
+	return !f.useDevice && f.canPrompt && !f.sshSession && !f.noDisplay
 }
 
 // isSSHSession reports whether this process is running inside an SSH
@@ -361,6 +370,36 @@ func isSSHSession() bool {
 	return os.Getenv("SSH_CONNECTION") != "" ||
 		os.Getenv("SSH_CLIENT") != "" ||
 		os.Getenv("SSH_TTY") != ""
+}
+
+// noLocalDisplay reports whether this machine cannot show a browser: a Linux
+// or BSD session with neither an X11 nor a Wayland display. WSL is excluded
+// because a browser is reachable there — the Windows one through interop, or
+// a Linux one; GitHub issue #1707 is about which of those xdg-open picks, not
+// about whether one exists. An explicit $BROWSER is excluded too: it names an
+// opener the user vouches for. macOS and Windows always have a display.
+//
+// This catches the remote terminals isSSHSession cannot: web terminals and
+// agent orchestrators that give the user a shell on a server without SSH
+// variables. There the loopback listener binds on the server, and the browser
+// the user opens on their own machine is redirected to a 127.0.0.1 that means
+// the server, not the machine the browser is on (the September 2026 support
+// report).
+//
+// The platform list is Linux and the BSDs: the systems where a graphical
+// session is optional and its absence is visible in the environment.
+func noLocalDisplay(goos string, getenv func(string) string) bool {
+	switch goos {
+	case "linux", "freebsd", "openbsd", "netbsd", "dragonfly":
+	default:
+		return false
+	}
+	for _, v := range []string{"DISPLAY", "WAYLAND_DISPLAY", "BROWSER", "WSL_DISTRO_NAME", "WSL_INTEROP"} {
+		if getenv(v) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // runBrowserLogin runs the loopback authorization-code flow on an

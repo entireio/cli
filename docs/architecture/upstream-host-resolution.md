@@ -18,14 +18,14 @@ accept a core's JWTs.
 
 | Role | Service (prod / staging) | Hit by | Trusted-core discovery |
 |---|---|---|---|
-| **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project` / `grant`, `auth *`, `login` | none needed — the host *is* the core |
+| **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project`, `auth *`, `login` | none needed — the host *is* the core |
 | **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
 | **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
 
 `contexts.json` (`$ENTIRE_CONFIG_DIR/contexts.json`, shared with entiredb's
 CLIs) stores each login as `{Name, CoreURL, Handle, KeychainService}` plus a
 `CurrentContext` pointer. `CoreURL` is the JWT `iss` — the core that minted the
-token. `entire auth use <ctx>` flips `CurrentContext`.
+token. `entire auth switch <ctx>` flips `CurrentContext`.
 
 ### `entire login`: the apex dispatches, a region issues
 
@@ -78,8 +78,8 @@ The host *is* a core, so there is no discovery. `coreapi.New()` consults
    bearer (`auth.NewRefreshingLoginProvider`): the token manager is keyed on
    `c.CoreURL` as issuer, so store reads and refresh/STS hit the right core,
    and an expired access token is silently re-minted from the stored refresh
-   token. This is what makes `entire auth use <ctx>` actually retarget
-   `org`/`repo`/`project`/`grant`.
+   token. This is what makes `entire auth switch <ctx>` actually retarget
+   `org`/`repo`/`project`.
 2. **else** (no active context) → an error wrapping `ErrNotLoggedIn` with the
    `entire login` hint. There is no fallback host: a control-plane command
    without a login has no identity to act as. (At login time `entire login
@@ -136,7 +136,7 @@ Resolution (`auth.ResolveDataAPIToken`):
 2. Require the **active context** with the same semantics as the git path: it is
    used when its `CoreURL` is among the trusted issuers, and anything else is an
    error. So `ENTIRE_API_BASE_URL=https://partial.to entire activity` needs
-   `entire auth use staging` first — the target host never selects the identity
+   `entire auth switch staging` first — the target host never selects the identity
    for you.
 3. Return that context's login JWT, silently re-minted from the stored refresh
    token when near expiry (`auth.RefreshedLoginToken`, keyed on `c.CoreURL`
@@ -165,11 +165,19 @@ the cluster path), `internal/entireclient/discovery/cluster_cores.go`
 ## Account selection
 
 One rule, everywhere a host is matched — git clusters, the data API,
-cluster-addressed control-plane commands, and entire-api cell routing
-(`auth/cell_data_api.go`'s `resolveStoredCellSubject`): **the identity is the one
-the user selected; failing that, the only saved login the host accepts.**
-`/.well-known` decides which identities are *accepted*; it picks one only when
-exactly one fits.
+cluster-addressed control-plane commands, and entire-api cell routing under an
+explicit `ENTIRE_API_BASE_URL` (`auth/cell_data_api.go`'s
+`resolveCellClientSubject`): **the identity is the one the user selected;
+failing that, the only saved login the host accepts.** `/.well-known` decides
+which identities are *accepted*; it picks one only when exactly one fits.
+
+Cell routing with **no** `ENTIRE_API_BASE_URL` matches no host: there is no
+configured data host to match against, and the production default is not a
+choice the user made, so the cell path acts as the control plane does —
+`ENTIRE_TOKEN`, else the selected context — and reads the cell `apiUrl` from
+that login's own core catalog (COR-1634). `activity`/`recap` therefore fall
+back from the cell to the data API only when `auth.DataAPIServesSelectedLogin`
+confirms both are in the same environment.
 
 The user's selection resolves in one place, `contexts.File.Active`, with this
 precedence:
@@ -178,9 +186,9 @@ precedence:
 | --- | --- | --- |
 | `--context <name>` | one command | a single cross-federation command |
 | `$ENTIRE_CONTEXT` | one process/shell | git operations, hooks, a whole shell session |
-| `current_context` (`entire auth use`) | persistent, machine-wide | your normal default |
+| `current_context` (`entire auth switch`) | persistent, machine-wide | your normal default |
 
-The two overrides exist because `auth use` is the wrong tool for a one-off: it
+The two overrides exist because `auth switch` is the wrong tool for a one-off: it
 mutates state shared by every shell, worktree, and background git hook on the
 machine, so forgetting to switch back silently retargets the next `git push`. And
 a flag alone is not enough — git invokes `git-remote-entire` itself, so
@@ -212,7 +220,7 @@ apply only when the identity came from `current_context` (or there is none):
   error. For any other host — a self-hosted `git.acme.com` advertising
   `auth.acme.com` — the sole eligible login is *named*, not used: the "does not
   accept your active login … These saved logins can authenticate it" error
-  below, so the user selects it with `auth use` or `--context`. The allowlist
+  below, so the user selects it with `auth switch` or `--context`. The allowlist
   gates only the choice made *for* the user, never one they made.
 - several are eligible → an ambiguity error naming them, sorted
   (`clusterdiscovery.ambiguousContextError`). Picking one would make the acting
@@ -222,7 +230,7 @@ An **explicit** `--context`/`$ENTIRE_CONTEXT` never falls through to either: the
 user asked for that identity by name, so acting as another behind their back is
 the failure the override exists to prevent.
 
-Multiple saved logins are fully supported — `auth contexts`, `auth use`, and
+Multiple saved logins are fully supported — `auth contexts`, `auth switch`, and
 `logout --all-contexts` are unchanged.
 
 ### The advertised issuers must be the host's own
@@ -274,7 +282,7 @@ override the host rejected: with no override, an eligible saved login is
 auto-selected or reported as ambiguous before rendering gets a say.
 
 "Points at the switch" also tracks the source: an identity that came from
-`--context` is fixed by changing that argument, not by `entire auth use`, which
+`--context` is fixed by changing that argument, not by `entire auth switch`, which
 the flag would keep overriding on the next run.
 
 The advertised servers are named whenever no saved login fits, because they are

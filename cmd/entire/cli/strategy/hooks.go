@@ -268,7 +268,7 @@ func HooksPathCommand(dir string) string {
 
 // shellQuoteForDisplay quotes a path for a command line the USER will paste. It
 // is not for building an argv -- nothing here is executed, and a path that
-// reaches an exec goes as a separate argument instead (see CLAUDE.md's
+// reaches an exec goes as a separate argument instead (see docs/development/git-safety.md's
 // "Never Put a Dynamic Value on a cmd.exe Line").
 //
 // The POSIX branch delegates to shellQuote, this file's existing quoter for the

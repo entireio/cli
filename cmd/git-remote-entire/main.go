@@ -20,21 +20,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/entireio/auth-go/sts"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -151,7 +147,7 @@ func run(args []string) int {
 
 	helperStart := time.Now()
 	if err := githelper.Run(ctx, proxy, protocolVersion, os.Stdin, os.Stdout); err != nil {
-		fmt.Fprint(os.Stderr, fatalMessage(err, parsedURL))
+		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		return 128
 	}
 	debuglog.Printf("timing: helper-session dur_ms=%d", time.Since(helperStart).Milliseconds())
@@ -226,41 +222,6 @@ func setAuthWithProvider(provider credentialProvider) transport.SetAuthFunc {
 		req.Header.Set("Authorization", "Bearer "+token)
 		return nil
 	}
-}
-
-// wrongClusterRe extracts the host that actually serves the repo from the
-// data plane's `invalid_target` error_description (RFC 8693). The data plane
-// emits this when the audience host doesn't host the repo but a sibling
-// cluster does, naming the correct host so we can point the user at it. The
-// phrasing is "… it lives on \"<host>\" …"; anchoring on "lives on" keeps the
-// match tied to this specific, actionable case rather than other
-// invalid_target variants (e.g. a suspended mirror).
-var wrongClusterRe = regexp.MustCompile(`lives on "([^"]+)"`)
-
-// fatalMessage renders the stderr "fatal: …" line for a transfer error. When
-// the failure is the data plane reporting that the repo lives on a different
-// cluster, it special-cases the raw OAuth chain into an actionable message
-// naming the correct host (and the corrected entire:// URL). Everything else
-// falls back to the verbatim error.
-func fatalMessage(err error, parsedURL *url.URL) string {
-	var oe *sts.ExchangeError
-	if errors.As(err, &oe) && oe.Code == "invalid_target" {
-		if m := wrongClusterRe.FindStringSubmatch(oe.Description); m != nil {
-			host := m[1]
-			// Copy the URL the user typed and swap only the host, so any
-			// escaped path (RawPath) or query stays byte-identical to what
-			// they originally ran.
-			correctedURL := *parsedURL
-			correctedURL.Scheme = "entire"
-			correctedURL.Host = host
-			correctedURL.User = nil
-			corrected := correctedURL.String()
-			return fmt.Sprintf("fatal: this repository is not hosted on %s; it lives on %s.\n"+
-				"Re-run against the correct host, e.g.:\n\n    git clone %s\n",
-				parsedURL.Host, host, corrected)
-		}
-	}
-	return fmt.Sprintf("fatal: %v\n", err)
 }
 
 // missingClusterHostMessage renders the stderr "fatal: …" line for an entire://
