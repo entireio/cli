@@ -83,9 +83,14 @@ Execute these steps in order:
 .claude/skills/test-repo/test-harness.sh verify-commit
 .claude/skills/test-repo/test-harness.sh verify-session-state
 .claude/skills/test-repo/test-harness.sh verify-shadow-branch
+.claude/skills/test-repo/test-harness.sh commit-changes
 .claude/skills/test-repo/test-harness.sh verify-metadata-branch
 .claude/skills/test-repo/test-harness.sh list-pending-checkpoints
 ```
+
+`commit-changes` comes before `verify-metadata-branch` because checkpoints
+condense into the storage on **user commits** — right after `stop-session`
+the work exists only on the shadow branch and as a pending checkpoint.
 
 Expected results:
 
@@ -94,7 +99,7 @@ Expected results:
 | Active branch | Optional Entire-Checkpoint: trailer |
 | Session state | ✓ Exists |
 | Shadow branch | ✓ entire/{hash} |
-| Metadata branch | ✓ entire/checkpoints/v1 |
+| Checkpoint storage | ✓ refs/entire/checkpoints/* (git-refs, the default) — or entire/checkpoints/v1 when settings select the git-branch backend |
 | Pending checkpoints | ✓ At least 1 |
 
 #### 4. Check Listing After Further Changes
@@ -131,6 +136,7 @@ go build -o /tmp/entire-bin ./cmd/entire && \
 .claude/skills/test-repo/test-harness.sh create-files && \
 .claude/skills/test-repo/test-harness.sh create-transcript && \
 .claude/skills/test-repo/test-harness.sh stop-session && \
+.claude/skills/test-repo/test-harness.sh commit-changes && \
 .claude/skills/test-repo/test-harness.sh verify-metadata-branch && \
 .claude/skills/test-repo/test-harness.sh list-pending-checkpoints
 ```
@@ -140,7 +146,10 @@ go build -o /tmp/entire-bin ./cmd/entire && \
 ### Manual-Commit Strategy (default)
 - Active branch commits: **NO modifications** (no commits created by Entire)
 - Shadow branches: `entire/<commit-hash[:7]>` created for checkpoints
-- Metadata: stored on both shadow branches and `entire/checkpoints/v1` branch (condensed on user commits)
+- Metadata: stored on shadow branches and, condensed on user commits, in the
+  checkpoint storage — `refs/entire/checkpoints/<shard>/<ULID>` on the
+  git-refs backend (`enable`'s default) or the `entire/checkpoints/v1` branch
+  on the git-branch backend
 - AllowsMainBranch: **true** (safe on main/master)
 
 ## Additional Testing (Optional)
@@ -180,11 +189,9 @@ For manual-commit, test log condensation:
 git add app.js
 git commit -m "Add greeting function"
 
-# Verify logs condensed to entire/checkpoints/v1
-git show entire/checkpoints/v1 --stat | grep -E "^[0-9a-f]{2}/[0-9a-f]"
-
-# Verify shadow branch still exists
-git branch -a | grep "entire/[0-9a-f]"
+# Verify logs condensed into the checkpoint storage (git-refs default);
+# falls back to the v1 branch on the git-branch backend
+.claude/skills/test-repo/test-harness.sh verify-metadata-branch
 ```
 
 ## Available Claude Code Hooks
