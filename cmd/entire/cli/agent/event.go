@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -237,9 +239,14 @@ func ReadHookInputRaw(stdin io.Reader) (json.RawMessage, error) {
 }
 
 // ReadHookInputRawLimited is ReadHookInputRaw with a ceiling of limit bytes on
-// the JSON value (limit < 0 means unlimited). It is used at the external/plugin
-// boundary to bound an untrusted payload — without reintroducing the EOF-wait
-// hang, since the streaming decoder still returns on the first complete value.
+// the payload read from stdin, a leading BOM included (limit < 0 means
+// unlimited). It is used at the external/plugin boundary to bound an untrusted
+// payload — without reintroducing the EOF-wait hang, since the streaming
+// decoder still returns on the first complete value.
+//
+// The ceiling is the outermost wrapper, so the buffered reader skipUTF8BOM adds
+// fills through it: its read-ahead is then bounded by limit rather than by its
+// own buffer size, which is larger than plausible ceilings.
 func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, error) {
 	// If stdin is an interactive terminal there is no payload coming at all: the
 	// command was run by hand, or the agent left the console attached instead of
@@ -254,7 +261,7 @@ func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, err
 		r = io.LimitReader(stdin, limit)
 	}
 	var raw json.RawMessage
-	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+	if err := json.NewDecoder(skipUTF8BOM(r)).Decode(&raw); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, errors.New("empty hook input")
 		}
@@ -269,4 +276,56 @@ func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, err
 func StdinLooksInteractive(r io.Reader) bool {
 	f, ok := r.(*os.File)
 	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+// utf8BOM is the UTF-8 serialization of U+FEFF. JSON may not begin with it and
+// Go's decoder does not skip it, so a payload carrying one fails to parse as
+// `invalid character 'ï' looking for beginning of value`.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// skipUTF8BOM returns a reader positioned past any UTF-8 BOMs at the head of r.
+//
+// A hook payload acquires one when the agent pipes it through Windows
+// PowerShell. Cursor runs every hook command as
+// `$OutputEncoding = [System.Text.Encoding]::UTF8; … | & { $input | <command> }`,
+// and under Windows PowerShell 5.1 that encoder carries a 3-byte preamble which
+// is written ahead of the JSON — the default $OutputEncoding there is ASCII,
+// which is why Cursor sets it at all. Measured on Windows 11 / PowerShell 5.1:
+// that line alone adds one BOM at any console codepage, and a UTF-8 console
+// codepage adds a second independently, so both stack. Hence a loop rather than
+// one strip. It terminates when the input does, and the untrusted boundary
+// bounds the input with ReadHookInputRawLimited's ceiling.
+//
+// Each strip is gated on a ONE-byte peek. Peek(3) blocks until three bytes
+// arrive or the reader fails, so peeking three unconditionally would give a
+// runner that writes a short-but-complete payload and holds the pipe open the
+// very hang this reader exists to avoid (issue #1398). No JSON document legally
+// begins with 0xEF, so only input that is already malformed reaches the wider
+// peek.
+//
+// The gate bounds that hang to valid payloads, and does not abolish it: input
+// that is nothing but a BOM used to fail instantly on its first byte, and now
+// leaves the decoder with nothing to read until the writer closes or the host
+// kills the hook. That is the price of stripping at all — a single strip pays it
+// too — and it is only ever paid by input that was already malformed.
+//
+// Every exit is the same one, and reader errors are deliberately not
+// propagated: an empty or failing reader is handed to the decoder untouched, so
+// it still produces the io.EOF that callers report as "empty hook input" rather
+// than a bufio-shaped error in its place.
+func skipUTF8BOM(r io.Reader) io.Reader {
+	br := bufio.NewReader(r)
+	for {
+		first, err := br.Peek(1)
+		if err != nil || first[0] != utf8BOM[0] {
+			return br
+		}
+		head, err := br.Peek(len(utf8BOM))
+		if err != nil || !bytes.Equal(head, utf8BOM) {
+			return br
+		}
+		if _, err := br.Discard(len(utf8BOM)); err != nil {
+			return br
+		}
+	}
 }

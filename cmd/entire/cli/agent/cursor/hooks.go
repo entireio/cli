@@ -17,6 +17,7 @@ import (
 var (
 	_ agent.HookSupport       = (*CursorAgent)(nil)
 	_ agent.HookConfigLocator = (*CursorAgent)(nil)
+	_ agent.HookFreshness     = (*CursorAgent)(nil)
 )
 
 // Cursor hook names - these become subcommands under `entire hooks cursor`
@@ -60,6 +61,52 @@ func cursorHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 		worktreeRoot = "."
 	}
 	return agent.OpenHookConfig(worktreeRoot, (&CursorAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
+
+// hookCommandPrefix is what every hook command Entire writes for Cursor begins
+// with; the verb is one of the HookName* constants.
+const hookCommandPrefix = "entire hooks cursor "
+
+// silentHookCommand wraps one hook verb in the silent production wrapper for
+// this host.
+//
+// Cursor runs every hook command through **PowerShell** on Windows — not
+// cmd.exe. Read out of the shipped builds (Cursor IDE 3.19.19 win32/x64, and
+// the native cursor-agent CLI windows/x64 2026.09.08-6caf4ff), the spawn is
+// `<pwsh|powershell> [-NoProfile -NonInteractive -ExecutionPolicy Bypass] -c
+// "$OutputEncoding = [System.Text.Encoding]::UTF8; Get-Content -LiteralPath
+// '<tmp>\cursor-hook-payload-*.json' -Raw | & { $input | <command> }"`, with the
+// stored command inserted verbatim. Both Windows runners read the same
+// .cursor/hooks.json, and both compose that identically.
+//
+// So the sh wrapper is not mangled the way droid's is: PowerShell single quotes
+// are literal, and the whole script reaches sh as one argument. It fails for a
+// different reason — `sh` has to resolve in the PATH of the PowerShell child
+// Cursor spawns, and agent.UseWindowsProductionHooks probes for sh in the
+// `entire enable` process instead. Git for Windows installs sh.exe under
+// …\Git\usr\bin and …\Git\bin, neither of which is on the machine PATH (only
+// …\Git\cmd is), while MSYS translates PATH for native children — so running
+// `entire enable` from Git Bash passes the probe and writes a wrapper Cursor
+// cannot run. That is issue #1424's reported environment (Windows 11 + Git
+// Bash), and no stronger probe COMMAND fixes it, because the probe is measuring
+// the wrong process. Hence agent.HookHostIsWindows rather than the probe.
+//
+// The failure is invisible rather than swallowed: a CommandNotFoundException
+// raised inside `& { $input | … }` does not set powershell.exe's exit code, so
+// Cursor sees exit 0 and has no error to report. The same command standalone
+// exits 1. TestWindowsWrappers_CursorComposition asserts this on a real Windows
+// runner — the sh-wrapper subtest is exactly this case.
+//
+// This moves the PATH dependency rather than removing it — the wrapper opens
+// with `where.exe entire`, so it needs `entire` on the child's PATH, which every
+// documented install method satisfies and Git for Windows' sh does not.
+//
+// Not fixed by any wrapper: the cursor-agent CLI picks a bash shell executor
+// whenever MSYSTEM is set (i.e. started from Git Bash) while still composing the
+// PowerShell script above, so hooks cannot run there at all. That is Cursor's to
+// fix, and it does not affect the IDE.
+func silentHookCommand(verb string, useWindows bool) string {
+	return agent.WrapProductionSilentHookCommandForOS(hookCommandPrefix+verb, useWindows)
 }
 
 // InstallHooks installs Cursor hooks in .cursor/hooks.json.
@@ -120,33 +167,24 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 		subagentStop = removeEntireHooks(subagentStop)
 	}
 
-	// Define hook commands
-	const cmdPrefix = "entire hooks cursor "
-
-	// Cursor spawns hook commands through the native OS shell (cmd.exe on
-	// Windows), so a `sh -c '…'` wrapper silently fails to launch on a
-	// Windows host without a working POSIX sh — no hook fires and, because
-	// this is the *silent* wrapper, no error surfaces (issue #1424).
-	// UseWindowsProductionHooks probes for a runnable sh and only swaps in
-	// the native cmd.exe wrapper when one is absent, so this is a no-op on
-	// hosts (incl. all non-Windows) where the sh wrapper already works.
-	useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
-	sessionStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionStart, useWindowsHooks)
-	sessionEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionEnd, useWindowsHooks)
-	beforeSubmitPromptCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameBeforeSubmitPrompt, useWindowsHooks)
-	stopCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameStop, useWindowsHooks)
-	preCompactCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNamePreCompact, useWindowsHooks)
-	subagentStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStart, useWindowsHooks)
-	subagentEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStop, useWindowsHooks)
+	// Define hook commands. See silentHookCommand for why the host alone
+	// decides the wrapper.
+	useWindowsHooks := agent.HookHostIsWindows()
+	sessionStartCmd := silentHookCommand(HookNameSessionStart, useWindowsHooks)
+	sessionEndCmd := silentHookCommand(HookNameSessionEnd, useWindowsHooks)
+	beforeSubmitPromptCmd := silentHookCommand(HookNameBeforeSubmitPrompt, useWindowsHooks)
+	stopCmd := silentHookCommand(HookNameStop, useWindowsHooks)
+	preCompactCmd := silentHookCommand(HookNamePreCompact, useWindowsHooks)
+	subagentStartCmd := silentHookCommand(HookNameSubagentStart, useWindowsHooks)
+	subagentEndCmd := silentHookCommand(HookNameSubagentStop, useWindowsHooks)
 
 	count := 0
 
 	// Sync each hook to its desired command. syncEntireHook replaces any
 	// stale-form Entire hook (e.g. an sh-wrapped entry from a previous install)
-	// with the current command even without --force, so a wrapper-form change —
-	// notably the sh↔cmd.exe migration driven by UseWindowsProductionHooks when
-	// a Windows host gains or loses a working POSIX sh — cleanly replaces rather
-	// than leaving a dead duplicate entry that could double-fire (issue #1424).
+	// with the current command even without --force, so the sh→cmd.exe migration
+	// on an already-enabled Windows repo cleanly replaces rather than leaving a
+	// dead duplicate entry that could double-fire (issue #1424).
 	staleDropped := false
 	var dropped bool
 	sessionStart, count, dropped = syncEntireHook(sessionStart, sessionStartCmd, count)
@@ -284,40 +322,134 @@ func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
+// managedCursorHook pairs the entries installed under one hook type in
+// hooks.json with the Entire verb that belongs under it.
+type managedCursorHook struct {
+	entries []CursorHookEntry
+	verb    string
+}
+
+// managedCursorHooks lists every hook type Entire installs under, so the
+// read-only paths walk the same set InstallHooks writes rather than spelling all
+// seven out again.
+func managedCursorHooks(h CursorHooks) []managedCursorHook {
+	return []managedCursorHook{
+		{h.SessionStart, HookNameSessionStart},
+		{h.SessionEnd, HookNameSessionEnd},
+		{h.BeforeSubmitPrompt, HookNameBeforeSubmitPrompt},
+		{h.Stop, HookNameStop},
+		{h.PreCompact, HookNamePreCompact},
+		{h.SubagentStart, HookNameSubagentStart},
+		{h.SubagentStop, HookNameSubagentStop},
+	}
+}
+
+// readManagedHooks parses the hook types Entire manages out of hooks.json.
 //
-// A missing config file is an answer, not a failure: that file is where the
-// state lives, so its absence means no hooks. Anything that stops us reading the
-// answer — an unreadable file, malformed config — is returned as an error, since
-// "we could not tell" and "there are none" are different things to a caller
-// deciding whether hooks can be left alone.
-func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+// A missing config file is an answer, not a failure — that file is where the
+// state lives, so its absence means no hooks — and it is reported as exists
+// false rather than an error. Anything that stops us reading the answer (an
+// unreadable file, malformed config) is an error, since "we could not tell" and
+// "there are none" are different things to a caller deciding whether hooks can
+// be left alone.
+func readManagedHooks(ctx context.Context) (hooks CursorHooks, exists bool, err error) {
 	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		return false, err
+		return CursorHooks{}, false, err
 	}
 	data, err := cfg.Read()
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return CursorHooks{}, false, nil
 	}
 	if err != nil {
 		logging.Warn(ctx, "cursor: failed to read hooks file", "path", cfg.Path(), "err", err)
-		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
+		return CursorHooks{}, false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var hooksFile CursorHooksFile
 	if err := json.Unmarshal(data, &hooksFile); err != nil {
 		logging.Warn(ctx, "cursor: failed to parse hooks file", "path", cfg.Path(), "err", err)
-		return false, fmt.Errorf("parse hook config: %w", err)
+		return CursorHooks{}, false, fmt.Errorf("parse hook config: %w", err)
 	}
 
-	return hasEntireHook(hooksFile.Hooks.SessionStart) ||
-		hasEntireHook(hooksFile.Hooks.SessionEnd) ||
-		hasEntireHook(hooksFile.Hooks.BeforeSubmitPrompt) ||
-		hasEntireHook(hooksFile.Hooks.Stop) ||
-		hasEntireHook(hooksFile.Hooks.PreCompact) ||
-		hasEntireHook(hooksFile.Hooks.SubagentStart) ||
-		hasEntireHook(hooksFile.Hooks.SubagentStop), nil
+	return hooksFile.Hooks, true, nil
+}
+
+// AreHooksInstalled checks if Entire hooks are installed.
+func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	hooks, exists, err := readManagedHooks(ctx)
+	if err != nil || !exists {
+		return false, err
+	}
+
+	for _, managed := range managedCursorHooks(hooks) {
+		if hasEntireHook(managed.entries) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// CheckHookConfig satisfies agent.HookFreshness: it reports whether the
+// installed hooks are still the ones InstallHooks would write today.
+//
+// AreHooksInstalled cannot answer that. It matches on the ownership marker,
+// which an sh-wrapped entry written by an older CLI still carries — so on a
+// Windows host such a config reads as installed while firing nothing, because
+// Cursor's PowerShell child cannot resolve sh (see silentHookCommand). Until
+// Cursor implemented this interface, `entire status` and `entire doctor` skipped
+// it and said nothing, leaving the user no prompt to re-run enable.
+//
+// Current means a hook type carries exactly the current command and no second
+// Entire-owned entry beside it — what InstallHooks converges to. A stale entry
+// next to a current one is drift even though the right command is there: both
+// fire.
+//
+// Moving one checkout between a POSIX host and a Windows one therefore reports
+// drift each way. That is correct, since the wrapper genuinely has to change,
+// and it is noisier than the generated-file agents this sits beside, whose
+// configs do not depend on the host.
+//
+// An unreadable or malformed file collapses to HooksAbsent, matching Codex and
+// Claude Code: this is a coarse three-state diagnostic and no caller here acts
+// on "could not tell". AreHooksInstalled is the API that keeps that distinction,
+// and readManagedHooks has already logged the failure.
+func (c *CursorAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	hooks, exists, err := readManagedHooks(ctx)
+	if err != nil || !exists {
+		return agent.HooksAbsent
+	}
+
+	useWindowsHooks := agent.HookHostIsWindows()
+	installed, outdated := false, false
+	for _, managed := range managedCursorHooks(hooks) {
+		want := silentHookCommand(managed.verb, useWindowsHooks)
+		ours, hasWant := 0, false
+		for _, entry := range managed.entries {
+			if !isEntireHook(entry.Command) {
+				continue
+			}
+			ours++
+			if entry.Command == want {
+				hasWant = true
+			}
+		}
+		if ours > 0 {
+			installed = true
+		}
+		if ours != 1 || !hasWant {
+			outdated = true
+		}
+	}
+
+	switch {
+	case !installed:
+		return agent.HooksAbsent
+	case outdated:
+		return agent.HooksOutdated
+	default:
+		return agent.HooksCurrent
+	}
 }
 
 // GetSupportedHooks returns the hook types Cursor supports.
