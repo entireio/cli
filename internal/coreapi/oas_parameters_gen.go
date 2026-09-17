@@ -436,6 +436,11 @@ type RegisterOrgCIBuildkiteClusterParams struct {
 	OrgId string
 }
 
+// ReleaseAliasParams is parameters of releaseAlias operation.
+type ReleaseAliasParams struct {
+	Email string
+}
+
 // RemoveOrgMemberParams is parameters of removeOrgMember operation.
 type RemoveOrgMemberParams struct {
 	OrgId          string

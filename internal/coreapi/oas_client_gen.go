@@ -100,6 +100,12 @@ type Invoker interface {
 	//
 	// POST /service-accounts
 	CreateServiceAccount(ctx context.Context, request *CreateServiceAccountInputBody) (*ServiceAccount, error)
+	// DeclareAlias invokes declareAlias operation.
+	//
+	// Declare that a reserved-host git author address is yours, scoped to one repo.
+	//
+	// POST /me/aliases
+	DeclareAlias(ctx context.Context, request *DeclareAliasInputBody) (*DeclareAliasOutputBody, error)
 	// DeleteBinding invokes deleteBinding operation.
 	//
 	// Delete OIDC binding.
@@ -475,6 +481,12 @@ type Invoker interface {
 	//
 	// POST /orgs/{orgId}/ci/buildkite/clusters
 	RegisterOrgCIBuildkiteCluster(ctx context.Context, request *RegisterOrgCIBuildkiteClusterInputBody, params RegisterOrgCIBuildkiteClusterParams) (*OrgCIBuildkiteClusterView, error)
+	// ReleaseAlias invokes releaseAlias operation.
+	//
+	// Release a declared alias.
+	//
+	// DELETE /me/aliases/{email}
+	ReleaseAlias(ctx context.Context, params ReleaseAliasParams) error
 	// RemoveOrgMember invokes removeOrgMember operation.
 	//
 	// Remove a member from an organization.
@@ -1790,6 +1802,91 @@ func (c *Client) sendCreateServiceAccount(ctx context.Context, request *CreateSe
 	defer body.Close()
 
 	result, err := decodeCreateServiceAccountResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// DeclareAlias invokes declareAlias operation.
+//
+// Declare that a reserved-host git author address is yours, scoped to one repo.
+//
+// POST /me/aliases
+func (c *Client) DeclareAlias(ctx context.Context, request *DeclareAliasInputBody) (*DeclareAliasOutputBody, error) {
+	res, err := c.sendDeclareAlias(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendDeclareAlias(ctx context.Context, request *DeclareAliasInputBody) (res *DeclareAliasOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/me/aliases"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeDeclareAliasRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, DeclareAliasOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, DeclareAliasOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeDeclareAliasResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -8829,6 +8926,106 @@ func (c *Client) sendRegisterOrgCIBuildkiteCluster(ctx context.Context, request 
 	defer body.Close()
 
 	result, err := decodeRegisterOrgCIBuildkiteClusterResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ReleaseAlias invokes releaseAlias operation.
+//
+// Release a declared alias.
+//
+// DELETE /me/aliases/{email}
+func (c *Client) ReleaseAlias(ctx context.Context, params ReleaseAliasParams) error {
+	_, err := c.sendReleaseAlias(ctx, params)
+	return err
+}
+
+func (c *Client) sendReleaseAlias(ctx context.Context, params ReleaseAliasParams) (res *ReleaseAliasNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [2]string
+	pathParts[0] = "/me/aliases/"
+	{
+		// Encode "email" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "email",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.Email))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ReleaseAliasOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ReleaseAliasOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeReleaseAliasResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}

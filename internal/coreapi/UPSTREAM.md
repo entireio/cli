@@ -108,6 +108,30 @@ the only failure mode here that would not announce itself (a requirement
 mixing `oauth2` with `bearerAuth` survives whole and makes ogen abort at
 generate time on the now-dangling scheme).
 
+## 4. Alias declaration operations are hand-added ahead of prod
+
+**Symptom:** after a prod spec refresh, `DeclareAlias` and `ReleaseAlias`
+vanish from the generated client and
+`cmd/entire/cli/doctor_unattributed_authors.go` fails to compile.
+
+**Fix upstream:** `POST /me/aliases` and `DELETE /me/aliases/{email}` are
+not yet served by prod. entire-core defines them on branch
+`peyton/cor-1289-declared-alias-min` (route types in `api/corev1/identity.go`,
+handlers in `core/coreapi/identity_aliases.go`), gated by
+`ENTIRE_ALIAS_DECLARATION_ENABLED`, and a spec refresh only picks up routes
+prod actually serves — so refreshing before that branch deploys silently
+drops the two path items (and their two schemas: `DeclareAliasInputBody`,
+`DeclareAliasOutputBody`) instead of erroring. Deploy that branch with
+`ENTIRE_ALIAS_DECLARATION_ENABLED` on, then refresh the spec and delete this
+entry.
+
+**Workaround:** the two path items and two schemas were hand-added to
+`spec/core.openapi.json`, mirroring entire-core's Huma tags verbatim (see the
+`x-cor-1289` note on each path item). A commit hash does not survive a
+squash/rebase, so if a refresh drops them again: re-add them from the
+entire-core branch above, or recover this repo's own prior hand-added JSON
+with `git log -S'"/me/aliases"' -- internal/coreapi/spec/core.openapi.json`.
+
 <!-- Resolved upstream and removed:
   - Nullable arrays (`"type": ["array","null"]`) — entiredb now emits
     non-nullable arrays (`"type": "array"`, absent ⇒ `[]`), so the

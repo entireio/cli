@@ -1151,6 +1151,55 @@
         ],
         "type": "object"
       },
+      "DeclareAliasInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/DeclareAliasInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "email": {
+            "minLength": 3,
+            "type": "string"
+          },
+          "repoId": {
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "repoId"
+        ],
+        "type": "object"
+      },
+      "DeclareAliasOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/DeclareAliasOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "changed": {
+            "description": "True on every accepted declaration (row inserted, trust raised, or verified_at advanced). Never read false as already-declared.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "changed"
+        ],
+        "type": "object"
+      },
       "DeletionBlocker": {
         "additionalProperties": true,
         "properties": {
@@ -4967,6 +5016,172 @@
           "identity"
         ]
       }
+    },
+    "/me/aliases": {
+      "post": {
+        "operationId": "declareAlias",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclareAliasInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeclareAliasOutputBody"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Declare that a reserved-host git author address is yours, scoped to one repo",
+        "tags": [
+          "identity"
+        ]
+      },
+      "x-cor-1289": "COR-1289: hand-added ahead of prod (entire-core branch peyton/cor-1289-declared-alias, flag ENTIRE_ALIAS_DECLARATION_ENABLED). The next spec refresh overwrites this file; if these operations then disappear, prod does not serve them yet — re-add from that branch. See UPSTREAM.md."
+    },
+    "/me/aliases/{email}": {
+      "delete": {
+        "operationId": "releaseAlias",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "email",
+            "required": true,
+            "schema": {
+              "minLength": 3,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Release a declared alias",
+        "tags": [
+          "identity"
+        ]
+      },
+      "x-cor-1289": "COR-1289: hand-added ahead of prod (entire-core branch peyton/cor-1289-declared-alias, flag ENTIRE_ALIAS_DECLARATION_ENABLED). The next spec refresh overwrites this file; if these operations then disappear, prod does not serve them yet — re-add from that branch. See UPSTREAM.md."
     },
     "/me/cancel-deletion": {
       "post": {
