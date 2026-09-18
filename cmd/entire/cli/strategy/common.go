@@ -142,7 +142,10 @@ func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.R
 	}
 	defer repo.Close()
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
+	return promoteTmpRefSafely(ctx, repo, tmpRefName, destRefName, label)
+}
 
+func promoteTmpRefSafely(ctx context.Context, repo *git.Repository, tmpRefName, destRefName plumbing.ReferenceName, label string) error {
 	tmpRef, err := repo.Reference(tmpRefName, true)
 	if err != nil {
 		return fmt.Errorf("%s not found after fetch (tmp ref %s missing): %w", label, tmpRefName, err)
@@ -930,8 +933,14 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 		return false
 	}
 
-	branchName := primary.Short()
-	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + branchName)
+	tmpRefName, err := newFetchTmpRef("metadata-bootstrap")
+	if err != nil {
+		logging.Warn(ctx, "checkpoint-remote: cannot allocate bootstrap fetch ref",
+			slog.String("error", err.Error()),
+		)
+		return false
+	}
+	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 	// Unfiltered. The bootstrap itself only needs the ref, but it is only ever
 	// reached under the git-branch primary (git-refs returns above), and there
 	// the branch it lands IS the repo's checkpoint store — refs.Read and
@@ -953,8 +962,6 @@ func bootstrapPrimaryFromCheckpointRemote(ctx context.Context, repo *git.Reposit
 		fmt.Fprintln(os.Stderr, "    Continuing — they will be fetched on demand when a command needs them.")
 		return false
 	}
-	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
-
 	tmpRef, err := repo.Reference(tmpRefName, true)
 	if err != nil {
 		logging.Debug(ctx, "checkpoint-remote: fetched metadata ref missing after enable bootstrap",
@@ -1042,7 +1049,10 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 		return false, nil
 	}
 
-	tmpRefName := plumbing.ReferenceName(FetchTmpRefPrefix + primary.Short())
+	tmpRefName, err := newFetchTmpRef("metadata-heal")
+	if err != nil {
+		return false, fmt.Errorf("allocate metadata heal fetch ref: %w", err)
+	}
 	defer func() { _ = repo.Storer.RemoveReference(tmpRefName) }() //nolint:errcheck // cleanup is best-effort
 
 	// Unfiltered, for the same reason as the bootstrap fetch above: this heal

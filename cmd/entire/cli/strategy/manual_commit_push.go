@@ -54,8 +54,17 @@ func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote st
 }
 
 func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
+	return s.prePushWithMetadataThreshold(ctx, remote, protectFirstUserBranch, OversizedCheckpointMetadataThreshold)
+}
+
+func (s *ManualCommitStrategy) prePushWithMetadataThreshold(
+	ctx context.Context,
+	remote string,
+	protectFirstUserBranch bool,
+	metadataThreshold int64,
+) error {
 	// This runs inside the user's `git push` pre-push hook. Every checkpoint
-	// git subprocess spawned here (metadata fetch, policy sync, checkpoint
+	// git subprocess spawned here (metadata fetch and cleanup, checkpoint
 	// push and its recovery fetch) must fail fast rather than block on an
 	// interactive SSH passphrase prompt — there is no way to answer it here and
 	// it would hang the user's push. Foreground commands do not set this.
@@ -120,6 +129,23 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// on an otherwise-empty remote a forge like GitHub would select it as the
 	// default. Defer publication until the user's own branch exists there.
 	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
+
+	repo, repoErr := OpenRepository(ctx)
+	if repoErr != nil {
+		logging.Warn(ctx, "checkpoint metadata cleanup: failed to open repository; aborting push",
+			slog.String("error", repoErr.Error()),
+		)
+		return repoErr
+	}
+	defer repo.Close()
+	if err := prepareOversizedV1ForPush(
+		ctx, repo, ps.pushTarget(), metadataThreshold,
+	); err != nil {
+		logging.Warn(ctx, "checkpoint metadata cleanup failed; aborting push",
+			slog.String("error", err.Error()),
+		)
+		return err
+	}
 
 	// OPF pre-push rewrite: if OPF is configured, resolve the user's
 	// decision (env > settings > prompt > non-TTY auto-run), then

@@ -589,6 +589,7 @@ type metadataRewriter struct {
 	blobs   map[plumbing.Hash]plumbing.Hash
 	trees   map[plumbing.Hash]plumbing.Hash
 	commits map[plumbing.Hash]plumbing.Hash
+	shallow map[plumbing.Hash]bool
 
 	commitsRewritten int
 	blobsShrunk      int
@@ -631,6 +632,18 @@ func (r *metadataRewriter) rewriteHistory(tip plumbing.Hash) (plumbing.Hash, err
 		c, err := r.repo.CommitObject(f.hash)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("load commit %s: %w", f.hash, err)
+		}
+		if r.shallow[f.hash] {
+			oversizedPath, err := oversizedMetadataPathInTree(r.repo, c.TreeHash, r.threshold)
+			if err != nil {
+				return plumbing.ZeroHash, fmt.Errorf("inspect shallow boundary %s: %w", f.hash, err)
+			}
+			if oversizedPath != "" {
+				return plumbing.ZeroHash, &shallowMetadataRepairError{Boundary: f.hash, Path: oversizedPath}
+			}
+			r.commits[f.hash] = f.hash
+			stack = stack[:top]
+			continue
 		}
 		if !f.expanded {
 			stack[top].expanded = true

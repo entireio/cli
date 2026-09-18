@@ -75,7 +75,7 @@ type V1RefMovedError struct {
 }
 
 func (e *V1RefMovedError) Error() string {
-	return fmt.Sprintf("entire/checkpoints/v1 moved during OPF rewrite "+
+	return fmt.Sprintf("entire/checkpoints/v1 moved during checkpoint rewrite "+
 		"(expected %s, found %s); another local worktree advanced the ref "+
 		"mid-rewrite — re-run `git push` (no fetch needed; the move was local)",
 		e.Expected.String()[:7], e.Actual.String()[:7])
@@ -258,6 +258,10 @@ const rawByteCapMultiplier = 100
 // privacy-critical failures — the pre-push hook propagates these so
 // git push aborts.
 func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string) (plumbing.Hash, error) {
+	return rewriteUnpushedV1WithOPF(ctx, repo, target, OversizedCheckpointMetadataThreshold)
+}
+
+func rewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string, metadataThreshold int64) (plumbing.Hash, error) {
 	localTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("read local v1: %w", err)
@@ -268,6 +272,16 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	remoteTip, err := resolveRemoteV1Tip(ctx, repo, target)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("read remote v1: %w", err)
+	}
+
+	reconciledTip, handled, reconcileErr := reconcileOversizedV1ForPush(
+		ctx, repo, localTip, remoteTip, metadataThreshold,
+	)
+	if reconcileErr != nil {
+		return plumbing.ZeroHash, fmt.Errorf("reconcile oversized checkpoint metadata: %w", reconcileErr)
+	}
+	if handled {
+		localTip = reconciledTip
 	}
 
 	if !remoteTip.IsZero() {
@@ -421,10 +435,7 @@ func readV1Tip(repo *git.Repository, refName plumbing.ReferenceName) (plumbing.H
 	return ref.Hash(), nil
 }
 
-// opfRewriteFetchTmpRef is the temp ref used to stage the URL-fetched
-// remote v1 tip during OPF rewrite. Cleaned up at the end of each
-// resolveRemoteV1Tip call so the tracking is invisible to the user.
-const opfRewriteFetchTmpRef = FetchTmpRefPrefix + "opf-rewrite-v1"
+const opfRewriteFetchPurpose = "opf-rewrite-v1"
 
 // resolveRemoteV1Tip returns the hash of the remote's
 // entire/checkpoints/v1 tip.
@@ -446,7 +457,18 @@ func resolveRemoteV1Tip(ctx context.Context, repo *git.Repository, target string
 	if wt, wtErr := repo.Worktree(); wtErr == nil {
 		worktreeRoot = wt.Filesystem().Root()
 	}
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, opfRewriteFetchTmpRef, "v1 for OPF rewrite", true, checkpointRemoteFetchTimeout); err != nil {
+	tmpRef, err := newFetchTmpRef(opfRewriteFetchPurpose)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	defer func() {
+		if err := repo.Storer.RemoveReference(tmpRef); err != nil {
+			logging.Debug(ctx, "OPF rewrite: failed to clean up temp ref",
+				slog.String("error", err.Error()),
+			)
+		}
+	}()
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, tmpRef.String(), "v1 for OPF rewrite", true, checkpointRemoteFetchTimeout); err != nil {
 		if !remote.IsURL(target) {
 			logging.Warn(ctx, "OPF rewrite: failed to fetch remote v1; using local remote-tracking ref",
 				slog.String("remote", target),
@@ -459,14 +481,7 @@ func resolveRemoteV1Tip(ctx context.Context, repo *git.Repository, target string
 		)
 		return plumbing.ZeroHash, nil
 	}
-	defer func() {
-		if err := repo.Storer.RemoveReference(plumbing.ReferenceName(opfRewriteFetchTmpRef)); err != nil {
-			logging.Debug(ctx, "OPF rewrite: failed to clean up temp ref",
-				slog.String("error", err.Error()),
-			)
-		}
-	}()
-	ref, err := repo.Reference(plumbing.ReferenceName(opfRewriteFetchTmpRef), true)
+	ref, err := repo.Reference(tmpRef, true)
 	if err != nil {
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return plumbing.ZeroHash, nil

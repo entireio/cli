@@ -267,6 +267,29 @@ func writeSettingsFile(t *testing.T, tempDir, content string) {
 	}
 }
 
+func TestAreProjectHooksInstalledInWorktree(t *testing.T) {
+	t.Parallel()
+
+	configured := t.TempDir()
+	writeSettingsFile(t, configured, `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"entire hooks claude-code stop"}]}]}}`)
+
+	installed, err := AreProjectHooksInstalledInWorktree(t.Context(), configured)
+	if err != nil {
+		t.Fatalf("AreProjectHooksInstalledInWorktree() error = %v", err)
+	}
+	if !installed {
+		t.Error("AreProjectHooksInstalledInWorktree() = false, want true")
+	}
+
+	installed, err = AreProjectHooksInstalledInWorktree(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatalf("AreProjectHooksInstalledInWorktree() for empty worktree error = %v", err)
+	}
+	if installed {
+		t.Error("AreProjectHooksInstalledInWorktree() = true for empty worktree")
+	}
+}
+
 func containsRule(rules []string, rule string) bool {
 	return slices.Contains(rules, rule)
 }

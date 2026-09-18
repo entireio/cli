@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -196,10 +197,6 @@ func ReconcileDisconnectedMetadataRef(
 	remoteRefName plumbing.ReferenceName,
 	w io.Writer,
 ) error {
-	advance := func(hash plumbing.Hash) error {
-		return setRefHash(repo, localRefName, hash)
-	}
-
 	// Check local ref
 	localRef, err := repo.Reference(localRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
@@ -220,6 +217,12 @@ func ReconcileDisconnectedMetadataRef(
 
 	localHash := localRef.Hash()
 	remoteHash := remoteRef.Hash()
+	advance := func(hash plumbing.Hash) error {
+		if localRefName == plumbing.NewBranchReferenceName(paths.MetadataBranchName) {
+			return atomicSetV1Ref(ctx, repo, localHash, hash)
+		}
+		return setRefHash(repo, localRefName, hash)
+	}
 
 	// Same hash — nothing to do
 	if localHash == remoteHash {
@@ -425,6 +428,9 @@ func cherryPickOnto(ctx context.Context, repo *git.Repository, base plumbing.Has
 		mergedTreeHash, err := checkpoint.ApplyTreeChanges(ctx, repo, tipCommit.TreeHash, changes)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("failed to apply cherry-pick changes: %w", err)
+		}
+		if mergedTreeHash.Equal(tipCommit.TreeHash) {
+			continue
 		}
 
 		// Create new commit on top of current tip, preserving original message/author

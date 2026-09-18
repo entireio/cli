@@ -3276,7 +3276,7 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	var out bytes.Buffer
 	sty := statusStyles{colorEnabled: false, width: 80}
 	if err := runStatusDetailed(t.Context(), &out, sty, projectPath,
-		filepath.Join(entireDir, "settings.local.json"), true, false); err != nil {
+		filepath.Join(entireDir, "settings.local.json"), true, false, nil); err != nil {
 		t.Fatalf("runStatusDetailed: %v", err)
 	}
 

@@ -1536,6 +1536,44 @@ func TestIsSetUpAndEnabled_FalseOnInvalidScannerConfig(t *testing.T) {
 	}
 }
 
+func TestIsSetUpAndEnabledForWorktreeRoot(t *testing.T) {
+	t.Parallel()
+
+	enabledRoot := t.TempDir()
+	testutil.InitRepo(t, enabledRoot)
+	testutil.WriteFile(t, enabledRoot, EntireSettingsFile, `{"enabled":true}`)
+
+	disabledRoot := t.TempDir()
+	testutil.InitRepo(t, disabledRoot)
+	testutil.WriteFile(t, disabledRoot, EntireSettingsLocalFile, `{"enabled":false}`)
+
+	if !IsSetUpAndEnabledForWorktreeRoot(t.Context(), enabledRoot) {
+		t.Error("enabled explicit worktree reported inactive")
+	}
+	if IsSetUpAndEnabledForWorktreeRoot(t.Context(), disabledRoot) {
+		t.Error("disabled explicit worktree reported active")
+	}
+	if IsSetUpAndEnabledForWorktreeRoot(t.Context(), t.TempDir()) {
+		t.Error("unconfigured explicit worktree reported active")
+	}
+}
+
+func TestProjectSettingsEnabledForWorktreeRoot_IgnoresLocalOverride(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	testutil.WriteFile(t, root, EntireSettingsFile, `{"enabled":false}`)
+	testutil.WriteFile(t, root, EntireSettingsLocalFile, `{"enabled":true}`)
+
+	if ProjectSettingsEnabledForWorktreeRoot(root) {
+		t.Error("disabled project settings reported enabled through local override")
+	}
+	if !IsSetUpAndEnabledForWorktreeRoot(t.Context(), root) {
+		t.Error("effective worktree settings reported disabled despite local override")
+	}
+}
+
 func TestGetCheckpointPushRemote(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

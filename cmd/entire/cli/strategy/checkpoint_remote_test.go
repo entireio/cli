@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
+	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -570,8 +571,10 @@ func TestFetchMetadataBranch_FetchesAndCreatesLocalBranch(t *testing.T) {
 	// Branch should now exist
 	assert.True(t, testutil.BranchExists(t, localDir, "entire/checkpoints/v1"))
 
-	// Temp ref should be cleaned up
-	assert.False(t, testutil.BranchExists(t, localDir, "refs/entire-fetch-tmp/entire/checkpoints/v1"))
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+	assertNoFetchTmpRefsWithPurpose(t, repo, "metadata-branch")
 }
 
 // Not parallel: uses t.Chdir()
@@ -875,6 +878,7 @@ func TestEnsurePrimaryRef_FetchesFromCheckpointRemoteInsteadOfOrphan(t *testing.
 	files := checkpointRemoteMetadataFiles(t, localDir)
 	assert.Contains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName,
 		"the bootstrapped branch should contain the checkpoint committed on the remote")
+	assertNoFetchTmpRefsWithPurpose(t, repo, "metadata-bootstrap")
 }
 
 // TestEnsurePrimaryRef_ReplacesExistingEmptyOrphanFromCheckpointRemote verifies
@@ -948,6 +952,7 @@ func TestEnsurePrimaryRef_ReplacesExistingEmptyOrphanFromCheckpointRemote(t *tes
 	files := checkpointRemoteMetadataFiles(t, localDir)
 	assert.Contains(t, files, "aa/aaaaaaaaaa/"+paths.MetadataFileName,
 		"the healed branch should contain the checkpoint committed on the remote")
+	assertNoFetchTmpRefsWithPurpose(t, repo, "metadata-heal")
 }
 
 // TestEnsurePrimaryRef_SkipsCheckpointRemoteBootstrapOutsideEnableFlow verifies
