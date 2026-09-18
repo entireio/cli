@@ -6,10 +6,196 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+type capabilityHelper struct {
+	function   string
+	capability string
+	resolver   string
+	position   token.Position
+}
+
+func TestCapabilityHelpersUseStandardResolver(t *testing.T) {
+	t.Parallel()
+
+	helpers := discoverCapabilityHelpers(t)
+	if len(helpers) == 0 {
+		t.Fatal("no As* capability helpers found — test setup is broken")
+	}
+
+	for _, helper := range helpers {
+		switch helper.resolver {
+		case "builtinCapability", "declaredCapability":
+			if helper.capability == "" {
+				t.Errorf("%s: %s must resolve a single named capability type",
+					helper.position, helper.function)
+			}
+		case "":
+			t.Errorf("%s: %s must return builtinCapability[T] or declaredCapability[T]",
+				helper.position, helper.function)
+		default:
+			t.Errorf("%s: %s uses unsupported resolver %s",
+				helper.position, helper.function, helper.resolver)
+		}
+	}
+}
+
+func TestDeclaredCapsBuiltinListMatchesCapabilityHelpers(t *testing.T) {
+	t.Parallel()
+
+	var resolved []string
+	for _, helper := range discoverCapabilityHelpers(t) {
+		if helper.resolver == "builtinCapability" {
+			resolved = append(resolved, helper.capability)
+		}
+	}
+	slices.Sort(resolved)
+
+	documented := documentedBuiltinCapabilities(t)
+	if !slices.IsSorted(documented) {
+		t.Fatalf("DeclaredCaps built-in capability list must be sorted: %v", documented)
+	}
+	if !slices.Equal(documented, resolved) {
+		t.Fatalf("DeclaredCaps built-in capability list is out of sync\ndocumented: %v\nresolved:   %v",
+			documented, resolved)
+	}
+}
+
+func discoverCapabilityHelpers(t *testing.T) []capabilityHelper {
+	t.Helper()
+
+	dir := findAgentDir(t)
+	fset := token.NewFileSet()
+	//nolint:staticcheck // ParseDir intentionally scans every production file regardless of build tags.
+	pkgs, err := parser.ParseDir(fset, dir, func(info os.FileInfo) bool {
+		return !strings.HasSuffix(info.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parser.ParseDir(%s): %v", dir, err)
+	}
+
+	var helpers []capabilityHelper
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Recv != nil || !isCapabilityHelperName(fn.Name.Name) {
+					continue
+				}
+				resolver, capability := capabilityResolver(fn)
+				helpers = append(helpers, capabilityHelper{
+					function:   fn.Name.Name,
+					capability: capability,
+					resolver:   resolver,
+					position:   fset.Position(fn.Pos()),
+				})
+			}
+		}
+	}
+	return helpers
+}
+
+func isCapabilityHelperName(name string) bool {
+	return strings.HasPrefix(name, "As") && len(name) > len("As") && ast.IsExported(name[len("As"):])
+}
+
+func capabilityResolver(fn *ast.FuncDecl) (string, string) {
+	if fn.Body == nil || len(fn.Body.List) != 1 {
+		return "", ""
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return "", ""
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	if !ok {
+		return "", ""
+	}
+
+	resolver, typeArg := indexedCall(call.Fun)
+	if resolver == nil || typeArg == nil {
+		return "", ""
+	}
+	capability, ok := typeArg.(*ast.Ident)
+	if !ok {
+		return resolver.Name, ""
+	}
+	return resolver.Name, capability.Name
+}
+
+func indexedCall(expr ast.Expr) (*ast.Ident, ast.Expr) {
+	switch indexed := expr.(type) {
+	case *ast.IndexExpr:
+		resolver, ok := indexed.X.(*ast.Ident)
+		if !ok {
+			return nil, nil
+		}
+		return resolver, indexed.Index
+	case *ast.IndexListExpr:
+		resolver, ok := indexed.X.(*ast.Ident)
+		if !ok || len(indexed.Indices) != 1 {
+			return nil, nil
+		}
+		return resolver, indexed.Indices[0]
+	default:
+		return nil, nil
+	}
+}
+
+func documentedBuiltinCapabilities(t *testing.T) []string {
+	t.Helper()
+
+	path := filepath.Join(findAgentDir(t), "capabilities.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parser.ParseFile(%s): %v", path, err)
+	}
+
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok || typeSpec.Name.Name != "DeclaredCaps" {
+				continue
+			}
+			doc := typeSpec.Doc
+			if doc == nil {
+				doc = gen.Doc
+			}
+			if doc == nil {
+				t.Fatal("DeclaredCaps must have a doc comment")
+			}
+
+			var capabilities []string
+			for _, comment := range doc.List {
+				line := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+				name, ok := strings.CutPrefix(line, "- ")
+				if !ok {
+					continue
+				}
+				if fields := strings.Fields(name); len(fields) != 1 || !ast.IsExported(name) {
+					t.Fatalf("invalid capability entry in DeclaredCaps doc: %q", line)
+				}
+				capabilities = append(capabilities, name)
+			}
+			if len(capabilities) == 0 {
+				t.Fatal("DeclaredCaps doc must list built-in capabilities as '- CapabilityName' entries")
+			}
+			return capabilities
+		}
+	}
+
+	t.Fatal("DeclaredCaps type not found")
+	return nil
+}
 
 // TestAgentPackages_NoForbiddenImports verifies that agent implementation packages
 // (claudecode, geminicli, opencode, cursor, etc.) only import from allowed packages.
