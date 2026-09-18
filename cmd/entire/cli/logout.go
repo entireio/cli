@@ -229,7 +229,7 @@ func revokeLogin(ctx context.Context, errW io.Writer, deps logoutDeps, c *contex
 	case err == nil:
 	case api.IsHTTPErrorStatus(err, http.StatusNotFound):
 		// The family is already gone: the desired state.
-	case errors.Is(b.stale, auth.ErrReauthRequired):
+	case errors.Is(b.stale, auth.ErrReauthRequired) && api.IsHTTPErrorStatus(err, http.StatusUnauthorized):
 		// The login server already declared this session dead.
 	case b.stale != nil && api.IsHTTPErrorStatus(err, http.StatusUnauthorized):
 		fmt.Fprintf(errW, "Warning: couldn't refresh the login for %q; its session on %s may still be active: %v\n", c.Name, c.CoreURL, b.stale)

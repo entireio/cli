@@ -299,6 +299,29 @@ func TestRunLogout_ReauthRequiredIsSilent(t *testing.T) {
 	}
 }
 
+// Reauth-required excuses a 401 only. Any other revoke failure still
+// means the session may be live.
+func TestRunLogout_ReauthRequiredStillWarnsOnServerError(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
+	tokenFor := func(context.Context, *contexts.Context) (bearer, error) {
+		return bearer{token: testLogoutToken, stale: fmt.Errorf("refresh: %w", auth.ErrReauthRequired)}, nil
+	}
+	revoke := func(context.Context, string, string) error {
+		return &api.HTTPError{StatusCode: http.StatusInternalServerError, Message: "boom"}
+	}
+	remove := func(string) error { return nil }
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, tokenFor, revoke, remove)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := errOut.String(); !strings.Contains(got, "revocation failed") || !strings.Contains(got, "boom") {
+		t.Fatalf("stderr = %q, want a revocation-failed warning carrying the server error", got)
+	}
+}
+
 func TestRunLogout_UnreadableTokenRemovesLocallyOnly(t *testing.T) {
 	t.Parallel()
 
