@@ -129,6 +129,9 @@ func TestRunLogout_SkipsMalformedEntries(t *testing.T) {
 	if !strings.Contains(out.String(), "Logged out of 1 saved login(s).") {
 		t.Fatalf("stdout = %q, want count of 1", out.String())
 	}
+	if n := strings.Count(errOut.String(), "skipped a malformed saved login"); n != 2 {
+		t.Fatalf("stderr = %q, want one warning per malformed entry", errOut.String())
+	}
 }
 
 func TestRunLogout_NoContextsPrintsNotLoggedIn(t *testing.T) {

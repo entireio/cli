@@ -156,6 +156,13 @@ type logoutDeps struct {
 	loginTimeout time.Duration
 }
 
+func (d logoutDeps) contextsFileOrDefault() string {
+	if d.contextsFile != "" {
+		return d.contextsFile
+	}
+	return "contexts.json"
+}
+
 // runLogout sweeps every stored login.
 //
 // Each login gets its own deadline and is removed locally whatever its
@@ -181,6 +188,8 @@ func runLogout(ctx context.Context, outW, errW io.Writer, deps logoutDeps) error
 	removed, failed := 0, 0
 	for _, c := range all {
 		if c == nil || c.Name == "" {
+			// Nothing to revoke or remove by name; the file needs a hand edit.
+			fmt.Fprintf(errW, "Warning: skipped a malformed saved login; check %s\n", deps.contextsFileOrDefault())
 			continue
 		}
 		func() {
