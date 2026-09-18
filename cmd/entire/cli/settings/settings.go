@@ -723,13 +723,6 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		applyClonePreferences(settings, preferences)
 	}
 
-	// The user tier (~/.config/entire/settings.json) sits between the
-	// clone-local preferences and the per-worktree local file: machine-wide
-	// preferences first, then this repository's entry. Unlike every layer
-	// around it, this one resolves without a git repository at all, so it is
-	// the only tier readable when repository resolution itself fails.
-	applyUserTier(ctx, settings, worktreeRootOfSettingsFile(settingsFileAbs))
-
 	// Apply local overrides if they exist — but only from a file that is
 	// genuinely local. See localLayerTrackedReason.
 	localData, err := readConfined(localSettingsFileAbs)
@@ -748,6 +741,23 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	} else if err := mergeJSON(settings, localData); err != nil {
 		return nil, fmt.Errorf("merging local settings: %w", err)
 	}
+
+	// The user tier (~/.config/entire/settings.json) applies LAST, above the
+	// per-worktree local file: machine-wide preferences first, then this
+	// repository's entry.
+	//
+	// Above, not below, and that ordering is the point of the change. Both
+	// files are the developer's own, so neither outranks the other on
+	// provenance; what separates them is that one has a single answer per
+	// developer and the other has one answer per worktree. Leaving the local
+	// file on top would mean every worktree that already has one keeps
+	// overriding the shared answer, which is the divergence being removed —
+	// the tier would be inert for exactly the people who need it.
+	//
+	// Unlike every layer around it, this one resolves without a git repository
+	// at all, so it is also the only tier readable when repository resolution
+	// itself fails.
+	applyUserTier(ctx, settings, worktreeRootOfSettingsFile(settingsFileAbs))
 
 	// openai_privacy_filter.command is executed, so it is honored only from a
 	// local file positively verified as this developer's own. external_agents
@@ -1788,11 +1798,36 @@ func IsSetUpLocal(ctx context.Context) bool {
 	return entireFileExists(ctx, SettingsLocalName)
 }
 
-// IsSetUpAny returns true if Entire has been set up in the current repository,
-// checking both .entire/settings.json and .entire/settings.local.json.
-// Use this to detect any prior setup, even if only local settings exist.
+// IsSetUpAny returns true if Entire has been set up for the current
+// repository, in any tier: .entire/settings.json, .entire/settings.local.json,
+// or the user settings file.
+//
+// The third one is not optional. Both .entire files live in the WORKTREE, and
+// a linked worktree of a repository configured only outside it has neither —
+// `git worktree add` copies no untracked file, and there is no hook that fires
+// when a worktree is created. Answering from those two alone therefore reports
+// "never set up" in a tree whose hooks are installed and firing (they live in
+// the git common dir, which every worktree shares), and every one of them
+// becomes a silent no-op that drops all capture. That is the same failure
+// IsSetUpAndEnabled's doc comment describes for `enable --local`, reached by
+// adding a worktree instead of by checking the wrong file.
+//
+// Ordered cheapest first. The two Lstat calls answer for every repository with
+// an .entire directory without reading the user file at all, so the added cost
+// falls only on repositories that have no local settings to find — where the
+// alternative is being wrong.
 func IsSetUpAny(ctx context.Context) bool {
-	return IsSetUp(ctx) || IsSetUpLocal(ctx)
+	if IsSetUp(ctx) || IsSetUpLocal(ctx) {
+		return true
+	}
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// No resolvable worktree means nothing to match a repos entry
+		// against. Reporting "not set up" here matches what the two file
+		// checks above already did on the same failure.
+		return false
+	}
+	return UserTierConfiguresRepo(ctx, root)
 }
 
 // entireFileExists reports whether name exists directly under .entire. Lstat,
@@ -1904,9 +1939,14 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 
 // CheckpointRemoteConfig holds the structured checkpoint remote configuration.
 // Stored in strategy_options.checkpoint_remote as {"provider": "github", "repo": "org/repo"}.
+// The json tags are load bearing even though GetCheckpointRemote builds this
+// by hand from strategy_options: the user settings file decodes INTO it
+// directly, under DisallowUnknownFields. Without tags, Go's case-insensitive
+// field matching would accept "Provider" and "provider" alike, so the schema a
+// user is told to write would not be the only one that works.
 type CheckpointRemoteConfig struct {
-	Provider string // e.g., "github"
-	Repo     string // e.g., "org/checkpoints-repo"
+	Provider string `json:"provider"` // e.g., "github"
+	Repo     string `json:"repo"`     // e.g., "org/checkpoints-repo"
 }
 
 // Owner returns the owner portion of the repo field (before the slash).

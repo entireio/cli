@@ -119,11 +119,16 @@ func TestUserTier_UnknownKeyDropsOnlyThatBlock(t *testing.T) {
 	assert.True(t, s.Enabled, "the repository's own settings still applied")
 }
 
-// Precedence as shipped in this change: the user tier outranks the project
-// file, and the per-worktree local file still outranks the user tier.
-// Demoting the local file is a deliberate later step; pinning the current
-// order here means that change cannot happen silently.
-func TestUserTier_PrecedenceAgainstProjectAndLocal(t *testing.T) {
+// The user tier outranks both the committed project file and the per-worktree
+// local file.
+//
+// Beating the local file is the point, not a side effect. Both files are the
+// developer's own, so provenance does not separate them; what does is that the
+// user file has one answer per developer while the local file has one per
+// worktree. If the local file stayed on top, every worktree that already has
+// one would keep overriding the shared answer, and the tier would be inert for
+// exactly the people whose worktrees disagree.
+func TestUserTier_OutranksProjectAndLocal(t *testing.T) {
 	_, project, local := newUserTierRepo(t)
 	require.NoError(t, os.WriteFile(project, []byte(`{"enabled":true,"review_fix_agent":"from-project"}`), 0o644))
 	writeUserSettings(t, `{"preferences": {"review_fix_agent": "from-user"}}`)
@@ -135,8 +140,36 @@ func TestUserTier_PrecedenceAgainstProjectAndLocal(t *testing.T) {
 	require.NoError(t, os.WriteFile(local, []byte(`{"review_fix_agent":"from-local"}`), 0o644))
 	s, err = loadMergedSettings(t.Context(), project, "", local)
 	require.NoError(t, err)
-	assert.Equal(t, "from-local", s.ReviewFixAgent,
-		"the per-worktree local file still wins; demoting it is a separate change")
+	assert.Equal(t, "from-user", s.ReviewFixAgent,
+		"the user tier must outrank a per-worktree local file, or the divergence survives")
+}
+
+// A repos entry and a machine-wide preference can both name a key; the
+// repository-specific one wins, and the local file no longer overrides either.
+func TestUserTier_CheckpointRemoteAndEnabledReachEveryWorktree(t *testing.T) {
+	root, project, local := newUserTierRepo(t)
+	testutil.InitRepo(t, root)
+	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+
+	// The shape that bites today: the committed file names an upstream store,
+	// and the developer's own choice used to live in a per-worktree file.
+	require.NoError(t, os.WriteFile(project, []byte(
+		`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"upstream/app-checkpoints"}}}`), 0o644))
+	require.NoError(t, os.WriteFile(local, []byte(`{"enabled":false}`), 0o644))
+	writeUserSettings(t, `{
+	  "repos": {"github.com/acme/widgets": {
+	    "enabled": true,
+	    "checkpoint_remote": {"provider": "github", "repo": "mydev/my-checkpoints"}
+	  }}
+	}`)
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	cr := s.GetCheckpointRemote()
+	require.NotNil(t, cr, "a user-tier destination must decode through the existing reader")
+	assert.Equal(t, "mydev/my-checkpoints", cr.Repo)
+	assert.True(t, s.Enabled, "the user tier's enabled must beat a per-worktree disable")
 }
 
 // The claim that a user file without a repos block costs no git reads. With
@@ -166,4 +199,49 @@ func TestUserTier_AbsentFileChangesNothing(t *testing.T) {
 // jsonString quotes a path for embedding in a JSON object key.
 func jsonString(s string) string {
 	return `"` + filepath.ToSlash(s) + `"`
+}
+
+// Symptom A, directly. A linked worktree of a repository configured only
+// outside the worktree has no .entire directory of its own: `git worktree add`
+// copies no untracked file, and no hook fires when a worktree is created. Its
+// git hooks are installed and firing regardless, because they live in the git
+// common dir every worktree shares — so if IsSetUpAny answers from the two
+// .entire files alone, every one of those hooks is a silent no-op and all
+// capture is dropped in that tree.
+func TestIsSetUpAny_ReachesTheUserTierInAWorktreeWithNoEntireDir(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Cleanup(ClearOriginKeyCache)
+	t.Chdir(root)
+
+	require.NoDirExists(t, filepath.Join(root, ".entire"),
+		"the premise: a freshly added worktree has no .entire of its own")
+
+	assert.False(t, IsSetUpAny(t.Context()),
+		"sanity: with nothing configured anywhere, this repository is not set up")
+
+	writeUserSettings(t, `{"repos": {"github.com/acme/widgets": {"enabled": true}}}`)
+	ClearOriginKeyCache()
+
+	assert.True(t, IsSetUpAny(t.Context()),
+		"a repository configured in the user file is set up in every worktree, including one with no .entire")
+}
+
+// The converse: a user file that says nothing about THIS repository must not
+// make it read as set up, or enabling one repository would enable every
+// repository on the machine.
+func TestIsSetUpAny_IgnoresAUserEntryForAnotherRepo(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Cleanup(ClearOriginKeyCache)
+	t.Chdir(root)
+
+	writeUserSettings(t, `{"repos": {"github.com/other/thing": {"enabled": true}}}`)
+
+	assert.False(t, IsSetUpAny(t.Context()),
+		"an entry naming a different origin must not activate this repository")
 }
