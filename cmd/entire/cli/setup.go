@@ -1779,6 +1779,16 @@ func localExists(ctx context.Context) bool {
 
 // runRemoveAgent removes hooks for a specific agent.
 func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
+	// Resolve one external agent binary by the name the user typed, the same
+	// named lookup `entire enable --agent <name>` uses to install it. Ungated
+	// on purpose: the install side is ungated, so gating removal would leave a
+	// plugin whose hooks are installed and firing with no supported way to
+	// uninstall it — the user would be left deleting the plugin's config by
+	// hand. The blast radius is the single binary the user named, not a $PATH
+	// sweep, and the error is dropped so agent.Get below reports an
+	// unresolvable name in the user's terms.
+	discoverNamedExternalAgent(ctx, types.AgentName(name))
+
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
 		printWrongAgentError(w, name)
@@ -2094,12 +2104,15 @@ func isBuiltInAgent(ag agent.Agent) bool {
 
 // printAgentError writes an error message followed by available agents and usage.
 func printAgentError(w io.Writer, message string) {
-	agents := agent.List()
+	// StringList, not List: this is a suggestion list the user is meant to pick
+	// from, and List includes test-only agents (Vogon, the deterministic fake
+	// used by the e2e canary), which nobody should be told to enable.
+	agents := agent.StringList()
 	fmt.Fprintf(w, "%s Available agents:\n", message)
 	fmt.Fprintln(w)
 	for _, a := range agents {
 		suffix := ""
-		if a == agent.DefaultAgentName {
+		if types.AgentName(a) == agent.DefaultAgentName {
 			suffix = "    (default)"
 		}
 		fmt.Fprintf(w, "  %s%s\n", a, suffix)
