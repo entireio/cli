@@ -6,15 +6,6 @@ before:
   hooks:
     - go mod tidy
     - mise run completions
-    # Embeds a Windows PE VERSIONINFO resource (.syso) next to each Windows
-    # binary's main package, so `entire.exe`'s own file/product version is
-    # populated for Windows tooling (Explorer Properties, Get-Command) —
-    # separate from and in addition to the ldflags stamp above, which only
-    # `entire version` reads. Go's linker picks up a `_windows_<arch>.syso`
-    # sitting next to main.go automatically, including when cross-compiling
-    # for windows from another OS. Uses goversioninfo v1.7.0 (go-winres
-    # pulled a golang.org/x/image with a reachable govulncheck finding,
-    # GO-2026-5031; goversioninfo has no x/image dependency). See #2218.
     - mise run winres {{.Version}}
 
 builds:

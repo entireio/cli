@@ -90,14 +90,7 @@ jobs:
       # test name so this job selects them without running POSIX-only harnesses.
       - name: Windows unit tests
         run: go test ./cmd/entire/cli/... -run '(Windows|MSYS)' -count=1 -v
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
-      # Regression coverage for #2218: a bug in the .syso generation (or the
-      # mise task not being picked up at all — see the executable-bit review
-      # note on PR #2503) would silently ship a release binary with no PE
-      # version metadata again, and nothing else in this suite builds a real
-      # Windows binary to notice. A clearly-fake, all-nonzero version number
-      # is used on purpose so any of the four VersionInfo fields reading back
-      # as zero is unambiguous evidence the .syso never got linked in.
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 
       - name: Generate Windows PE version resources
         run: mise run winres 9.9.9-ci-verify
       - name: Build entire.exe with embedded PE resources

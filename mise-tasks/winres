@@ -6,25 +6,12 @@ set -euo pipefail
 
 version="${1:?usage: mise run winres <version>}"
 
-# FixedFileInfo's Major/Minor/Patch/Build are strictly 16-bit integers, so a
-# full version with a prerelease/build suffix (e.g. a nightly tag like
-# 0.10.7-nightly.202609160626.0138471ae) can't go there directly. Only the
-# leading Major.Minor.Patch triplet is used for those numeric fields; the
-# full string still lands verbatim in the free-text FileVersion/ProductVersion
-# fields below, so `entire.exe`'s Properties dialog still shows the exact tag.
-# %% (longest match) strips from the FIRST hyphen, not the last, so a version
-# with more than one hyphen still yields a clean 3-part base to split on.
 base="${version%%-*}"
 IFS='.' read -r major minor patch <<<"$base"
 major="${major:-0}"
 minor="${minor:-0}"
 patch="${patch:-0}"
 
-# generate writes both arch .syso files for one binary's main package.
-# goversioninfo has no single "target both arches" flag: -64 alone selects
-# amd64, and -64 together with -arm selects arm64 (there's no plain -arch
-# flag). Both binaries share one manifest (asInvoker, DPI-aware) and one
-# versioninfo.json skeleton; only the fields passed as flags differ per binary.
 generate() {
     local pkg="$1" desc="$2" original_name="$3"
     local common_flags=(
