@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const unrelatedWorktreePath = "/somewhere/else/entirely"
+
 // identityTestRepo initializes an isolated repo and chdirs into it.
 func identityTestRepo(t *testing.T) string {
 	t.Helper()
@@ -81,7 +83,7 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		anc := selfAncestorOwner(t)
 		saveIdentitySession(t, "sess-agent", func(st *SessionState) {
 			st.Owner = anc
-			st.WorktreePath = "/somewhere/else/entirely"
+			st.WorktreePath = unrelatedWorktreePath
 		})
 
 		s := NewManualCommitStrategy()
@@ -212,7 +214,7 @@ func TestFindSessionsForCommitLinking_IdentityAddsGuestSession(t *testing.T) {
 	anc := selfAncestorOwner(t)
 	saveIdentitySession(t, "sess-agent-elsewhere", func(st *SessionState) {
 		st.Owner = anc
-		st.WorktreePath = "/somewhere/else/entirely"
+		st.WorktreePath = unrelatedWorktreePath
 	})
 
 	s := NewManualCommitStrategy()
@@ -222,6 +224,58 @@ func TestFindSessionsForCommitLinking_IdentityAddsGuestSession(t *testing.T) {
 	ids := []string{got[0].SessionID, got[1].SessionID}
 	assert.Contains(t, ids, "sess-here")
 	assert.Contains(t, ids, "sess-agent-elsewhere")
+}
+
+// Not parallel: uses t.Chdir().
+func TestFindSessionsForCommitLinking_ToleratesMalformedUnrelatedState(t *testing.T) {
+	ctx := context.Background()
+	dir := identityTestRepo(t)
+	saveIdentitySession(t, "sess-here", func(st *SessionState) {
+		st.WorktreePath = dir
+	})
+	malformed := filepath.Join(dir, ".git", "entire-sessions", "malformed.json")
+	require.NoError(t, os.WriteFile(malformed, []byte(`{"session_id":`), 0o600))
+
+	got, err := NewManualCommitStrategy().findSessionsForCommitLinking(ctx, dir)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "sess-here", got[0].SessionID)
+}
+
+// Not parallel: uses t.Chdir().
+func TestFindSessionsForCommitLinking_ToleratesUnreadableUnrelatedRef(t *testing.T) {
+	ctx := context.Background()
+	dir := identityTestRepo(t)
+	saveIdentitySession(t, "sess-here", func(st *SessionState) {
+		st.WorktreePath = dir
+	})
+	const unreadableWorktreeID = "unreadable"
+	saveIdentitySession(t, "sess-unreadable", func(st *SessionState) {
+		st.WorktreeID = unreadableWorktreeID
+		st.WorktreePath = unrelatedWorktreePath
+	})
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	head, err := repo.Head()
+	require.NoError(t, err)
+	shadow := getShadowBranchNameForCommit("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", unreadableWorktreeID)
+	refName := plumbing.NewBranchReferenceName(shadow)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, head.Hash())))
+	refPath := filepath.Join(dir, ".git", refName.String())
+	require.NoError(t, os.Chmod(refPath, 0o000))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(refPath, 0o600)) })
+	_, rawErr := os.ReadFile(refPath)
+	if !os.IsPermission(rawErr) {
+		t.Skip("filesystem does not enforce unreadable file permissions")
+	}
+
+	got, err := NewManualCommitStrategy().findSessionsForCommitLinking(ctx, dir)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "sess-here", got[0].SessionID)
+	require.FileExists(t, filepath.Join(dir, ".git", "entire-sessions", "sess-unreadable.json"))
 }
 
 // addSiblingWorktree creates a real git worktree of dir so fallback matching
@@ -425,7 +479,7 @@ func TestUpdateBaseCommitIfChanged_GuestWorktreeGating(t *testing.T) {
 	guest := &SessionState{
 		SessionID:    "sess-guest-gate",
 		BaseCommit:   "1111111111111111111111111111111111111111",
-		WorktreePath: "/somewhere/else/entirely",
+		WorktreePath: unrelatedWorktreePath,
 		Phase:        session.PhaseActive,
 	}
 	s.updateBaseCommitIfChanged(ctx, guest, "2222222222222222222222222222222222222222", dir)

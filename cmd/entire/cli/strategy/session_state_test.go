@@ -490,6 +490,8 @@ func TestLoadSessionState_DeletesStaleSession(t *testing.T) {
 	staleInteracted := time.Now().Add(-2 * 7 * 24 * time.Hour)
 	state := &SessionState{
 		SessionID:           "stale-load-test",
+		FullyCondensed:      true,
+		Phase:               session.PhaseEnded,
 		BaseCommit:          "abc123def456",
 		StartedAt:           time.Now().Add(-3 * 7 * 24 * time.Hour),
 		LastInteractionTime: &staleInteracted,
