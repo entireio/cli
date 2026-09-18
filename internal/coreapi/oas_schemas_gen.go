@@ -3200,6 +3200,117 @@ func (s *CreatedMirrorAdditional) init() CreatedMirrorAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/DeclareAliasInputBody
+type DeclareAliasInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI `json:"$schema"`
+	Email           string `json:"email"`
+	RepoId          string `json:"repoId"`
+	AdditionalProps DeclareAliasInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *DeclareAliasInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetEmail returns the value of Email.
+func (s *DeclareAliasInputBody) GetEmail() string {
+	return s.Email
+}
+
+// GetRepoId returns the value of RepoId.
+func (s *DeclareAliasInputBody) GetRepoId() string {
+	return s.RepoId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DeclareAliasInputBody) GetAdditionalProps() DeclareAliasInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *DeclareAliasInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetEmail sets the value of Email.
+func (s *DeclareAliasInputBody) SetEmail(val string) {
+	s.Email = val
+}
+
+// SetRepoId sets the value of RepoId.
+func (s *DeclareAliasInputBody) SetRepoId(val string) {
+	s.RepoId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DeclareAliasInputBody) SetAdditionalProps(val DeclareAliasInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type DeclareAliasInputBodyAdditional map[string]jx.Raw
+
+func (s *DeclareAliasInputBodyAdditional) init() DeclareAliasInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/DeclareAliasOutputBody
+type DeclareAliasOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// True on every accepted declaration (row inserted, trust raised, or verified_at advanced). Never
+	// read false as already-declared.
+	Changed         bool `json:"changed"`
+	AdditionalProps DeclareAliasOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *DeclareAliasOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetChanged returns the value of Changed.
+func (s *DeclareAliasOutputBody) GetChanged() bool {
+	return s.Changed
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *DeclareAliasOutputBody) GetAdditionalProps() DeclareAliasOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *DeclareAliasOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetChanged sets the value of Changed.
+func (s *DeclareAliasOutputBody) SetChanged(val bool) {
+	s.Changed = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *DeclareAliasOutputBody) SetAdditionalProps(val DeclareAliasOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type DeclareAliasOutputBodyAdditional map[string]jx.Raw
+
+func (s *DeclareAliasOutputBodyAdditional) init() DeclareAliasOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // DeleteBindingNoContent is response for DeleteBinding operation.
 type DeleteBindingNoContent struct{}
 
@@ -11730,6 +11841,9 @@ func (s *RegisterOrgCIBuildkiteClusterInputBodyAdditional) init() RegisterOrgCIB
 	}
 	return m
 }
+
+// ReleaseAliasNoContent is response for ReleaseAlias operation.
+type ReleaseAliasNoContent struct{}
 
 // RemoveOrgMemberNoContent is response for RemoveOrgMember operation.
 type RemoveOrgMemberNoContent struct{}
