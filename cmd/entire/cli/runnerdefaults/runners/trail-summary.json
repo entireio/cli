@@ -17,7 +17,7 @@
     "kind": "trail_prompt"
   },
   "prompt": {
-    "template": "You summarize code changes for reviewers. Analyze branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nRun `git diff origin/{{base_branch}}...HEAD`, then write a short Problem -> Solution summary in Markdown. Start with the `**Problem:**` line and include a `**Solution:**` line. Return Markdown only."
+    "template": "You summarize code changes for reviewers. Analyze branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nEstablish the comparison range first, so only this branch's own work is in it:\n\n    git fetch --quiet origin {{base_branch}}\n    base=$(git merge-base origin/{{base_branch}} HEAD)\n\nRead the changes with `git diff $base..HEAD`. Do not compare against `origin/{{base_branch}}` directly. Tip to tip that reports the base branch's newer commits as this branch's deletions, which reads as work this branch never did. If `git log $base..HEAD --oneline` holds work branch \"{{branch}}\" is clearly not about, say that in place of the summary rather than describing someone else's change.\n\nThen write a short Problem -> Solution summary in Markdown. Start with the `**Problem:**` line and include a `**Solution:**` line. Return Markdown only."
   },
   "select": {
     "trigger_types": [

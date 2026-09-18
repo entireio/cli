@@ -16,7 +16,7 @@
     "kind": "trail_prompt"
   },
   "prompt": {
-    "template": "You are a security risk evaluator. Analyze the changes on branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nRun `git diff origin/{{base_branch}}...HEAD` to see the changes, then score **security risk** from 0 to 100 (review adversarially; higher = more suspicious or insecure).\n\nOutput ONLY this JSON object as the very last line of your response:\n\n{\"value\": <number 0-100>, \"rationale\": \"<1-2 sentence explanation>\"}"
+    "template": "You are a security risk evaluator. Analyze the changes on branch \"{{branch}}\" compared to \"{{base_branch}}\".\n\nEstablish the comparison range first, so only this branch's own work is in it:\n\n    git fetch --quiet origin {{base_branch}}\n    base=$(git merge-base origin/{{base_branch}} HEAD)\n\nRead the changes with `git diff $base..HEAD`. Do not compare against `origin/{{base_branch}}` directly. Tip to tip that reports the base branch's newer commits as this branch's deletions, which reads as work this branch never did. If `git log $base..HEAD --oneline` holds work branch \"{{branch}}\" is clearly not about, say that in the rationale rather than scoring someone else's change.\n\nThen score **security risk** from 0 to 100 (review adversarially; higher = more suspicious or insecure).\n\nOutput ONLY this JSON object as the very last line of your response:\n\n{\"value\": <number 0-100>, \"rationale\": \"<1-2 sentence explanation>\"}"
   },
   "select": {
     "trigger_types": [
