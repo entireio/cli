@@ -3,6 +3,7 @@ package usersettings
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -165,4 +166,46 @@ func TestWriteFollowsASymlinkedSettingsFile(t *testing.T) {
 	var got map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Contains(t, string(got["redaction"]), "/opt/opf", "the write landed on the link's target")
+}
+
+// OriginKeys runs on the hook path: IsSetUpAndEnabled reaches it, and git
+// exports GIT_DIR and GIT_WORK_TREE to every hook it runs. Those OUTRANK
+// cmd.Dir, so a child that inherits them reads the hook's repository instead
+// of the one named — and for a per-repository settings lookup that means
+// matching another repository's entry and applying its configuration here.
+//
+// No source guard covers this class; the existing one is specific to `git
+// status` and --no-optional-locks. So it gets a behavioural test.
+func TestOriginKeysIgnoresHookRepoOverrides(t *testing.T) {
+	target := t.TempDir()
+	runGit(t, target, "init", "-q", ".")
+	runGit(t, target, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+
+	other := t.TempDir()
+	runGit(t, other, "init", "-q", ".")
+	runGit(t, other, "remote", "add", "origin", "https://github.com/other/thing.git")
+
+	keys, present, err := OriginKeys(t.Context(), target)
+	require.NoError(t, err)
+	require.True(t, present)
+	require.Equal(t, []string{"github.com/acme/widgets"}, keys, "sanity, with a clean environment")
+
+	// Exactly what git hands a hook running in the other repository.
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+
+	keys, present, err = OriginKeys(t.Context(), target)
+	require.NoError(t, err)
+	require.True(t, present)
+	assert.Equal(t, []string{"github.com/acme/widgets"}, keys,
+		"the directory asked about must win over a hook's exported repository")
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
 }

@@ -33,7 +33,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -414,11 +416,16 @@ func NormalizeOrigin(rawURL string) string {
 // be read or normalized" (an error). Collapsing the two would let an
 // unreadable remote config read as an unconfigured repository.
 func OriginKeys(ctx context.Context, worktreeRoot string) (keys []string, present bool, err error) {
-	fetchURLs, fetchFound, err := gitremote.GetRemoteURLsInDirIfSet(ctx, worktreeRoot, "origin")
+	// The environment is scrubbed because this runs on the hook path:
+	// IsSetUpAndEnabled reaches here, git exports GIT_DIR and GIT_WORK_TREE to
+	// its hooks, and those outrank cmd.Dir. An unscrubbed child would read the
+	// hook's repository and match another repository's `repos` entry.
+	env := gitrepo.EnvWithoutRepoOverrides()
+	fetchURLs, fetchFound, err := gitremote.GetRemoteURLsInDirIfSet(ctx, worktreeRoot, env, "origin")
 	if err != nil {
 		return nil, false, fmt.Errorf("reading origin remote: %w", err)
 	}
-	pushURLs, pushFound, err := gitremote.GetRemotePushURLsInDirIfSet(ctx, worktreeRoot, "origin")
+	pushURLs, pushFound, err := gitremote.GetRemotePushURLsInDirIfSet(ctx, worktreeRoot, env, "origin")
 	if err != nil {
 		return nil, false, fmt.Errorf("reading origin pushurl: %w", err)
 	}
@@ -464,10 +471,56 @@ func ExpandTilde(pattern string) (string, error) {
 	return filepath.ToSlash(filepath.Clean(pattern)), nil
 }
 
-// PathIsRoot reports whether a `repos` path key names this worktree root.
+// PathNamesThisClone reports whether a `repos` path key names this repository,
+// matching any worktree of the clone rather than only the one it spells.
 //
-// Both sides are compared in raw and symlink-resolved form, because the key
-// and the root can reach the same directory by different spellings — a
+// A path key exists for a repository with no usable origin, and every worktree
+// of a clone has a DIFFERENT path — so comparing paths alone made a path-keyed
+// entry apply to exactly one worktree and leave every other one unconfigured.
+// That is the same per-worktree divergence this whole tier exists to remove,
+// reintroduced through the fallback meant to cover repositories that cannot
+// use the primary key.
+//
+// So the path comparison is tried first, because it is free, and a miss falls
+// through to comparing git common directories: every worktree of one clone
+// shares one, and no two clones do. A key that is not a repository at all
+// fails that lookup and is simply not a match.
+func PathNamesThisClone(ctx context.Context, key, worktreeRoot string) bool {
+	if PathIsRoot(key, worktreeRoot) {
+		return true
+	}
+	expanded, err := ExpandTilde(key)
+	if err != nil || expanded == "" {
+		return false
+	}
+	keyCommon, err := gitdir.CommonDirForWorktree(ctx, expanded)
+	if err != nil {
+		return false
+	}
+	ourCommon, err := gitdir.CommonDirForWorktree(ctx, worktreeRoot)
+	if err != nil {
+		return false
+	}
+	return pathsEquivalent(keyCommon, ourCommon)
+}
+
+func pathsEquivalent(a, b string) bool {
+	aForms, bForms := pathForms(a), pathForms(b)
+	if caseInsensitivePaths {
+		foldForms(aForms)
+		foldForms(bForms)
+	}
+	for _, x := range aForms {
+		if slices.Contains(bForms, x) {
+			return true
+		}
+	}
+	return false
+}
+
+// PathIsRoot reports whether a `repos` path key names this worktree root
+// exactly. Both sides are compared in raw and symlink-resolved form, because
+// the key and the root can reach the same directory by different spellings — a
 // worktree under a symlinked parent is the ordinary case on macOS (/tmp) and
 // in dotfile-managed checkouts.
 func PathIsRoot(key, worktreeRoot string) bool {

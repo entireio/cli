@@ -173,7 +173,7 @@ func (o *userOverlay) repoPreferences(ctx context.Context, worktreeRoot string) 
 
 	var matched []*UserPreferences
 	for _, name := range names {
-		if !repoKeyMatches(name, originKeys, worktreeRoot) {
+		if !repoKeyMatches(ctx, name, originKeys, worktreeRoot) {
 			continue
 		}
 		prefs, err := decodeUserPreferences(o.repos[name])
@@ -243,9 +243,9 @@ func originKeysCached(ctx context.Context, worktreeRoot string) ([]string, bool,
 // repoKeyMatches decides whether one `repos` key names this worktree. A key
 // that reads as a filesystem path is compared as a path; anything else is an
 // origin key, compared case-folded because normalization lower-cases.
-func repoKeyMatches(key string, originKeys []string, worktreeRoot string) bool {
+func repoKeyMatches(ctx context.Context, key string, originKeys []string, worktreeRoot string) bool {
 	if isPathKey(key) {
-		return usersettings.PathIsRoot(key, worktreeRoot)
+		return usersettings.PathNamesThisClone(ctx, key, worktreeRoot)
 	}
 	return slices.Contains(originKeys, strings.ToLower(strings.TrimSpace(key)))
 }

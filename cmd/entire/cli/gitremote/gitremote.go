@@ -419,17 +419,23 @@ const gitNoSuchRemoteExitCode = 2
 // whether a per-repository configuration entry applies needs them apart — an
 // unreadable config must not read as "this repository has no origin" and
 // silently drop the entry.
-func GetRemoteURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls []string, found bool, err error) {
-	return remoteURLsIfSet(ctx, dir, remoteName, false)
+// env, when non-nil, replaces the child's environment. Pass
+// gitrepo.EnvWithoutRepoOverrides() when dir names the target and the caller
+// can run inside a git hook: git exports GIT_DIR and GIT_WORK_TREE to its
+// hooks and they OUTRANK cmd.Dir, so an unscrubbed child reads the hook's
+// repository instead of the one named here — which for a per-repository
+// settings lookup means applying another repository's configuration.
+func GetRemoteURLsInDirIfSet(ctx context.Context, dir string, env []string, remoteName string) (urls []string, found bool, err error) {
+	return remoteURLsIfSet(ctx, dir, env, remoteName, false)
 }
 
 // GetRemotePushURLsInDirIfSet is GetRemoteURLsInDirIfSet for push URLs, which
 // are remote.<name>.pushurl when any is set and remote.<name>.url otherwise.
-func GetRemotePushURLsInDirIfSet(ctx context.Context, dir, remoteName string) (urls []string, found bool, err error) {
-	return remoteURLsIfSet(ctx, dir, remoteName, true)
+func GetRemotePushURLsInDirIfSet(ctx context.Context, dir string, env []string, remoteName string) (urls []string, found bool, err error) {
+	return remoteURLsIfSet(ctx, dir, env, remoteName, true)
 }
 
-func remoteURLsIfSet(ctx context.Context, dir, remoteName string, push bool) (urls []string, found bool, err error) {
+func remoteURLsIfSet(ctx context.Context, dir string, env []string, remoteName string, push bool) (urls []string, found bool, err error) {
 	args := []string{"remote", "get-url", "--all"}
 	if push {
 		args = append(args, "--push")
@@ -439,6 +445,9 @@ func remoteURLsIfSet(ctx context.Context, dir, remoteName string, push bool) (ur
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
 	}
 	output, err := cmd.Output()
 	if err != nil {
