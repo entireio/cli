@@ -10,15 +10,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
-// TestSessionStore_IdleLiveSessionSurvivesAnotherWorktreesCommitHook covers
-// the shared-store deletion that re-initialises live sessions. A session whose
-// last turn changed no files has no shadow branch and no last checkpoint — the
-// normal shape of a read-only turn, and of any session right after a linked
-// commit. Every process that lists the shared store used to treat that shape
-// as an orphan and delete it, so a commit hook in ANOTHER worktree wiped the
-// session between two of its turns; the next turn-start rebuilt it from zero
-// and a commit in the gap found no session at all. An idle session whose
-// agent is still alive must survive other worktrees' hooks.
+// A session whose last turn changed no files has no shadow branch and no last
+// checkpoint. Every store listing used to delete that shape as an orphan, so a
+// commit hook in another worktree wiped a live session between turns. An idle
+// session whose agent is alive must survive.
 func TestSessionStore_IdleLiveSessionSurvivesAnotherWorktreesCommitHook(t *testing.T) {
 	t.Parallel()
 	parent := NewRepoWithCommit(t)

@@ -39,42 +39,21 @@ func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context,
 	return linking.sessions, err
 }
 
-// commitLinkingSet is findSessionsForCommitLinking's result with its provenance
-// kept: which session, if any, process ancestry identified. Only that session
-// may be re-homed by the commit (rehomeSessionAfterOwnCommit) — a session that
-// merely fell into the linking set through the single-worktree path fallback
-// carries no evidence about where its agent works.
+// commitLinkingSet is findSessionsForCommitLinking's result with provenance:
+// which session process ancestry identified, and the full listing it came from.
 type commitLinkingSet struct {
-	sessions []*SessionState
-	// ancestryGuest is the ID of the session whose recorded owner process is
-	// an ancestor of this commit hook, or "" when ancestry named nothing.
-	ancestryGuest string
-	// all is the store listing the set was derived from, kept so PostCommit
-	// can add the sessions a trailer's reservation names without a second
-	// listing (sessionsIncludingReservedFor).
-	all []*SessionState
+	sessions      []*SessionState
+	ancestryGuest string          // session whose owner is an ancestor of this hook, or ""
+	all           []*SessionState // the listing, for sessionsIncludingReservedFor
 }
 
-// sessionsIncludingReservedFor returns the linking set plus every session
-// whose pending condensation is checkpointID — the reservation
-// prepare-commit-msg made when it stamped that trailer
-// (reserveCheckpointForStampedSessions). Worktree paths and process ancestry
-// are re-derived by each hook and either can differ between the prepare and
-// post-commit hooks: the committing process's ancestry can change, a session
-// can be re-homed in between, a path fallback can be ambiguous on the second
-// look. The trailer is the one identity the commit itself carries, so a
-// session neither signal can place is still condensed into the checkpoint the
-// commit names instead of leaving a trailer nobody wrote.
-//
-// Adopted-away tombstones are excluded on purpose. `session adopt` retires the
-// source record as ENDED and fully condensed (retireAdoptedSourceSession) and
-// clears the reservation on the live copy it creates (buildAdoptedSessionState),
-// so a tombstone's stale reservation must not condense stale state; PostCommit
-// skips fully-condensed ENDED sessions regardless. The residual gap — a trailer
-// stamped by prepare-commit-msg, then an adopt run between it and post-commit —
-// spans one `git commit` and needs a user command inside it; the commit is
-// then logged as an unclaimed trailer (logUnclaimedCheckpointTrailer) and
-// `entire session attach` links it after the fact.
+// sessionsIncludingReservedFor adds every session whose pending condensation
+// is checkpointID — the reservation prepare-commit-msg made when it stamped
+// the trailer. Paths and ancestry are re-derived per hook and can differ
+// between prepare-commit-msg and post-commit; the trailer is the identity the
+// commit itself carries. Adopted-away tombstones are skipped: adoption retires
+// them ENDED and fully condensed and clears the live copy's reservation, so a
+// stale reservation must not condense stale state.
 func (l commitLinkingSet) sessionsIncludingReservedFor(checkpointID id.CheckpointID) []*SessionState {
 	sessions := l.sessions
 	if checkpointID == id.EmptyCheckpointID {
@@ -112,18 +91,12 @@ func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktre
 	return commitLinkingSet{sessions: sessions, ancestryGuest: ancestryGuest, all: allStates}, nil
 }
 
-// announceUnlinkedCommit tells the committing user that this commit links to
-// no session and names the candidates, so they can pick one afterwards.
-//
-// Two things made the previous hint useless in practice. It went to stderr
-// only, and the git hook wrapper Entire installs discards the hook's stderr
-// (`2>/dev/null`), so nobody committing in a real install ever saw it; the
-// prompt in askConfirmTTY writes to the controlling terminal for exactly that
-// reason, and so does this. And it recommended `entire session adopt`, which
-// moves a live session out of the worktree its agent is still working in;
-// the remedy for a commit made elsewhere is `entire session attach`, which
-// links this commit to the chosen session without moving anything. stderr is
-// still written for callers that are not behind the wrapper and for tests.
+// announceUnlinkedCommit names the candidate sessions so the user can link the
+// commit afterwards. It writes to the controlling terminal because the
+// installed hook wrappers discard hook stderr (the old hint was never seen),
+// and to stderr for callers outside the wrapper and for tests. The remedy is
+// `session attach`; `session adopt` would move a live session out of its
+// agent's worktree.
 func announceUnlinkedCommit(candidates []*SessionState) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[entire] Commit not linked to an agent session: %d sessions in other worktrees could match it, and this worktree has none of its own.\n", len(candidates))
@@ -150,31 +123,17 @@ func announceUnlinkedCommit(candidates []*SessionState) {
 }
 
 // rehomeSessionAfterOwnCommit moves a session to the worktree its own agent
-// just committed in, and reports whether it did.
+// just committed in. A session is homed where its first turn-start hook ran,
+// and hooks run where the agent was launched, so an agent started in the main
+// checkout that then works in a worktree stayed parent-homed while every
+// commit landed elsewhere. A commit whose process descends from the agent is
+// the best evidence of where it works, so the home follows it.
 //
-// A session is homed where its first turn-start hook ran, and agent hooks run
-// where the agent was launched. An agent launched in the main checkout that
-// then works in a worktree (created during the session, entered with the
-// agent's worktree tool or a plain cd) therefore stays homed in the parent
-// while every edit and commit lands elsewhere: each commit there depends on
-// the ancestry rescue, a commit from any other process falls into the
-// multi-worktree refusal, and the parent-homed state — with no shadow branch
-// of its own — is what the orphan cleanup deletes. A commit whose process
-// descends from the session's agent is the strongest evidence available of
-// where that agent actually works, so the home follows it.
-//
-// The move happens only when nothing at the old home would be orphaned: no
-// tracked files, no shadow-branch steps, no task records. A session that does
-// hold pending content at its home genuinely works in two trees; it stays
-// guest-linked exactly as before and keeps its home. Worktree-coupled state
-// is re-derived together so WorktreePath and WorktreeID never disagree — the
-// misalignment reconcileWorktreePathForResumedTurn refuses to risk.
-//
-// Only the session process ancestry named (ancestryGuest) qualifies, and only
-// once this commit condensed it: a session that reached the linking set
-// through the single-worktree path fallback carries no evidence about where
-// its agent works, and a session this commit declined to condense keeps its
-// pending window where it was.
+// Only the ancestry-identified session qualifies (a path-fallback match says
+// nothing about where the agent works), only once this commit condensed it,
+// and only when the old home holds nothing pending: tracked files, shadow
+// steps or task records mean the agent works in two trees, and it stays
+// guest-linked. WorktreePath and WorktreeID move together.
 func (s *ManualCommitStrategy) rehomeSessionAfterOwnCommit(ctx context.Context, repo *git.Repository, state *SessionState, worktreePath, newHead string, condensed bool, ancestryGuest string) bool {
 	if !condensed || ancestryGuest == "" || state.SessionID != ancestryGuest {
 		return false
@@ -205,9 +164,7 @@ func (s *ManualCommitStrategy) rehomeSessionAfterOwnCommit(ctx context.Context, 
 	state.WorktreeID = worktreeID
 	state.BaseCommit = newHead
 	state.RealignAttributionBase(newHead)
-	// The untracked-at-start baseline described the old tree; re-read it here
-	// so files that already existed untracked in the new tree are not later
-	// credited to the session. Best-effort, as at session initialization.
+	// Re-baseline untracked files against the new tree (best-effort).
 	if untracked, untrackedErr := collectUntrackedFiles(ctx); untrackedErr == nil {
 		state.UntrackedFilesAtStart = untracked
 	}

@@ -330,13 +330,9 @@ func isGitSequenceOperation(ctx context.Context) bool {
 // The source parameter indicates how the commit was initiated:
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
-//   - "merge": skip trailer entirely (auto-generated message; the merged
-//     commits keep their own trailers)
-//   - "squash": git seeds the message from SQUASH_MSG, trailers included, so
-//     nothing is stamped. A squash committed with -m reports "message"
-//     instead, which is why inheritSquashedCheckpointTrailers runs before the
-//     source switch: a squash's provenance is the squashed commits, whatever
-//     the message flag.
+//   - "merge": skip trailer entirely (the merged commits keep their own)
+//   - "squash": skip; git seeded the message from SQUASH_MSG, trailers included.
+//     A squash committed with -m reports "message" — see inheritSquashedCheckpointTrailers.
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -353,8 +349,6 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
-	// A squash in progress links to the commits being squashed, never to a
-	// session matched here — see inheritSquashedCheckpointTrailers.
 	if s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source) {
 		return nil
 	}
@@ -551,31 +545,20 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	return nil
 }
 
-// inheritSquashedCheckpointTrailers handles a commit made while a squash is in
-// progress (`git merge --squash` leaves SQUASH_MSG in the per-worktree git
-// dir). Such a commit's content is the squashed commits' content, so its
-// checkpoint linkage is theirs: every Entire-Checkpoint trailer found in
-// SQUASH_MSG is carried into the message when missing, and no session is
-// matched. Reports whether a squash was in progress, in which case the caller
-// is done.
-//
-// This exists because git only reports source "squash" when the user accepts
-// its seeded message, which already contains those trailers. A squash
-// committed with -m or -F reports "message", and the hook used to run ordinary
-// session matching on it: in a checkout with sessions in several other
-// worktrees that refused, and where one live session was found it minted a
-// fresh, near-empty checkpoint for a commit that was not that session's work —
-// which is how integrating worktree work from the main checkout lost its link
-// to the checkpoints that actually describe it. Downstream readers already
-// accept several trailers on one commit (trailers.ParseAllCheckpoints).
+// inheritSquashedCheckpointTrailers handles a commit made while `git merge
+// --squash` is in progress (SQUASH_MSG in the per-worktree git dir): its
+// content is the squashed commits', so their Entire-Checkpoint trailers are
+// carried into the message when missing and no session is matched. Needed
+// because `commit -m` reports source "message", not "squash", and ordinary
+// matching then refused or minted an empty checkpoint. Reports whether a
+// squash was in progress.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	gitDir, err := GetGitDir(ctx)
 	if err != nil {
 		return false
 	}
-	// SQUASH_MSG lives in the PER-WORKTREE git dir, like the sequencer markers.
-	// The root is the shared registry handle (gitdir.OpenAt): never close it.
+	// Per-worktree git dir, like the sequencer markers; shared root, never closed.
 	root, err := gitdir.OpenAt(gitDir)
 	if err != nil {
 		return false
@@ -1036,8 +1019,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
-	// diverge (a dangling trailer). The provenance is kept because a session
-	// identified by ancestry outside its home is re-homed below.
+	// diverge (a dangling trailer).
 	linking, err := s.findCommitLinkingSet(ctx, worktreePath)
 	sessions := linking.sessionsIncludingReservedFor(checkpointID)
 	findSessionsSpan.RecordError(err)
@@ -2499,16 +2481,11 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	return nil
 }
 
-// reserveCheckpointForStampedSessions records the checkpoint ID just written
-// into the commit message as each stamped session's pending condensation, so
-// the trailer alone identifies the sessions it belongs to. PostCommit
-// re-derives its linking set from worktree paths and process ancestry, and
-// either can be gone by then (see commitLinkingSet.sessionsIncludingReservedFor);
-// without the reservation the commit named a checkpoint nobody wrote. A
-// session already holding a different reservation keeps it — that is an
-// interrupted condensation postCommitProcessSessionLocked protects, not ours
-// to overwrite — and checkpointIDForSessions already reuses a matching one.
-// Best-effort: a hook must not fail the commit over bookkeeping.
+// reserveCheckpointForStampedSessions records the stamped checkpoint ID as each
+// session's pending condensation so post-commit can resolve the session from
+// the trailer alone (commitLinkingSet.sessionsIncludingReservedFor). A
+// different existing reservation is an interrupted condensation and is kept.
+// Best-effort: bookkeeping must not fail the commit.
 func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
 	for _, stamped := range states {
 		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {

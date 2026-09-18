@@ -13,10 +13,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// squashFixture builds a repository whose feature branch carries one commit
-// with an Entire-Checkpoint trailer, then runs `git merge --squash` of that
-// branch in the main checkout so `.git/SQUASH_MSG` exists and the change is
-// staged. Returns the repo dir and the branch commit's checkpoint ID.
+// squashFixture: a feature branch commit carrying a trailer, squash-merged into
+// the main checkout so SQUASH_MSG exists and the change is staged.
 func squashFixture(t *testing.T) (string, string) {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -36,14 +34,9 @@ func squashFixture(t *testing.T) (string, string) {
 	return dir, branchCheckpoint
 }
 
-// TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers covers
-// `git merge --squash feature && git commit -m "…"`, the common way worktree
-// work is integrated from the main checkout. git reports source "message"
-// for that commit, not "squash", so the hook used to run ordinary session
-// matching: it either refused (several live worktrees) or minted a fresh,
-// near-empty checkpoint for whatever session it could find. The squash's
-// provenance is the squashed commits, so their trailers are carried over from
-// SQUASH_MSG and no session is matched.
+// `git merge --squash feature && git commit -m "…"` reports source "message",
+// so the hook used to run ordinary matching: refused, or a fresh checkpoint for
+// whatever session it found. The squashed commits' trailers must be inherited.
 func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
 	// A live session in this checkout must not be linked to the squash.
@@ -65,10 +58,8 @@ func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testi
 	require.Equal(t, 1, strings.Count(string(got), "Entire-Checkpoint:"), "no fresh checkpoint may be minted for a squash: %q", got)
 }
 
-// TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce covers
-// the editor flow, where git seeds the message from SQUASH_MSG (trailer
-// included) and reports source "squash": the trailer stays, and is not
-// duplicated.
+// Editor flow: git seeds the message from SQUASH_MSG (trailer included) and
+// reports "squash". The trailer stays and is not duplicated.
 func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
 	squashMsg, err := os.ReadFile(filepath.Join(dir, ".git", "SQUASH_MSG"))

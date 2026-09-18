@@ -171,22 +171,14 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	return states, nil
 }
 
-// isOrphanedSessionState reports whether a state whose shadow branch is
-// missing may be deleted from the shared store. ACTIVE sessions may not have
-// created their branch yet; a LastCheckpointID must be kept for checkpoint-ID
-// reuse on later commits; task records hold condensable content that never
-// lives on the shadow branch.
-//
-// An IDLE session with none of those is the normal shape of a LIVE session
-// between turns: a read-only turn, or the turn right after a linked commit
-// (the commit removed the branch and turn-start cleared LastCheckpointID).
-// The store is shared by every worktree of the clone, so every commit hook
-// and turn-start anywhere in it used to delete such sessions, and the next
-// turn-start rebuilt them from zero — losing the transcript window, the
-// owner, and the home. An IDLE session is therefore an orphan only once its
-// owner process is known to have exited; one with no recorded owner ages out
-// through the stale threshold instead. ENDED and legacy (empty-phase)
-// sessions keep the old rule.
+// isOrphanedSessionState reports whether a state whose shadow branch is missing
+// may be deleted. ACTIVE sessions may not have created it yet, a
+// LastCheckpointID is kept for reuse, and task records hold content off the
+// branch. An IDLE state with none of those is a live session between turns (a
+// read-only turn, or the turn after a linked commit), and the store is listed
+// by every worktree's hooks, so deleting it re-initialised live sessions: it is
+// an orphan only once its owner is known to have exited. ENDED and legacy
+// states keep the old rule; owner-less ones age out through the stale threshold.
 func isOrphanedSessionState(state *SessionState) bool {
 	if state.Phase.IsActive() || !state.LastCheckpointID.IsEmpty() || state.HasTaskContent() {
 		return false

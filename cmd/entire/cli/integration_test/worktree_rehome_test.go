@@ -13,14 +13,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// TestCommitLinking_AgentCommitInForeignWorktreeReHomesSession covers the
-// launch-in-parent, work-in-worktree shape. The agent's first turn-start ran in
-// the main checkout, so the session is homed there; the worktree it then works
-// in is created during the session, and every edit and commit lands there.
-// Process ancestry links the agent's own commit (guest-linked, as before). After
-// that commit the session must follow its agent: it is re-homed to the worktree
-// it committed in, so a later commit there that does NOT descend from the agent
-// process finds the session by exact worktree match instead of falling into
+// The agent's first turn-start ran in the main checkout, so the session is
+// homed there; it then works and commits in a worktree. Its own commit links by
+// ancestry and re-homes the session, so a later commit there from a process
+// that does not descend from the agent links by exact match instead of hitting
 // the multi-worktree ambiguity refusal.
 func TestCommitLinking_AgentCommitInForeignWorktreeReHomesSession(t *testing.T) {
 	t.Parallel()
@@ -65,10 +61,8 @@ func TestCommitLinking_AgentCommitInForeignWorktreeReHomesSession(t *testing.T) 
 		"after re-homing, the worktree's own commits link by exact match")
 }
 
-// worktreeEnv adds a linked worktree to parent's repository and returns a
-// TestEnv whose hooks, commits and files all target that worktree. Entire is
-// initialised there because `.entire/` is gitignored and so absent from a fresh
-// checkout.
+// worktreeEnv adds a linked worktree and returns a TestEnv targeting it. Entire
+// is initialised there because `.entire/` is gitignored.
 func worktreeEnv(t *testing.T, parent *TestEnv, name string) *TestEnv {
 	t.Helper()
 	base := t.TempDir()
@@ -83,10 +77,8 @@ func worktreeEnv(t *testing.T, parent *TestEnv, name string) *TestEnv {
 	return &env
 }
 
-// disownSession records an owner process that is not in this test's ancestry,
-// so commits made by the test are no longer attributable to the session by
-// process identity: the shape of a human at a terminal, or a script, committing
-// in the session's worktree.
+// disownSession records an owner outside this test's ancestry, so the test's
+// commits are no longer attributable to the session by process identity.
 func disownSession(t *testing.T, env *TestEnv, sessionID string) {
 	t.Helper()
 	state, err := env.GetSessionState(sessionID)
