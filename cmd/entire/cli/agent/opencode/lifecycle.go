@@ -49,6 +49,7 @@ const (
 	HookNameSessionStart = "session-start"
 	HookNameSessionEnd   = "session-end"
 	HookNameTurnStart    = "turn-start"
+	HookNamePromptUpdate = "prompt-update"
 	HookNameTurnEnd      = "turn-end"
 	HookNameCompaction   = "compaction"
 )
@@ -59,6 +60,7 @@ func (a *OpenCodeAgent) HookNames() []string {
 		HookNameSessionStart,
 		HookNameSessionEnd,
 		HookNameTurnStart,
+		HookNamePromptUpdate,
 		HookNameTurnEnd,
 		HookNameCompaction,
 	}
@@ -94,6 +96,18 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 			Prompt:     raw.Prompt,
 			Model:      raw.Model,
 			Timestamp:  time.Now(),
+		}, nil
+
+	case HookNamePromptUpdate:
+		raw, err := agent.ReadAndParseHookInput[promptUpdateRaw](stdin)
+		if err != nil {
+			return nil, err
+		}
+		return &agent.Event{
+			Type:      agent.PromptUpdate,
+			SessionID: raw.SessionID,
+			Prompt:    raw.Prompt,
+			Timestamp: time.Now(),
 		}, nil
 
 	case HookNameTurnEnd:
