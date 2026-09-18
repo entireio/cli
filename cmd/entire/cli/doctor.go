@@ -36,6 +36,7 @@ import (
 
 func newDoctorCmd() *cobra.Command {
 	var forceFlag bool
+	var releaseFlag string
 
 	cmd := &cobra.Command{
 		Use:   "doctor",
@@ -69,7 +70,17 @@ Checks performed:
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 
-  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  6. Unattributed authors: commits here under a reserved-host address that is
+     yours (e.g. you@Your-Laptop.local, synthesized when user.email was unset)
+     which Entire could not link to an account. Offered for linking when
+     logged in and interactive. This check never uses --force: linking is a
+     one-way attribution write and needs your confirmation; without a
+     terminal it only reports.
+
+     --release <address> undoes a link made by this check (account-wide);
+     commits already linked stay linked.
+
+  7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -104,11 +115,26 @@ points at --force instead of prompting.`,
 			return strategy.EnsureRedactionConfigured(cmd.Context())
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// PersistentPreRunE/PreRunE above still run before this
+			// short-circuit (broken-.entire-dir report, redaction config load) —
+			// benign and deliberate: --release is itself a doctor invocation and
+			// should see the same environment checks as the normal scan.
+			//
+			// Gated on Changed, not releaseFlag != "": an explicit
+			// `--release ""` must still short-circuit into runReleaseAlias so it
+			// is refused with the reserved-host message, rather than silently
+			// falling through to the unrelated normal scan.
+			if cmd.Flags().Changed("release") {
+				cmd.SilenceUsage = true
+				return runReleaseAlias(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), releaseFlag, defaultReleaseDeps())
+			}
 			return runSessionsFix(cmd, forceFlag)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Auto-fix all issues without prompting")
+	cmd.Flags().StringVar(&releaseFlag, "release", "", "Unlink a reserved-host author address from your account (account-wide); commits already linked stay linked")
+	cmd.MarkFlagsMutuallyExclusive("release", "force")
 
 	// Diagnostic subcommands.
 	cmd.AddCommand(newTraceCmd())
@@ -178,6 +204,12 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// A configured summary provider that cannot generate text. After the hook
 	// checks: it breaks three commands, not capture, so it is the milder fault.
 	checkSummaryProvider(cmd)
+
+	// COR-1289: commits here under a reserved-host address that is the
+	// user's, which Entire could not link to an account. Never uses --force
+	// (linking is a one-way attribution write) and has no error return of its
+	// own — see checkUnattributedAuthors's doc comment.
+	checkUnattributedAuthors(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
