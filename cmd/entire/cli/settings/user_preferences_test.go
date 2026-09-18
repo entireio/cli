@@ -290,3 +290,54 @@ func TestUserTier_ProjectFileInstructionsAreStillDropped(t *testing.T) {
 		"a task from the committed file must still be dropped")
 	require.NotEmpty(t, s.AgentPromptRejections())
 }
+
+// The hook gate, asked from a real LINKED worktree of a repository configured
+// only through the user settings file.
+//
+// This is the failure the tier exists to fix, at the level that decides it.
+// Git hooks live in the git common dir and fire in every worktree; both
+// .entire files live in the worktree and `git worktree add` copies neither, so
+// before this tier IsSetUpAndEnabled answered false there and every hook was a
+// silent no-op that dropped all capture.
+//
+// Asserting on `entire status` output is not enough — an earlier check did
+// exactly that and passed while nothing was being captured, because a commit
+// with no agent session legitimately produces no checkpoint. IsSetUpAndEnabled
+// is what every hook actually consults.
+func TestIsSetUpAndEnabled_TrueFromALinkedWorktreeConfiguredOnlyByTheUserTier(t *testing.T) {
+	main := t.TempDir()
+	testutil.InitRepo(t, main)
+	testutil.RunGit(t, main, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	require.NoError(t, os.WriteFile(filepath.Join(main, "f.txt"), []byte("x"), 0o644))
+	testutil.RunGit(t, main, "add", ".")
+	testutil.RunGit(t, main, "commit", "-m", "init")
+
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, main, "worktree", "add", "-b", "linked-work", linked)
+
+	configDir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, configDir)
+	t.Cleanup(ClearOriginKeyCache)
+	t.Chdir(linked)
+
+	require.NoDirExists(t, filepath.Join(linked, ".entire"),
+		"the premise: a linked worktree carries neither settings file")
+
+	assert.False(t, IsSetUpAndEnabled(t.Context()),
+		"sanity: nothing configures this repository yet")
+
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName),
+		[]byte(`{"repos":{"github.com/acme/widgets":{"enabled":true}}}`), 0o600))
+	ClearOriginKeyCache()
+
+	assert.True(t, IsSetUpAndEnabled(t.Context()),
+		"hooks firing in this worktree must not be silent no-ops")
+
+	// And an explicit disable in the user file must still switch it off, or
+	// the pointer shape on Enabled is buying nothing.
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName),
+		[]byte(`{"repos":{"github.com/acme/widgets":{"enabled":false}}}`), 0o600))
+	ClearOriginKeyCache()
+	assert.False(t, IsSetUpAndEnabled(t.Context()),
+		"an explicit false must be honoured, not read as absent")
+}
