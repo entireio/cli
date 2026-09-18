@@ -334,7 +334,7 @@ func TestUnattributedAuthorsCheck_DeclareOwnedByOther(t *testing.T) {
 	}
 	runUnattributedAuthorsCheck(context.Background(), &out, o, rec.deps())
 
-	if !strings.Contains(out.String(), "  me@h.local is already linked to another account.\n") {
+	if !strings.Contains(out.String(), "  me@h.local is already linked to another account. If it is yours, ask them to run `entire doctor --release me@h.local`.\n") {
 		t.Errorf("output missing conflict line:\n%s", out.String())
 	}
 	if rec.invalidateCalls != 0 {
@@ -418,7 +418,7 @@ func TestUnattributedAuthorsCheck_ConflictContinuesToNext(t *testing.T) {
 	if invalidateCalls != 1 {
 		t.Errorf("expected exactly one invalidate call (only the second author linked), got %d", invalidateCalls)
 	}
-	if !strings.Contains(out.String(), "  a@h.local is already linked to another account.\n") {
+	if !strings.Contains(out.String(), "  a@h.local is already linked to another account. If it is yours, ask them to run `entire doctor --release a@h.local`.\n") {
 		t.Errorf("output missing conflict line for the first author:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "  ✓ Fixed: linked 2 commits by b@h.local to you@entire.io\n") {

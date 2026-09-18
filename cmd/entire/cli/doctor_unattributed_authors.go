@@ -115,7 +115,7 @@ func runUnattributedAuthorsCheck(ctx context.Context, w io.Writer, out detection
 			fmt.Fprintln(w, "  Linking isn't available on this Entire yet.")
 			return // every further declare would fail the same way
 		case aliasErrConflict:
-			fmt.Fprintf(w, "  %s is already linked to another account.\n", a.Email)
+			fmt.Fprintf(w, "  %s is already linked to another account. If it is yours, ask them to run `entire doctor --release %s`.\n", a.Email, a.Email)
 		case aliasErrNotFound, aliasErrOther: // typed 404 cannot happen on declare; rendered the same if it did
 			fmt.Fprintf(w, "  Could not link %s: %s\n", a.Email, apiErrText(err))
 		}
