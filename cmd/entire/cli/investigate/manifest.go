@@ -14,7 +14,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 const manifestsSubdirName = "manifests"
@@ -97,12 +96,11 @@ type LocalManifestStore struct {
 }
 
 // NewLocalManifestStore creates a LocalManifestStore rooted at
-// <git-common-dir>/entire-investigations/manifests. Resolves the common dir
-// via session.GetGitCommonDir, so this requires a git repository context.
+// <git-common-dir>/entire-investigations/manifests in the current repository.
 func NewLocalManifestStore(ctx context.Context) (*LocalManifestStore, error) {
-	commonDir, err := session.GetGitCommonDir(ctx)
+	commonDir, err := currentCommonDir(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get git common dir: %w", err)
+		return nil, err
 	}
 	return &LocalManifestStore{
 		dir:     filepath.Join(commonDir, InvestigationsDirName, manifestsSubdirName),

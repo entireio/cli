@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // Register Claude Code agent for transcript analysis
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 
@@ -50,7 +51,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	// path in its transcript, so we must too.
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	require.NoError(t, err)
 
 	// Create a transcript file that references the file by absolute path
@@ -76,7 +77,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 		SessionID:                 "test-abs-path-normalize",
 		BaseCommit:                head.Hash().String(),
 		WorktreePath:              worktreePath,
-		WorktreeID:                worktreeID,
+		WorktreeID:                worktreeMetadata.WorktreeID,
 		StartedAt:                 now,
 		Phase:                     session.PhaseActive,
 		LastInteractionTime:       &now,
@@ -147,7 +148,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 	// path in its transcript, so we must too.
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	require.NoError(t, err)
 
 	// Create a main transcript that ONLY has a Task tool call — no direct Write/Edit.
@@ -188,7 +189,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 		SessionID:                 modelSessionID,
 		BaseCommit:                head.Hash().String(),
 		WorktreePath:              worktreePath,
-		WorktreeID:                worktreeID,
+		WorktreeID:                worktreeMetadata.WorktreeID,
 		StartedAt:                 now,
 		Phase:                     session.PhaseActive,
 		LastInteractionTime:       &now,

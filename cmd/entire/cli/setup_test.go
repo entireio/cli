@@ -26,7 +26,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -44,7 +43,7 @@ func setupTestDir(t *testing.T) string {
 	hideExternalAgentsFromPath(t)
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
+
 	return tmpDir
 }
 
@@ -798,7 +797,7 @@ func setupCodexAgentWithUnresolvedDiscovery(t *testing.T) (agent.Agent, string) 
 	runGit(primaryRoot, "worktree", "add", "-b", "feature", linkedRoot)
 	t.Chdir(linkedRoot)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
+
 	// Codex discovery refuses a project layer that is also CODEX_HOME, while
 	// current-worktree installation remains independently valid.
 	if err := os.MkdirAll(filepath.Join(primaryRoot, ".codex"), 0o750); err != nil {
@@ -3374,7 +3373,6 @@ func TestRunUninstall_CodexLinkedWorktreeDoesNotRemovePrimaryHooks(t *testing.T)
 	}
 	t.Chdir(linkedRoot)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 
 	ag, err := agent.Get(agent.AgentNameCodex)
 	if err != nil {
@@ -3420,7 +3418,6 @@ func TestUninstallDeselectedAgentHooks_CodexIgnoresPrimaryOnlyHooks(t *testing.T
 	}
 	t.Chdir(linkedRoot)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 
 	ag, err := agent.Get(agent.AgentNameCodex)
 	if err != nil {
@@ -3588,7 +3585,7 @@ func setupCodexRepositoryWithLinkedWorktree(t *testing.T) {
 
 	t.Chdir(repoRoot)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
+
 	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
 
 	ag, err := agent.Get(agent.AgentNameCodex)
@@ -3758,7 +3755,6 @@ func TestManageAgents_DeselectIgnoresPrimaryOnlyCodexHooks(t *testing.T) {
 	}
 	t.Chdir(linkedRoot)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 
 	ag, err := agent.Get(agent.AgentNameCodex)
 	if err != nil {
