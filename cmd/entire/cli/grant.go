@@ -46,6 +46,32 @@ type grantTarget[Row any] struct {
 	// the target has none (org), so a ULID grantee falls through to
 	// resolveGranteeProvider and is refused with the handle form named.
 	revokeByID func(ctx context.Context, c *coreapi.Client, id, granteeID string) error
+
+	// unwritableRef reports a ref that names something this target's `add` and
+	// `remove` cannot write — the repo target's GitHub mirrors, whose access is
+	// the upstream repository's. Checked before required flags are validated or
+	// anything is dialed, so the answer is about the repo the user named rather
+	// than a missing --role they would then supply for nothing. nil where every
+	// ref a target parses is writable (org, project).
+	unwritableRef func(ref string) error
+
+	// listBranch is the second reading `list` gives a target ref, for a target
+	// whose refs do not all name the same thing: a repo is an Entire repository
+	// or a GitHub mirror, and only the first has grants. nil for org and
+	// project, which have one kind of target each.
+	listBranch *grantListBranch
+}
+
+// grantListBranch is the second answer a `list` leaf can give: claims reports
+// which refs it answers for, leaving every other ref to the target's own
+// resolver, and list answers one of them. long and example become the leaf's
+// help, because a leaf taking two kinds of ref is the only one with more to say
+// than its Short.
+type grantListBranch struct {
+	long    string
+	example string
+	claims  func(ref string) bool
+	list    func(cmd *cobra.Command, ref string) error
 }
 
 func newOrgGrantCmd() *cobra.Command     { return newGrantSubtreeCmd(orgGrantTarget) }
@@ -78,6 +104,7 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Long:    fmt.Sprintf("Grant a user (addressed as provider:handle, e.g. github:alice) %s access. The %s is addressed by %s.", t.noun, t.noun, t.refUsage),
 		Example: example,
 		Args:    cobra.ExactArgs(2),
+		PreRunE: refuseUnwritableRef(t),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// A role the user typed is always checked, an explicit `--role=`
 			// included: markRequired asks only whether the flag was given, and
@@ -121,6 +148,9 @@ func newGrantListCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Short: fmt.Sprintf("List who has %s access", t.noun),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if t.listBranch != nil && t.listBranch.claims(args[0]) {
+				return t.listBranch.list(cmd, args[0])
+			}
 			return runCoreList(cmd, "No grants found.", t.columns, t.row, func(ctx context.Context, c *coreapi.Client) ([]Row, error) {
 				id, err := t.resolve(ctx, c, args[0])
 				if err != nil {
@@ -137,6 +167,9 @@ func newGrantListCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		},
 	}
 	addJSONFlag(cmd)
+	if t.listBranch != nil {
+		cmd.Long, cmd.Example = t.listBranch.long, t.listBranch.example
+	}
 	return cmd
 }
 
@@ -151,6 +184,7 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Long:    fmt.Sprintf("Revoke a grantee's %s access. The %s is addressed by %s; the grantee is %s.", t.noun, t.noun, t.refUsage, grantee),
 		Example: fmt.Sprintf("  entire %s grant remove %s github:alice", t.noun, t.exampleRef),
 		Args:    cobra.ExactArgs(2),
+		PreRunE: refuseUnwritableRef(t),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				id, err := t.resolve(ctx, c, args[0])
@@ -172,6 +206,25 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 				})
 			})
 		},
+	}
+}
+
+// refuseUnwritableRef is the write verbs' first question: does this ref name
+// something the target can write at all? Cobra runs PreRunE before it validates
+// required flags, which is the point — `repo grant add /gh/acme/widget alice`
+// is answered with what is wrong (a mirror's access lives on GitHub) rather
+// than sending the user to add a --role that changes nothing. nil for a target
+// with no such ref, which leaves the hook off the command entirely.
+func refuseUnwritableRef[Row any](t grantTarget[Row]) func(*cobra.Command, []string) error {
+	if t.unwritableRef == nil {
+		return nil
+	}
+	return func(cmd *cobra.Command, args []string) error {
+		if err := t.unwritableRef(args[0]); err != nil {
+			cmd.SilenceUsage = true
+			return err
+		}
+		return nil
 	}
 }
 
@@ -210,8 +263,8 @@ func revokeGrant(cmd *cobra.Command, subject string, revoke func() error) error 
 // so they add SOURCE and TYPE. No table prints an internal id: the grantee
 // ULID is in the --json output for anyone who needs it.
 var (
-	orgMemberColumns = []string{"GRANTEE", colHeaderRole, colHeaderStatus}
-	grantColumns     = []string{"GRANTEE", colHeaderRole, "SOURCE", "TYPE"}
+	orgMemberColumns = []string{colHeaderGrantee, colHeaderRole, colHeaderStatus}
+	grantColumns     = []string{colHeaderGrantee, colHeaderRole, "SOURCE", "TYPE"}
 )
 
 func orgMemberRow(m coreapi.Membership) []string {
@@ -319,14 +372,18 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 }
 
 // repoGrantTarget is repo access: roles reader/writer/admin, required, on a
-// repo addressed by its /et/<project>/<repo> path and nothing else.
+// repo addressed by its /et/<project>/<repo> path and nothing else. `list`
+// alone also answers a GitHub mirror ref, from the upstream collaborators the
+// placement materializes — see mirrorGrantListing.
 var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
-	noun:       cmdRepo,
-	refUsage:   "its /" + nativeCloneForge + "/<project>/<repo> path",
-	exampleRef: "/" + nativeCloneForge + "/acme/web",
-	roles:      accessRoles,
-	columns:    grantColumns,
-	row:        repoGrantRow,
+	noun:          cmdRepo,
+	refUsage:      "its /" + nativeCloneForge + "/<project>/<repo> path",
+	exampleRef:    "/" + nativeCloneForge + "/acme/web",
+	roles:         accessRoles,
+	columns:       grantColumns,
+	row:           repoGrantRow,
+	listBranch:    mirrorGrantListing,
+	unwritableRef: mirrorGrantsAreUpstream,
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 		return resolveRepoPath(ctx, c, ref)
 	},

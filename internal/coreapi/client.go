@@ -44,14 +44,14 @@ func New() (*Client, error) {
 }
 
 // NewForCluster returns a *Client for a resource-provider control-plane command
-// whose subject is a mirror on clusterHost (mirror add/remove, repo access
-// list).
+// whose subject is a mirror on clusterHost (mirror add/remove, `repo grant
+// list` of a mirror ref).
 //
 // Unlike New — which dials the active context — the core is discovered from the
 // cluster's /.well-known/entire-cluster.json and the matching local context
 // supplies the bearer (see auth.ResolveControlPlaneTargetForCluster). This is
 // what lets a command act on a cluster fronted by a federation other than the
-// active login, e.g. running `repo access list … --cluster aws-us-east-2.entire.io`
+// active login, e.g. running `repo mirror add /gh/… --cluster aws-us-east-2.entire.io`
 // while the active context is a partial.to login: without it the active
 // context's core 400s with "unknown cluster_host" because it doesn't front the
 // cluster. ENTIRE_TOKEN is honoured identically to New.

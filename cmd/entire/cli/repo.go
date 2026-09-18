@@ -15,7 +15,7 @@ import (
 
 // newRepoCmd is the `entire repo` command group: control-plane
 // repository lifecycle (create, list within a project, view, edit, delete),
-// the `mirror`, `remote`, `access`, `visibility`, `protection` and `grant`
+// the `mirror`, `remote`, `visibility`, `protection` and `grant`
 // subtrees, plus the `clone` convenience that resolves a mirror and shells
 // out to `git clone`. Other git content operations (log, diff, …) remain
 // intentionally out of scope here.
@@ -33,7 +33,6 @@ func newRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoCloneCmd())
 	cmd.AddCommand(newRepoMirrorCmd())
 	cmd.AddCommand(newRepoRemoteCmd())
-	cmd.AddCommand(newRepoAccessCmd())
 	cmd.AddCommand(newRepoVisibilityCmd())
 	cmd.AddCommand(newRepoProtectionCmd())
 	cmd.AddCommand(newRepoGrantCmd())

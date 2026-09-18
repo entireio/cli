@@ -187,17 +187,16 @@ func runCoreListShaped[T any](cmd *cobra.Command, empty string, view listView[T]
 	return runCore(cmd, renderCoreListShaped(cmd, empty, view, fn))
 }
 
-// runCoreListForCluster is runCoreList for a resource-provider command (see
-// runCoreForCluster): identical table/JSON/empty-state rendering, but dialing
-// the core that fronts clusterHost rather than the active context.
-func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
-	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, empty, headers, row, fn))
+// runCoreListShapedForCluster is runCoreListShaped for a resource-provider
+// command (see runCoreForCluster): the same rendering decided after the fetch,
+// dialing the core that fronts clusterHost rather than the active context.
+func runCoreListShapedForCluster[T any](cmd *cobra.Command, clusterHost, empty string, view listView[T], fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreListShaped(cmd, empty, view, fn))
 }
 
-// renderCoreList builds the run-function shared by runCoreList and
-// runCoreListForCluster for a table with fixed columns. Kept separate from the
-// client-selection so the two list variants differ only in which core they
-// dial.
+// renderCoreList builds the run-function runCoreList uses for a table with
+// fixed columns. Kept separate from the client-selection so a list variant
+// differs from another only in which core it dials.
 func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
 	view := listView[T]{table: func([]T) ([]string, func(T) []string) { return headers, row }}
 	return renderCoreListShaped(cmd, empty, view, fn)
@@ -244,6 +243,13 @@ func renderCoreListShaped[T any](cmd *cobra.Command, empty string, view listView
 // is left untouched, so the server value always wins, and an empty synth
 // result adds nothing rather than a half-formed placeholder.
 func mergeSynthesizedField(v any, field string, synth func() string) (map[string]json.RawMessage, error) {
+	return mergeSynthesizedFields(v, map[string]func() string{field: synth})
+}
+
+// mergeSynthesizedFields is mergeSynthesizedField for more than one field —
+// same round-trip, same additive-only rules, one encode of v instead of one per
+// field. Keys are independent, so the map's iteration order cannot matter.
+func mergeSynthesizedFields(v any, fields map[string]func() string) (map[string]json.RawMessage, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("encode %T: %w", v, err)
@@ -252,18 +258,20 @@ func mergeSynthesizedField(v any, field string, synth func() string) (map[string
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, fmt.Errorf("decode %T: %w", v, err)
 	}
-	if _, ok := obj[field]; ok {
-		return obj, nil
+	for field, synth := range fields {
+		if _, ok := obj[field]; ok {
+			continue
+		}
+		value := synth()
+		if value == "" {
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("encode %s: %w", field, err)
+		}
+		obj[field] = encoded
 	}
-	value := synth()
-	if value == "" {
-		return obj, nil
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return nil, fmt.Errorf("encode %s: %w", field, err)
-	}
-	obj[field] = encoded
 	return obj, nil
 }
 
@@ -647,7 +655,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 }
 
 // runCoreForCluster is runCore for resource-provider commands addressed at a
-// specific cluster (mirror add/remove, access list):
+// specific cluster (mirror add/remove, `repo grant list` of a mirror ref):
 // it dials the core that fronts clusterHost — discovered from the cluster's
 // /.well-known/entire-cluster.json, authenticating with the matching local
 // context — instead of the active context. So the command works on a cluster in
