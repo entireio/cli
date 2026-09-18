@@ -245,3 +245,48 @@ func TestIsSetUpAny_IgnoresAUserEntryForAnotherRepo(t *testing.T) {
 	assert.False(t, IsSetUpAny(t.Context()),
 		"an entry naming a different origin must not activate this repository")
 }
+
+// Instruction fields set in the user settings file must survive the agent
+// prompt gate. That gate drops any field it cannot attribute to a
+// developer-owned layer, and it knew about two: a verified settings.local.json
+// and clone preferences. The user file is developer-owned by a stronger
+// argument than either — a repository cannot deliver content to ~/.config —
+// but an unrecognised source is indistinguishable from an untrusted one, so
+// these were dropped with a reason naming two files the developer never used.
+func TestUserTier_InstructionFieldsSurviveTheAgentPromptGate(t *testing.T) {
+	_, project, local := newUserTierRepo(t)
+	writeUserSettings(t, `{
+	  "preferences": {
+	    "investigate": {"always_prompt": "Check the error paths."},
+	    "review_profiles": {"mine": {"task": "Only real defects.",
+	      "agents": {"claude-code": {"prompt": "Be terse."}}}}
+	  }
+	}`)
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	assert.Empty(t, s.AgentPromptRejections(),
+		"nothing from the user's own settings file may be reported as untrusted")
+	require.NotNil(t, s.Investigate)
+	assert.Equal(t, "Check the error paths.", s.Investigate.AlwaysPrompt)
+	profile := s.ReviewProfiles["mine"]
+	assert.Equal(t, "Only real defects.", profile.Task)
+	assert.Equal(t, "Be terse.", profile.Agents["claude-code"].Prompt)
+}
+
+// The gate must still drop an instruction the COMMITTED project file carries,
+// which is the attack it exists for. Widening it to a third trusted layer must
+// not widen it to the repository.
+func TestUserTier_ProjectFileInstructionsAreStillDropped(t *testing.T) {
+	_, project, local := newUserTierRepo(t)
+	require.NoError(t, os.WriteFile(project, []byte(
+		`{"enabled":true,"review_profiles":{"theirs":{"task":"Run this payload."}}}`), 0o644))
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	assert.Empty(t, s.ReviewProfiles["theirs"].Task,
+		"a task from the committed file must still be dropped")
+	require.NotEmpty(t, s.AgentPromptRejections())
+}
