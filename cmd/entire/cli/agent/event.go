@@ -137,9 +137,20 @@ type Event struct {
 	// is still active; it must never create parent state for this path.
 	CompletionWithoutLaunch bool
 
-	// SubagentTranscriptUnavailable records an agent contract with no standalone
-	// child transcript. It prevents later generic layout probing from mistaking
-	// an unrelated agent-<id>.jsonl file for this child's transcript.
+	// DeferredCompletion marks a SubagentStart whose completion arrives as a
+	// separate Final SubagentEnd rather than at the launch hook. The framework
+	// records an in-flight task record (so the task is listed as running and
+	// swept at SessionEnd if the agent dies) and skips the worktree pre-task
+	// baseline, which the analyzer-only final capture never reads. OpenCode sets
+	// it: its task part binds the tool call to the child session ID before the
+	// child does any work, and completion comes from tool.execute.after.
+	DeferredCompletion bool
+
+	// SubagentTranscriptUnavailable records that no child transcript is
+	// obtainable for this completion — either by contract (Copilot CLI) or
+	// because the fetch failed (OpenCode). It prevents later generic layout
+	// probing from mistaking an unrelated agent-<id>.jsonl file for this
+	// child's transcript.
 	SubagentTranscriptUnavailable bool
 
 	// SubagentTranscriptPath is the agent-declared path to the subagent's own
