@@ -549,23 +549,14 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	return nil
 }
 
-// inheritSquashedCheckpointTrailers handles a commit made while a squash is in
-// progress (`git merge --squash` leaves SQUASH_MSG in the per-worktree git
-// dir). Such a commit's content is the squashed commits' content, so its
-// checkpoint linkage is theirs: every Entire-Checkpoint trailer found in
-// SQUASH_MSG is carried into the message when missing, and no session is
-// matched. Reports whether a squash was in progress, in which case the caller
-// is done.
-//
-// This exists because git only reports source "squash" when the user accepts
-// its seeded message, which already contains those trailers. A squash
-// committed with -m or -F reports "message", and the hook used to run ordinary
-// session matching on it: in a checkout with sessions in several other
-// worktrees that refused, and where one live session was found it minted a
-// fresh, near-empty checkpoint for a commit that was not that session's work —
-// which is how integrating worktree work from the main checkout lost its link
-// to the checkpoints that actually describe it. Downstream readers already
-// accept several trailers on one commit (trailers.ParseAllCheckpoints).
+// inheritSquashedCheckpointTrailers handles a commit made while `git merge
+// --squash` is in progress (SQUASH_MSG in the per-worktree git dir): its
+// content is the squashed commits', so their Entire-Checkpoint trailers are
+// carried into the message when missing and no session is matched. Needed
+// because `commit -m` reports source "message", not "squash", and ordinary
+// matching then refused or minted an empty checkpoint. Reports whether it
+// took over; a squash of commits that carry no trailers has nothing to
+// inherit and falls through to ordinary matching, as before.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	gitDir, err := GetGitDir(ctx)
@@ -584,6 +575,9 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 	}
 
 	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	if len(inherited) == 0 {
+		return false
+	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
 		return true
