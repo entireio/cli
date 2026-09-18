@@ -36,9 +36,11 @@ type ClaudeHookEntry struct {
 // sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks.
 // SessionStart includes a "model" field with the LLM model identifier.
 type sessionInfoRaw struct {
-	SessionID      string `json:"session_id"`
-	TranscriptPath string `json:"transcript_path"`
-	Model          string `json:"model,omitempty"`
+	SessionID            string  `json:"session_id"`
+	TranscriptPath       string  `json:"transcript_path"`
+	Model                string  `json:"model,omitempty"`
+	LastAssistantMessage *string `json:"last_assistant_message"`
+	StopHookActive       bool    `json:"stop_hook_active,omitempty"`
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.

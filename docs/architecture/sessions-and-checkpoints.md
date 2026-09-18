@@ -125,6 +125,16 @@ type TokenUsage struct {
 }
 ```
 
+Claude can emit several Stop hooks within one assistant turn. Each validated
+snapshot reports cumulative main-agent usage for that turn. `SaveStep` adds only
+increases over the durable `TurnTokenUsage` baseline, saved with the session and
+checkpoint counters. A smaller corrected snapshot does not lower that baseline.
+Condensation retains it; the next user prompt resets it. Subagent usage remains a
+separate cumulative total for the session.
+Before another Stop captures a pending turn, lifecycle marks its checkpoint IDs
+for refresh. A capture failure therefore retains those IDs through the next
+prompt, allowing a later successful Stop to recover them.
+
 ### Strategy-Level Operations
 
 Strategies compose low-level primitives into higher-level workflows.

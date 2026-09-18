@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os/exec"
 	"time"
@@ -210,7 +211,9 @@ type TranscriptAnalyzer interface {
 	// GetTranscriptPosition returns the current position (length) of a transcript.
 	// For JSONL formats (Claude Code), this is the line count.
 	// For JSON formats (Gemini CLI), this is the message count.
-	// Returns 0 if the file doesn't exist or is empty.
+	// Returns 0 for an empty transcript. Implementations may return an error for
+	// a missing transcript when callers must distinguish an unmeasured position
+	// from a measured zero.
 	GetTranscriptPosition(path string) (int, error)
 
 	// ExtractModifiedFilesFromOffset extracts files modified since a given offset.
@@ -234,14 +237,64 @@ type PromptExtractor interface {
 }
 
 // TranscriptPreparer is called before ReadTranscript to handle agent-specific
-// flush/sync requirements (e.g., Claude Code's async transcript writing).
-// The framework calls PrepareTranscript before ReadTranscript if implemented.
+// materialization or flush requirements. Stop handlers prefer TranscriptCapturer
+// when available so readiness and reading stay atomic.
 type TranscriptPreparer interface {
 	Agent
 
 	// PrepareTranscript ensures the transcript is ready to read.
 	// For Claude Code, this waits for the async transcript flush to complete.
 	PrepareTranscript(ctx context.Context, sessionRef string) error
+}
+
+// ErrTranscriptNotReady means no transcript snapshot was safe to consume.
+var ErrTranscriptNotReady = errors.New("transcript not ready")
+
+// TranscriptCaptureRequest describes the turn boundary and producer evidence
+// needed to capture a ready transcript snapshot.
+type TranscriptCaptureRequest struct {
+	SessionRef    string
+	StartPosition int
+	FinalResponse *string
+}
+
+// TranscriptSnapshot is an Entire-owned, read-only copy of validated transcript
+// bytes. Position is derived from Data, never from a later source-path read.
+type TranscriptSnapshot struct {
+	Data     []byte
+	Position int
+}
+
+// TranscriptCapturer combines transcript readiness validation with the read
+// whose bytes lifecycle consumers will use.
+type TranscriptCapturer interface {
+	Agent
+
+	CaptureTranscript(ctx context.Context, request TranscriptCaptureRequest) (TranscriptSnapshot, error)
+}
+
+// TranscriptAnalysis contains the current turn metadata derived from one
+// transcript parse.
+type TranscriptAnalysis struct {
+	ModifiedFiles []string
+	TokenUsage    *TokenUsage
+}
+
+// TranscriptTurnAnalyzer derives all transcript-backed turn metadata in one
+// pass so lifecycle does not parse the same snapshot once per consumer.
+type TranscriptTurnAnalyzer interface {
+	Agent
+
+	AnalyzeTranscriptTurn(transcriptData []byte, startPosition int, subagentsDir string) (*TranscriptAnalysis, error)
+}
+
+// RepeatableTurnEnd is implemented by agents whose turn-end hook can cause the
+// same assistant turn to continue and emit another turn-end event without a new
+// user-prompt event.
+type RepeatableTurnEnd interface {
+	Agent
+
+	TurnEndMayRepeat() bool
 }
 
 // TranscriptFetcher is implemented by agents that can materialize a session
