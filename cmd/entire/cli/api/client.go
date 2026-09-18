@@ -278,11 +278,16 @@ func DecodeJSON(resp *http.Response, dest any) error {
 
 // ErrorResponse represents a standard API error response. Older endpoints
 // return {"error":"message"}; newer endpoints return
-// {"error":{"code":"...","message":"...",...}}; entire-api cells proxied
-// through the gateway return huma's {"title":..,"status":..,"detail":"message"}.
+// {"error":{"code":"...","message":"...",...}}; entire-api cells return RFC
+// 9457 problem details (application/problem+json), whose human-readable text
+// is detail with title as the coarser fallback. RequestID is a problem-details
+// extension entire-api sets on every error; it is what support needs to find
+// the server-side trace, so it is carried through to HTTPError.
 type ErrorResponse struct {
-	Error  any    `json:"error"`
-	Detail string `json:"detail"`
+	Error     any    `json:"error"`
+	Detail    string `json:"detail"`
+	Title     string `json:"title"`
+	RequestID string `json:"request_id"`
 }
 
 // Message extracts the human-readable error message from any envelope shape.
@@ -300,7 +305,10 @@ func (e ErrorResponse) Message() string {
 			return strings.TrimSpace(code)
 		}
 	}
-	return strings.TrimSpace(e.Detail)
+	if detail := strings.TrimSpace(e.Detail); detail != "" {
+		return detail
+	}
+	return strings.TrimSpace(e.Title)
 }
 
 // HTTPError is returned by CheckResponse for non-2xx responses. Callers can use
@@ -308,13 +316,21 @@ func (e ErrorResponse) Message() string {
 type HTTPError struct {
 	StatusCode int
 	Message    string
+	// RequestID is the RFC 9457 request_id extension when the server sent one.
+	RequestID string
 }
 
 func (e *HTTPError) Error() string {
+	var out string
 	if e.Message != "" {
-		return fmt.Sprintf("API error: %s (status %d)", e.Message, e.StatusCode)
+		out = fmt.Sprintf("API error: %s (status %d)", e.Message, e.StatusCode)
+	} else {
+		out = fmt.Sprintf("API error: status %d", e.StatusCode)
 	}
-	return fmt.Sprintf("API error: status %d", e.StatusCode)
+	if e.RequestID != "" {
+		out += fmt.Sprintf(" [request %s]", e.RequestID)
+	}
+	return out
 }
 
 // IsHTTPErrorStatus reports whether err wraps an *HTTPError with the given HTTP status.
@@ -340,6 +356,7 @@ func CheckResponse(resp *http.Response) error {
 
 	var parsed ErrorResponse
 	if err := json.Unmarshal(body, &parsed); err == nil {
+		apiError.RequestID = strings.TrimSpace(parsed.RequestID)
 		if message := parsed.Message(); message != "" {
 			apiError.Message = message
 			return apiError

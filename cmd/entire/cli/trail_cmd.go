@@ -34,7 +34,7 @@ const (
 	defaultTrailListStatus = string(trail.StatusOpen)
 	// trailListStatusAny disables the status filter; user-facing value for --status.
 	trailListStatusAny = "any"
-	// trailListServerMaxLimit is entire-api's maximum pageSize.
+	// trailListServerMaxLimit is entire-api's maximum perPage.
 	trailListServerMaxLimit = 100
 	// trailFindMaxPages bounds a branch/ID lookup at a 2,000-trail search budget.
 	trailFindMaxPages = 20
@@ -437,7 +437,7 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 // omits, by integer number. It returns only the description and etag — the
 // list result already supplies the metadata — and decodes only the fields it
 // needs, so it is unaffected by the shape of sibling fields like
-// `checkpoints`/`thread`.
+// `checkpoints`/`discussion`.
 func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePath string, number int) (string, string, error) {
 	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
@@ -574,15 +574,15 @@ func listTrailResources(ctx context.Context, client *api.Client, basePath string
 		return nil, 0, errors.New("limit must be greater than 0")
 	}
 	items := make([]api.TrailResource, 0, min(limit, trailListServerMaxLimit))
-	pageToken := ""
+	cursor := ""
 	seenTokens := map[string]bool{}
 	totalMatched := 0
 	for {
-		pageSize := trailListServerMaxLimit
-		if author == "" && limit-len(items) < pageSize {
-			pageSize = limit - len(items)
+		perPage := trailListServerMaxLimit
+		if author == "" && limit-len(items) < perPage {
+			perPage = limit - len(items)
 		}
-		resp, err := client.Get(ctx, basePath+trailListPageQuery(statuses, pageSize, pageToken))
+		resp, err := client.Get(ctx, basePath+trailListPageQuery(statuses, perPage, cursor))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to list trails: %w", err)
 		}
@@ -634,14 +634,14 @@ func listTrailResources(ctx context.Context, client *api.Client, basePath string
 				break
 			}
 		}
-		if page.NextPageToken == nil || strings.TrimSpace(*page.NextPageToken) == "" {
+		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
 			break
 		}
-		pageToken = strings.TrimSpace(*page.NextPageToken)
-		if seenTokens[pageToken] {
-			return nil, 0, fmt.Errorf("trail list pagination repeated page token %q", pageToken)
+		cursor = strings.TrimSpace(*page.NextCursor)
+		if seenTokens[cursor] {
+			return nil, 0, fmt.Errorf("trail list pagination repeated cursor %q", cursor)
 		}
-		seenTokens[pageToken] = true
+		seenTokens[cursor] = true
 	}
 	return items, totalMatched, nil
 }
@@ -649,21 +649,21 @@ func listTrailResources(ctx context.Context, client *api.Client, basePath string
 // trailListPageQuery builds entire-api's cursor-paginated list query. Empty
 // statuses (--status any) omit the filter. Author is intentionally absent: the
 // CLI accepts a login while this API's author filter accepts account ULIDs.
-func trailListPageQuery(statusFilters []trail.Status, pageSize int, pageToken string) string {
+func trailListPageQuery(statusFilters []trail.Status, perPage int, cursor string) string {
 	q := url.Values{}
-	if len(statusFilters) > 0 {
+	if cursor == "" && len(statusFilters) > 0 {
 		parts := make([]string, len(statusFilters))
 		for i, status := range statusFilters {
 			parts[i] = string(status)
 		}
-		q.Set("status", strings.Join(parts, ","))
+		q.Set("status[eq]", strings.Join(parts, ","))
 	}
-	if pageSize <= 0 || pageSize > trailListServerMaxLimit {
-		pageSize = trailListServerMaxLimit
+	if perPage <= 0 || perPage > trailListServerMaxLimit {
+		perPage = trailListServerMaxLimit
 	}
-	q.Set("pageSize", strconv.Itoa(pageSize))
-	if strings.TrimSpace(pageToken) != "" {
-		q.Set("pageToken", strings.TrimSpace(pageToken))
+	q.Set("per_page", strconv.Itoa(perPage))
+	if strings.TrimSpace(cursor) != "" {
+		q.Set("cursor", strings.TrimSpace(cursor))
 	}
 	return "?" + q.Encode()
 }
@@ -2164,10 +2164,10 @@ func findTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath s
 func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
 	// Walk bounded opaque-cursor pages so selector lookups do not silently miss
 	// trails beyond the first entire-api page.
-	pageToken := ""
+	cursor := ""
 	seenTokens := map[string]bool{}
 	for range trailFindMaxPages {
-		resp, err := client.Get(ctx, basePath+trailListPageQuery(nil, trailListServerMaxLimit, pageToken))
+		resp, err := client.Get(ctx, basePath+trailListPageQuery(nil, trailListServerMaxLimit, cursor))
 		if err != nil {
 			return nil, fmt.Errorf("list trails: %w", err)
 		}
@@ -2192,14 +2192,14 @@ func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, m
 				return &listResp.Trails[i], nil
 			}
 		}
-		if listResp.NextPageToken == nil || strings.TrimSpace(*listResp.NextPageToken) == "" {
+		if listResp.NextCursor == nil || strings.TrimSpace(*listResp.NextCursor) == "" {
 			break
 		}
-		pageToken = strings.TrimSpace(*listResp.NextPageToken)
-		if seenTokens[pageToken] {
+		cursor = strings.TrimSpace(*listResp.NextCursor)
+		if seenTokens[cursor] {
 			break
 		}
-		seenTokens[pageToken] = true
+		seenTokens[cursor] = true
 	}
 	return nil, nil //nolint:nilnil // nil, nil means "not found" — callers check both
 }
