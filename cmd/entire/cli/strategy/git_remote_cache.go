@@ -176,28 +176,31 @@ func (c *gitRemoteCache) snapshotFor(ctx context.Context) *remoteSnapshot {
 // list would turn one transient git hiccup into a process-long "this repo has no
 // remotes", and the election answers that by silently skipping checkpoint sync.
 func cachedRemotesInConfigOrder(ctx context.Context, read func(context.Context) ([]string, error)) []string {
+	names, _ := cachedRemotesInConfigOrderResult(ctx, read) //nolint:errcheck // historical best-effort contract
+	return names
+}
+
+func cachedRemotesInConfigOrderResult(ctx context.Context, read func(context.Context) ([]string, error)) ([]string, error) {
 	c := cacheFromContext(ctx)
 	if c == nil {
-		names, _ := read(ctx) //nolint:errcheck // uncached path keeps the historical best-effort contract
-		return names
+		return read(ctx)
 	}
 	snap := c.snapshotFor(ctx)
 	if snap == nil {
-		names, _ := read(ctx) //nolint:errcheck // unidentifiable repo: same best-effort contract
-		return names
+		return read(ctx)
 	}
 	snap.mu.Lock()
 	defer snap.mu.Unlock()
 	if snap.orderedSet {
-		return snap.ordered
+		return snap.ordered, nil
 	}
 	names, err := read(ctx)
 	if err != nil {
 		// Transient: answer this call, leave the slot unset so the next one retries.
-		return nil
+		return nil, err
 	}
 	snap.ordered, snap.orderedSet = names, true
-	return snap.ordered
+	return snap.ordered, nil
 }
 
 // cachedIsConfiguredRemote returns the memoized answer for name in this call's

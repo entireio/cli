@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -2928,24 +2929,48 @@ func TestRunStatus_CheckpointSyncDestination_CapturedAnnotated(t *testing.T) {
 
 func TestRunStatus_CheckpointSyncFailClosed(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
-	setupTestRepo(t)
-	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone"}}`)
-	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
+	for _, tt := range []struct {
+		name          string
+		remote        string
+		pushurlOnly   bool
+		emptyFetchURL bool
+		wantReason    string
+	}{
+		{name: "missing remote", remote: "gone"},
+		{name: "pushurl-only remote", remote: "pushonly", pushurlOnly: true, wantReason: "fetch URL"},
+		{name: "empty fetch URL", remote: "empty", emptyFetchURL: true, wantReason: "fetch URL"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupTestRepo(t)
+			writeSettings(t, fmt.Sprintf(`{"enabled": true, "strategy_options": {"checkpoint_push_remote": %q}}`, tt.remote))
+			if tt.pushurlOnly {
+				testutil.RunGit(t, ".", "config", "remote."+tt.remote+".pushurl", "https://example.com/pushonly.git")
+			}
+			if tt.emptyFetchURL {
+				testutil.RunGit(t, ".", "config", "remote."+tt.remote+".url", "")
+			}
+			testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 
-	out := stdout.String()
-	if !strings.Contains(out, "Checkpoints NOT syncing:") {
-		t.Errorf("expected fail-closed warning line, got:\n%s", out)
-	}
-	if !strings.Contains(out, `"gone"`) {
-		t.Errorf("fail-closed line should name the misconfigured remote, got:\n%s", out)
-	}
-	if strings.Contains(out, "Checkpoints sync to:") {
-		t.Errorf("fail-closed status must not also print a destination line, got:\n%s", out)
+			var stdout bytes.Buffer
+			if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+				t.Fatalf("runStatus() error = %v", err)
+			}
+
+			out := stdout.String()
+			if !strings.Contains(out, "Checkpoints NOT syncing:") {
+				t.Errorf("expected fail-closed warning line, got:\n%s", out)
+			}
+			if !strings.Contains(out, fmt.Sprintf("%q", tt.remote)) {
+				t.Errorf("fail-closed line should name remote %q, got:\n%s", tt.remote, out)
+			}
+			if tt.wantReason != "" && !strings.Contains(out, tt.wantReason) {
+				t.Errorf("fail-closed line should contain %q, got:\n%s", tt.wantReason, out)
+			}
+			if strings.Contains(out, "Checkpoints sync to:") {
+				t.Errorf("fail-closed status must not also print a destination line, got:\n%s", out)
+			}
+		})
 	}
 }
 

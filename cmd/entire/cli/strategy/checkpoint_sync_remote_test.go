@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
@@ -51,24 +52,43 @@ func TestResolveCheckpointSyncRemote_ConfigSetting(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
-func TestResolveCheckpointSyncRemote_ConfigSettingMissingRemote_FailsClosed(t *testing.T) {
+func TestResolveCheckpointSyncRemote_ConfigSettingInvalidRemote_FailsClosed(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "f.txt", "init")
-	testutil.GitAdd(t, tmpDir, "f.txt")
-	testutil.GitCommit(t, tmpDir, "init")
 
-	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
-	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
+	for _, tt := range []struct {
+		name          string
+		remote        string
+		pushURL       string
+		emptyFetchURL bool
+	}{
+		{name: "missing remote", remote: "gone"},
+		{name: "pushurl-only remote", remote: "pushonly", pushURL: "https://example.com/pushonly.git"},
+		{name: "empty fetch URL", remote: "empty", emptyFetchURL: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			testutil.InitRepo(t, tmpDir)
+			testutil.WriteFile(t, tmpDir, "f.txt", "init")
+			testutil.GitAdd(t, tmpDir, "f.txt")
+			testutil.GitCommit(t, tmpDir, "init")
+			if tt.pushURL != "" {
+				testutil.RunGit(t, tmpDir, "config", "remote."+tt.remote+".pushurl", tt.pushURL)
+			}
+			if tt.emptyFetchURL {
+				testutil.RunGit(t, tmpDir, "config", "remote."+tt.remote+".url", "")
+			}
+			testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+			testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, tt.remote)
+			t.Chdir(tmpDir)
 
-	t.Chdir(tmpDir)
-
-	got, err := ResolveCheckpointSyncRemote(ctx)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gone")
-	assert.Empty(t, got.Name)
+			got, err := ResolveCheckpointSyncRemote(ctx)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.remote)
+			assert.Contains(t, err.Error(), "fetch URL")
+			assert.Empty(t, got.Name)
+		})
+	}
 }
 
 // Not parallel: uses t.Chdir()
@@ -157,6 +177,33 @@ func TestResolveCheckpointSyncRemote_SettingsLoadErrorFailsClosed(t *testing.T) 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot read settings")
 	assert.Empty(t, got.Name)
+}
+
+// Not parallel: uses t.Chdir()
+func TestResolveCheckpointSyncRemote_GitConfigReadErrorFailsClosed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "f.txt", "init")
+	testutil.GitAdd(t, tmpDir, "f.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+	t.Chdir(tmpDir)
+
+	ctx := settings.WithWorktreeRoot(context.Background(), tmpDir)
+	t.Setenv("PATH", t.TempDir())
+
+	got, err := ResolveCheckpointSyncRemote(ctx)
+	require.ErrorContains(t, err, "executable file not found")
+	assert.Empty(t, got.Name)
+}
+
+func TestReadRemotesInConfigOrder_CanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(settings.WithWorktreeRoot(context.Background(), t.TempDir()))
+	cancel()
+
+	_, err := readRemotesInConfigOrder(ctx)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // Not parallel: uses t.Chdir()
@@ -512,6 +559,18 @@ func TestHintGatedCheckpointSync(t *testing.T) {
 		assert.Empty(t, buf.String(), "checkpoint_push_remote takes a remote name; a URL push has no actionable hint")
 	})
 
+	t.Run("pushurl-only remote stays silent", func(t *testing.T) {
+		dir := initHintRepo(t, false)
+		testutil.RunGit(t, dir, "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
+		setGitConfig(t, dir, "remote.pushDefault", "pushonly")
+		t.Chdir(dir)
+		buf := captureStderrWriter(t)
+
+		hintGatedCheckpointSync(ctx, "pushonly")
+
+		assert.Empty(t, buf.String(), "the hint must not recommend a remote that checkpoint sync cannot read from")
+	})
+
 	t.Run("failed election stays silent", func(t *testing.T) {
 		dir := initHintRepo(t, true)
 		testutil.WriteCheckpointPushRemoteSetting(t, dir, "gone")
@@ -563,6 +622,17 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 		dir := newCaptureTestRepo(t)
 		t.Chdir(dir)
 		require.NoError(t, saveCapturedSyncRemote(ctx, "gone"))
+
+		got, err := ResolveCheckpointSyncRemote(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
+	})
+
+	t.Run("captured pushurl-only remote falls through to origin", func(t *testing.T) {
+		dir := newCaptureTestRepo(t)
+		testutil.RunGit(t, dir, "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
+		t.Chdir(dir)
+		require.NoError(t, saveCapturedSyncRemote(ctx, "pushonly"))
 
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
@@ -710,6 +780,17 @@ func TestCaptureCheckpointSyncRemote(t *testing.T) {
 		captureOnSuccessfulPush(ctx, "fork")
 
 		assert.Equal(t, []string{"fork"}, loadCapturedSyncRemotes(ctx))
+	})
+
+	t.Run("pushurl-only remote cannot capture", func(t *testing.T) {
+		dir := newCaptureTestRepo(t)
+		testutil.RunGit(t, dir, "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
+		setGitConfig(t, dir, "remote.pushDefault", "pushonly")
+		t.Chdir(dir)
+
+		assert.False(t, pendingCaptureCheckpointSyncRemote(ctx, "pushonly"),
+			"capture must use the same fetch-URL eligibility rule as election")
+		assert.Empty(t, loadCapturedSyncRemotes(ctx))
 	})
 
 	t.Run("raw URL push never captures", func(t *testing.T) {
