@@ -65,6 +65,16 @@ type commitLinkingSet struct {
 // look. The trailer is the one identity the commit itself carries, so a
 // session neither signal can place is still condensed into the checkpoint the
 // commit names instead of leaving a trailer nobody wrote.
+//
+// Adopted-away tombstones are excluded on purpose. `session adopt` retires the
+// source record as ENDED and fully condensed (retireAdoptedSourceSession) and
+// clears the reservation on the live copy it creates (buildAdoptedSessionState),
+// so a tombstone's stale reservation must not condense stale state; PostCommit
+// skips fully-condensed ENDED sessions regardless. The residual gap — a trailer
+// stamped by prepare-commit-msg, then an adopt run between it and post-commit —
+// spans one `git commit` and needs a user command inside it; the commit is
+// then logged as an unclaimed trailer (logUnclaimedCheckpointTrailer) and
+// `entire session attach` links it after the fact.
 func (l commitLinkingSet) sessionsIncludingReservedFor(checkpointID id.CheckpointID) []*SessionState {
 	sessions := l.sessions
 	if checkpointID == id.EmptyCheckpointID {
