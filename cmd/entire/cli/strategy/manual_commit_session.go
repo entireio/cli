@@ -266,13 +266,13 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 }
 
 // findSessionsForWorktreeFromStates is findSessionsForWorktree over an
-// already-loaded state list. The second result reports a multi-worktree
-// ambiguity decline — candidates existed but spanned several worktrees, so
-// nothing was linked; findSessionsForCommitLinking surfaces it to the user
-// only when identity matching cannot rescue the commit either.
-func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
+// already-loaded state list. The second result is the multi-worktree
+// ambiguity decline: the candidates that existed but spanned several
+// worktrees, so nothing was linked. findCommitLinkingSet names them to the
+// user, but only when identity matching cannot rescue the commit either.
+func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) (matches, declined []*SessionState) {
 	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
-		return exact, false
+		return exact, nil
 	}
 
 	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
@@ -280,7 +280,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 			"session matching: cannot resolve common dir for fallback matching",
 			slog.String("error", err.Error()))
-		return nil, false
+		return nil, nil
 	}
 
 	var parentWorktreeMatches []*SessionState
@@ -328,16 +328,16 @@ const recentSessionWindow = 15 * time.Minute
 // Spanning several worktrees: filter to recently-interacting sessions and
 // link only if a single worktree remains — days-idle stragglers must not
 // veto the obviously-live session, but between two live worktrees there is
-// no safe guess. A refusal logs here and reports true, so the
-// commit-linking caller can announce it on stderr with the remedy (#1852:
+// no safe guess. A refusal logs here and returns the declined candidates, so
+// the commit-linking caller can name them to the user with the remedy (#1852:
 // silent loss of linkage) — but only after identity matching has also failed
 // to rescue the commit, and never on amend/post-rewrite.
-func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candidates []*SessionState) (matches []*SessionState, ambiguous bool) {
+func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candidates []*SessionState) (matches, declined []*SessionState) {
 	if len(candidates) == 0 {
-		return nil, false
+		return nil, nil
 	}
 	if matches := sessionsFromSingleWorktree(candidates); matches != nil {
-		return matches, false
+		return matches, nil
 	}
 	cutoff := time.Now().Add(-recentSessionWindow)
 	var live []*SessionState
@@ -348,11 +348,11 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 	}
 	if len(live) > 0 {
 		if matches := sessionsFromSingleWorktree(live); matches != nil {
-			return matches, false
+			return matches, nil
 		}
 	}
 	warnAmbiguousWorktreeSessions(ctx, worktreePath, candidates)
-	return nil, true
+	return nil, candidates
 }
 
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live

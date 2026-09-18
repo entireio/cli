@@ -519,6 +519,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		message = addCheckpointTrailerWithComment(message, checkpointID, string(agentType), displayPrompt)
 	}
 
+	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
+
 	logging.Info(logCtx, "prepare-commit-msg: trailer added",
 		slog.String("strategy", "manual-commit"),
 		slog.String("source", source),
@@ -953,8 +955,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
-	// diverge (a dangling trailer).
-	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
+	// diverge (a dangling trailer). The provenance is kept because a session
+	// identified by ancestry outside its home is re-homed below.
+	linking, err := s.findCommitLinkingSet(ctx, worktreePath)
+	sessions := linking.sessionsIncludingReservedFor(checkpointID)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
 
@@ -1048,6 +1052,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
 				sessionsWithCommittedFiles, condensedTelemetry)
 			trailerOwned = trailerOwned || condensed
+			s.rehomeSessionAfterOwnCommit(iterCtx, repo, state, worktreePath, newHead, condensed, linking.ancestryGuest)
 			return nil
 		}, func() {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
@@ -2409,7 +2414,36 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
+	reserveCheckpointForStampedSessions(logCtx, []*SessionState{state}, cpID)
 	return nil
+}
+
+// reserveCheckpointForStampedSessions records the checkpoint ID just written
+// into the commit message as each stamped session's pending condensation, so
+// the trailer alone identifies the sessions it belongs to. PostCommit
+// re-derives its linking set from worktree paths and process ancestry, and
+// either can be gone by then (see commitLinkingSet.sessionsIncludingReservedFor);
+// without the reservation the commit named a checkpoint nobody wrote. A
+// session already holding a different reservation keeps it — that is an
+// interrupted condensation postCommitProcessSessionLocked protects, not ours
+// to overwrite — and checkpointIDForSessions already reuses a matching one.
+// Best-effort: a hook must not fail the commit over bookkeeping.
+func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
+	for _, stamped := range states {
+		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {
+			if state.PendingCondensationID() != id.EmptyCheckpointID {
+				return ErrMutationSkip
+			}
+			state.BeginCondensationAttempt(checkpointID)
+			return nil
+		})
+		if err != nil && !errors.Is(err, ErrStateNotFound) && !errors.Is(err, ErrMutationSkip) {
+			logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not reserve the stamped checkpoint on the session",
+				slog.String("session_id", stamped.SessionID),
+				slog.String("checkpoint_id", checkpointID.String()),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {
