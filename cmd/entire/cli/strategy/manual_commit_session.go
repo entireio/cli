@@ -156,7 +156,10 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
-			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
+			if isOrphanedSessionState(state) {
+				logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state without a shadow branch",
+					slog.String("session_id", state.SessionID),
+					slog.String("phase", string(state.Phase)))
 				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
 				store.Clear(ctx, state.SessionID)
 				continue
@@ -166,6 +169,32 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		states = append(states, state)
 	}
 	return states, nil
+}
+
+// isOrphanedSessionState reports whether a state whose shadow branch is
+// missing may be deleted from the shared store. ACTIVE sessions may not have
+// created their branch yet; a LastCheckpointID must be kept for checkpoint-ID
+// reuse on later commits; task records hold condensable content that never
+// lives on the shadow branch.
+//
+// An IDLE session with none of those is the normal shape of a LIVE session
+// between turns: a read-only turn, or the turn right after a linked commit
+// (the commit removed the branch and turn-start cleared LastCheckpointID).
+// The store is shared by every worktree of the clone, so every commit hook
+// and turn-start anywhere in it used to delete such sessions, and the next
+// turn-start rebuilt them from zero — losing the transcript window, the
+// owner, and the home. An IDLE session is therefore an orphan only once its
+// owner process is known to have exited; one with no recorded owner ages out
+// through the stale threshold instead. ENDED and legacy (empty-phase)
+// sessions keep the old rule.
+func isOrphanedSessionState(state *SessionState) bool {
+	if state.Phase.IsActive() || !state.LastCheckpointID.IsEmpty() || state.HasTaskContent() {
+		return false
+	}
+	if state.Phase == session.PhaseIdle {
+		return state.OwnerExited()
+	}
+	return true
 }
 
 // IsCondensableEndedSession reports whether an ENDED session still carries
