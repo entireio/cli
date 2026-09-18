@@ -128,9 +128,15 @@ func refsAwaitingOPF(ctx context.Context, repo *git.Repository) ([]plumbing.Refe
 
 // maybeSpawnOPFFlush fires one detached __opf_flush child when OPF is enabled
 // and queued checkpoint refs still need rewriting after the inline pre-push
-// attempt. Called from both OPF gate call sites regardless of the gate's
-// verdict: a withheld flush leaves the whole backlog, and a successful one can
-// still leave a ref the per-ref cap skipped, so both want a follow-up.
+// attempt. Called from both OPF gate call sites, but only when the gate's
+// decision was OPFRun — the user asked for OPF on this push. A failed or
+// partial rewrite under that decision still leaves a backlog worth a
+// follow-up; an explicit OPFSkip (or an unresolvable decision, mapped to
+// OPFAbort) must not, since running OPF in the background after the user
+// declined it for this push would redact content they chose to flush as-is
+// and diverge the local ref from what was actually pushed. Not permanent: a
+// later push whose decision resolves to OPFRun re-evaluates the same backlog
+// from the queue and ref trailers, with no memory of an earlier skip.
 //
 // Best-effort throughout — a failure here must never fail the push. Everything
 // it does is either a local read or a fork; nothing it can do changes what this
