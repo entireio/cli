@@ -90,7 +90,8 @@ the commands are always runnable in every build.
   grantee, roles owner/admin/member (default member)
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
-  grantee, roles reader/writer/admin; `remove` also takes an account ULID
+  grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
+  optionally (see the grant-subtree notes below)
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`, `access`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
@@ -205,6 +206,86 @@ the commands are always runnable in every build.
 - The three `grant` subtrees (`org grant`, `project grant`, `repo grant`) are one
   generic builder plus three target descriptions in `grant.go`; a new target is
   a `grantTarget` value, not a fourth copy of the leaves.
+
+  **`add` and `remove` take the grantee optionally**: omitted on a terminal,
+  they open a multi-select (`grant_picker.go`). `add` then collects a role **per
+  grantee**, so one run can add a reader and an admin; `--role` fixes every row,
+  rendered as a non-focusable `huh` note so the pairing is shown but not
+  editable. The forms sit behind the `grantPicker`, `removePicker` and
+  `revokeConfirmed` seams, because `go test` has no terminal to answer them on.
+
+  **The two pools are mirror images, and the axis is `source`.** `add` offers
+  the owning org's members with **no direct grant** on the target; `remove`
+  offers the **direct** grants revoking would remove. A `project:<name>` row is
+  neither: project access reaches the project's repos (`push = writer +
+  project->write`), but it is not a grant on the repo, so it does not block
+  adding one and cannot be revoked there — revoking it really does answer "no
+  such grant; nothing to revoke". `directHolders` is the one place `source` is
+  read for this. `remove` also drops the `owner` row, the owning org itself,
+  which holds the target through the authz schema rather than a grant.
+
+  Both earlier versions of the add pool were wrong in opposite directions, so do
+  not "simplify" back to either. Subtracting every holder emptied the pool on any
+  repo whose project already covered the org, and subtracting none meant every
+  row was a possible silent role change — `grant add` **upserts**, which is why
+  a direct holder has nothing to add and why changing a role is the typed form's
+  job.
+
+  **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
+  two required args): everyone eligible is by definition absent from the only
+  list there is. `org grant remove` does have one, because the members to remove
+  ARE that list. There is no user search or global account listing in the API —
+  the only enumerable people endpoints are `/orgs/{id}/members`,
+  `/projects/{id}/members` and `/repos/{id}/grants`, none filterable — so the
+  filtering is client-side. Org membership is also the only pool whose entries
+  are directly grantable: project and repo rows carry a grantee ULID and no
+  provider identity, with no reverse lookup, while a `Membership` carries the
+  `provider:handle` that `resolveGranteeProvider` already takes. `remove` uses
+  the ULID where a typed-id route exists, since it needs no lookup and survives
+  a rename, so a candidate carries a `ref` to act on and a `label` to show, plus
+  `byID` saying which route it takes. **A grantee is a provider-qualified handle
+  and nothing else** (`ensureGranteeIsHandle`, checked before the target is
+  resolved so a grantee that cannot work costs no lookup): a ULID is an internal
+  id the interface does not ask anyone to copy, and routing on `byID` rather
+  than on the ref's shape is what keeps the typed-id route reachable only by the
+  picker, which reads the id off a listing.
+
+  **`--role` is not a cobra-required flag**, because cobra enforces those before
+  `RunE` and a role that cannot reach `RunE` cannot be prompted for. The
+  guarantee it gave — an omitted role never reaching validation, a lookup, or
+  the API — moved into the `RunE`, which settles both non-interactive refusals
+  from the command line **before any request**: an unanswerable prompt must not
+  cost a lookup.
+
+  **An empty pool exits 0; a missing one does not.** Having nobody to add is not
+  a failure — nothing went wrong and, in the common case, the state the user
+  wanted already holds, the same reasoning that makes revoking an
+  already-revoked grant a success rather than a 404. Selecting nobody in the
+  picker is the same and also exits 0. What stays an error is a command that
+  cannot run as asked: an account-owned target, which has no membership list
+  anywhere, and a non-interactive run with no grantee. Those two spell out the
+  `provider:handle` form because the user is stuck without it; the empty-pool
+  messages do not, there being nobody left to add. Under `--json` the reason
+  moves to stderr and stdout gets the empty array, so a caller parsing stdout is
+  never handed a sentence.
+
+  **`remove` confirms, but only where there is a terminal, and there is no flag
+  to bypass it.** This is deliberately not what `delete` does — that refuses
+  without `--force` — and the difference is blast radius: a deleted repo is
+  gone, a revoked grant is one command from being restored. So a script that has
+  always revoked unprompted keeps working and no `--force` has to exist for it.
+  Do not "finish the job" by adding the refusal and the flag; the flag is only
+  needed once the non-interactive path is broken. The prompt comes after the
+  picker so it names what was chosen, and covers the whole set at once — a count
+  in the title with the grantees listed under it, never a bare number.
+  `confirmDestructiveAction` is the shared gate and `destructiveAction` supplies
+  the words that differ, with `confirmControlPlaneDeletion` its delete-worded
+  wrapper.
+
+  No candidate is auto-picked even when only one is eligible, unlike
+  `selectPlacement`, which returns a lone cluster without prompting: this writes
+  access. Picker prompts go to **stderr** (`promptForm`), because `huh` writes to
+  stdout in accessible mode and these commands can be asked for `--json`.
 
 Forge tokens (`gh`, `et`) are the path segments of an `entire://` URL, and
 `gitremote.pathForges` owns the *set* — `IsForgePathToken` answers "is this a

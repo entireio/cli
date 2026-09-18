@@ -121,18 +121,38 @@ func runControlPlaneDelete(
 	})
 }
 
-// confirmControlPlaneDeletion gates a destructive control-plane delete. With
+// destructiveAction names the words one confirmation gate uses, so deleting a
+// resource and revoking access to one share a gate instead of a near-copy.
+type destructiveAction struct {
+	imperative string // "Delete" / "Revoke": the prompt
+	verb       string // "delete" / "revoke": the refusal
+	outcome    string // "Deletion" / "Revocation": the cancellation line
+}
+
+var (
+	deleteAction = destructiveAction{imperative: "Delete", verb: "delete", outcome: "Deletion"}
+	revokeAction = destructiveAction{imperative: "Revoke", verb: "revoke", outcome: "Revocation"}
+)
+
+// confirmControlPlaneDeletion gates a destructive control-plane delete. See
+// confirmDestructiveAction, which it is the delete-worded half of.
+func confirmControlPlaneDeletion(ctx context.Context, w io.Writer, label string, force, canPrompt bool) (bool, error) {
+	return confirmDestructiveAction(ctx, w, deleteAction, label, "", force, canPrompt)
+}
+
+// confirmDestructiveAction gates a destructive control-plane operation. With
 // force it proceeds silently. Otherwise it requires an interactive terminal:
-// with none it refuses (returns an error) rather than deleting unprompted; with
+// with none it refuses (returns an error) rather than acting unprompted; with
 // one it shows a confirmation form. canPrompt is passed in (not queried) so the
 // decision is unit-testable without a TTY. label is the human description of
-// the target, e.g. `org acme (01J…)`.
-func confirmControlPlaneDeletion(ctx context.Context, w io.Writer, label string, force, canPrompt bool) (bool, error) {
+// the target, e.g. `org acme (01J…)`; detail, when set, lists what the label
+// summarises, so a prompt covering several things can still name each one.
+func confirmDestructiveAction(ctx context.Context, w io.Writer, act destructiveAction, label, detail string, force, canPrompt bool) (bool, error) {
 	if force {
 		return true, nil
 	}
 	if !canPrompt {
-		return false, fmt.Errorf("refusing to delete %s without confirmation; pass --force", label)
+		return false, fmt.Errorf("refusing to %s %s without confirmation; pass --force", act.verb, label)
 	}
 	// huh opens the TTY during form startup regardless of context state, so
 	// guard explicitly to honor an already-cancelled command context.
@@ -140,19 +160,21 @@ func confirmControlPlaneDeletion(ctx context.Context, w io.Writer, label string,
 		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
 	}
 	confirmed := false
-	form := NewAccessibleForm(
-		huh.NewGroup(huh.NewConfirm().Title(fmt.Sprintf("Delete %s?", label)).Value(&confirmed)),
-	)
+	prompt := huh.NewConfirm().Title(fmt.Sprintf("%s %s?", act.imperative, label)).Value(&confirmed)
+	if detail != "" {
+		prompt = prompt.Description(detail)
+	}
+	form := NewAccessibleForm(huh.NewGroup(prompt))
 	if err := form.RunWithContext(ctx); err != nil {
 		// A user abort (Esc) or context cancel (Ctrl+C) is a clean cancel, not
 		// an error — mirror confirmTrailDeletion.
 		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
 			return false, nil
 		}
-		return false, fmt.Errorf("deletion prompt: %w", err)
+		return false, fmt.Errorf("%s prompt: %w", strings.ToLower(act.outcome), err)
 	}
 	if !confirmed {
-		fmt.Fprintln(w, "Deletion cancelled.")
+		fmt.Fprintf(w, "%s cancelled.\n", act.outcome)
 		return false, nil
 	}
 	return true, nil
