@@ -55,6 +55,20 @@ type UserPreferences struct {
 	Investigate           *InvestigateConfig             `json:"investigate,omitempty"`
 	SummaryGeneration     *SummaryGenerationSettings     `json:"summary_generation,omitempty"`
 	SummaryTimeoutSeconds int                            `json:"summary_timeout_seconds,omitempty"`
+
+	// Enabled is "did this developer turn Entire on here", which is a fact
+	// about a person and a repository and never about one worktree of it.
+	// Pointer-shaped so an absent key stays distinguishable from an explicit
+	// false: IsSetUpAny has to tell "never configured" from "configured off",
+	// and a bool would collapse them.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// CheckpointRemote is where this repository's transcripts go. Typed rather
+	// than reached through StrategyOptions, which is a map[string]any and so
+	// would accept any key at all — the allowlist is the boundary, and a
+	// free-form map inside it is a hole in that boundary. Applied into
+	// StrategyOptions so every existing reader is unchanged.
+	CheckpointRemote *CheckpointRemoteConfig `json:"checkpoint_remote,omitempty"`
 }
 
 // userOverlay is everything the user tier contributes to one settings load.
@@ -280,6 +294,59 @@ func applyUserPreferences(settings *EntireSettings, prefs *UserPreferences) {
 	if prefs.SummaryTimeoutSeconds > 0 {
 		settings.SummaryTimeoutSeconds = prefs.SummaryTimeoutSeconds
 	}
+	if prefs.Enabled != nil {
+		settings.Enabled = *prefs.Enabled
+	}
+	if prefs.CheckpointRemote != nil {
+		if settings.StrategyOptions == nil {
+			settings.StrategyOptions = map[string]any{}
+		}
+		// Written as the same map shape GetCheckpointRemote already decodes,
+		// rather than the struct: that reader type-asserts map[string]any, and
+		// handing it a *CheckpointRemoteConfig would make it return nil — a
+		// configured destination silently reading as unconfigured.
+		settings.StrategyOptions["checkpoint_remote"] = map[string]any{
+			"provider": prefs.CheckpointRemote.Provider,
+			"repo":     prefs.CheckpointRemote.Repo,
+		}
+	}
+}
+
+// UserTierSetsCheckpointRemote reports whether the effective checkpoint_remote
+// came from the user settings file.
+//
+// This is the user-tier half of the ownership question CheckpointRemoteIsLocalOnly
+// answers for .entire/settings.local.json: "did this developer choose this
+// destination, or did they inherit it from a repository they cloned?" The user
+// file needs no probe to answer it — a repository cannot deliver content to
+// ~/.config, so a destination found there is the developer's by construction.
+func UserTierSetsCheckpointRemote(ctx context.Context, worktreeRoot string) bool {
+	overlay := loadUserOverlay(ctx)
+	if overlay.preferences != nil && overlay.preferences.CheckpointRemote != nil {
+		return true
+	}
+	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
+		if prefs.CheckpointRemote != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// UserTierConfiguresRepo reports whether the user settings file says anything
+// about this repository — a matching `repos` entry, or a machine-wide
+// `enabled`.
+//
+// IsSetUpAny uses this. Without it, a linked worktree of a repository enabled
+// only through this tier has no .entire directory of its own, reads as "never
+// set up", and every hook becomes a silent no-op — the exact failure the
+// IsSetUpAny guard exists to prevent, reached through a different door.
+func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
+	overlay := loadUserOverlay(ctx)
+	if overlay.preferences != nil && overlay.preferences.Enabled != nil {
+		return true
+	}
+	return len(overlay.repoPreferences(ctx, worktreeRoot)) > 0
 }
 
 // applyUserTier applies the machine-wide preferences and then this
