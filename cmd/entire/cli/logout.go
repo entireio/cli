@@ -33,17 +33,18 @@ func newLogoutCmd() *cobra.Command {
 		Use:   "logout",
 		Short: "Log out of Entire",
 		Long: "Log out of every saved login.\n\n" +
-			"For each saved login, this ends the CLI's own session on that login\n" +
-			"server and removes the login from this machine. --context and\n" +
-			"$ENTIRE_CONTEXT do not narrow it.\n\n" +
-			"Pass --everywhere to also end every other session on each login server:\n" +
-			"browser sessions and other machines' CLI sessions included. A browser is\n" +
-			"signed out once its access token expires.",
+			"For each saved login, this ends every CLI session on that login server,\n" +
+			"other machines included, and removes the login from this machine.\n" +
+			"--context and $ENTIRE_CONTEXT do not narrow it. Browser and web\n" +
+			"sessions stay signed in.\n\n" +
+			"Pass --everywhere to also end browser and web sessions on each login\n" +
+			"server. A browser is signed out on its next request; the web app once\n" +
+			"its access token expires.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			deps := logoutDeps{
 				listContexts:     auth.StoredContexts,
 				tokenForContext:  loginBearer,
-				revoke:           revokeCurrentAuthSession,
+				revoke:           revokeCLIAuthSessions,
 				removeContext:    auth.RemoveContext,
 				insecureHTTPAuth: applyInsecureHTTPAuth(insecureHTTPAuth),
 			}
@@ -65,21 +66,31 @@ func newLogoutCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Also end browser and other machines' sessions")
+	cmd.Flags().BoolVar(&everywhere, "everywhere", false, "Also end browser and web sessions")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
 
-// revokeCurrentAuthSession ends the bearer's own session.
-func revokeCurrentAuthSession(ctx context.Context, coreURL, token string) error {
-	return newAuthSessionsClient(coreURL, token).RevokeCurrentAuthSession(ctx) //nolint:wrapcheck // RevokeCurrentAuthSession already wraps with action context
+// revokeCLIAuthSessions ends every CLI session on coreURL.
+//
+// One collection DELETE when the login server supports it. An older
+// server answers 404 or 405 and cannot tell CLI sessions from browser
+// ones, so only the bearer's own session is ended there.
+func revokeCLIAuthSessions(ctx context.Context, coreURL, token string) error {
+	client := newAuthSessionsClient(coreURL, token)
+	err := client.RevokeCLIAuthSessions(ctx)
+	if err == nil || !endpointMissing(err) {
+		return err //nolint:wrapcheck // RevokeCLIAuthSessions already wraps with "revoke cli sessions"
+	}
+	return client.RevokeCurrentAuthSession(ctx) //nolint:wrapcheck // RevokeCurrentAuthSession already wraps with action context
 }
 
-// revokeAllAuthSessions ends every session on coreURL.
+// revokeAllAuthSessions ends every session on coreURL, browser and web
+// included.
 //
-// One collection DELETE when the login server supports it. An older server
-// answers 404 or 405 to that; then each session is ended by id, which ends
-// the same set in more round trips.
+// One collection DELETE with scope=all when the login server supports
+// it. An older server answers 404 or 405 to that; then each session is
+// ended by id, which ends the same set in more round trips.
 func revokeAllAuthSessions(ctx context.Context, coreURL, token string) error {
 	client := newAuthSessionsClient(coreURL, token)
 	err := client.RevokeAllAuthSessions(ctx)

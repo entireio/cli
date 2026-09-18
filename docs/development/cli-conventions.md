@@ -58,9 +58,15 @@ the commands are always runnable in every build.
   `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
   bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
   env token's `aud`), else the active login. `auth status` shows the caller's
-  home jurisdiction so the slug is discoverable. `logout`
-  takes `--everywhere` (revoke every session on the active core, not just the
-  current one) and `--all-contexts` (log out of every saved login)
+  home jurisdiction so the slug is discoverable. `logout` sweeps every saved
+  login: one `DELETE /api/auth/tokens` per login server ends every CLI session
+  there (core tells them apart by `issuer_client_id`), then the login is
+  removed locally. `--context` never narrows it. `--everywhere` sends
+  `?scope=all`, which also ends browser and web sessions. An older server
+  answers 405; bare `logout` then ends only the bearer's own session and
+  `--everywhere` falls back to list + delete-by-id. Each login gets its own
+  deadline (`logoutLoginTimeout`), and only a failed local removal fails the
+  command
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
 - `cluster`: the control plane's data-plane cluster catalog — `list` only, since
   clusters are provisioned by Entire rather than by users. It renders `GET

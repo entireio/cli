@@ -13,10 +13,12 @@ import (
 // never returned by the server, only metadata. (The list envelope's wire key
 // is "tokens"; the rows are sessions.)
 type AuthSession struct {
-	ID         string  `json:"id"`
-	UserID     string  `json:"user_id"`
-	Name       string  `json:"name"`
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+	Name   string `json:"name"`
+	// Scope is "cli", "web" or "system"; ClientID is the raw OAuth client.
 	Scope      string  `json:"scope"`
+	ClientID   string  `json:"client_id"`
 	ExpiresAt  string  `json:"expires_at"`
 	LastUsedAt *string `json:"last_used_at"`
 	CreatedAt  string  `json:"created_at"`
@@ -62,22 +64,39 @@ func (c *Client) ListAuthSessions(ctx context.Context) ([]AuthSession, error) {
 	return out.Sessions, nil
 }
 
-// RevokeAllAuthSessions revokes every login session of the authenticated
-// user in one call (DELETE on the collection). A login server that predates
-// the endpoint answers 404 or 405; callers fall back to list + revoke by id.
+// RevokeCLIAuthSessions revokes every CLI login session of the
+// authenticated user, on every machine, in one call (DELETE on the
+// collection). Browser and web sessions stay. A login server that
+// predates the endpoint answers 404 or 405.
+func (c *Client) RevokeCLIAuthSessions(ctx context.Context) error {
+	return c.revokeSessionCollection(ctx, "", "revoke cli sessions")
+}
+
+// RevokeAllAuthSessions revokes every session of the authenticated user,
+// browser and web included (DELETE on the collection with scope=all). A
+// login server that predates the endpoint answers 404 or 405; callers
+// fall back to list + revoke by id.
 func (c *Client) RevokeAllAuthSessions(ctx context.Context) error {
+	return c.revokeSessionCollection(ctx, "all", "revoke all sessions")
+}
+
+func (c *Client) revokeSessionCollection(ctx context.Context, scope, action string) error {
 	base, err := c.authSessionsBasePath()
 	if err != nil {
-		return fmt.Errorf("revoke all sessions: %w", err)
+		return fmt.Errorf("%s: %w", action, err)
 	}
-	resp, err := c.Delete(ctx, base)
+	path := base
+	if scope != "" {
+		path += "?scope=" + url.QueryEscape(scope)
+	}
+	resp, err := c.Delete(ctx, path)
 	if err != nil {
-		return fmt.Errorf("revoke all sessions: %w", err)
+		return fmt.Errorf("%s: %w", action, err)
 	}
 	defer resp.Body.Close()
 
 	if err := CheckResponse(resp); err != nil {
-		return fmt.Errorf("revoke all sessions: %w", err)
+		return fmt.Errorf("%s: %w", action, err)
 	}
 	return nil
 }

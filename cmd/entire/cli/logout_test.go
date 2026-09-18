@@ -419,7 +419,8 @@ type coreRecorder struct {
 	mu            sync.Mutex
 	refreshes     int
 	listCount     int
-	deleteAll     int
+	deleteCLI     int // bare collection DELETE: CLI sessions
+	deleteAll     int // collection DELETE with scope=all
 	deleteCurrent int
 	deleteByID    []string
 	bearers       []string // Authorization bearers seen on revoke calls
@@ -428,8 +429,9 @@ type coreRecorder struct {
 	failRefresh bool
 	// noRevokeAll makes the collection DELETE answer 405 (older core).
 	noRevokeAll bool
-	// currentStatus overrides the /current answer; zero means 200.
-	currentStatus int
+	// revokeStatus overrides the bare collection and /current answers;
+	// zero means 200.
+	revokeStatus int
 }
 
 func (r *coreRecorder) snapshot() (list, current, byID int) {
@@ -463,16 +465,25 @@ func newCoreServer(t *testing.T) (*httptest.Server, *coreRecorder) {
 			rec.listCount++
 			fmt.Fprint(w, `{"tokens":[{"id":"s1"},{"id":"s2"}]}`)
 		case r.Method == http.MethodDelete && r.URL.Path == coreAuthSessionsPath:
-			rec.deleteAll++
-			if rec.noRevokeAll {
+			all := r.URL.Query().Get("scope") == "all"
+			if all {
+				rec.deleteAll++
+			} else {
+				rec.deleteCLI++
+			}
+			switch {
+			case rec.noRevokeAll:
 				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			case !all && rec.revokeStatus != 0:
+				w.WriteHeader(rec.revokeStatus)
 				return
 			}
 			fmt.Fprint(w, `{"success":true}`)
 		case r.Method == http.MethodDelete && r.URL.Path == coreAuthSessionsPath+"/current":
 			rec.deleteCurrent++
-			if rec.currentStatus != 0 {
-				w.WriteHeader(rec.currentStatus)
+			if rec.revokeStatus != 0 {
+				w.WriteHeader(rec.revokeStatus)
 				return
 			}
 			fmt.Fprint(w, `{"success":true}`)
@@ -564,12 +575,12 @@ func assertNoContextsLeft(t *testing.T) {
 // TestLogoutCommand_SweepsEveryContext runs the real cobra command against two
 // fake cores. Process-global env + keyring backend, so no t.Parallel().
 func TestLogoutCommand_SweepsEveryContext(t *testing.T) {
-	t.Run("default: current session on every core", func(t *testing.T) {
+	t.Run("default: every CLI session on every core", func(t *testing.T) {
 		recA, recB := seedTwoContexts(t)
 		out, errOut := execLogout(t)
 		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
-			if l, c, b := rec.snapshot(); l != 0 || c != 1 || b != 0 {
-				t.Errorf("context %s: want one current-session revoke, got list=%d current=%d byID=%d", name, l, c, b)
+			if l, c, b := rec.snapshot(); rec.deleteCLI != 1 || rec.deleteAll != 0 || l != 0 || c != 0 || b != 0 {
+				t.Errorf("context %s: want one bare collection DELETE, got cli=%d all=%d list=%d current=%d byID=%d", name, rec.deleteCLI, rec.deleteAll, l, c, b)
 			}
 		}
 		if !strings.Contains(out, "Logged out of 2 saved login(s).") {
@@ -581,13 +592,29 @@ func TestLogoutCommand_SweepsEveryContext(t *testing.T) {
 		assertNoContextsLeft(t)
 	})
 
-	t.Run("--everywhere: one revoke-all per core", func(t *testing.T) {
+	t.Run("default: older core falls back to the current session", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		recA.noRevokeAll = true
+		_, errOut := execLogout(t)
+		if l, c, b := recA.snapshot(); recA.deleteCLI != 1 || l != 0 || c != 1 || b != 0 {
+			t.Errorf("old core: want 405 then one /current revoke, got cli=%d list=%d current=%d byID=%d", recA.deleteCLI, l, c, b)
+		}
+		if _, c, _ := recB.snapshot(); recB.deleteCLI != 1 || c != 0 {
+			t.Errorf("new core: want one bare collection DELETE only, got cli=%d current=%d", recB.deleteCLI, c)
+		}
+		if errOut != "" {
+			t.Errorf("stderr = %q, want empty: the fallback is not a failure", errOut)
+		}
+		assertNoContextsLeft(t)
+	})
+
+	t.Run("--everywhere: one scope=all DELETE per core", func(t *testing.T) {
 		recA, recB := seedTwoContexts(t)
 		execLogout(t, "--everywhere")
 		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
 			l, c, b := rec.snapshot()
-			if rec.deleteAll != 1 || l != 0 || c != 0 || b != 0 {
-				t.Errorf("context %s: want one collection DELETE only, got all=%d list=%d current=%d byID=%d", name, rec.deleteAll, l, c, b)
+			if rec.deleteAll != 1 || rec.deleteCLI != 0 || l != 0 || c != 0 || b != 0 {
+				t.Errorf("context %s: want one scope=all DELETE only, got all=%d cli=%d list=%d current=%d byID=%d", name, rec.deleteAll, rec.deleteCLI, l, c, b)
 			}
 		}
 		assertNoContextsLeft(t)
@@ -601,7 +628,7 @@ func TestLogoutCommand_SweepsEveryContext(t *testing.T) {
 			t.Errorf("old core: want 405 then list + 2 by-id revokes, got all=%d list=%d current=%d byID=%d", recA.deleteAll, l, c, b)
 		}
 		if l, _, b := recB.snapshot(); recB.deleteAll != 1 || l != 0 || b != 0 {
-			t.Errorf("new core: want one collection DELETE only, got all=%d list=%d byID=%d", recB.deleteAll, l, b)
+			t.Errorf("new core: want one scope=all DELETE only, got all=%d list=%d byID=%d", recB.deleteAll, l, b)
 		}
 		if errOut != "" {
 			t.Errorf("stderr = %q, want empty: the fallback is not a failure", errOut)
@@ -618,8 +645,8 @@ func TestLogoutCommand_SweepsEveryContext(t *testing.T) {
 		contexts.SetFlagOverrideForTest(t, all[0].Name)
 		execLogout(t)
 		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
-			if l, c, b := rec.snapshot(); l != 0 || c != 1 || b != 0 {
-				t.Errorf("context %s: want one current-session revoke, got list=%d current=%d byID=%d", name, l, c, b)
+			if l, c, b := rec.snapshot(); rec.deleteCLI != 1 || l != 0 || c != 0 || b != 0 {
+				t.Errorf("context %s: want one bare collection DELETE, got cli=%d list=%d current=%d byID=%d", name, rec.deleteCLI, l, c, b)
 			}
 		}
 		assertNoContextsLeft(t)
@@ -655,8 +682,8 @@ func TestLogoutCommand_RefreshesBeforeRevoking(t *testing.T) {
 		seedExpiredLogin(t, srv.URL, "alice")
 
 		_, errOut := execLogout(t)
-		if rec.refreshes != 1 || rec.deleteCurrent != 1 {
-			t.Fatalf("want one refresh then one revoke, got refreshes=%d current=%d", rec.refreshes, rec.deleteCurrent)
+		if rec.refreshes != 1 || rec.deleteCLI != 1 {
+			t.Fatalf("want one refresh then one revoke, got refreshes=%d cli=%d", rec.refreshes, rec.deleteCLI)
 		}
 		if len(rec.bearers) != 1 || !strings.Contains(rec.bearers[0], ".") || rec.bearers[0] == "" {
 			t.Fatalf("revoke bearers = %v, want the re-minted JWT", rec.bearers)
@@ -675,12 +702,12 @@ func TestLogoutCommand_RefreshesBeforeRevoking(t *testing.T) {
 		isolateLogoutState(t)
 		srv, rec := newCoreServer(t)
 		rec.failRefresh = true
-		rec.currentStatus = http.StatusUnauthorized
+		rec.revokeStatus = http.StatusUnauthorized
 		seedExpiredLogin(t, srv.URL, "alice")
 
 		_, errOut := execLogout(t)
-		if rec.refreshes < 1 || rec.deleteCurrent != 1 {
-			t.Fatalf("want a refresh attempt then one revoke, got refreshes=%d current=%d", rec.refreshes, rec.deleteCurrent)
+		if rec.refreshes < 1 || rec.deleteCLI != 1 {
+			t.Fatalf("want a refresh attempt then one revoke, got refreshes=%d cli=%d", rec.refreshes, rec.deleteCLI)
 		}
 		if !strings.Contains(errOut, "may still be active") {
 			t.Fatalf("stderr = %q, want a may-still-be-active warning", errOut)
