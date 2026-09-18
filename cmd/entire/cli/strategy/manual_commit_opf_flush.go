@@ -84,7 +84,7 @@ func opfFlushRecentlySpawned(commonDir string, now time.Time) bool {
 	return spawnmarker.RecentlySpawned(commonDir, "opf-flush-spawn", opfFlushSpawnThrottle, now)
 }
 
-// refsAwaitingOPF returns the queued checkpoint refs whose tip does not yet
+// RefsAwaitingOPF returns the queued checkpoint refs whose tip does not yet
 // carry the OPF trailer — exactly the refs a flush would still have work to do
 // on. This is the flush's unit of progress: RewriteQueuedCheckpointRefsWithOPF
 // never adds to or removes from the push queue (it peeks), so queue LENGTH
@@ -94,7 +94,12 @@ func opfFlushRecentlySpawned(commonDir string, now time.Time) bool {
 // at the first trailered commit walking back from the tip, so a trailered tip
 // is precisely an empty chain. Refs no longer present locally are not awaiting
 // anything; flushCheckpointRefsQueue owns pruning them.
-func refsAwaitingOPF(ctx context.Context, repo *git.Repository) ([]plumbing.ReferenceName, error) {
+//
+// Exported because `entire status` reports the same backlog to the user, and
+// with the rewrite moved into a detached worker that report is the only place
+// pending redaction work is visible. It reads local refs and the queue file and
+// nothing else, so it is safe on a read-only status path.
+func RefsAwaitingOPF(ctx context.Context, repo *git.Repository) ([]plumbing.ReferenceName, error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("resolve push queue: %w", err)
@@ -166,7 +171,7 @@ func maybeSpawnOPFFlush(ctx context.Context, repo *git.Repository) {
 	// reason the session sweep's does: the shared marker is check-and-record, so
 	// consulting it first would burn the whole throttle window on the common
 	// nothing-to-do case.
-	awaiting, err := refsAwaitingOPF(ctx, repo)
+	awaiting, err := RefsAwaitingOPF(ctx, repo)
 	if err != nil {
 		logging.Warn(logCtx, "skipping OPF flush spawn: could not read push queue",
 			slog.String("error", err.Error()))
@@ -243,7 +248,7 @@ func RunOPFFlush(ctx context.Context) error {
 		failures = nil
 	}
 
-	initial, err := refsAwaitingOPF(ctx, repo)
+	initial, err := RefsAwaitingOPF(ctx, repo)
 	if err != nil {
 		logging.Warn(logCtx, "opf flush: could not read push queue",
 			slog.String("error", err.Error()))
@@ -264,7 +269,7 @@ func RunOPFFlush(ctx context.Context) error {
 			logging.Warn(logCtx, "opf flush: git-refs pass failed",
 				slog.String("error", rewriteErr.Error()))
 		}
-		after, afterErr := refsAwaitingOPF(ctx, repo)
+		after, afterErr := RefsAwaitingOPF(ctx, repo)
 		if afterErr != nil {
 			// The outcome is unknown, so record nothing: a count that cannot be
 			// trusted is worse than no count, because the visibility surface
