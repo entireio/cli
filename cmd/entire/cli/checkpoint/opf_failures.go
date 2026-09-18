@@ -46,6 +46,14 @@ const (
 const StuckOPFFailureThreshold = 3
 
 // opfFailureRecord is one ref's consecutive-failure tally.
+//
+// Nothing removes a record from the on-disk file when its ref is deleted
+// out-of-band (checkpoint pruned, branch deleted, `entire clean`) — this file
+// has no reference to the queue's or the repo's own ref lifetime, so stale
+// records can accumulate here indefinitely. StuckOPFRefs filters its result
+// against the repo's live refs so a deleted ref never surfaces as stuck, but
+// that only hides the symptom at read time; the record itself is never
+// pruned from disk.
 type opfFailureRecord struct {
 	Count int `json:"count"`
 	// LastFailedAt lets a later visibility surface say how long a ref has been
@@ -186,7 +194,21 @@ func StuckOPFRefs(ctx context.Context, repo *git.Repository) ([]plumbing.Referen
 	if err != nil {
 		return nil, err
 	}
-	return log.StuckRefs()
+	stuck, err := log.StuckRefs()
+	if err != nil {
+		return nil, err
+	}
+	// The failure log has no reference to the repo's or the push queue's own
+	// ref lifetime, so a ref deleted out-of-band (pruned, branch deleted,
+	// `entire clean`) after failing enough to be recorded stuck would
+	// otherwise surface here forever. Filter to refs that still exist.
+	live := make([]plumbing.ReferenceName, 0, len(stuck))
+	for _, name := range stuck {
+		if _, refErr := repo.Reference(name, false); refErr == nil {
+			live = append(live, name)
+		}
+	}
+	return live, nil
 }
 
 // readLocked parses the log file. The caller must hold the lock. A missing file

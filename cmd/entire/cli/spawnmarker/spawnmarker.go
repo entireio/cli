@@ -23,9 +23,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
-// DirName is the marker directory inside the git common dir. It is the same
+// dirName is the marker directory inside the git common dir. It is the same
 // "entire" directory clone preferences live in.
-const DirName = "entire"
+const dirName = "entire"
 
 // RecentlySpawned reports whether the named spawn marker under the shared
 // git-common-dir was refreshed within ttl and, when it wasn't, records now as
@@ -43,10 +43,10 @@ func RecentlySpawned(commonDir, marker string, ttl time.Duration, now time.Time)
 	// Create the directory before acquiring the lock: flock opens the lock file,
 	// which fails if its parent doesn't exist yet (mirrors
 	// ModifyClonePreferences, which creates before locking).
-	if err := osroot.MkdirAllNoSymlink(root, DirName, 0o750); err != nil {
+	if err := osroot.MkdirAllNoSymlink(root, dirName, 0o750); err != nil {
 		return false
 	}
-	markerName := DirName + "/" + marker
+	markerName := dirName + "/" + marker
 	release, err := flock.AcquireIn(root, markerName+".lock")
 	if err != nil {
 		return false
