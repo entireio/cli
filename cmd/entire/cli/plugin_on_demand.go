@@ -79,7 +79,27 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 	}
 	entry := idx.Find(name)
 	if entry == nil {
-		return "", fmt.Errorf("the entire-%s plugin is not listed in the plugin index %s, so it cannot be installed on demand; install it from its repository URL with 'entire plugin install <url>'", name, redactURL(indexURL))
+		// A miss may only mean the cached catalog predates the entry. The
+		// clone refreshes on a 24-hour TTL, so a plugin added today is
+		// invisible here for up to a day, and the error above would blame the
+		// index for being wrong when the local copy is merely old — which is
+		// exactly the window right after a new plugin is published.
+		//
+		// Retrying costs nothing that matters. It runs only on a path that is
+		// otherwise about to fail and exit non-zero, only for the handful of
+		// names in onDemandInstallPluginNames, and never on the hit path. A
+		// forced sync cannot make things worse offline either: SyncPluginIndex
+		// falls back to the stale copy with a logged warning rather than
+		// failing, so the worst case is the same miss and the same message.
+		stopRefresh := startPluginStep(withPluginProgress(ctx, rootCmd.ErrOrStderr()), "Refreshing plugin index...")
+		refreshed, refreshErr := SyncPluginIndex(ctx, indexURL, true)
+		stopRefresh()
+		if refreshErr == nil {
+			entry = refreshed.Find(name)
+		}
+	}
+	if entry == nil {
+		return "", fmt.Errorf("the entire-%s plugin is not listed in the plugin index %s (refreshed for this check), so it cannot be installed on demand; install it from its repository URL with 'entire plugin install <url>'", name, redactURL(indexURL))
 	}
 
 	confirmed, err := runPluginConfirm(ctx, rootCmd.ErrOrStderr(),

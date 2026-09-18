@@ -229,7 +229,7 @@ and the inferred one is the common path.
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`investigate`, `blame`, `why`, `experts`, and `runner`.
+`blame`, `why`, `experts`, and `runner`.
 `tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
@@ -391,10 +391,8 @@ for the `execx.NonInteractive` pattern when testing a real `entire` command.
 
 Existing good patterns:
 
-- `entire investigate --findings` prints a complete plain-text list and includes
-  `view: entire investigate show <run-id>` hints.
-- `entire investigate show <run-id>` prints the saved investigation summary and
-  findings without needing a TUI.
+- `entire review --findings`-style listings print a complete plain-text list and
+  include a `view: ...` hint naming the detail command.
 - `entire repo clone /gh/...` prompts only when several clusters are possible;
   without a TTY it asks for `--cluster`.
 - `entire experts --tui` is safe because the TUI is opt-in and non-TTY output

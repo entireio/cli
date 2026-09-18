@@ -158,23 +158,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"import":   {agentHelpAudienceTaskDriven, false},
 	"runner":   {agentHelpAudienceTaskDriven, false},
 
-	// The user's to start. review and investigate are not destructive but spawn
-	// paid multi-agent runs, so an uninvited one spends the user's money.
-	"agent":       {agentHelpAudienceUserOwned, false},
-	"auth":        {agentHelpAudienceUserOwned, false},
-	"clean":       {agentHelpAudienceUserOwned, false},
-	"cluster":     {agentHelpAudienceUserOwned, false},
-	"configure":   {agentHelpAudienceUserOwned, false},
-	"disable":     {agentHelpAudienceUserOwned, false},
-	"enable":      {agentHelpAudienceUserOwned, false},
-	"investigate": {agentHelpAudienceUserOwned, false},
-	"login":       {agentHelpAudienceUserOwned, false},
-	"logout":      {agentHelpAudienceUserOwned, false},
-	"org":         {agentHelpAudienceUserOwned, false},
-	"plugin":      {agentHelpAudienceUserOwned, false},
-	"project":     {agentHelpAudienceUserOwned, false},
-	"repo":        {agentHelpAudienceUserOwned, false},
-	"review":      {agentHelpAudienceUserOwned, false},
+	// The user's to start. review is not destructive but spawns a paid
+	// multi-agent run, so an uninvited one spends the user's money.
+	"agent":     {agentHelpAudienceUserOwned, false},
+	"auth":      {agentHelpAudienceUserOwned, false},
+	"clean":     {agentHelpAudienceUserOwned, false},
+	"cluster":   {agentHelpAudienceUserOwned, false},
+	"configure": {agentHelpAudienceUserOwned, false},
+	"disable":   {agentHelpAudienceUserOwned, false},
+	"enable":    {agentHelpAudienceUserOwned, false},
+	"login":     {agentHelpAudienceUserOwned, false},
+	"logout":    {agentHelpAudienceUserOwned, false},
+	"org":       {agentHelpAudienceUserOwned, false},
+	"plugin":    {agentHelpAudienceUserOwned, false},
+	"project":   {agentHelpAudienceUserOwned, false},
+	"repo":      {agentHelpAudienceUserOwned, false},
+	"review":    {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,

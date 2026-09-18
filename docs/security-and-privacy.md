@@ -582,10 +582,10 @@ repository would otherwise be a binary Entire executes.
 
 ## Why agent instruction fields are local-only
 
-`investigate.always_prompt`, every review `prompt` (per-agent and judge, in
-`review_profiles` and the legacy `review` map), and every review profile's
-`task` are placed verbatim in the prompts of agents that `entire investigate`
-and `entire review` spawn with approval checks disabled (claude-code's
+Every review `prompt` (per-agent and judge, in
+`review_profiles` and the legacy `review` map) and every review profile's
+`task` are placed verbatim in the prompts of agents that
+`entire review` spawns with approval checks disabled (claude-code's
 `bypassPermissions`, codex's `--dangerously-bypass-approvals-and-sandbox`). The
 prompt is the stated control for those spawns, so whoever writes these strings
 gets the last word in it. `task` and `prompt` are adjacent sections of the same
@@ -601,9 +601,15 @@ clone-local review preferences (stored inside `.git/`, which a clone never
 populates) or `.entire/settings.local.json` verified untracked in both the
 index and `HEAD`. Rejection is a downgrade, never an error — a dropped task
 falls back to the built-in text for conventional profile names, and
-`entire review` / `entire investigate` print a one-line notice naming the
+`entire review` prints a one-line notice naming the
 dropped field and where it has to move (suppressed when the dropped task equals
 the built-in default, since that drop changes nothing).
+
+The `entire-investigate` plugin applies the same reasoning to its own
+`always_prompt`, against its own `.entire/investigate.local.json`. That file
+has no committed counterpart at all, so there is no layer to gate — only a
+check that the file itself is untracked. It is outside this repository's
+control; see the plugin's `internal/config`.
 
 Deliberately not gated: `skills` (review validates every configured skill
 against the locally installed set before spawning, so free text there fails the

@@ -6,7 +6,6 @@ import (
 	"runtime"
 
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
-	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
@@ -198,8 +197,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newRepoCmd(), groupControlPlane)))    // 'repo' — control-plane repo lifecycle
 
 	// Top-level lifecycle and standalone commands.
-	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps()))        // `review` (experimental)
-	experimental.Register(cmd, investigate.NewCommand(buildInvestigateDeps())) // `investigate` (experimental); multi-agent investigation
+	experimental.Register(cmd, cliReview.NewCommand(buildReviewDeps())) // `review` (experimental)
 	cmd.AddCommand(inGroup(newCleanCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newSetupCmd(), groupSetup)) // 'configure' — non-agent settings; agent CRUD lives under 'agent'
 	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))
