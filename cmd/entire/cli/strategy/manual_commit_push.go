@@ -106,6 +106,13 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		}
 	}
 
+	// Below the gate on purpose: a push the gate turned away carries no
+	// checkpoints anywhere, and hintGatedCheckpointSync already speaks for that
+	// case. Everything past here is a push that DOES carry checkpoints, which is
+	// what makes "they are going somewhere other than where you said" worth a
+	// line in the user's push output.
+	warnIgnoredCheckpointRemote(ctx, ps)
+
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
 	// instead of the single v1 branch. Those refs live under refs/entire/, not
 	// refs/heads/, so a forge can never pick them as a repository's default

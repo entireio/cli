@@ -362,6 +362,19 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			return
 		}
 	}
+	// Reported whether or not this run asked about destinations, and so above
+	// the `touched` gate: a configured checkpoint_remote that is not the
+	// destination is the same class as a broken one, which the comment at the
+	// top of this function already exempts for the same reason — the user
+	// cannot otherwise learn it. `entire enable` is where checkpoint
+	// configuration is fixed, so saying nothing here left the one command that
+	// resolves it findable only by reading .entire/logs.
+	//
+	// Skipped when the store IS the destination: there is nothing to claim.
+	if !dedicated {
+		reportIgnoredCheckpointRemote(ctx, w, s, resolved.Name)
+	}
+
 	if !touched {
 		return
 	}
@@ -415,4 +428,116 @@ func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
 		return
 	}
 	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+}
+
+// reportIgnoredCheckpointRemote says that a configured checkpoint_remote is not
+// the store checkpoints go to, and names the single command that claims it for
+// this clone.
+//
+// The rejection is deliberate — checkpointRemoteIsInherited refuses a committed
+// checkpoint_remote whose owner does not match every remote identifying this
+// repo, so a fork contributor's transcripts never land in the upstream's
+// checkpoint store. What was missing is the other half: when the store really
+// is the developer's own, nothing told them how to say so, and the symptom
+// (checkpoints arriving in the code repository) looks like a working setup.
+func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings.EntireSettings, electedRemote string) {
+	cr := s.GetCheckpointRemote()
+	if cr == nil {
+		return
+	}
+	verdict, reason := remote.InheritedCheckpointRemoteVerdict(ctx, s, electedRemote)
+	if !verdict.Refused() {
+		return
+	}
+	repo := cr.Repo
+	// The verdict above votes with ONE remote — the elected one — and a repo can
+	// have several. A remote whose owner matches still resolves the store, so
+	// "not in use" would be flatly false for a repo where pushing to that remote
+	// uploads checkpoints exactly as configured. `pinned` is the resolver's own
+	// answer to "does this remote reach the checkpoint_remote", so any pinned
+	// destination means the store is in use somewhere and the user is not in the
+	// broken state this message describes.
+	for _, d := range inspectRemoteTopology(ctx).destinations {
+		if d.pinned {
+			return
+		}
+	}
+	fmt.Fprintf(w, "checkpoint_remote %s is not in use: %s.\n", repo, reason)
+
+	// Ownership merely UNPROVABLE is the one case a human can settle that local
+	// git config cannot: a single-segment or non-forge origin
+	// (git@host:repo.git, https://host/repo.git, a filesystem path) yields no
+	// owner to compare, which is ordinary on self-hosted git. Refusing stays
+	// right non-interactively — absence of evidence is not proof the store is
+	// ours — but the person running `entire enable` knows.
+	//
+	// Never offered for OwnershipDisproved: a remote named an owner and it was
+	// somebody else, which is the fork case the check exists for. Offering to
+	// adopt there would walk a contributor into publishing their transcripts to
+	// the upstream's store, one keystroke deep.
+	//
+	// This is not a new trust boundary. `entire enable --local
+	// --checkpoint-remote <provider>:<owner>/<repo>` already performs exactly
+	// this write in one command; the prompt makes the existing remedy
+	// discoverable to someone who does not know it exists.
+	if verdict == remote.OwnershipUnprovable &&
+		offerToClaimCheckpointRemote(ctx, w, remote.ClaimCheckpointRemoteFlagValue(cr), repo) {
+		return
+	}
+
+	if claim := remote.ClaimCheckpointRemoteCommand(cr); claim != "" {
+		fmt.Fprintf(w, "If %s is yours, run `%s` to use it from this clone.\n", repo, claim)
+	} else {
+		fmt.Fprintf(w, "If %s is yours, declare checkpoint_remote in .entire/settings.local.json.\n", repo)
+	}
+}
+
+// offerToClaimCheckpointRemote asks whether the configured store belongs to this
+// developer and, on yes, declares it in .entire/settings.local.json — the
+// per-clone, gitignored layer whose presence CheckpointRemoteIsLocalOnly takes
+// as proof the developer chose it. Reports whether it wrote.
+//
+// Interactive only. A non-TTY run gets the printed command instead, because a
+// prompt nobody can answer must not become an implicit yes — and because an
+// agent reading the output should be handed the command rather than have the
+// decision made for the human it works for.
+// Takes the already-validated claimValue rather than the config it came from,
+// so the value written can never diverge from the one validated and printed —
+// reconstructing it here from raw fields let surrounding whitespace pass the
+// check and fail the write.
+func offerToClaimCheckpointRemote(ctx context.Context, w io.Writer, claimValue, repo string) bool {
+	if !interactive.CanPromptInteractively() {
+		return false
+	}
+	// A provider the flag cannot express has no value and no write path; fall
+	// through to the settings-file message rather than prompting for something
+	// that cannot be carried out.
+	if claimValue == "" {
+		return false
+	}
+
+	var claim bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Use %s for this clone's checkpoints?", repo)).
+				Description("This repo's remotes cannot prove who owns that store, so it is being ignored.\nAnswer yes only if it is yours.").
+				Affirmative("Yes, it's mine").
+				Negative("No, leave it").
+				Value(&claim),
+		),
+	)
+	if err := form.Run(); err != nil || !claim {
+		return false
+	}
+
+	if err := updateStrategyOptions(ctx, w, EnableOptions{
+		UseLocalSettings: true,
+		CheckpointRemote: claimValue,
+	}); err != nil {
+		fmt.Fprintf(w, "Could not save the checkpoint destination: %v\n", err)
+		return false
+	}
+	fmt.Fprintf(w, "Checkpoints will use %s for this clone (saved to .entire/settings.local.json).\n", repo)
+	return true
 }
