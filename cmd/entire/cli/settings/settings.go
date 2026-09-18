@@ -98,6 +98,13 @@ type EntireSettings struct {
 	// if the user had removed it. See enforceAgentPromptTrust.
 	agentPromptRejections []AgentPromptRejection
 
+	// userLayerRejections records preference blocks (or this repository's
+	// repos entries) dropped from the user settings file, one human-readable
+	// line each. Unexported for the same reason as its siblings: a block that
+	// was ignored must not be written back as if the user had removed it.
+	// Surfaced via UserLayerRejections.
+	userLayerRejections []string
+
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
@@ -715,6 +722,13 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		}
 		applyClonePreferences(settings, preferences)
 	}
+
+	// The user tier (~/.config/entire/settings.json) sits between the
+	// clone-local preferences and the per-worktree local file: machine-wide
+	// preferences first, then this repository's entry. Unlike every layer
+	// around it, this one resolves without a git repository at all, so it is
+	// the only tier readable when repository resolution itself fails.
+	applyUserTier(ctx, settings, worktreeRootOfSettingsFile(settingsFileAbs))
 
 	// Apply local overrides if they exist — but only from a file that is
 	// genuinely local. See localLayerTrackedReason.
