@@ -171,6 +171,11 @@ func resolveAPIClient(ctx context.Context, to, jurisdiction string, insecure boo
 		if err != nil {
 			return nil, err
 		}
+		if target.storeErr != nil {
+			// The login exists but its token could not be read; "not logged
+			// in" would send the user round the `entire login` loop.
+			return nil, storeReadError(target)
+		}
 		if target.token == "" {
 			// Return a normal (non-silent) error so main.go prints the hint;
 			// a SilentError would exit non-zero with no explanation.

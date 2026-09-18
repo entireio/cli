@@ -498,6 +498,12 @@ func persistLogin(outW io.Writer, dialled, adoptedIssuer, token, refreshToken st
 	}
 
 	fmt.Fprintln(outW, loginCompleteLine(token, dialled))
+	// The fallback's notice announces the switch to the file store once per
+	// process; without this, every later login onto the remembered file store
+	// wrote bearer tokens to disk without a word.
+	if tokenstore.FileBackendSelected() {
+		fmt.Fprintf(outW, "Tokens are stored in %s.\n", tokenstore.FileBackendPath())
+	}
 	return nil
 }
 
@@ -523,15 +529,46 @@ func loginCompleteLine(token, dialled string) string {
 // store write failure. The default backend is the OS keyring, which locked
 // or keyring-less machines (CI, containers, minimal server VMs) can't use —
 // the raw store error gives those users no way forward (#1036). The hint is
-// skipped when ENTIRE_TOKEN_STORE=file is already set (suggesting it again
-// would be nonsense) and for failures the file store wouldn't help with.
+// skipped when the file store is already selected, by ENTIRE_TOKEN_STORE=file,
+// by the remembered preference, or by this process's own fallback adoption
+// (suggesting it again would be nonsense), and for failures the file store
+// wouldn't help with. On Linux/BSD the
+// keyring-less case is handled by the tokenstore fallback before this ever
+// runs, so the hint here is reached only when the keyring was selected
+// explicitly, or when a Ctrl-C interrupted the keyring call
+// (which the fallback deliberately does not catch); that case is constructed
+// but never shown, because a signalled abort exits before the error is
+// rendered. A fallback whose file write also failed carries
+// ErrFileStoreFailed and gets a different hint: recommending
+// ENTIRE_TOKEN_STORE=file alone would send the user back to the store that
+// just failed, so it points at ENTIRE_TOKEN_STORE_PATH as the way to a
+// writable file store, with ENTIRE_TOKEN_STORE=file alongside it so the
+// keyring is not asked again, and says both have to stay set (a choice made
+// with the path override is never remembered). storeReadError in auth.go
+// gives the same advice, in the same words, for a read. On macOS and Windows,
+// with no fallback, it is reached whenever the keyring write fails.
+//
+// The remembered/not-remembered wording follows tokenstore.ChoiceIsRemembered,
+// the same rule the fallback's own notice uses, so the two can never
+// disagree.
 func withHeadlessStoreHint(err error) error {
-	if !errors.Is(err, auth.ErrCredentialStoreWrite) || tokenstore.FileBackendSelected() {
+	if !errors.Is(err, auth.ErrCredentialStoreWrite) {
+		return err
+	}
+	if errors.Is(err, tokenstore.ErrFileStoreFailed) {
+		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed. Point %s at a writable location and set %s=file, then run entire login again; a choice made with the path override is not remembered, so both variables must stay set for later commands", err, tokenstore.FileBackendPath(), tokenstore.PathEnvVar, tokenstore.BackendEnvVar)
+	}
+	if tokenstore.FileBackendSelected() {
 		return err
 	}
 
-	return fmt.Errorf("%w\n\nIf this machine has no usable OS keyring (headless server, container, CI), store tokens in a file instead:\n\n  %s=file entire login\n\nTokens are then written with 0600 permissions to %s (override the location with %s)",
-		err, tokenstore.BackendEnvVar, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+	const lead = "%w\n\nIf this machine has no usable OS keyring (headless server, container, CI), store tokens in a file instead:\n\n  %s=file entire login\n\n"
+	if tokenstore.ChoiceIsRemembered() {
+		return fmt.Errorf(lead+"The choice is remembered, so later commands need no variable; run %s=keyring entire login to switch back. Tokens are written with 0600 permissions to %s (override the location with %s, which then has to stay set for later commands)",
+			err, tokenstore.BackendEnvVar, tokenstore.BackendEnvVar, tokenstore.FileBackendPath(), tokenstore.PathEnvVar)
+	}
+	return fmt.Errorf(lead+"%s is set, so the choice is not remembered: keep both variables set for later commands. Tokens are written with 0600 permissions to %s",
+		err, tokenstore.BackendEnvVar, tokenstore.PathEnvVar, tokenstore.FileBackendPath())
 }
 
 // validateReceivedToken runs minimum-trust checks on the access token

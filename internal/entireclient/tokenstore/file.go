@@ -47,7 +47,7 @@ type fileStore struct {
 	// and takes down every Get/Set/Delete when it doesn't.
 	ownsDir bool
 	// pathErr is a rejected ENTIRE_CONFIG_DIR override, carried from
-	// resolveBackendLocked because that function cannot return one. Reported by
+	// defaultFileStore because that function cannot return one. Reported by
 	// ensureDir and dir, both of which run before any filesystem access, so a
 	// relative config dir never gets as far as creating a directory or a lock
 	// file. See userdirs.RequireAbsoluteOverride.
@@ -181,7 +181,7 @@ func (f *fileStore) load() (map[string]map[string]string, error) {
 	}
 	var store map[string]map[string]string
 	if err := json.Unmarshal(data, &store); err != nil {
-		return nil, fmt.Errorf("parsing token store: %w", err)
+		return nil, fmt.Errorf("parsing token store %s: %w", f.path, err)
 	}
 	return store, nil
 }

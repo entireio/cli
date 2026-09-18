@@ -190,6 +190,40 @@ func TestLoginTokenForContext(t *testing.T) {
 	if _, err := LoginTokenForContext(nil); err == nil {
 		t.Fatal("expected error for nil context")
 	}
+
+	// A context with no slot cannot hold a token: that is "not logged in",
+	// and resolveStatusTarget classifies it by errors.Is(ErrNotFound), so
+	// the wrap is load-bearing.
+	if _, err := LoginTokenForContext(&contexts.Context{Name: "x"}); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("empty slot must read as ErrNotFound, got %v", err)
+	}
+}
+
+// A slot that exists but holds an empty string is the other "nothing stored"
+// shape, and it is not hypothetical: a file store can carry one after a
+// hand-edit or a half-finished write. The store reads it back as ("", nil),
+// so LoginTokenForContext has to draw the line itself, and it has to draw it
+// as ErrNotFound for the same classification reason as the missing slot.
+func TestLoginTokenForContext_EmptyStoredValueReadsAsNotFound(t *testing.T) {
+	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
+	t.Cleanup(restore)
+
+	c := &contexts.Context{
+		Name:            "core.example.com",
+		CoreURL:         "https://core.example.com",
+		Handle:          "carol",
+		KeychainService: tokenstore.CoreKeyringService("https://core.example.com"),
+	}
+	if err := tokenstore.Set(c.KeychainService, c.Handle, ""); err != nil {
+		t.Fatalf("seed empty slot: %v", err)
+	}
+	if v, err := tokenstore.Get(c.KeychainService, c.Handle); err != nil || v != "" {
+		t.Fatalf("precondition: the store must hand back the empty slot as (\"\", nil), got (%q, %v)", v, err)
+	}
+
+	if _, err := LoginTokenForContext(c); !errors.Is(err, tokenstore.ErrNotFound) {
+		t.Fatalf("empty stored value must read as ErrNotFound, got %v", err)
+	}
 }
 
 func TestRemoveCurrentContext(t *testing.T) {

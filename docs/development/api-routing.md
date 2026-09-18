@@ -28,6 +28,66 @@ env-token-first precedence itself — see `resolveAuthStatusTarget` /
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
 
+### Credential Store Selection (keyring or tokens.json?)
+
+`internal/entireclient/tokenstore` picks the backend once per process, in
+`resolveBackend`, from three production inputs in strict precedence (the
+`go test` temp store slots in after the marker; see below): `ENTIRE_TOKEN_STORE`
+when set (`file`, or anything else meaning the keyring; explicit, never falls
+back, and a successful write through it is remembered; an explicit keyring write
+also removes the superseded copy of that credential from the default-path
+`tokens.json`, so a plaintext bearer does not linger for the fallback to
+re-adopt), then the remembered
+preference in `<config dir>/token_store.json` (`preference.go` — it records
+**the backend that holds the freshest credential**: an explicit write records
+it, and the Linux fallback records it once the file store proves it holds the
+credential (Get, Set or Delete — never after a keyring timeout). Reads through
+the marker never change it. It is never written while `ENTIRE_TOKEN_STORE_PATH`
+is set, because the marker cannot carry a path and would point later processes
+at the default one), then the platform default. On Linux/BSD the default
+keyring is fronted by `fallbackStore` (`fallback.go`): a keyring call that fails
+for an availability reason — anything but `ErrNotFound` and Ctrl-C — is retried
+on the file store at `FileBackendPath` (`ENTIRE_TOKEN_STORE_PATH` when set, else
+`tokens.json` in the config dir), and once the file store proves it holds the
+credential it is adopted, announced once on stderr, and remembered — except
+after a keyring *timeout on a write*, which is adopted for this process only:
+the abandoned write may still complete once the keyring answers, and a marker
+would orphan that copy (a timed-out read or delete orphans nothing and is
+remembered like any other availability failure). Once the keyring has answered
+for an account in a process (a success or an `ErrNotFound`), no later call for
+that account falls back: login writes the refresh and access slots as two calls,
+and falling back on only the second would split one login across two stores. A fallback whose file
+operation also fails wraps `ErrFileStoreFailed`, which `withHeadlessStoreHint` and
+`storeReadError` check so they never recommend the store that just failed
+(they point at `ENTIRE_TOKEN_STORE_PATH` instead). macOS and Windows never
+fall back: there the keyring is always present, so a failure is a denied prompt
+or a locked store, and a plaintext file must not be the silent answer to either.
+
+Three consequences for tests. The marker is process-visible state in the
+per-user config dir, so any test that resolves the backend with the variable
+unset, or asserts on `FileBackendSelected()`/`BackendDescription()`, must
+isolate `ENTIRE_CONFIG_DIR`. The decision in `resolveBackend` is pure over
+`backendInputs` (constructing a file store still reads the path environment)
+precisely so the keyring branches can be tested at all: under `go test` the
+`testdirs` store sits in front of them and `resolveBackendLocked` never reaches
+them. And `resolveBackendLocked` drops an explicit non-`file`
+`ENTIRE_TOKEN_STORE` when it detects a test process, so a `keyring` exported in
+a developer's shell cannot route a test's writes to the real OS keyring; only
+the pure resolver honours it, and only its own tests exercise that branch.
+Do not spell the config-dir string resolver's call in a comment in any non-test
+`.go` file in the repository (the guard's pathspec excludes `_test.go`; two
+named non-consumers are skipped in the guard's own code, not by the pathspec):
+the consumer ledger guard is a `git grep` and reads a mention as a call.
+
+A Get that misses in both stores returns the keyring error, not `ErrNotFound`,
+and `auth status` renders it as "could not be read from …" rather than "Not
+logged in" (`statusTarget.storeErr`). A Delete that misses in both stores
+returns `ErrNotFound` silently, so `logout` can still remove a context on a
+machine whose keyring has vanished; the store cannot tell a logout from login's
+best-effort clear of a stale slot, so it is `logout` that warns, from
+`statusTarget.storeErr`, when the token could not be read: revocation was
+skipped and any copy in that store was not removed.
+
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 
 The data plane (entire-api) is deployed per jurisdiction; a repo placement
