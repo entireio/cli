@@ -330,7 +330,13 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		got, err = s.findSessionsForCommitLinking(ctx, dir)
 		require.NoError(t, err)
 		assert.Empty(t, got)
-		assert.Contains(t, buf.String(), "session adopt", "an unlinked commit must say so on stderr, not hide in a log file")
+		notice := buf.String()
+		assert.Contains(t, notice, "not linked", "an unlinked commit must say so, not hide in a log file")
+		for _, want := range []string{"sess-live-a", wtA, "sess-live-b", wtB} {
+			assert.Contains(t, notice, want, "the notice must name every candidate session and its worktree so the user can pick")
+		}
+		assert.Contains(t, notice, "entire session attach", "the remedy is to attach this commit to the right session afterwards")
+		assert.NotContains(t, notice, "session adopt", "adopt moves a live session out of its worktree; it is not the remedy for a commit made elsewhere")
 	})
 
 	t.Run("identity rescue suppresses the decline hint", func(t *testing.T) {
