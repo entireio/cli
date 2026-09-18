@@ -157,6 +157,14 @@ Location: `.git/entire-sessions/<session-id>.json`
 
 Stored in git common dir (shared across worktrees). Tracks active session info.
 
+Strategy storage resolves Git directories and worktree IDs through
+`gitrepo.ResolveWorktreeMetadata` from an explicit worktree root. Session locks
+and shared metadata remain rooted in the common directory; rebase and
+cherry-pick markers belong to the per-worktree Git directory. Operations that
+lock multiple session stores resolve physical directory identities, deduplicate
+aliases, and acquire locks in sorted order. An unresolved identity stops the
+operation before any lock is acquired.
+
 The state records `Branch` — the branch HEAD pointed at on the session's last turn
 (captured each turn start, so it follows branches created/renamed after the
 session began). `entire resume` (bare, no arg) uses it to list stopped sessions

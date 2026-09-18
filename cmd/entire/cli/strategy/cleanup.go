@@ -13,7 +13,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -546,11 +545,11 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 // redactCacheDir resolves the redaction prefix cache directory, or "" when the
 // git common dir cannot be resolved.
 func redactCacheDir(ctx context.Context) (string, error) {
-	commonDir, err := session.GetGitCommonDir(ctx)
+	root, err := openGitCommonRoot(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-	return filepath.Join(commonDir, checkpoint.RedactCacheDirName), nil
+	return filepath.Join(root.Name(), checkpoint.RedactCacheDirName), nil
 }
 
 // DeleteAllCleanupItems deletes all specified cleanup items.
@@ -697,14 +696,11 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 // derived data rebuilt on the next checkpoint, so removing the whole directory is
 // always safe; a missing directory is not an error.
 func deleteRedactCache(ctx context.Context) error {
-	dir, err := redactCacheDir(ctx)
+	root, err := openGitCommonRoot(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve git common dir: %w", err)
 	}
-	root, err := gitdir.Open(ctx)
-	if err != nil {
-		return fmt.Errorf("open git common dir: %w", err)
-	}
+	dir := filepath.Join(root.Name(), checkpoint.RedactCacheDirName)
 	if err := root.RemoveAll(checkpoint.RedactCacheDirName); err != nil {
 		return fmt.Errorf("remove redaction cache %s: %w", dir, err)
 	}
