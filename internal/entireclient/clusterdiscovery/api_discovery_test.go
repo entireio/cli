@@ -190,7 +190,7 @@ func TestResolveContextForAPI(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `API host partial.to does not accept your active login "me@prod"`)
 		assert.Contains(t, err.Error(), "These saved logins can authenticate it: me@staging")
-		assert.Contains(t, err.Error(), "entire auth use")
+		assert.Contains(t, err.Error(), "entire auth switch")
 	})
 
 	t.Run("no eligible context → login hint naming the API host's servers", func(t *testing.T) {

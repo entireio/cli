@@ -268,7 +268,7 @@ func (e *noAuthContextError) Unwrap() error { return ErrNoAuthContext }
 //     through: the user named that identity, so quietly acting as another is
 //     the very failure the override exists to prevent.
 //  2. The stored current_context, when the resource accepts it. `entire auth
-//     use <name>` is the lever for every resource that context's core fronts.
+//     switch <name>` is the lever for every resource that context's core fronts.
 //  3. Otherwise the sole saved login the resource accepts, announced on
 //     autoSelectNoticeW — for cluster-addressed operations (t.autoSelect:
 //     git remotes and the mirror commands) under autoSelectSites only. Someone holding logins in two federations should
