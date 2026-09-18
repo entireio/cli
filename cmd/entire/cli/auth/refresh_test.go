@@ -480,7 +480,10 @@ func TestNewContextTokenManager_LockNeverInRealUserCache(t *testing.T) {
 func TestTokenManagerLockDir_NeverRealUserCache(t *testing.T) {
 	t.Parallel()
 
-	dir := tokenManagerLockDir()
+	dir, err := tokenManagerLockDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if dir == "" {
 		t.Fatal("tokenManagerLockDir() = \"\" under go test; auth-go would fall back to the real user cache dir")
 	}
@@ -492,5 +495,24 @@ func TestTokenManagerLockDir_NeverRealUserCache(t *testing.T) {
 	realLockDir := filepath.Join(cache, "auth-go")
 	if dir == realLockDir || strings.HasPrefix(dir, realLockDir+string(os.PathSeparator)) {
 		t.Fatalf("tokenManagerLockDir() = %q, which resolves under the real %q", dir, realLockDir)
+	}
+}
+
+func TestTokenManagerLockDir_UsesExplicitOverride(t *testing.T) {
+	// Not parallel: it sets process-wide environment.
+	want := t.TempDir()
+	t.Setenv(authLockDirEnvVar, want)
+
+	if got, err := tokenManagerLockDir(); err != nil || got != want {
+		t.Fatalf("tokenManagerLockDir() = %q, %v; want explicit override %q", got, err, want)
+	}
+}
+
+func TestNewContextTokenManager_RejectsRelativeLockDir(t *testing.T) {
+	t.Setenv(authLockDirEnvVar, "relative-auth-locks")
+	c := &contexts.Context{Name: "test", CoreURL: "https://core.example", Handle: "alice", KeychainService: testCoreService}
+	_, err := NewRefreshingLoginProvider(c, failRoundTripper(t), false)
+	if err == nil || !strings.Contains(err.Error(), authLockDirEnvVar) || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("NewRefreshingLoginProvider() error = %v, want absolute %s requirement", err, authLockDirEnvVar)
 	}
 }
