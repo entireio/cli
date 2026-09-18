@@ -160,35 +160,62 @@ func SaveSessionState(ctx context.Context, state *SessionState) error {
 
 // ListSessionStates returns all session states from the state directory.
 // This is a package-level function that doesn't require a specific strategy instance.
+//
+// Lossy in one direction, deliberately: a state file that cannot be read is
+// omitted rather than reported. Callers that weigh sessions against one
+// another, or that would otherwise present an incomplete store as an empty
+// one, use ListSessionStatesWithSkipped.
 func ListSessionStates(ctx context.Context) ([]*SessionState, error) {
+	states, _, err := ListSessionStatesWithSkipped(ctx)
+	return states, err
+}
+
+// ListSessionStatesWithSkipped is ListSessionStates plus every state file it
+// could not read, so a caller can tell "no sessions" from "we could not see
+// them". See session.SkippedState for why that distinction is a value rather
+// than a log line.
+func ListSessionStatesWithSkipped(ctx context.Context) ([]*SessionState, []session.SkippedState, error) {
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create state store: %w", err)
+		return nil, nil, fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	states, err := store.List(ctx)
+	states, skipped, err := store.ListWithSkipped(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list session states: %w", err)
+		return nil, nil, fmt.Errorf("failed to list session states: %w", err)
 	}
-	return states, nil
+	return states, skipped, nil
 }
 
 // FindMostRecentSessionInCurrentWorktree returns the most recently interacted
 // session from the current worktree only, never falling back to another
 // worktree's.
 //
-// This is the whole of what it does, deliberately. Anything asking "which
+// This is the whole of what it SELECTS, deliberately. Anything asking "which
 // session is running me" must go through strategy.ResolveCallerSession, which
 // identifies the caller first and reports which tier answered; a bare
 // most-recent lookup cannot tell "mine" from "whichever moved last", and
 // worktrees share one session store, so guessing there returns an unrelated
-// session that looks exactly like a real answer.
-func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
-	states, err := ListSessionStates(ctx)
-	if err != nil || len(states) == 0 {
-		return ""
+// session that looks exactly like a real answer. The resolution is therefore
+// always ResolutionWorktree, which does not satisfy IsCaller.
+//
+// It returns the full envelope rather than an ID so that it reports
+// completeness like every other selection path: "most recent" is a comparison,
+// and a listing that lost a candidate can lose the winner. Its caller prints
+// one warning for both paths as a result, instead of the weaker path being the
+// one that says nothing.
+func FindMostRecentSessionInCurrentWorktree(ctx context.Context) ResolvedSession {
+	states, skipped, err := ListSessionStatesWithSkipped(ctx)
+	resolved := ResolvedSession{Resolution: ResolutionNone, Incomplete: incompleteCandidates(err, skipped)}
+	if err != nil {
+		return resolved
 	}
-	return mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states))
+	if id := mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states)); id != "" {
+		resolved.SessionID = id
+		resolved.Resolution = ResolutionWorktree
+		resolved.Tracked = true
+	}
+	return resolved
 }
 
 func sessionStatesForCurrentWorktree(ctx context.Context, states []*SessionState) []*SessionState {

@@ -175,8 +175,11 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
   commits. Log resume is distinct from restoring worktree files.
 - Caller identity comes from `strategy.ResolveCallerSession`, not newest state.
   Preserve resolution provenance; do not narrate worktree fallback or ambiguous
-  matches as identified callers. `IsCaller()` excludes those guesses; consult
-  the caller-resolution reference for current enforcement gaps.
+  matches as identified callers. `IsCaller()` excludes those guesses. Acting on
+  a session needs it *and* a candidate set known to be complete
+  (`ResolvedSession.Incomplete`); listings skip unreadable state files, so a
+  missing candidate can be the nearer owner. See the caller-resolution
+  reference.
 - Preserve sanitize → image externalization → redact ordering where all apply,
   fail-closed scanner behavior, and checkpoint-scoped token accounting. Read the
   implementation contracts before modifying any transcript/storage pipeline.

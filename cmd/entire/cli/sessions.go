@@ -344,10 +344,11 @@ Examples:
 }
 
 func runSessionList(ctx context.Context, cmd *cobra.Command, jsonOutput bool) error {
-	states, err := strategy.ListSessionStates(ctx)
+	states, skipped, err := strategy.ListSessionStatesWithSkipped(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
 	}
+	warnSkippedSessionStates(cmd.ErrOrStderr(), skipped)
 
 	var filtered []*strategy.SessionState
 	for _, s := range states {
@@ -391,6 +392,29 @@ func runSessionList(ctx context.Context, cmd *cobra.Command, jsonOutput bool) er
 	fmt.Fprintln(w)
 
 	return nil
+}
+
+// warnSkippedSessionStates says so when the listing is not the whole store.
+//
+// On stderr, so a --json consumer's stdout stays the plain array it promises,
+// and unconditionally rather than only when the result is empty: a listing
+// short by one session is as misleading as an empty one.
+//
+// Without this the omission is indistinguishable from an empty store —
+// measured, one state file at mode 000 made this command print "No sessions."
+// over a store holding one. Which file, and why, goes to the log at Warn where
+// the error text belongs; this line only has to stop the reader trusting the
+// count.
+func warnSkippedSessionStates(w io.Writer, skipped []session.SkippedState) {
+	switch {
+	case len(skipped) == 0:
+		return
+	case len(skipped) == 1:
+		fmt.Fprintln(w, "Warning: 1 session state file could not be read and is missing from this listing.")
+	default:
+		fmt.Fprintf(w, "Warning: %d session state files could not be read and are missing from this listing.\n", len(skipped))
+	}
+	fmt.Fprintln(w, "See .entire/logs for which file and why.")
 }
 
 // writeSessionListJSON emits the list as a JSON array of the same per-session
