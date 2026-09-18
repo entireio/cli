@@ -12,9 +12,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// rehomeFixture is a repository with one linked worktree, the process CWD
-// inside that worktree (the commit hook's vantage point), and a session state
-// homed in the main checkout — the launch-in-parent, work-in-worktree shape.
+// rehomeFixture: a linked worktree as the hook's CWD and a session homed in the
+// main checkout — the launch-in-parent, work-in-worktree shape.
 type rehomeFixture struct {
 	mainDir     string
 	worktreeDir string

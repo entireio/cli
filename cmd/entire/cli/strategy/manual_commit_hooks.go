@@ -955,8 +955,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
-	// diverge (a dangling trailer). The provenance is kept because a session
-	// identified by ancestry outside its home is re-homed below.
+	// diverge (a dangling trailer).
 	linking, err := s.findCommitLinkingSet(ctx, worktreePath)
 	sessions := linking.sessionsIncludingReservedFor(checkpointID)
 	findSessionsSpan.RecordError(err)
@@ -2418,16 +2417,11 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	return nil
 }
 
-// reserveCheckpointForStampedSessions records the checkpoint ID just written
-// into the commit message as each stamped session's pending condensation, so
-// the trailer alone identifies the sessions it belongs to. PostCommit
-// re-derives its linking set from worktree paths and process ancestry, and
-// either can be gone by then (see commitLinkingSet.sessionsIncludingReservedFor);
-// without the reservation the commit named a checkpoint nobody wrote. A
-// session already holding a different reservation keeps it — that is an
-// interrupted condensation postCommitProcessSessionLocked protects, not ours
-// to overwrite — and checkpointIDForSessions already reuses a matching one.
-// Best-effort: a hook must not fail the commit over bookkeeping.
+// reserveCheckpointForStampedSessions records the stamped checkpoint ID as each
+// session's pending condensation so post-commit can resolve the session from
+// the trailer alone (commitLinkingSet.sessionsIncludingReservedFor). A
+// different existing reservation is an interrupted condensation and is kept.
+// Best-effort: bookkeeping must not fail the commit.
 func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
 	for _, stamped := range states {
 		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {

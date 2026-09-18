@@ -10,15 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPostCommit_ResolvesSessionFromReservedTrailerWhenPathAndAncestryFail
-// covers the dangling-trailer shape: prepare-commit-msg identified a session
-// (here by process ancestry, in a worktree that is not the session's home and
-// while another worktree also has a live session, so path matching is
-// ambiguous), stamped its trailer, and then post-commit could no longer see
-// the same evidence. Today post-commit logs "no active sessions despite
-// trailer" and the commit names a checkpoint nobody wrote. The trailer's ID is
-// reserved on the session when it is stamped, so post-commit resolves the
-// session from the commit itself.
+// prepare-commit-msg identified a session by ancestry (path matching is
+// ambiguous between two live worktrees) and stamped its trailer; by post-commit
+// that evidence is gone. The ID reserved at stamp time must still resolve it,
+// or the commit names a checkpoint nobody wrote.
 func TestPostCommit_ResolvesSessionFromReservedTrailerWhenPathAndAncestryFail(t *testing.T) {
 	t.Parallel()
 	parent := NewRepoWithCommit(t)

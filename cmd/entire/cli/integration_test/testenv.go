@@ -1070,11 +1070,8 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	}
 }
 
-// commitMsgFile returns a scratch path for the commit message the
-// prepare-commit-msg hook rewrites. It deliberately lives outside the
-// repository: in a linked worktree `.git` is a file, not a directory, so the
-// old `<repo>/.git/COMMIT_EDITMSG` location cannot be written there, and the
-// hook only ever receives the path as an argument.
+// commitMsgFile returns a scratch path for the message the prepare-commit-msg
+// hook rewrites, outside the repository: in a linked worktree `.git` is a file.
 func (env *TestEnv) commitMsgFile() string {
 	env.T.Helper()
 	return filepath.Join(env.T.TempDir(), "COMMIT_EDITMSG")
