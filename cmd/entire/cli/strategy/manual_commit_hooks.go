@@ -519,8 +519,6 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		message = addCheckpointTrailerWithComment(message, checkpointID, string(agentType), displayPrompt)
 	}
 
-	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
-
 	logging.Info(logCtx, "prepare-commit-msg: trailer added",
 		slog.String("strategy", "manual-commit"),
 		slog.String("source", source),
@@ -536,6 +534,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	writeCommitMessageSpan.End()
 
+	// Only a trailer that reached the message may be reserved (see the fast path).
+	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
 	return nil
 }
 
