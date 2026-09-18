@@ -80,7 +80,19 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return err //nolint:wrapcheck // already contextual; a bare %w only changes the concrete type
 	}
 
+	// Both files above live in the WORKTREE. A repository configured through
+	// the user settings file has neither in a freshly added worktree, so
+	// answering from them alone reports "not set up" for a repository whose
+	// hooks are installed and running — the same mistake IsSetUpAny used to
+	// make, in the surface a user actually looks at.
+	configuredByUser := false
 	if !projectExists && !localExists {
+		if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+			configuredByUser = settings.UserTierConfiguresRepo(ctx, root)
+		}
+	}
+
+	if !projectExists && !localExists && !configuredByUser {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
 		return nil
 	}
