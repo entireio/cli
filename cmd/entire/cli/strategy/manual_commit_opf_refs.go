@@ -39,6 +39,11 @@ import (
 // is still returned, so the caller's flush is withheld exactly as before: the
 // scoping isolates the rewrite, not the delivery.
 //
+// That isolation is not unconditional. Two conditions stop the whole flush and
+// leave every ref after them untouched: an empty effective category set, and a
+// tripped OPF circuit breaker — both mean OPF cannot scan anything, so no
+// remaining ref may be stamped applied. See the breaker check in Pass 2.
+//
 // Caller checks redact.OPFEnabled() and skips this when OPF is off. Returns
 // the same error taxonomy as RewriteUnpushedV1WithOPF; the caller fails closed
 // by withholding the flush (see prePushCheckpointRefs).
@@ -147,15 +152,16 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	// redacted, tagged and moved, or fully untouched. No ref's chain is ever
 	// partially rewritten — within a ref, each rebuilt commit is the next
 	// one's parent, so a chain that fails part-way through is abandoned whole.
-	//
-	// Runtime failures are not per-ref conditions and must not be retried as
-	// if they were: BatchBytesWithPrivacyFilter trips the process-wide OPF
-	// breaker when the runtime fails, and once tripped it returns regex-only
-	// output with a NIL error. Carrying on would stamp Entire-OPF-Applied over
-	// content OPF never saw, so the breaker re-check below stops the flush and
-	// leaves every remaining ref untouched. Same for a missing category set.
 	var firstErr error
 	for _, pr := range pendings {
+		// Second whole-flush stop, alongside ErrOPFNoEnabledCategories below:
+		// a tripped process-wide breaker (this loop's own prior ref, or anything
+		// earlier in the process) makes BatchBytesWithPrivacyFilter return
+		// regex-only content with a NIL error, so break — not continue. Skipping
+		// only this ref would rebuild every later one from content OPF never saw
+		// and stamp Entire-OPF-Applied on it. Per-ref isolation covers per-ref
+		// conditions (the size cap); a broken runtime is broken for the whole
+		// process. Refs already rewritten above were scanned before the trip.
 		if redact.OPFBreakerTripped() {
 			if firstErr == nil {
 				firstErr = &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
