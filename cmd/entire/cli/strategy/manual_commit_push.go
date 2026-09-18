@@ -238,6 +238,15 @@ func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
 // shipping 8-layer content the user did not opt out of. OPF being disabled is a
 // nil error, so every flush can call this unconditionally.
 //
+// The resolved decision is returned alongside the error because a caller that
+// hands leftover work to the background worker needs to know WHY a backlog
+// remains. OPFSkip leaves the whole queue un-rewritten and is indistinguishable
+// from a failed rewrite by inspecting the refs — but it is the user declining
+// the model call for this push, so it must not become a model call a moment
+// later in a detached child. OPF being off, and an unresolvable decision, are
+// reported as OPFSkip and OPFAbort for the same reason: neither is a licence to
+// run OPF in the background.
+//
 // Every path that flushes the queue must pass through here, because skipping it
 // is not the same as an OPFSkip: a skip is a decision the user made for this
 // push and it ships untagged content deliberately, while a missing gate ships
@@ -258,17 +267,17 @@ func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
 // is deliberately logged and survived rather than propagated, so raising it
 // here would withhold pushes on a condition that path documents as
 // non-fatal.
-func opfGateForCheckpointRefs(ctx context.Context, repo *git.Repository) error {
+func opfGateForCheckpointRefs(ctx context.Context, repo *git.Repository) (OPFDecision, error) {
 	if !redact.OPFEnabled() {
-		return nil
+		return OPFSkip, nil
 	}
 	decision, err := opfPrePushDecision(ctx)
 	if err != nil {
-		return err
+		return OPFAbort, err
 	}
 	switch decision {
 	case OPFAbort:
-		return ErrOPFAbortedByUser
+		return OPFAbort, ErrOPFAbortedByUser
 	case OPFSkip:
 		// Explicit opt-out for this push: flush the 8-layer content as-is,
 		// untagged — same as the v1 path.
@@ -278,10 +287,10 @@ func opfGateForCheckpointRefs(ctx context.Context, repo *git.Repository) error {
 		defer opfSpan.End()
 		if rewriteErr := RewriteQueuedCheckpointRefsWithOPF(ctx, repo); rewriteErr != nil {
 			opfSpan.RecordError(rewriteErr)
-			return rewriteErr
+			return OPFRun, rewriteErr
 		}
 	}
-	return nil
+	return decision, nil
 }
 
 // warnOPFCheckpointRefsWithheld reports a withheld flush on both channels: the
@@ -412,7 +421,17 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// checkpoint-ref failure must never do that (see this function's doc), so
 	// failing closed means withholding the flush — nothing un-OPF'd ships, the
 	// refs stay queued, and the user's push proceeds.
-	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
+	opfDecision, opfErr := opfGateForCheckpointRefs(ctx, repo)
+	// Hand any remaining OPF backlog to a detached worker whether the gate
+	// succeeded or not: a withheld flush leaves the whole backlog, and a gate
+	// that succeeded can still have skipped a ref over the per-ref cap. Placed
+	// before the withheld early-return so both outcomes get the follow-up, and
+	// it never blocks — the child makes the model call, this push does not wait
+	// for it. Only when the user asked for OPF on this push: see the gate's doc.
+	if opfDecision == OPFRun {
+		maybeSpawnOPFFlush(ctx, repo)
+	}
+	if opfErr != nil {
 		warnOPFCheckpointRefsWithheld(ctx, opfErr)
 		return nil
 	}
@@ -447,7 +466,13 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if ps.pushDisabled {
 		return 0, true, nil
 	}
-	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
+	opfDecision, opfErr := opfGateForCheckpointRefs(ctx, repo)
+	// Same follow-up as the pre-push path, for the same reasons: see
+	// maybeSpawnOPFFlush and the gate's doc.
+	if opfDecision == OPFRun {
+		maybeSpawnOPFFlush(ctx, repo)
+	}
+	if opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message
 		// below: the gate fails on an unresolvable decision or a failed scan,
 		// but also on a ref update that lost a race after a scan that ran
