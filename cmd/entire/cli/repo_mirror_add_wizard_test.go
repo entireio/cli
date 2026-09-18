@@ -39,7 +39,7 @@ func TestCreateOneMirror_Suspended(t *testing.T) {
 
 	var final string
 	var finalOK bool
-	target := mirrorTarget{owner: "o", repo: "r", region: regionChoice{host: "c"}}
+	target := mirrorTarget{forge: mirrorCloneForge, owner: "o", repo: "r", region: regionChoice{host: "c"}}
 	res := createOneMirror(ctx, target, c, nil, mirrorAddOptions{timeout: time.Second},
 		func(status string, isFinal, ok bool) {
 			if isFinal {
@@ -89,7 +89,7 @@ func TestCreateOneMirror_PollErrorRendersCleanDetail(t *testing.T) {
 	c, err := coreapi.NewWithBearer(srv.URL, "tok")
 	require.NoError(t, err)
 
-	target := mirrorTarget{owner: "o", repo: "r", region: regionChoice{host: "c"}}
+	target := mirrorTarget{forge: mirrorCloneForge, owner: "o", repo: "r", region: regionChoice{host: "c"}}
 	res := createOneMirror(ctx, target, c, nil, mirrorAddOptions{timeout: time.Second}, nil)
 
 	require.Equal(t, mirrorStatusError, res.status)
@@ -249,10 +249,10 @@ func TestMirrorTargets(t *testing.T) {
 
 	// Cross-product: 2 repos × 2 regions = 4 pairs, repo-major order.
 	require.Len(t, targets, 4)
-	require.Equal(t, mirrorTarget{owner: "a", repo: "x", region: regions[0]}, targets[0])
-	require.Equal(t, mirrorTarget{owner: "a", repo: "x", region: regions[1]}, targets[1])
-	require.Equal(t, mirrorTarget{owner: "b", repo: "y", region: regions[0]}, targets[2])
-	require.Equal(t, mirrorTarget{owner: "b", repo: "y", region: regions[1]}, targets[3])
+	require.Equal(t, mirrorTarget{forge: mirrorCloneForge, owner: "a", repo: "x", region: regions[0]}, targets[0])
+	require.Equal(t, mirrorTarget{forge: mirrorCloneForge, owner: "a", repo: "x", region: regions[1]}, targets[1])
+	require.Equal(t, mirrorTarget{forge: mirrorCloneForge, owner: "b", repo: "y", region: regions[0]}, targets[2])
+	require.Equal(t, mirrorTarget{forge: mirrorCloneForge, owner: "b", repo: "y", region: regions[1]}, targets[3])
 }
 
 func TestMirrorCreateResultRow(t *testing.T) {

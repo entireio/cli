@@ -345,14 +345,14 @@ func runMirrorUseForm(cmd *cobra.Command, action string, form *huh.Form) error {
 	return nil
 }
 
-// mirrorUseForge is the only forge mirrors support today; a remote pointing
-// anywhere else cannot name a mirrorable upstream.
-const mirrorUseForge = "gh"
-
-// resolveMirrorUseUpstream determines the GitHub upstream `remote use` should
-// look for mirrors of. An explicit [repo] wins. Otherwise the coordinates
-// are read from a configured remote — which already names the repo the user is
+// resolveMirrorUseUpstream determines the repository `remote use` should look
+// for placements of. An explicit [repo] wins. Otherwise the coordinates are
+// read from a configured remote — which already names the repo the user is
 // standing in.
+//
+// Both forges resolve: a GitHub remote names a mirrorable upstream, and an
+// entire:// remote names the repo it was cloned from, native or not. Which one
+// came back decides how placements are looked up.
 //
 // Note the two distinct roles a remote name plays here: `remote` is the *write
 // target* (what gets pointed at the mirror), while repo identity can come from
@@ -363,13 +363,9 @@ const mirrorUseForge = "gh"
 //
 // entire:// remotes resolve as readily as forge remotes (their forge lives in
 // the URL path), so switching clusters never needs the repo retyped.
-func resolveMirrorUseUpstream(ctx context.Context, dir, remote, arg string) (owner, repo string, err error) {
+func resolveMirrorUseUpstream(ctx context.Context, dir, remote, arg string) (mirrorRepoRef, error) {
 	if arg != "" {
-		owner, repo, err = parseGitHubMirrorRepoRef(arg)
-		if err != nil {
-			return "", "", err
-		}
-		return owner, repo, nil
+		return parseMirrorRepoRef(arg)
 	}
 
 	candidates := []string{remote}
@@ -390,13 +386,19 @@ func resolveMirrorUseUpstream(ctx context.Context, dir, remote, arg string) (own
 			tried = append(tried, name+" (unparseable URL)")
 			continue
 		}
-		if info.Forge != mirrorUseForge {
-			tried = append(tried, name+" (not a GitHub repo — mirrors are GitHub-only)")
-			continue
+		switch info.Forge {
+		case mirrorCloneForge:
+			// GitHub owners and repos are stored lowercase server-side.
+			return mirrorRepoRef{forge: mirrorCloneForge, owner: strings.ToLower(info.Owner), repo: strings.ToLower(info.Repo)}, nil
+		case nativeCloneForge:
+			// Native names keep the spelling the remote carries; both lookups
+			// behind them fold case server-side.
+			return mirrorRepoRef{forge: nativeCloneForge, owner: info.Owner, repo: info.Repo}, nil
+		default:
+			tried = append(tried, name+" (not an Entire or GitHub repo)")
 		}
-		return strings.ToLower(info.Owner), strings.ToLower(info.Repo), nil
 	}
-	return "", "", fmt.Errorf("cannot tell which repo to mirror from the git remotes (tried %s); pass a repository reference explicitly (for example, /gh/owner/repo)", strings.Join(tried, ", "))
+	return mirrorRepoRef{}, fmt.Errorf("cannot tell which repo to act on from the git remotes (tried %s); pass a repository reference explicitly (for example, /gh/owner/repo or /et/project/repo)", strings.Join(tried, ", "))
 }
 
 // newRepoRemoteCmd is the `entire repo remote` subtree: the git remote of an
@@ -457,7 +459,7 @@ func newRepoRemoteUseCmd() *cobra.Command {
 			clusterHost := strings.TrimSpace(cluster)
 			if clusterHost != "" {
 				if err := validateClusterHost(clusterHost); err != nil {
-					return fmt.Errorf("invalid cluster host: %w", err)
+					return fmt.Errorf("invalid --cluster: %w", err)
 				}
 			}
 
@@ -468,17 +470,38 @@ func newRepoRemoteUseCmd() *cobra.Command {
 				return NewSilentError(errors.New("not a git repository"))
 			}
 
-			owner, repo, err := resolveMirrorUseUpstream(ctx, repoRoot, remote, upstreamArg)
+			repoRef, err := resolveMirrorUseUpstream(ctx, repoRoot, remote, upstreamArg)
 			if err != nil {
 				return err
 			}
+			name := repoRef.owner + "/" + repoRef.repo
+			qualified := "/" + repoRef.forge + "/" + name
 
-			// The pull-gated placement lookup is the same authority the clone's
-			// STS exchange enforces, so anything the user could clone resolves
-			// here — public mirrors included.
-			var placements []coreapi.ResolvedPlacement
+			// For GitHub, the pull-gated placement lookup is the same authority
+			// the clone's STS exchange enforces, so anything the user could clone
+			// resolves here — public mirrors included. For a native repo the
+			// placements are the repo's own primary plus its ready mirrors,
+			// which the catalog turns into the cluster hosts a placement is
+			// addressed by.
+			var (
+				placements []coreapi.ResolvedPlacement
+				nativeRepo *coreapi.Repo
+			)
 			if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				ps, lerr := resolvePullablePlacements(ctx, c, owner, repo)
+				if repoRef.forge == nativeCloneForge {
+					repo, cat, lerr := loadNativeRepo(ctx, c, repoRef)
+					if lerr != nil {
+						return lerr
+					}
+					mirrors, lerr := listNativeMirrors(ctx, c, repo.ID)
+					if lerr != nil {
+						return lerr
+					}
+					nativeRepo = repo
+					placements = nativeUsePlacements(repo, mirrors, cat)
+					return nil
+				}
+				ps, lerr := resolvePullablePlacements(ctx, c, repoRef.owner, repoRef.repo)
 				if lerr != nil {
 					return lerr
 				}
@@ -488,18 +511,31 @@ func newRepoRemoteUseCmd() *cobra.Command {
 				return err
 			}
 			if len(placements) == 0 {
-				return fmt.Errorf("%s/%s is not mirrored (or you have no access to its mirrors); create one first:\n  entire repo mirror add /gh/%s/%s", owner, repo, owner, repo)
+				return fmt.Errorf("%s has no cluster you can fetch from; create a mirror first:\n  entire repo mirror add %s", qualified, qualified)
 			}
 
 			chosen, err := selectPlacement(cmd, placements, clusterHost, placementPicker{
 				selector: clusterSelectorFlag,
-				title:    fmt.Sprintf("%s/%s is mirrored on more than one cluster — pick the one to use", owner, repo),
+				title:    qualified + " is on more than one cluster — pick the one to use",
 				action:   "Remote update",
 			})
 			if err != nil {
 				return err
 			}
-			mirrorURL := mirrorCloneURL(chosen.ClusterHost, owner, repo)
+			mirrorURL := forgeCloneURL(mirrorCloneForge, chosen.ClusterHost, repoRef.owner, repoRef.repo)
+			// A native URL is the server's own path, not a reconstruction from
+			// the ref, so `repo view`'s remote and this one cannot disagree.
+			if repoRef.forge == nativeCloneForge {
+				mirrorURL = nativeRepoURLAt(nativeRepo, chosen.ClusterHost)
+			}
+			// A native URL needs the repo's server-provided path, which a repo
+			// that is still provisioning does not have yet. `git remote set-url`
+			// accepts an empty URL and exits 0, so without this the command
+			// would report "✓ Repointed remote" while leaving the remote
+			// pointing nowhere — the one outcome worse than refusing.
+			if mirrorURL == "" {
+				return fmt.Errorf("%s has no clone URL on %s yet (still provisioning?); remote %q is unchanged", qualified, chosen.ClusterHost, remote)
+			}
 
 			remotes, err := listGitRemotes(ctx, repoRoot)
 			if err != nil {

@@ -421,35 +421,22 @@ func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
 	})
 }
 
-// TestRepoCreate_RejectsUnsafeClusterHost pins that --cluster-host gets the
-// same bare-host check every other host-taking flag applies before the value
-// is sent: the server pins the repo to it and echoes it back as clusterHost,
-// which then becomes a clone URL, so a spoofable value must fail here rather
-// than be created and refused at every later use.
+// TestRepoCreate_HasNoClusterHostFlag pins that a repo's home cluster is not
+// the caller's to choose: it is the primary cell of the owning project's
+// region. The flag is gone rather than kept as a rejecting stub, so the whole
+// spec here is that nothing accepts it.
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
-func TestRepoCreate_RejectsUnsafeClusterHost(t *testing.T) {
-	for _, host := range []string{"aws-us-east-2.entire.io@evil.com", "https://aws-us-east-2.entire.io", "aws-us-east-2.entire.io/path"} {
-		t.Run(host, func(t *testing.T) {
-			bodyCh := serveRepoCreate(t)
-			err := execRepoCreate(t, "--cluster-host", host)
-			require.ErrorContains(t, err, "--cluster-host")
-			require.ErrorContains(t, err, host)
-			select {
-			case raw := <-bodyCh:
-				t.Fatalf("no create request expected, got body %s", raw)
-			default:
-			}
-		})
+func TestRepoCreate_HasNoClusterHostFlag(t *testing.T) {
+	bodyCh := serveRepoCreate(t)
+	err := execRepoCreate(t, "--cluster-host", "aws-us-east-2.entire.io")
+	require.ErrorContains(t, err, "unknown flag")
+	require.ErrorContains(t, err, "cluster-host")
+	select {
+	case raw := <-bodyCh:
+		t.Fatalf("no create request expected, got body %s", raw)
+	default:
 	}
-
-	t.Run("a bare host reaches the wire body", func(t *testing.T) {
-		bodyCh := serveRepoCreate(t)
-		require.NoError(t, execRepoCreate(t, "--cluster-host", "aws-us-east-2.entire.io"))
-		var body map[string]any
-		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
-		require.Equal(t, "aws-us-east-2.entire.io", body["clusterHost"])
-	})
 }
 
 // TestRepoCreate_ObjectFormat pins the --object-format wiring: a set flag

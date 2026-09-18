@@ -100,18 +100,20 @@ func TestRepoRemoteURL_Mirror(t *testing.T) {
 	}{
 		{"single", []string{"aws-us-east-2.entire.io"}, "", "entire://aws-us-east-2.entire.io/gh/owner/repo\n", ""},
 		{"multiple", []string{"aws-us-east-2.entire.io", "eu-west-1.entire.io"}, "", "", "pass --cluster"},
+		// --cluster names the cluster host, which is both what the command dials
+		// and what lands in the URL.
 		{"explicit cluster", []string{"aws-us-east-2.entire.io", "eu-west-1.entire.io"}, "eu-west-1.entire.io", "entire://eu-west-1.entire.io/gh/owner/repo\n", ""},
 		{"none", nil, "", "", "no mirror found"},
 		{"invalid host", []string{"example.com@evil.com"}, "", "", "invalid cluster host"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				assert.Equal(t, "/api/v1/mirrors/placements", r.URL.Path)
 				placements := make([]coreapi.ResolvedPlacement, 0, len(tc.hosts))
 				for _, host := range tc.hosts {
 					placements = append(placements, coreapi.ResolvedPlacement{ClusterHost: host})
 				}
-				w.Header().Set("Content-Type", "application/json")
 				assert.NoError(t, printJSON(w, &coreapi.ResolvePlacementsOutputBody{Placements: placements}))
 			}))
 			t.Cleanup(srv.Close)
@@ -119,7 +121,7 @@ func TestRepoRemoteURL_Mirror(t *testing.T) {
 			if tc.cluster != "" {
 				prev := clusterCoreClient
 				clusterCoreClient = func(_ context.Context, host string) (*coreapi.Client, error) {
-					require.Equal(t, tc.cluster, host)
+					require.Equal(t, tc.cluster, host, "--cluster is the host dialled")
 					return coreapi.NewWithBearer(srv.URL, "tok")
 				}
 				t.Cleanup(func() { clusterCoreClient = prev })
@@ -154,8 +156,16 @@ func TestRepoRemoteURL_PickerKeepsStdoutClean(t *testing.T) {
 	t.Setenv("ACCESSIBLE", "1")      // line-based form, so input can be scripted
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/mirrors/placements", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+		// The picker labels clusters by slug, so it reads the catalog.
+		if r.URL.Path == testClustersPath {
+			assert.NoError(t, printJSON(w, &coreapi.ListClustersOutputBody{Clusters: []coreapi.Cluster{
+				{Slug: "aws-us-east-2", PublicUrl: "https://aws-us-east-2.entire.io"},
+				{Slug: "aws-eu-west-1", PublicUrl: "https://aws-eu-west-1.entire.io"},
+			}}))
+			return
+		}
+		assert.Equal(t, "/api/v1/mirrors/placements", r.URL.Path)
 		assert.NoError(t, printJSON(w, &coreapi.ResolvePlacementsOutputBody{Placements: []coreapi.ResolvedPlacement{
 			{ClusterHost: "aws-us-east-2.entire.io"},
 			{ClusterHost: "aws-eu-west-1.entire.io"},
@@ -179,8 +189,9 @@ func TestRepoRemoteURL_PickerKeepsStdoutClean(t *testing.T) {
 	require.Empty(t, stderr)
 
 	// And the prompt really did render — on the terminal, not into the capture.
+	// Clusters are offered by slug, which is what --cluster takes.
 	require.Contains(t, terminal.String(), "pick a remote")
-	require.Contains(t, terminal.String(), "aws-eu-west-1.entire.io")
+	require.Contains(t, terminal.String(), "aws-eu-west-1")
 }
 
 // TestValidateEntireURLForPrinting_OffsetMatchesTheQuotedString calls the

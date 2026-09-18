@@ -68,11 +68,13 @@ the commands are always runnable in every build.
   `repo mirror list` already make to map slugs to hosts) sorted by region then
   slug. The table's columns are the values other commands take: REGION is the
   jurisdiction slug behind `org create --region` and `project create
-  --region`; CLUSTER is the placement slug `repo mirror list --cluster`
-  accepts; HOST is the bare public host behind `repo create --cluster-host`,
-  `repo mirror add` and `repo clone --cluster`, reduced through
+  --region`; CLUSTER is the placement slug `repo mirror list --cluster` filters
+  on and the key the native-mirror API is addressed by; HOST is the bare public
+  host every targeting `--cluster` takes (`repo mirror add`/`remove`, `repo
+  access list`, `repo clone`, `repo remote use`), reduced through
   `hostFromPublicURL` so a publicUrl that fails validation renders `-` rather
-  than a spoofable host. `--json` is the wire model, `apiUrl` and `isDefault`
+  than a spoofable host. It is also what goes into an `entire://` clone URL and
+  what `runCoreForCluster` dials. `--json` is the wire model, `apiUrl` and `isDefault`
   included, plus a synthesized `host` merged into each object
   (`clusterJSON`, via the additive-only `mergeSynthesizedField` that `repo
   create` uses for `remote`): the same validated host the table shows, absent
@@ -98,6 +100,16 @@ the commands are always runnable in every build.
   only). Verb names follow the GitHub CLI where the job is the same (`view`,
   `edit --visibility`, `auth switch`), per the unified-repo-commands proto.
   Git content operations (log, diff, …) are intentionally out of scope.
+  **A targeting `--cluster` names a cluster by its public host**
+  (`aws-us-east-2.entire.io`, the HOST column of `entire cluster list`) — the
+  same coordinate the `entire://` URL carries and `runCoreForCluster` dials. The
+  native-mirror API is keyed by the catalog *slug* instead, so the native path
+  resolves host → slug through one `GET /clusters` rather than asking for a
+  second spelling. `repo mirror list --cluster` is the exception and predates
+  this: it is a filter the server resolves, and takes either. Settling the CLI
+  on one spelling is worth doing on its own; it is not this change.
+  `repo create` takes no cluster at all: a repo's home cluster is the primary
+  cell of its owning project's region.
   `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
   native repo's branch-protection rules through core's
   `/repos/{repoId}/branch-protection` resource: `add` and `remove` are one
@@ -107,17 +119,56 @@ the commands are always runnable in every build.
   branch without the flag never lowers it and `--server-side-merge-only=false`
   is the explicit way down. A short branch name expands to `refs/heads/`,
   `HEAD` and `refs/...` pass through. The `mirror` subtree is
-  server-side (`add`, `list`, `get`, `remove`; `add` and `remove` name the
-  cluster with `--cluster <host>`). `remote use` repoints the *current clone's*
+  server-side (`add`, `list`, `get`, `remove`; `add` and `remove` name clusters
+  with `--cluster <host>`, repeatable or comma-separated, and place or tear down
+  every named cluster in parallel through one engine — `mirrorTargets` →
+  `createMirrors`/`removeMirrors` → a summary table — so a one-shot verb reports
+  exactly like the wizard. A failure on one cluster never stops the others; the
+  command exits non-zero naming the ones that failed. `add` defaults to one
+  fixed cluster without a terminal so scripts stay stable; `remove` has no
+  default at all, because which clusters a repo is on is a property of the repo
+  and guessing one would delete a copy nobody named — a terminal gets a
+  multi-select of the repo's actual placements with nothing pre-ticked, which is
+  also the confirmation) and serves **both forges**. A GitHub mirror
+  is a clone of an upstream, created through the asynchronous mirror-request
+  resource and addressed by `(provider, owner, repo, clusterHost)`. An
+  Entire-native mirror is an extra placement of a repo Entire already holds,
+  addressed by `(repoId, clusterSlug)` under `/repos/{repoId}/native-mirrors`,
+  and three things follow from that: the primary placement is **not** in the
+  native-mirror list (so any "where does this repo live" view joins the repo's
+  own `clusterSlug` onto it), a replica is **never promoted** (removing one
+  tears down that copy alone, and the primary is not in the list to remove),
+  and v1 places them **cross-jurisdiction only**. Those last two are why
+  `add`/`remove` refuse the repo's own primary cluster and a same-region target
+  before writing anything, and why `--cluster` has no default on the native
+  path. Pushing and fetching both work through any placement, so a remote
+  pointed at one needs no special handling. `list` stays GitHub-only by default; `--forge et|all` opts native rows
+  in, classified by the entry's `provider` (falling back to the placements'
+  `mirror` flag when the optional field is absent — never the other way round,
+  since `mirror` must not decide which placement *routes* a repo). The
+  native-mirror routes are home-core-scoped and answer 421 for a repo in another
+  jurisdiction, which `coreapi`'s transport follows and re-authenticates on its
+  own, so they run on the plain active-context client with no cluster-fronting
+  detour. `remote use` repoints the *current clone's*
   git remote at a mirror (local git config only — it creates nothing
   server-side). Interactively it picks among the repo's placements and asks
   whether to replace the remote (preserving the old URL under `--upstream`) or
-  add a separate one; non-interactively it repoints `--remote` directly.
+  add a separate one; non-interactively it repoints `--remote` directly. It
+  serves both forges: for a native repo the placements are its primary plus each
+  **ready** mirror. One URL per remote either way — a placement serves pushes as
+  well as fetches, so there is no split fetch/push remote to maintain.
   `remote url` is the read-only half of the same subtree: it resolves a repo to
   its `entire://` URL and prints it, changing nothing.
   `remote use`, `remote url` and `clone` all choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
-  picker renders on stderr when that is a terminal and on the controlling
+  picker matches on the cluster host, which is what `--cluster` takes. That
+  selection is **GitHub-only**
+  in `clone` and `remote url`: a native ref there resolves the repo's primary
+  and `--cluster` is refused, so the way to target a native mirror is
+  `remote use --cluster <host>` or a full `entire://` URL (which both `clone`
+  and `remote url` forward untouched). Teaching those two to select among native
+  placements is unfinished work, not a decision. It renders on stderr when that is
+  a terminal and on the controlling
   terminal otherwise (`openPlacementPromptTerminal`), because Bubble Tea fails
   *silently* on a redirected writer — no window size, a 0x0 viewport, and stdin
   still in raw mode — and `remote url` exists to have its stdout captured. The
@@ -137,10 +188,17 @@ the commands are always runnable in every build.
   mirror subtree and `clone` alike: a bare `<a>/<b>` is refused because both
   forges take that shape, and a GitHub URL is refused because it would be a
   second spelling for one repo. Both are recognised only to name the ref they
-  should have been. The mirror verbs serve GitHub only, so a valid
-  `/et/<project>/<repo>` there reports an unsupported operation rather than
-  invalid syntax, and `repo mirror get` takes a mirror ULID or an `entire://`
-  clone URL besides, since those address a placement rather than name a repo.
+  should have been. One parser reads both grammars, `parseMirrorRepoRef`, and
+  it takes the forges the *calling verb* serves — the same contract
+  `bareRefSuggestions` uses, so a verb can never suggest a ref it refuses on the
+  next line. A ref naming a forge the verb does not serve is refused **without
+  being parsed**: declaring the forge is the whole answer, and quoting a name
+  rule would send the reader to fix something that would be refused again.
+  `repo access list` is the one verb still GitHub-only (it reads GitHub
+  collaborators; native access is grants), and it points a native ref at
+  `entire repo grant list`. `repo mirror get` takes a mirror ULID or an
+  `entire://` clone URL besides, since those address a placement rather than
+  name a repo.
   `clone`
   accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
   ref, or a full `entire://` URL passed through verbatim. **Every ref names its
