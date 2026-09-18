@@ -206,6 +206,8 @@ func newRecapClient(ctx context.Context, insecureHTTP bool) (client *api.Client,
 
 	if insecureHTTP {
 		auth.EnableInsecureHTTP()
+	} else if err := requireSecureDataOverride(); err != nil {
+		return nil, "", "", err
 	}
 	target, err := auth.ResolveDataAPI(ctx)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
