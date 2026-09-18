@@ -550,8 +550,9 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 // content is the squashed commits', so their Entire-Checkpoint trailers are
 // carried into the message when missing and no session is matched. Needed
 // because `commit -m` reports source "message", not "squash", and ordinary
-// matching then refused or minted an empty checkpoint. Reports whether a
-// squash was in progress.
+// matching then refused or minted an empty checkpoint. Reports whether it
+// took over; a squash of commits that carry no trailers has nothing to
+// inherit and falls through to ordinary matching, as before.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	gitDir, err := GetGitDir(ctx)
@@ -569,6 +570,9 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 	}
 
 	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	if len(inherited) == 0 {
+		return false
+	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
 		return true
