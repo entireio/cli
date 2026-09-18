@@ -36,6 +36,13 @@ func TestFetchURL(t *testing.T) {
 			wantURL:      "https://github.com/acme/checkpoints.git",
 		},
 		{
+			name:         "gitlab checkpoint remote with token returns https url on gitlab.com",
+			originURL:    "git@gitlab.com:acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"gitlab","repo":"acme/checkpoints"}}}`,
+			token:        "secret-token",
+			wantURL:      "https://gitlab.com/acme/checkpoints.git",
+		},
+		{
 			name:         "checkpoint remote without token and https origin reuses https",
 			originURL:    "https://github.com/acme/app.git",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
@@ -144,6 +151,15 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 			originURL:    "entire://app.entire.io/et/acme/app",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			wantURL:      "git@github.com:acme/checkpoints.git",
+		},
+		{
+			// hostToForge has no gitlab.com entry, so a gitlab checkpoint_remote can
+			// never ride the gh mirror: the forge check fails and resolution falls
+			// to the provider host over direct transport.
+			name:         "entire:// gh origin with gitlab provider routes to gitlab.com not the mirror",
+			originURL:    "entire://app.entire.io/gh/acme/app",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"gitlab","repo":"acme/checkpoints"}}}`,
+			wantURL:      "git@gitlab.com:acme/checkpoints.git",
 		},
 		{
 			name:         "non-derivable origin with unknown provider falls back to origin",
@@ -256,6 +272,14 @@ func TestFetchURL_OwnershipCheck(t *testing.T) {
 			originURL:    "https://github.com/acme/app.git",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			wantURL:      "https://github.com/acme/checkpoints.git",
+		},
+		{
+			// GitLab nested groups: Owner() and the origin parser both take the
+			// first path segment, so the vote compares group to group.
+			name:         "nested-group gitlab checkpoint_remote with matching top-level group resolves",
+			originURL:    "https://gitlab.com/group/subgroup/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"gitlab","repo":"group/subgroup/checkpoints"}}}`,
+			wantURL:      "https://gitlab.com/group/subgroup/checkpoints.git",
 		},
 		{
 			// settings.local.json is the escape hatch for a checkpoint repo that
@@ -511,6 +535,14 @@ func TestPushURL(t *testing.T) {
 			pushRemote:   "origin",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			wantURL:      "git@github.com:acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
+			name:         "file:// origin with gitlab provider routes to gitlab.com (ssh default)",
+			originURL:    "file:///acme/app",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"gitlab","repo":"acme/checkpoints"}}}`,
+			wantURL:      "git@gitlab.com:acme/checkpoints.git",
 			wantEnabled:  true,
 		},
 		{

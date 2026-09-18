@@ -120,7 +120,7 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 	claudeDir := t.TempDir()
 	writeFixtureSession(t, claudeDir, "sess1.jsonl")
 
-	opts := Options{RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 	imp := claudeImporter{}
 
 	res, err := Run(context.Background(), repo, imp, opts)
@@ -174,20 +174,35 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestRun_StampsLinkCommitSHA proves Options.LinkCommitSHA is copied verbatim
-// into each imported checkpoint's commit_sha metadata field, and that leaving
-// it unset leaves commit_sha empty. Run resolves nothing itself.
+// TestRun_StampsLinkCommitSHA proves a validated uppercase input is persisted
+// canonically in each checkpoint's root and session metadata.
+//
+// The anchor is deliberately the PARENT, not HEAD. Every fixture in this file
+// anchors to the repo's only commit, which makes "persisted what the caller
+// gave us" and "read HEAD itself" indistinguishable — an implementation that
+// ignored opts.LinkCommitSHA entirely would satisfy all of them. A second
+// commit is what separates the two, so this test fails if Run ever starts
+// resolving the anchor on its own. Uppercase input covers canonicalization,
+// which is a different property and does not imply this one.
 func TestRun_StampsLinkCommitSHA(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
-	const commitSHA = "b01b59663fd4860fd15a9939499be44a14dbf168"
+	commitSHA := repoHeadSHA(t, repo)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommit(t, wt, repoDir, "y", "second")
+	if tip := repoHeadSHA(t, repo); tip == commitSHA {
+		t.Fatal("fixture needs HEAD to differ from the anchor")
+	}
 
 	claudeDirWithSHA := t.TempDir()
 	writeFixtureSession(t, claudeDirWithSHA, "sess-with-sha.jsonl")
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
 		RepoRoot: repoDir, OverridePath: claudeDirWithSHA,
 		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-		LinkCommitSHA: commitSHA,
+		LinkCommitSHA: strings.ToUpper(commitSHA),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -209,29 +224,12 @@ func TestRun_StampsLinkCommitSHA(t *testing.T) {
 		t.Fatalf("expected commit_sha %q, got %q", commitSHA, md.CommitSHA)
 	}
 
-	// A separate session fixture (own sessionID/turn UUIDs) run with
-	// LinkCommitSHA unset must persist an empty commit_sha. Reusing the same
-	// session would be idempotently skipped, so this needs its own fixture.
-	claudeDirNoSHA := t.TempDir()
-	writeFixtureSession(t, claudeDirNoSHA, "sess-no-sha.jsonl")
-	res2, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDirNoSHA,
-		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-	})
+	root, err := stores.Persistent.Read(context.Background(), cid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res2.TurnsImported != 2 {
-		t.Fatalf("want 2 imported, got %+v", res2)
-	}
-
-	cid2 := DeriveCheckpointID("sess-no-sha", "u1")
-	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if md2.CommitSHA != "" {
-		t.Fatalf("expected empty commit_sha, got %q", md2.CommitSHA)
+	if root.CommitSHA != commitSHA {
+		t.Fatalf("root commit_sha = %q, want %q", root.CommitSHA, commitSHA)
 	}
 }
 
@@ -330,7 +328,8 @@ func TestRun_AppliesConfiguredCustomRedaction(t *testing.T) {
 	}
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -372,7 +371,7 @@ func TestRun_CursorImporterEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opts := Options{RepoRoot: repoDir, OverridePath: cursorDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: cursorDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 	res, err := Run(context.Background(), repo, cursorImporter{}, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +418,8 @@ func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
 	writeFixtureSession(t, claudeDir, "sess-author.jsonl")
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -502,7 +502,8 @@ func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
 	writeFixtureSession(t, claudeDir, "sess-noauthor.jsonl")
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -537,7 +538,8 @@ func TestRun_DryRunWritesNothing(t *testing.T) {
 	writeFixtureSession(t, claudeDir, "sess1.jsonl")
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir, DryRun: true,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir, DryRun: true,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -595,7 +597,8 @@ func TestRun_CodexImportSanitizesAndKeepsOffsetsAligned(t *testing.T) {
 	}
 
 	res, err := Run(context.Background(), repo, codexImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: codexDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: codexDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -656,11 +659,12 @@ func TestRun_StopsOnContextCancellation(t *testing.T) {
 	// Cancel as soon as the first turn is processed, standing in for a Ctrl-C
 	// during the import. DryRun reports every turn through TurnSkipped.
 	opts := Options{
-		RepoRoot:     repoDir,
-		OverridePath: claudeDir,
-		Now:          time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-		DryRun:       true,
-		Progress:     &Progress{TurnSkipped: func(int, int, int) { cancel() }},
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir,
+		OverridePath:  claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		DryRun:        true,
+		Progress:      &Progress{TurnSkipped: func(int, int, int) { cancel() }},
 	}
 
 	res, err := Run(ctx, repo, claudeImporter{}, opts)
@@ -696,10 +700,11 @@ func TestRun_CancellationStopsRefsBackedImport(t *testing.T) {
 	defer cancel()
 
 	opts := Options{
-		RepoRoot:     repoDir,
-		OverridePath: claudeDir,
-		Now:          time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-		Progress:     &Progress{TurnWritten: func(int, int, int) { cancel() }},
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir,
+		OverridePath:  claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		Progress:      &Progress{TurnWritten: func(int, int, int) { cancel() }},
 	}
 
 	res, err := Run(ctx, repo, claudeImporter{}, opts)

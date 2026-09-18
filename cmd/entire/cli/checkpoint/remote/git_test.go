@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1307,6 +1308,47 @@ func TestFormatGitPushError_RedactsRemoteURL(t *testing.T) {
 	msg := formatted.Error()
 	assert.NotContains(t, msg, "hunter2")
 	assert.Contains(t, msg, RedactURLOrPath(remote))
+}
+
+func TestFormatGitPushError_PreservesTerminalLayout(t *testing.T) {
+	t.Parallel()
+
+	const target = "https://user:password@github.com/example/checkpoints.git"
+	const unblockURL = "https://github.com/example/checkpoints/security/secret-scanning/unblock-secret/2mQ8vR5xL9nT3bW7kP4sH6jY0cF1dZ"
+	for _, longOutput := range []bool{false, true} {
+		name := "short"
+		if longOutput {
+			name = "elided"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := "remote: GITHUB PUSH PROTECTION\nremote:   locations:\nremote:     path: 0/full.jsonl:85\n"
+			if longOutput {
+				output += strings.Repeat("remote: additional policy detail —\n", 200)
+			}
+			output += "remote: " + unblockURL + "\n! [remote rejected] (repository rule violations)\nTo " + target
+			cause := errors.New("push exited")
+			err := fmt.Errorf("caller: %w", formatGitPushError(t.Context(), cause, []byte(output), target))
+			var pushErr *PushError
+			require.ErrorAs(t, err, &pushErr)
+			require.ErrorIs(t, err, cause)
+			assert.NotContains(t, err.Error(), "\n", "logs remain single-line")
+			assert.NotContains(t, err.Error(), "user:password")
+			terminal := pushErr.Output()
+			assert.NotContains(t, terminal, "user:password")
+			assert.Contains(t, terminal, RedactURLOrPath(target))
+			assert.Contains(t, terminal, unblockURL)
+			assert.Contains(t, terminal, "\nremote:   locations:\nremote:     path:")
+			assert.Contains(t, terminal, "repository rule violations")
+			assert.LessOrEqual(t, len([]rune(terminal)), maxPushErrorDetail)
+			assert.True(t, utf8.ValidString(terminal))
+			if longOutput {
+				assert.Contains(t, terminal, "[…]")
+			} else {
+				assert.Equal(t, strings.ReplaceAll(output, target, RedactURLOrPath(target)), terminal)
+			}
+		})
+	}
 }
 
 // Multi-line git output has to stay usable as a single log attribute.
