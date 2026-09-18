@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,7 +52,8 @@ type pushQueueEntry struct {
 // (Remove), so an interrupted or failed push leaves them for the next pre-push.
 // Duplicates are tolerated on disk and collapsed by Drain.
 type PushQueue struct {
-	dir string
+	dir  string
+	repo *git.Repository
 }
 
 // root returns the shared *os.Root over the git common dir the queue lives in.
@@ -71,7 +73,9 @@ func PushQueueForRepo(_ context.Context, repo *git.Repository) (*PushQueue, erro
 	if err != nil {
 		return nil, fmt.Errorf("resolve git common dir for push queue: %w", err)
 	}
-	return NewPushQueue(dir), nil
+	queue := NewPushQueue(dir)
+	queue.repo = repo
+	return queue, nil
 }
 
 func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFileName) }
@@ -146,9 +150,9 @@ func (q *PushQueue) Peek() ([]plumbing.ReferenceName, error) {
 	return refs, err
 }
 
-// Remove deletes the given refs from the queue, preserving any entries appended
-// after a Drain (e.g. a write that landed during the push). Called after a
-// confirmed push.
+// Remove deletes the given refs from the queue. Called after a confirmed push
+// or when a ref is known to be stale. Use RemoveIfUnchanged after a Drain when
+// a concurrent writer may have advanced one of the refs.
 func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	if len(refs) == 0 {
 		return nil
@@ -175,6 +179,58 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 		kept = append(kept, r)
 	}
 	return q.rewriteLocked(root, kept)
+}
+
+// RemoveIfUnchanged deletes refs only when each local ref still points at the
+// hash captured before the corresponding push. If a ref advanced while the
+// push was in flight, all queue entries for that ref are retained so the newer
+// tip is retried. The comparison and queue rewrite happen under the same queue
+// lock: an enqueue that races with this operation either happens before the
+// comparison (and is retained by the hash mismatch) or after the rewrite (and
+// appends a fresh entry).
+func (q *PushQueue) RemoveIfUnchanged(refs []plumbing.ReferenceName, expected map[string]plumbing.Hash) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	if q.repo == nil {
+		return errors.New("remove pushed refs conditionally: repository unavailable")
+	}
+	root, release, err := q.lock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	removable := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		expectedHash, ok := expected[ref.String()]
+		if !ok {
+			continue
+		}
+		local, err := q.repo.Reference(ref, false)
+		if err != nil {
+			if errors.Is(err, plumbing.ErrReferenceNotFound) {
+				continue
+			}
+			return fmt.Errorf("read local ref %s: %w", ref, err)
+		}
+		if local.Hash() == expectedHash {
+			removable[ref.String()] = struct{}{}
+		}
+	}
+
+	current, err := q.readEntriesLocked(root)
+	if err != nil {
+		return err
+	}
+	kept := make([]plumbing.ReferenceName, 0, len(current))
+	for _, ref := range current {
+		if _, remove := removable[ref.String()]; remove {
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	return q.rewriteLocked(root, dedupeRefs(kept))
 }
 
 // rewriteLocked replaces the queue file with exactly refs (de-duplicated, one
@@ -212,6 +268,32 @@ func (q *PushQueue) rewriteLocked(root *os.Root, refs []plumbing.ReferenceName) 
 // de-duplicated set and is worth compacting: rawLines > len(refs) exactly when
 // there were redundant lines.
 func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
+	entries, rawLines, err := q.readEntriesWithRawLinesLocked(root)
+	if err != nil {
+		return nil, 0, err
+	}
+	return dedupeRefs(entries), rawLines, nil
+}
+
+func dedupeRefs(entries []plumbing.ReferenceName) []plumbing.ReferenceName {
+	refs := make([]plumbing.ReferenceName, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, ref := range entries {
+		if _, dup := seen[ref.String()]; dup {
+			continue
+		}
+		seen[ref.String()] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func (q *PushQueue) readEntriesLocked(root *os.Root) ([]plumbing.ReferenceName, error) {
+	refs, _, err := q.readEntriesWithRawLinesLocked(root)
+	return refs, err
+}
+
+func (q *PushQueue) readEntriesWithRawLinesLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
 	f, err := root.Open(pushQueueFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -221,7 +303,6 @@ func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, ra
 	}
 	defer f.Close()
 
-	seen := make(map[string]struct{})
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -234,10 +315,6 @@ func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, ra
 		if err := json.Unmarshal(line, &entry); err != nil || entry.Ref == "" {
 			continue
 		}
-		if _, dup := seen[entry.Ref]; dup {
-			continue
-		}
-		seen[entry.Ref] = struct{}{}
 		refs = append(refs, plumbing.ReferenceName(entry.Ref))
 	}
 	if err := scanner.Err(); err != nil {

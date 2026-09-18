@@ -65,10 +65,11 @@ func TestPartitionLocalRefs(t *testing.T) {
 	require.NoError(t, err)
 
 	stale := mustRefName(t, id.MustCheckpointID("ffffffffffff"))
-	existing, missing := partitionLocalRefs(repo, append([]plumbing.ReferenceName{stale}, refs...))
+	existing, missing, hashes := partitionLocalRefs(repo, append([]plumbing.ReferenceName{stale}, refs...))
 
 	assert.ElementsMatch(t, refs, existing, "local refs are pushable")
 	assert.Equal(t, []plumbing.ReferenceName{stale}, missing, "absent ref is stale")
+	assert.Len(t, hashes, len(refs), "hash snapshots cover only local refs")
 }
 
 func TestBatchPushRefs(t *testing.T) {

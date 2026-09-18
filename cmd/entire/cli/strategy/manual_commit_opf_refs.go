@@ -81,7 +81,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	var rawBytesSoFar int
 	// Stale entries (refs no longer present locally) are skipped, not pruned:
 	// the queue belongs to the flush.
-	existing, _ := partitionLocalRefs(repo, queued)
+	existing, _, _ := partitionLocalRefs(repo, queued)
 	for _, refName := range existing {
 		ref, refErr := repo.Reference(refName, true)
 		if refErr != nil {
