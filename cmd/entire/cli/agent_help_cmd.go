@@ -36,7 +36,8 @@ const agentHelpAnnotationEnabled = "true"
 const agentHelpOverview = `Entire's CLI is the source of truth for its own usage. Do not guess flags or
 subcommands — read them from this command. You are already inside the repo:
 entire auto-detects it from the git origin remote, so never ask the user for the
-repo name. Pass --repo only to target a DIFFERENT repo.`
+repo name. For repository-scoped commands, pass --repo only to target a DIFFERENT
+repo. Global lists stay unfiltered unless you explicitly select a scope.`
 
 // agentHelpAudience answers the question an agent actually has when it reads this
 // listing: may I run this without being asked? A flat alphabetical dump of every
@@ -597,7 +598,11 @@ func renderAgentHelpCommand(cmd *cobra.Command, repoLine string, trailsEnabled b
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(agentHelpRepoBlock(repoLine))
+	if agentHelpPath(cmd) == "trail list" {
+		b.WriteString("Scope: global; only explicit --project/--repo filters narrow it, even inside a clone.\n")
+	} else {
+		b.WriteString(agentHelpRepoBlock(repoLine))
+	}
 
 	// LocalFlags()/InheritedFlags() trigger cobra's persistent-flag merge (plain
 	// Flags() does not without Execute) and skip hidden flags in FlagUsages.

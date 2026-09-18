@@ -28,24 +28,27 @@ type TrailParentReference struct {
 // Changes is absent from list responses. A detail is potentially access-filtered;
 // neither its changes nor its repoIds are an authoritative complete inventory.
 type ProjectTrail struct {
-	ID                 string          `json:"id"`
-	ProjectID          string          `json:"projectId"`
-	Number             int             `json:"number"`
-	Title              string          `json:"title"`
-	Body               string          `json:"body"`
-	Status             string          `json:"status"`
-	Metadata           map[string]any  `json:"metadata"`
-	Type               string          `json:"type"`
-	Priority           string          `json:"priority"`
-	Assignees          []string        `json:"assignees"`
-	AssigneeAccountIDs []*string       `json:"assigneeAccountIds"`
-	RepositoryIDs      []string        `json:"repoIds"`
-	AuthorAccountID    string          `json:"authorAccountId"`
-	CreatedAt          time.Time       `json:"createdAt"`
-	UpdatedAt          time.Time       `json:"updatedAt"`
-	ClosedAt           *time.Time      `json:"closedAt"`
-	Changes            []ChangeSummary `json:"changes,omitempty"`
-	IsPossiblyPartial  bool            `json:"isPossiblyPartial,omitempty"`
+	Project            *GlobalTrailProject `json:"project,omitempty"`
+	Order              *GlobalTrailOrder   `json:"order,omitempty"`
+	ContinuationToken  string              `json:"continuationToken,omitempty"`
+	ID                 string              `json:"id"`
+	ProjectID          string              `json:"projectId"`
+	Number             int                 `json:"number"`
+	Title              string              `json:"title"`
+	Body               string              `json:"body"`
+	Status             string              `json:"status"`
+	Metadata           map[string]any      `json:"metadata"`
+	Type               string              `json:"type"`
+	Priority           string              `json:"priority"`
+	Assignees          []string            `json:"assignees"`
+	AssigneeAccountIDs []*string           `json:"assigneeAccountIds"`
+	RepositoryIDs      []string            `json:"repoIds"`
+	AuthorAccountID    string              `json:"authorAccountId"`
+	CreatedAt          time.Time           `json:"createdAt"`
+	UpdatedAt          time.Time           `json:"updatedAt"`
+	ClosedAt           *time.Time          `json:"closedAt"`
+	Changes            []ChangeSummary     `json:"changes,omitempty"`
+	IsPossiblyPartial  bool                `json:"isPossiblyPartial,omitempty"`
 }
 
 type ChangeSummary struct {
@@ -59,6 +62,38 @@ type ChangeSummary struct {
 	HasCodeChanges bool      `json:"hasCodeChanges"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+// GlobalTrailProject identifies otherwise ambiguous project-local numbers.
+type GlobalTrailProject struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Provider     string `json:"provider"`
+	Jurisdiction string `json:"jurisdiction"`
+	Reference    struct {
+		Forge   string `json:"forge"`
+		Project string `json:"project"`
+	} `json:"reference"`
+	Capabilities struct {
+		CanManageTrails bool `json:"canManageTrails"`
+	} `json:"capabilities"`
+}
+
+// GlobalTrailOrder is the server's canonical cross-cell comparator. In
+// particular, UpdatedAt retains precision lost in the display timestamp.
+type GlobalTrailOrder struct {
+	GroupRank int    `json:"groupRank"`
+	GroupKey  string `json:"groupKey"`
+	SortRank  int    `json:"sortRank"`
+	SortValue string `json:"sortValue"`
+	UpdatedAt string `json:"updatedAt"`
+	TrailID   string `json:"trailId"`
+}
+
+type GlobalTrailListResponse struct {
+	ProjectTrailListResponse
+
+	Jurisdiction string `json:"jurisdiction"`
 }
 
 type ProjectTrailListResponse struct {

@@ -82,8 +82,8 @@ func newProjectTrailListCmd() *cobra.Command {
 	var status, cursor string
 	var pageSize int
 	cmd := &cobra.Command{
-		Use: "list", Short: "List project trails",
-		Long: "List one page of project trails, newest update first. --status filters this page locally; use --page-token to continue. Omitting --status includes all lifecycle states.",
+		Use: "list", Short: "List trails across projects and repositories",
+		Long: "List accessible trails across available cells, newest update first, without requiring a checkout. --project and --repo are explicit filters; neither defaults to the current repository for list. --status filters on the server before pagination. Use --page-token with the same filters to continue. Omitting --status includes all lifecycle states.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if status != "" && !validProjectTrailStatus(status) {
@@ -92,26 +92,17 @@ func newProjectTrailListCmd() *cobra.Command {
 			if pageSize < 1 || pageSize > trailListServerMaxLimit {
 				return errors.New("--limit must be between 1 and 100")
 			}
-			target, err := resolveProjectTrailCollection(cmd)
+			page, err := listGlobalTrails(cmd, status, pageSize, cursor)
 			if err != nil {
 				return err
 			}
-			page, err := target.list(cmd.Context(), pageSize, cursor)
-			if err != nil {
-				return err
-			}
-			items := make([]api.ProjectTrail, 0, len(page.Items))
-			for _, item := range page.Items {
-				if status == "" || status == item.Status {
-					items = append(items, item)
-				}
-			}
-			page.Items = items
+			items := page.Items
 			if jsonRequested(cmd) {
 				return printJSON(cmd.OutOrStdout(), page)
 			}
-			if err := printTable(cmd.OutOrStdout(), []string{"NUMBER", "ID", colHeaderStatus, colHeaderTitle}, items, func(t api.ProjectTrail) []string {
-				return []string{strconv.Itoa(t.Number), t.ID, tuiutil.SanitizeTerminalLabel(t.Status), tuiutil.SanitizeTerminalLabel(t.Title)}
+			if err := printTable(cmd.OutOrStdout(), []string{colHeaderProject, "NUMBER", "ID", colHeaderStatus, colHeaderTitle}, items, func(t api.ProjectTrail) []string {
+				project := t.Project.Reference.Forge + "/" + t.Project.Reference.Project
+				return []string{tuiutil.SanitizeTerminalLabel(project), strconv.Itoa(t.Number), t.ID, tuiutil.SanitizeTerminalLabel(t.Status), tuiutil.SanitizeTerminalLabel(t.Title)}
 			}); err != nil {
 				return err
 			}
@@ -124,7 +115,7 @@ func newProjectTrailListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&status, "status", "", "Filter this page by status (draft, open, closed)")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status before pagination (draft, open, closed)")
 	cmd.Flags().IntVar(&pageSize, "limit", 50, "Page size (1-100)")
 	cmd.Flags().StringVar(&cursor, "page-token", "", "Continue from nextPageToken")
 	addJSONFlag(cmd)

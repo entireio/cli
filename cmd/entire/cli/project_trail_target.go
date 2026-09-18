@@ -130,28 +130,36 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 	if err != nil {
 		return nil, fmt.Errorf("project control plane: %w", err)
 	}
-	resolved, err := core.ResolveProject(ctx, host, project)
-	if err != nil {
-		return nil, fmt.Errorf("resolve project: %w", err)
-	}
-	if resolved.Project == nil || resolved.Reference.Host != host || !strings.EqualFold(resolved.Reference.Project, project) {
-		return nil, errors.New("core returned a different project reference")
-	}
-	target, err := projectTrailTargetForReference(api.TrailParentReference{
-		ProjectID: resolved.Project.ID, Host: resolved.Reference.Host, Project: resolved.Reference.Project,
-	})
+	target, cell, err := resolveProjectTrailRoute(ctx, core, host, project)
 	if err != nil {
 		return nil, err
-	}
-	cell, err := projectTrailResolvedCellTarget(resolved.Project.APIURL, resolved.Project.PrimaryProcessingCell, resolved.Project.Region)
-	if err != nil {
-		return nil, fmt.Errorf("route project %s/%s: %w", host, project, err)
 	}
 	target.Client, err = newProjectTrailCellClient(ctx, insecure, cell)
 	if err != nil {
 		return nil, fmt.Errorf("open project trail cell: %w", err)
 	}
 	return target, nil
+}
+
+func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
+	resolved, err := core.ResolveProject(ctx, host, project)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve project: %w", err)
+	}
+	if resolved.Project == nil || resolved.Reference.Host != host || !strings.EqualFold(resolved.Reference.Project, project) {
+		return nil, nil, errors.New("core returned a different project reference")
+	}
+	target, err := projectTrailTargetForReference(api.TrailParentReference{
+		ProjectID: resolved.Project.ID, Host: resolved.Reference.Host, Project: resolved.Reference.Project,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	cell, err := projectTrailResolvedCellTarget(resolved.Project.APIURL, resolved.Project.PrimaryProcessingCell, resolved.Project.Region)
+	if err != nil {
+		return nil, nil, fmt.Errorf("route project %s/%s: %w", host, project, err)
+	}
+	return target, cell, nil
 }
 
 // Core resolves the stored cell, including hidden clusters and API overrides.

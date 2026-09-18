@@ -7,8 +7,12 @@ remain separate, but there is no `trail change` subgroup or change selector.
 ## Intent
 
 ```sh
-# Namespace defaults to origin. Explicit project targeting works outside a clone.
+# Global listing works outside a clone; origin never implicitly filters it.
+entire trail list --json
+entire trail list --status open --limit 50
+# Explicit project and repository filters use the same global endpoint.
 entire trail list --project gh/entireio --json
+entire trail list --repo gh/entirehq/entire.io
 entire trail list --project et/widgets --limit 50 --page-token '<nextPageToken>'
 
 # No selector follows the current branch's parent.
@@ -32,9 +36,32 @@ numbers or branch names. Use `--branch` for a branch. Project status is
 deletion command. Show displays intent plus “Repositories and branches,” not a
 second class of user-visible entities.
 
-List returns one page: JSON is `{items, nextPageToken}`. `--status` filters that
-page locally because the project API has no status filter. Update combines body
-and metadata in one conditional PATCH. `--assignee` replaces the list,
+List uses `GET /api/v1/trails` and returns one globally ordered page: JSON is
+`{items, nextPageToken}`. Each item retains the global API's `project` reference,
+ordering metadata, and continuation token. Text includes the project namespace
+because numbers are project-local. `--status` filters server-side before
+pagination; `--limit` bounds the combined page, not each cell's displayed results.
+
+Without filters, listing queries every distinct API origin in Core's available
+cluster catalog, including non-default cells. `--project` routes directly to
+Core's assigned API URL and sends `projectId`; `--repo` resolves the named
+repository's processing placement and sends `repoId`. A repo-only filter does
+not require a project catalog lookup. With both flags, the explicit project's
+route wins and the API enforces the intersection. A checkout is never inspected
+unless needed by another command. Hidden cells absent from the public catalog
+can still be queried with explicit project targeting.
+
+Cross-cell pagination uses an opaque CLI cursor bound to the filters and
+resolved cell set. It advances only through consumed rows, using each row's
+server continuation token and full-precision ordering; buffered/unconsumed rows
+are refetched, not skipped. Repeat the same filters with `--page-token`; changing
+`--limit` is allowed. Cell failures abort the whole page without returning a
+misleading partial list or advancing a cursor. This is not a snapshot: concurrent
+updates have the upstream API's normal cursor semantics. Numeric selectors for
+show/update still resolve within a project; creation and other writes retain
+the project-scoped routes.
+
+Update combines body and metadata in one conditional PATCH. `--assignee` replaces the list,
 `--assignee=` clears it, and `--add-assignee`/`--remove-assignee` modify the read
 list. JSON retains backend resource fields and IDs for automation.
 

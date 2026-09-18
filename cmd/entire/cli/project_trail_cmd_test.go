@@ -190,7 +190,8 @@ func TestProjectTrailCreateWithoutRepo(t *testing.T) {
 	require.Contains(t, out, projectTrailTestID)
 }
 
-func TestProjectTrailListAndNumberSelector(t *testing.T) {
+// Numeric selectors remain project-scoped even though user-facing list is global.
+func TestProjectTrailNumberSelector(t *testing.T) {
 	pages := 0
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == projectTrailTestPath {
@@ -210,13 +211,10 @@ func TestProjectTrailListAndNumberSelector(t *testing.T) {
 			t.Errorf("unexpected cursor: %s", r.URL.RawQuery)
 		}
 	})
-	out, _, err := executeProjectTrailTest(t, "list", "--project", "gh/acme", "--json")
-	require.NoError(t, err)
-	require.JSONEq(t, `{"items":[],"nextPageToken":"page-two"}`, out)
-	out, _, err = executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
 	require.NoError(t, err)
 	require.Contains(t, out, projectTrailTestID)
-	require.Equal(t, 3, pages)
+	require.Equal(t, 2, pages)
 }
 
 func TestProjectTrailCellRoutingFailsClosed(t *testing.T) {

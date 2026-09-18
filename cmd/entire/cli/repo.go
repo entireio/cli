@@ -38,7 +38,7 @@ func newRepoCmd() *cobra.Command {
 
 // repoColumns is the human table/field view of a repo, shared by list and
 // get. CLUSTER/STATE come from optional fields, shown as "-" when unset.
-var repoColumns = []string{"ID", colHeaderName, "PROJECT", colHeaderCluster, "STATE"}
+var repoColumns = []string{"ID", colHeaderName, colHeaderProject, colHeaderCluster, "STATE"}
 
 func repoRow(r coreapi.Repo) []string {
 	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), r.State.Or("-")}
@@ -50,7 +50,7 @@ func repoRow(r coreapi.Repo) []string {
 // bloat the table — but a person inspecting one repo wants the URL they can
 // paste into `git clone` (COR-699). REMOTE is "-" until the repo is provisioned
 // enough to have a resolvable cluster host + path.
-var repoDetailColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE", "PROVISION REASON", "REMOTE"}
+var repoDetailColumns = []string{"ID", "NAME", colHeaderProject, "CLUSTER", "STATE", "PROVISION REASON", "REMOTE"}
 
 func repoDetailRow(r coreapi.Repo) []string {
 	remote := repoRemoteURL(r)
