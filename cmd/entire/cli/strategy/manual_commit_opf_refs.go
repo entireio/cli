@@ -47,6 +47,14 @@ import (
 // Caller checks redact.OPFEnabled() and skips this when OPF is off. Returns
 // the same error taxonomy as RewriteUnpushedV1WithOPF; the caller fails closed
 // by withholding the flush (see prePushCheckpointRefs).
+//
+// Follow-up (not done here): Pass 2's body sits at this file's comment-density
+// ceiling — golangci's maintidx nearly failed on the breaker-check comment
+// alone. Extracting that check into a small named helper (e.g.
+// stopFlushOnBreakerTrip) would give the "second whole-flush-stop condition"
+// explanation a home that doesn't compete with the loop's own narrative, and
+// buy real headroom for the next legitimate addition. Don't resolve a future
+// maintidx failure here by trimming a safety comment instead.
 func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repository) error {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
