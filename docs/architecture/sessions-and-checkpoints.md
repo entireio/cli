@@ -203,6 +203,16 @@ identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
 shadow-branch realignment) — those follow only the session's own worktree HEAD.
 
+**Squashes inherit their trailers** (`inheritSquashedCheckpointTrailers`). A
+commit made while `git merge --squash` is in progress (SQUASH_MSG present in
+the per-worktree git dir) is the squashed commits' content, so every
+`Entire-Checkpoint` trailer in SQUASH_MSG is carried into the message when
+missing and no session is matched. git only reports source `squash` when its
+seeded message is accepted; a squash committed with `-m` reports `message`,
+which used to run ordinary matching and either refuse or mint a fresh, empty
+checkpoint for a commit that was not that session's work. Merge commits stay
+unlinked by design; the merged commits keep their own trailers.
+
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
 `WorktreePath` match first, then sessions from a sibling worktree of the same

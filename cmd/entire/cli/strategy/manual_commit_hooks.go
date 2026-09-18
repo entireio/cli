@@ -330,7 +330,13 @@ func isGitSequenceOperation(ctx context.Context) bool {
 // The source parameter indicates how the commit was initiated:
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
-//   - "merge", "squash": skip trailer entirely (auto-generated messages)
+//   - "merge": skip trailer entirely (auto-generated message; the merged
+//     commits keep their own trailers)
+//   - "squash": git seeds the message from SQUASH_MSG, trailers included, so
+//     nothing is stamped. A squash committed with -m reports "message"
+//     instead, which is why inheritSquashedCheckpointTrailers runs before the
+//     source switch: a squash's provenance is the squashed commits, whatever
+//     the message flag.
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -344,6 +350,12 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
 		)
+		return nil
+	}
+
+	// A squash in progress links to the commits being squashed, never to a
+	// session matched here — see inheritSquashedCheckpointTrailers.
+	if s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source) {
 		return nil
 	}
 
@@ -535,6 +547,75 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	writeCommitMessageSpan.End()
 
 	return nil
+}
+
+// inheritSquashedCheckpointTrailers handles a commit made while a squash is in
+// progress (`git merge --squash` leaves SQUASH_MSG in the per-worktree git
+// dir). Such a commit's content is the squashed commits' content, so its
+// checkpoint linkage is theirs: every Entire-Checkpoint trailer found in
+// SQUASH_MSG is carried into the message when missing, and no session is
+// matched. Reports whether a squash was in progress, in which case the caller
+// is done.
+//
+// This exists because git only reports source "squash" when the user accepts
+// its seeded message, which already contains those trailers. A squash
+// committed with -m or -F reports "message", and the hook used to run ordinary
+// session matching on it: in a checkout with sessions in several other
+// worktrees that refused, and where one live session was found it minted a
+// fresh, near-empty checkpoint for a commit that was not that session's work —
+// which is how integrating worktree work from the main checkout lost its link
+// to the checkpoints that actually describe it. Downstream readers already
+// accept several trailers on one commit (trailers.ParseAllCheckpoints).
+func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return false
+	}
+	// SQUASH_MSG lives in the PER-WORKTREE git dir, like the sequencer markers.
+	// The root is the shared registry handle (gitdir.OpenAt): never close it.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return false
+	}
+	squashMsg, err := osroot.ReadFileNoFollow(root, "SQUASH_MSG")
+	if err != nil {
+		return false // no squash in progress (or unreadable: fall through to normal matching)
+	}
+
+	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return true
+	}
+	message := string(content)
+	present := make(map[string]bool)
+	for _, cpID := range trailers.ParseAllCheckpoints(message) {
+		present[cpID.String()] = true
+	}
+	added := 0
+	for _, cpID := range inherited {
+		if present[cpID.String()] {
+			continue
+		}
+		message = addCheckpointTrailer(message, cpID)
+		added++
+	}
+	if added == 0 {
+		logging.Debug(logCtx, "prepare-commit-msg: squash in progress, message already carries the squashed trailers",
+			slog.String("source", source),
+			slog.Int("inherited", len(inherited)))
+		return true
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return true // hook must be silent on failure
+	}
+	logging.Info(logCtx, "prepare-commit-msg: inherited checkpoint trailers from the squashed commits",
+		slog.String("strategy", "manual-commit"),
+		slog.String("source", source),
+		slog.Int("inherited", len(inherited)),
+		slog.Int("added", added))
+	return true
 }
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
