@@ -173,6 +173,14 @@ changes so the next commit can link to the adopted session.
 
 #### Commit-to-session linking
 
+Before adding a checkpoint trailer, content detection reads staged filenames and
+blob IDs in one query against Git's commit index. This preserves the temporary
+`GIT_INDEX_FILE` supplied for `git commit -a` and path-limited commits. Reading
+blob IDs from the ordinary worktree index would compare different content,
+which can omit a valid session link or add a trailer for replaced agent work.
+The query is read-only; Git owns and updates the index. Post-commit content
+checks use the resulting commit tree.
+
 The commit hooks (prepare-commit-msg / post-commit) resolve which sessions a
 commit belongs to via `findSessionsForCommitLinking`
 (`strategy/session_identity.go`): the **worktree-matched set** (every session

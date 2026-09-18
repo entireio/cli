@@ -139,9 +139,11 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
   ignored/untracked directories. This is an implementation rule, not permission
   to run destructive git commands.
 - Git-relative paths resolve against `paths.WorktreeRoot`, never process CWD.
-- A git subprocess running inside a hook and targeting a repo via `Dir` or `-C`
-  must use `gitrepo.EnvWithoutRepoOverrides()`. User-invoked CWD commands instead
-  honor intentionally exported repo selectors.
+- A git subprocess targeting a repository independently of the current hook must
+  use `gitrepo.EnvWithoutRepoOverrides()`; `Dir` or `-C` alone does not override
+  inherited selectors. Queries inspecting the commit Git is preparing must retain
+  the hook environment, including its temporary `GIT_INDEX_FILE`. User-invoked
+  CWD commands also honor intentionally exported repo selectors.
 - PATH scanners use `execx.PathScanDirs()`; external-agent execution requires
   absolute binary paths. User-directory overrides use the checked `userdirs`
   resolvers before any I/O. Preserve the documented developer-owned OPF exception.
