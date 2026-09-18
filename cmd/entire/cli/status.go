@@ -1148,8 +1148,17 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return writeJSON(statusJSON{Error: presenceErr.Error()})
 	}
 
+	// Same reason as the text path above: both files live in the worktree, so
+	// a repository configured through the user settings file has neither in a
+	// freshly added tree.
 	if !projectExists && !localExists {
-		return writeJSON(statusJSON{Error: "not set up"})
+		configuredByUser := false
+		if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+			configuredByUser = settings.UserTierConfiguresRepo(ctx, root)
+		}
+		if !configuredByUser {
+			return writeJSON(statusJSON{Error: "not set up"})
+		}
 	}
 
 	s, err := LoadEntireSettings(ctx)

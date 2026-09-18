@@ -98,6 +98,13 @@ type EntireSettings struct {
 	// if the user had removed it. See enforceAgentPromptTrust.
 	agentPromptRejections []AgentPromptRejection
 
+	// userPromptOwnership records which agent instruction fields the user
+	// settings file supplied, so enforceAgentPromptTrust can recognise them.
+	// That file cannot be written by a repository, so it is a trusted source
+	// exactly as clone preferences are — but the gate only knew about two
+	// layers, and an unrecognised source is dropped.
+	userPromptOwnership userPromptOwnership
+
 	// userLayerRejections records preference blocks (or this repository's
 	// repos entries) dropped from the user settings file, one human-readable
 	// line each. Unexported for the same reason as its siblings: a block that

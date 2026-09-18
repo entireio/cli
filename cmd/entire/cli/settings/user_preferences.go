@@ -361,11 +361,54 @@ func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
 // commit that introduces the tier.
 func applyUserTier(ctx context.Context, settings *EntireSettings, worktreeRoot string) {
 	overlay := loadUserOverlay(ctx)
-	applyUserPreferences(settings, overlay.preferences)
-	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
+	owned := userPromptOwnership{profiles: map[string]bool{}}
+
+	apply := func(prefs *UserPreferences) {
+		if prefs == nil {
+			return
+		}
 		applyUserPreferences(settings, prefs)
+		owned.note(prefs)
 	}
+
+	apply(overlay.preferences)
+	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
+		apply(prefs)
+	}
+	settings.userPromptOwnership = owned
 	settings.userLayerRejections = overlay.rejections
+}
+
+// userPromptOwnership records which agent instruction fields came from the
+// user settings file.
+//
+// enforceAgentPromptTrust drops any instruction field it cannot attribute to a
+// developer-owned layer, and it knew about exactly two: a verified
+// settings.local.json and clone preferences. The user file is developer-owned
+// by a stronger argument than either — a repository cannot deliver content to
+// ~/.config at all — but an unrecognised source is indistinguishable from an
+// untrusted one, so investigate.always_prompt and every review profile task or
+// prompt set there were silently dropped with a reason naming two files the
+// developer had not used.
+type userPromptOwnership struct {
+	investigate bool
+	profiles    map[string]bool
+}
+
+func (o *userPromptOwnership) note(prefs *UserPreferences) {
+	if prefs.Investigate != nil {
+		o.investigate = true
+	}
+	for name := range prefs.ReviewProfiles {
+		if o.profiles == nil {
+			o.profiles = map[string]bool{}
+		}
+		o.profiles[name] = true
+	}
+}
+
+func (o *userPromptOwnership) ownsProfile(name string) bool {
+	return o.profiles[name]
 }
 
 // UserLayerRejections reports the user-settings preference blocks (or this

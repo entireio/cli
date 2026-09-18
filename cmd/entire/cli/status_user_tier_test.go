@@ -53,3 +53,33 @@ func TestStatus_ReportsEnabledWhenOnlyTheUserTierConfiguresTheRepo(t *testing.T)
 		"a repository configured in the user settings file is set up in every worktree")
 	assert.Contains(t, after.String(), "Enabled")
 }
+
+// The JSON status path had the same worktree-only check as the text path, and
+// fixing one call site and not the other left agents and scripts being told a
+// running repository was not set up.
+func TestStatusJSON_ReportsEnabledWhenOnlyTheUserTierConfiguresTheRepo(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	testutil.RunGit(t, root, "add", ".")
+	testutil.RunGit(t, root, "commit", "-m", "init")
+
+	configDir := t.TempDir()
+	t.Setenv(userdirs.EnvConfigDir, configDir)
+	t.Cleanup(settings.ClearOriginKeyCache)
+	t.Chdir(root)
+
+	var before bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &before, false, true))
+	assert.Contains(t, before.String(), "not set up", "sanity")
+
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName),
+		[]byte(`{"repos":{"github.com/acme/widgets":{"enabled":true}}}`), 0o600))
+	settings.ClearOriginKeyCache()
+
+	var after bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &after, false, true))
+	assert.NotContains(t, after.String(), "not set up",
+		"the JSON path must agree with the text path about whether this repo is set up")
+}
