@@ -246,6 +246,16 @@ Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre
 
 #### When OPF actually runs
 
+> **Stale, needs a rewrite:** this section still describes one inference call
+> batching every commit/ref in the push. On `git-refs`, that changed: the cap
+> and the OPF call are now scoped per checkpoint ref, not per flush, and a
+> `git-refs` flush that can't finish inline hands the remainder to a detached
+> `entire __opf_flush` worker instead of blocking the push (see "Seeing
+> outstanding OPF work" below, and the caps subsection above, for the accurate
+> current shape). `git-branch`'s flow below is still accurate: its cap stays
+> cumulative across the whole unpushed chain. Rewrite this section for
+> `git-refs` rather than trusting the flow as written.
+
 OPF execution lives in the pre-push hook. The flow:
 
 1. **Post-commit** writes the checkpoint with **8-layer-only** redaction to local git objects — per-checkpoint refs on `git-refs`, the `entire/checkpoints/v1` branch on `git-branch`. Fast, predictable, no OPF cost on the hot path.
