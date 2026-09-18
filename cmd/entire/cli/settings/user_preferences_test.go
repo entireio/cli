@@ -341,3 +341,59 @@ func TestIsSetUpAndEnabled_TrueFromALinkedWorktreeConfiguredOnlyByTheUserTier(t 
 	assert.False(t, IsSetUpAndEnabled(t.Context()),
 		"an explicit false must be honoured, not read as absent")
 }
+
+// A path-keyed entry must reach EVERY worktree of the clone, not only the one
+// it spells. Every worktree has a different path, so comparing paths alone
+// left a path-keyed repository — one with no usable origin, which is the only
+// reason to use a path key — configured in exactly one tree and unconfigured
+// in the rest. That is the divergence this tier exists to remove, reappearing
+// in the fallback meant to cover repositories that cannot use an origin key.
+func TestUserTier_PathKeyedEntryReachesEveryWorktreeOfTheClone(t *testing.T) {
+	main := t.TempDir()
+	testutil.InitRepo(t, main)
+	require.NoError(t, os.MkdirAll(filepath.Join(main, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(main, EntireSettingsFile), []byte(`{"enabled":true}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(main, "f.txt"), []byte("x"), 0o644))
+	testutil.RunGit(t, main, "add", ".")
+	testutil.RunGit(t, main, "commit", "-m", "init")
+	// No origin: a path key is the only key available.
+
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, main, "worktree", "add", "-b", "linked-work", linked)
+
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Cleanup(ClearOriginKeyCache)
+	writeUserSettings(t, `{"repos":{`+jsonString(main)+`:{"review_fix_agent":"codex"}}}`)
+
+	for _, tree := range []string{main, linked} {
+		ClearOriginKeyCache()
+		s, err := loadMergedSettings(t.Context(),
+			filepath.Join(tree, EntireSettingsFile), "", filepath.Join(tree, EntireSettingsLocalFile))
+		require.NoError(t, err)
+		assert.Equal(t, "codex", s.ReviewFixAgent,
+			"the entry must apply in %s", filepath.Base(tree))
+	}
+}
+
+// And it must not reach a DIFFERENT clone that happens to be asked about.
+func TestUserTier_PathKeyedEntryDoesNotReachAnotherClone(t *testing.T) {
+	mine := t.TempDir()
+	testutil.InitRepo(t, mine)
+	require.NoError(t, os.MkdirAll(filepath.Join(mine, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(mine, EntireSettingsFile), []byte(`{"enabled":true}`), 0o644))
+
+	other := t.TempDir()
+	testutil.InitRepo(t, other)
+	require.NoError(t, os.MkdirAll(filepath.Join(other, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(other, EntireSettingsFile), []byte(`{"enabled":true}`), 0o644))
+
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Cleanup(ClearOriginKeyCache)
+	writeUserSettings(t, `{"repos":{`+jsonString(mine)+`:{"review_fix_agent":"codex"}}}`)
+
+	s, err := loadMergedSettings(t.Context(),
+		filepath.Join(other, EntireSettingsFile), "", filepath.Join(other, EntireSettingsLocalFile))
+	require.NoError(t, err)
+	assert.Empty(t, s.ReviewFixAgent,
+		"a path key naming one clone must not configure a different clone")
+}
