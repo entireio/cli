@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -240,8 +241,9 @@ func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
 
 // TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions tests that
 // listAllSessionStates cleans up stale sessions whose shadow branch no longer exists.
-// Stale sessions include: pre-state-machine sessions (empty phase), IDLE/ENDED sessions
-// that were never condensed. Active sessions and sessions with LastCheckpointID are kept.
+// Deleted: ENDED never-condensed sessions, and IDLE never-condensed sessions
+// whose owner is known dead. Kept: ACTIVE, condensed, record-bearing, and IDLE
+// sessions with a live or unknown owner (see isOrphanedSessionState).
 func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -253,23 +255,41 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 
 	// None of these sessions have shadow branches → cleanup logic applies.
 
-	// Session 1: Pre-state-machine session (empty phase, no checkpoint ID)
-	// Should be cleaned up.
-	staleEmpty := &SessionState{
-		SessionID:  "stale-empty-phase",
+	// Session 1: pre-state-machine (empty phase); normalizes to IDLE, no owner: KEPT.
+	legacyEmpty := &SessionState{
+		SessionID:  "legacy-empty-phase",
 		BaseCommit: "aaa1111",
 		StartedAt:  now.Add(-24 * time.Hour),
 		StepCount:  0,
 	}
 
-	// Session 2: IDLE session with no checkpoint ID
-	// Should be cleaned up.
-	staleIdle := &SessionState{
-		SessionID:  "stale-idle",
+	// Session 2a: IDLE, no checkpoint ID, no recorded owner: KEPT until stale.
+	idleUnknownOwner := &SessionState{
+		SessionID:  "idle-unknown-owner",
 		BaseCommit: "bbb2222",
 		StartedAt:  now.Add(-12 * time.Hour),
 		StepCount:  3,
 		Phase:      "idle",
+	}
+
+	// Session 2b: IDLE, no checkpoint ID, owner exited (wrong start fingerprint): cleaned up.
+	idleDeadOwner := &SessionState{
+		SessionID:  "idle-dead-owner",
+		BaseCommit: "bbb2223",
+		StartedAt:  now.Add(-12 * time.Hour),
+		StepCount:  3,
+		Phase:      "idle",
+		Owner:      &proclive.Identity{PID: os.Getpid(), Start: "not-this-process"},
+	}
+
+	// Session 2c: IDLE, no checkpoint ID, owner alive (a turn between commits): KEPT.
+	liveOwner, liveOwnerOK := proclive.ResolveOwner()
+	idleLiveOwner := &SessionState{
+		SessionID:  "idle-live-owner",
+		BaseCommit: "bbb2224",
+		StartedAt:  now.Add(-1 * time.Minute),
+		Phase:      "idle",
+		Owner:      &liveOwner,
 	}
 
 	// Session 3: ENDED session with no checkpoint ID
@@ -311,7 +331,13 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_keep", StartedAt: now, CompletedAt: now}},
 	}
 
-	for _, state := range []*SessionState{staleEmpty, staleIdle, staleEnded, activeNoShadow, condensedIdle, recordEnded} {
+	fixtures := []*SessionState{legacyEmpty, idleUnknownOwner, idleDeadOwner, staleEnded, activeNoShadow, condensedIdle, recordEnded}
+	wantKept := []string{"active-no-shadow", "condensed-idle", "record-ended", "idle-unknown-owner", "legacy-empty-phase"}
+	if liveOwnerOK {
+		fixtures = append(fixtures, idleLiveOwner)
+		wantKept = append(wantKept, "idle-live-owner")
+	}
+	for _, state := range fixtures {
 		if err := s.saveSessionState(context.Background(), state); err != nil {
 			t.Fatalf("saveSessionState(%s) error = %v", state.SessionID, err)
 		}
@@ -322,13 +348,12 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		t.Fatalf("listAllSessionStates() error = %v", err)
 	}
 
-	// Only active-no-shadow, condensed-idle, and record-ended should survive
-	if len(states) != 3 {
+	if len(states) != len(wantKept) {
 		var ids []string
 		for _, st := range states {
 			ids = append(ids, st.SessionID)
 		}
-		t.Fatalf("listAllSessionStates() returned %d states %v, want 3 [active-no-shadow, condensed-idle, record-ended]", len(states), ids)
+		t.Fatalf("listAllSessionStates() returned %d states %v, want %d %v", len(states), ids, len(wantKept), wantKept)
 	}
 
 	kept := make(map[string]bool)
@@ -344,9 +369,15 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 	if !kept["record-ended"] {
 		t.Error("ended record-bearing session must not be cleared as orphaned")
 	}
+	if !kept["idle-unknown-owner"] {
+		t.Error("idle session with no recorded owner must be kept until it goes stale")
+	}
+	if liveOwnerOK && !kept["idle-live-owner"] {
+		t.Error("idle session whose owner is alive must be kept — it is a live session between turns")
+	}
 
 	// Verify stale sessions were actually cleared from disk
-	for _, staleID := range []string{"stale-empty-phase", "stale-idle", "stale-ended"} {
+	for _, staleID := range []string{"idle-dead-owner", "stale-ended"} {
 		loaded, err := LoadSessionState(context.Background(), staleID)
 		if err != nil {
 			t.Errorf("LoadSessionState(%s) error = %v", staleID, err)

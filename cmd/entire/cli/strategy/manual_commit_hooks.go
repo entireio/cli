@@ -330,7 +330,8 @@ func isGitSequenceOperation(ctx context.Context) bool {
 // The source parameter indicates how the commit was initiated:
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
-//   - "merge", "squash": skip trailer entirely (auto-generated messages)
+//   - "merge": skip trailer entirely (the merged commits keep their own)
+//   - "squash": skip; the seeded message already carries the squashed trailers
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -344,6 +345,10 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
 		)
+		return nil
+	}
+
+	if s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source) {
 		return nil
 	}
 
@@ -534,7 +539,69 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	writeCommitMessageSpan.End()
 
+	// Reserve only once the trailer reached the message.
+	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
 	return nil
+}
+
+// inheritSquashedCheckpointTrailers handles a commit made while `git merge
+// --squash` is in progress (SQUASH_MSG present): the squashed commits'
+// Entire-Checkpoint trailers are carried into the message and no session is
+// matched. `commit -m` reports source "message", not "squash", so this runs
+// before the source switch. Reports whether it took over; no trailers or an
+// unusable message fall through to ordinary matching.
+func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return false
+	}
+	// Per-worktree git dir, like the sequencer markers; shared root, never closed.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return false
+	}
+	squashMsg, err := osroot.ReadFileNoFollow(root, "SQUASH_MSG")
+	if err != nil {
+		return false // no squash in progress (or unreadable: fall through to normal matching)
+	}
+
+	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	if len(inherited) == 0 {
+		return false
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return false // nothing inherited; let ordinary matching report its own failure
+	}
+	message := string(content)
+	present := make(map[string]bool)
+	for _, cpID := range trailers.ParseAllCheckpoints(message) {
+		present[cpID.String()] = true
+	}
+	added := 0
+	for _, cpID := range inherited {
+		if present[cpID.String()] {
+			continue
+		}
+		message = addCheckpointTrailer(message, cpID)
+		added++
+	}
+	if added == 0 {
+		logging.Debug(logCtx, "prepare-commit-msg: squash in progress, message already carries the squashed trailers",
+			slog.String("source", source),
+			slog.Int("inherited", len(inherited)))
+		return true
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return false // nothing landed; hooks stay silent, ordinary matching may still try
+	}
+	logging.Info(logCtx, "prepare-commit-msg: inherited checkpoint trailers from the squashed commits",
+		slog.String("strategy", "manual-commit"),
+		slog.String("source", source),
+		slog.Int("inherited", len(inherited)),
+		slog.Int("added", added))
+	return true
 }
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
@@ -954,7 +1021,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
 	// diverge (a dangling trailer).
-	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
+	linking, err := s.findCommitLinkingSet(ctx, worktreePath)
+	sessions := linking.sessionsIncludingReservedFor(checkpointID)
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
 
@@ -1048,6 +1116,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
 				sessionsWithCommittedFiles, condensedTelemetry)
 			trailerOwned = trailerOwned || condensed
+			s.rehomeSessionAfterOwnCommit(iterCtx, repo, state, worktreePath, newHead, condensed, linking.ancestryGuest)
 			return nil
 		}, func() {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
@@ -2409,7 +2478,29 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
+	reserveCheckpointForStampedSessions(logCtx, []*SessionState{state}, cpID)
 	return nil
+}
+
+// reserveCheckpointForStampedSessions records the stamped checkpoint ID as each
+// session's pending condensation so post-commit can resolve the session from the
+// trailer alone. An existing different reservation is kept. Best-effort.
+func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
+	for _, stamped := range states {
+		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {
+			if state.PendingCondensationID() != id.EmptyCheckpointID {
+				return ErrMutationSkip
+			}
+			state.BeginCondensationAttempt(checkpointID)
+			return nil
+		})
+		if err != nil && !errors.Is(err, ErrStateNotFound) && !errors.Is(err, ErrMutationSkip) {
+			logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not reserve the stamped checkpoint on the session",
+				slog.String("session_id", stamped.SessionID),
+				slog.String("checkpoint_id", checkpointID.String()),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {

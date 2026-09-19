@@ -156,7 +156,10 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
-			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
+			if isOrphanedSessionState(state) {
+				logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state without a shadow branch",
+					slog.String("session_id", state.SessionID),
+					slog.String("phase", string(state.Phase)))
 				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
 				store.Clear(ctx, state.SessionID)
 				continue
@@ -166,6 +169,22 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		states = append(states, state)
 	}
 	return states, nil
+}
+
+// isOrphanedSessionState reports whether a state with no shadow branch may be
+// deleted. ACTIVE sessions may not have created it yet; a LastCheckpointID and
+// task records are kept. An IDLE state with none of those is a live session
+// between turns, and every worktree's hooks list this store, so it counts as an
+// orphan only once its owner is known dead. ENDED and legacy states keep the
+// old rule; owner-less ones age out through the stale threshold.
+func isOrphanedSessionState(state *SessionState) bool {
+	if state.Phase.IsActive() || !state.LastCheckpointID.IsEmpty() || state.HasTaskContent() {
+		return false
+	}
+	if state.Phase == session.PhaseIdle {
+		return state.OwnerExited()
+	}
+	return true
 }
 
 // IsCondensableEndedSession reports whether an ENDED session still carries
@@ -266,13 +285,13 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 }
 
 // findSessionsForWorktreeFromStates is findSessionsForWorktree over an
-// already-loaded state list. The second result reports a multi-worktree
-// ambiguity decline — candidates existed but spanned several worktrees, so
-// nothing was linked; findSessionsForCommitLinking surfaces it to the user
-// only when identity matching cannot rescue the commit either.
-func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
+// already-loaded state list. The second result is the multi-worktree
+// ambiguity decline: the candidates that existed but spanned several
+// worktrees, so nothing was linked. findCommitLinkingSet names them to the
+// user, but only when identity matching cannot rescue the commit either.
+func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) (matches, declined []*SessionState) {
 	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
-		return exact, false
+		return exact, nil
 	}
 
 	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
@@ -280,7 +299,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 			"session matching: cannot resolve common dir for fallback matching",
 			slog.String("error", err.Error()))
-		return nil, false
+		return nil, nil
 	}
 
 	var parentWorktreeMatches []*SessionState
@@ -328,16 +347,16 @@ const recentSessionWindow = 15 * time.Minute
 // Spanning several worktrees: filter to recently-interacting sessions and
 // link only if a single worktree remains — days-idle stragglers must not
 // veto the obviously-live session, but between two live worktrees there is
-// no safe guess. A refusal logs here and reports true, so the
-// commit-linking caller can announce it on stderr with the remedy (#1852:
+// no safe guess. A refusal logs here and returns the declined candidates, so
+// the commit-linking caller can name them to the user with the remedy (#1852:
 // silent loss of linkage) — but only after identity matching has also failed
 // to rescue the commit, and never on amend/post-rewrite.
-func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candidates []*SessionState) (matches []*SessionState, ambiguous bool) {
+func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candidates []*SessionState) (matches, declined []*SessionState) {
 	if len(candidates) == 0 {
-		return nil, false
+		return nil, nil
 	}
 	if matches := sessionsFromSingleWorktree(candidates); matches != nil {
-		return matches, false
+		return matches, nil
 	}
 	cutoff := time.Now().Add(-recentSessionWindow)
 	var live []*SessionState
@@ -348,11 +367,11 @@ func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candida
 	}
 	if len(live) > 0 {
 		if matches := sessionsFromSingleWorktree(live); matches != nil {
-			return matches, false
+			return matches, nil
 		}
 	}
 	warnAmbiguousWorktreeSessions(ctx, worktreePath, candidates)
-	return nil, true
+	return nil, candidates
 }
 
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live

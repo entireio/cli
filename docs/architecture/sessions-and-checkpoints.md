@@ -203,15 +203,45 @@ identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
 shadow-branch realignment) — those follow only the session's own worktree HEAD.
 
+**The session follows its agent** (`rehomeSessionAfterOwnCommit`). A session
+is homed where its first turn-start hook ran, and agent hooks run where the
+agent was launched, so an agent started in the main checkout that then works
+in a worktree — created during the session and entered with the agent's
+worktree tool or a plain `cd` — stays homed in the parent while every edit and
+commit lands elsewhere. Once such a commit has condensed, the session
+identified by **ancestry** (never one that merely fell into the set through
+the path fallback) is re-homed to the committing worktree: `WorktreePath`,
+`WorktreeID`, `BaseCommit`, the attribution base, the untracked-at-start
+baseline and the branch are re-derived together. The move is skipped when the
+old home still holds pending content (tracked files, shadow-branch steps, or
+task records): that session genuinely works in two trees and stays
+guest-linked. From then on the worktree's own commits — including ones from a
+process that is not the agent's descendant — link by exact match instead of
+depending on the rescue or falling into the ambiguity refusal below.
+
+**Squashes inherit their trailers** (`inheritSquashedCheckpointTrailers`). A
+commit made while `git merge --squash` is in progress (SQUASH_MSG present in
+the per-worktree git dir) is the squashed commits' content, so every
+`Entire-Checkpoint` trailer in SQUASH_MSG is carried into the message when
+missing and no session is matched. git only reports source `squash` when its
+seeded message is accepted; a squash committed with `-m` reports `message`,
+which used to run ordinary matching and either refuse or mint a fresh, empty
+checkpoint for a commit that was not that session's work. Merge commits stay
+unlinked by design; the merged commits keep their own trailers.
+
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
 `WorktreePath` match first, then sessions from a sibling worktree of the same
 repo, provided they resolve to a single worktree. Imported sessions (`Kind=imported`) never link —
 they are historical records. When candidates span several worktrees, sessions
 that interacted within the last 15 minutes are preferred; if a single live
-worktree remains it links, otherwise the hook declines with a stderr hint
-naming `entire session adopt` (two genuinely live sessions in different
-worktrees are never guessed between). This liveness filter intentionally turns
+worktree remains it links, otherwise the hook declines and names the
+candidate sessions and their worktrees on the controlling terminal (and
+stderr), with `entire session attach <session-id>` as the after-the-fact
+remedy (`announceUnlinkedCommit`; two genuinely live sessions in different
+worktrees are never guessed between). It writes to the terminal because the
+installed hook wrappers discard hook stderr, and it no longer suggests
+`session adopt`, which would move a live session out of its agent's worktree. This liveness filter intentionally turns
 some cases the old code declined outright into a best-candidate link. The
 15-minute `recentSessionWindow` is therefore a correctness tradeoff: a session
 in a long-running build or tool call can age out, allowing the remaining recent

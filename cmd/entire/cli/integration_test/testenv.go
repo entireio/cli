@@ -1017,7 +1017,7 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	}
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1070,6 +1070,13 @@ func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, f
 	}
 }
 
+// commitMsgFile returns a scratch path for the message the prepare-commit-msg
+// hook rewrites, outside the repository: in a linked worktree `.git` is a file.
+func (env *TestEnv) commitMsgFile() string {
+	env.T.Helper()
+	return filepath.Join(env.T.TempDir(), "COMMIT_EDITMSG")
+}
+
 func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	envVars := append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
@@ -1094,7 +1101,7 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	}
 
 	// Write commit message to temp file
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1181,7 +1188,7 @@ func (env *TestEnv) GitCommitWithTrailerRemoved(message string, files ...string)
 	}
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
@@ -1278,7 +1285,7 @@ func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY b
 	env.T.Helper()
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
-	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	msgFile := env.commitMsgFile()
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		env.T.Fatalf("failed to write commit message file: %v", err)
 	}
