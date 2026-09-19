@@ -534,7 +534,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	writeCommitMessageSpan.End()
 
-	// Only a trailer that reached the message may be reserved (see the fast path).
+	// Reserve only once the trailer reached the message.
 	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
 	return nil
 }
@@ -2418,10 +2418,8 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 }
 
 // reserveCheckpointForStampedSessions records the stamped checkpoint ID as each
-// session's pending condensation so post-commit can resolve the session from
-// the trailer alone (commitLinkingSet.sessionsIncludingReservedFor). A
-// different existing reservation is an interrupted condensation and is kept.
-// Best-effort: bookkeeping must not fail the commit.
+// session's pending condensation so post-commit can resolve the session from the
+// trailer alone. An existing different reservation is kept. Best-effort.
 func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
 	for _, stamped := range states {
 		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {

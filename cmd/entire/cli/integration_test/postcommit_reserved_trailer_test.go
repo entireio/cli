@@ -10,10 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// prepare-commit-msg identified a session by ancestry (path matching is
-// ambiguous between two live worktrees) and stamped its trailer; by post-commit
-// that evidence is gone. The ID reserved at stamp time must still resolve it,
-// or the commit names a checkpoint nobody wrote.
+// The reservation made at stamp time must resolve the session in post-commit
+// when neither the path nor the ancestry that prepare-commit-msg used remains.
 func TestPostCommit_ResolvesSessionFromReservedTrailerWhenPathAndAncestryFail(t *testing.T) {
 	t.Parallel()
 	parent := NewRepoWithCommit(t)
@@ -28,7 +26,7 @@ func TestPostCommit_ResolvesSessionFromReservedTrailerWhenPathAndAncestryFail(t 
 	require.NoError(t, home.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, prompt, sess.TranscriptPath))
 	sess.CreateTranscript(prompt, []FileChange{{Path: "draft.txt", Content: "draft\n"}})
 
-	// The agent commits in the parent: prepare-commit-msg links it by ancestry.
+	// Agent commit in the parent: linked by ancestry.
 	parent.WriteFile("draft.txt", "draft\n")
 	parent.GitAdd("draft.txt")
 	msgFile := parent.commitMsgFile()
@@ -43,9 +41,7 @@ func TestPostCommit_ResolvesSessionFromReservedTrailerWhenPathAndAncestryFail(t 
 	cpID := parent.GetCheckpointIDFromCommitMessage(parent.GetHeadHash())
 	require.NotEmpty(t, cpID)
 
-	// Between the two hooks the evidence prepare used is gone: the committing
-	// process no longer descends from the agent, and the path fallback is
-	// ambiguous between two live worktrees.
+	// Between the hooks, ancestry is gone and the path fallback is ambiguous.
 	disownSession(t, parent, sess.ID)
 	post := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	post.Dir = parent.RepoDir

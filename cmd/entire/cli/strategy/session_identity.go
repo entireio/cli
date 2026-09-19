@@ -47,13 +47,11 @@ type commitLinkingSet struct {
 	all           []*SessionState // the listing, for sessionsIncludingReservedFor
 }
 
-// sessionsIncludingReservedFor adds every session whose pending condensation
-// is checkpointID — the reservation prepare-commit-msg made when it stamped
-// the trailer. Paths and ancestry are re-derived per hook and can differ
-// between prepare-commit-msg and post-commit; the trailer is the identity the
-// commit itself carries. Adopted-away tombstones are skipped: adoption retires
-// them ENDED and fully condensed and clears the live copy's reservation, so a
-// stale reservation must not condense stale state.
+// sessionsIncludingReservedFor adds every session whose pending condensation is
+// checkpointID: the reservation prepare-commit-msg made when it stamped the
+// trailer, which survives when paths and ancestry differ between the two hooks.
+// Adopted-away tombstones are skipped; adoption retires them and clears the
+// live copy's reservation.
 func (l commitLinkingSet) sessionsIncludingReservedFor(checkpointID id.CheckpointID) []*SessionState {
 	sessions := l.sessions
 	if checkpointID == id.EmptyCheckpointID {
@@ -91,12 +89,9 @@ func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktre
 	return commitLinkingSet{sessions: sessions, ancestryGuest: ancestryGuest, all: allStates}, nil
 }
 
-// announceUnlinkedCommit names the candidate sessions so the user can link the
-// commit afterwards. It writes to the controlling terminal because the
-// installed hook wrappers discard hook stderr (the old hint was never seen),
-// and to stderr for callers outside the wrapper and for tests. The remedy is
-// `session attach`; `session adopt` would move a live session out of its
-// agent's worktree.
+// announceUnlinkedCommit names the candidate sessions so the user can
+// `session attach` afterwards. It writes to the controlling terminal because the
+// hook wrappers discard hook stderr; stderr stays for tests and direct callers.
 func announceUnlinkedCommit(candidates []*SessionState) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[entire] Commit not linked to an agent session: %d sessions in other worktrees could match it, and this worktree has none of its own.\n", len(candidates))
@@ -122,18 +117,12 @@ func announceUnlinkedCommit(candidates []*SessionState) {
 	fmt.Fprint(tty, "\n"+notice)
 }
 
-// rehomeSessionAfterOwnCommit moves a session to the worktree its own agent
-// just committed in. A session is homed where its first turn-start hook ran,
-// and hooks run where the agent was launched, so an agent started in the main
-// checkout that then works in a worktree stayed parent-homed while every
-// commit landed elsewhere. A commit whose process descends from the agent is
-// the best evidence of where it works, so the home follows it.
-//
-// Only the ancestry-identified session qualifies (a path-fallback match says
-// nothing about where the agent works), only once this commit condensed it,
-// and only when the old home holds nothing pending: tracked files, shadow
-// steps or task records mean the agent works in two trees, and it stays
-// guest-linked. WorktreePath and WorktreeID move together.
+// rehomeSessionAfterOwnCommit moves a session to the worktree its own agent just
+// committed in. Sessions are homed where their first turn-start hook ran and
+// hooks run where the agent was launched, so an agent that moves into a
+// worktree stayed homed in the parent. Only the ancestry-identified session
+// qualifies, only once this commit condensed it, and only when the old home
+// holds nothing pending; otherwise it stays guest-linked.
 func (s *ManualCommitStrategy) rehomeSessionAfterOwnCommit(ctx context.Context, repo *git.Repository, state *SessionState, worktreePath, newHead string, condensed bool, ancestryGuest string) bool {
 	if !condensed || ancestryGuest == "" || state.SessionID != ancestryGuest {
 		return false

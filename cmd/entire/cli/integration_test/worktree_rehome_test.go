@@ -13,24 +13,19 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// The agent's first turn-start ran in the main checkout, so the session is
-// homed there; it then works and commits in a worktree. Its own commit links by
-// ancestry and re-homes the session, so a later commit there from a process
-// that does not descend from the agent links by exact match instead of hitting
-// the multi-worktree ambiguity refusal.
+// A session homed in the main checkout whose agent commits in a worktree is
+// re-homed there, so a later commit from a non-agent process links by exact
+// match instead of hitting the multi-worktree refusal.
 func TestCommitLinking_AgentCommitInForeignWorktreeReHomesSession(t *testing.T) {
 	t.Parallel()
 	parent := NewRepoWithCommit(t)
 
-	// Another agent's live session in a sibling worktree makes the path
-	// fallback ambiguous (candidates span two worktrees), as in any clone
-	// with several agents running at once.
+	// A second live worktree makes the path fallback ambiguous.
 	other := worktreeEnv(t, parent, "other")
 	require.NoError(t, other.SimulateUserPromptSubmit("other-agent-session"))
 	disownSession(t, parent, "other-agent-session")
 
-	// The agent under test starts in the parent and only then moves into a
-	// worktree; its hooks never ran there.
+	// The agent starts in the parent; its hooks never run in the worktree.
 	sess := parent.NewSession()
 	prompt := "Implement the feature in a worktree"
 	require.NoError(t, parent.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, prompt, sess.TranscriptPath))
@@ -50,10 +45,7 @@ func TestCommitLinking_AgentCommitInForeignWorktreeReHomesSession(t *testing.T) 
 		"session must follow its agent into the worktree it committed in")
 	require.Equal(t, wantWorktreeID, state.WorktreeID)
 
-	// A commit in that worktree from a process that is not the agent's
-	// descendant (a script, an IDE) now finds the session by exact match.
-	// Before re-homing it was refused as ambiguous between the parent and the
-	// other live worktree.
+	// A non-agent process committing there now finds the session by exact match.
 	disownSession(t, parent, sess.ID)
 	feature.WriteFile("feature2.txt", "more work\n")
 	feature.GitCommitWithShadowHooksAsAgent("Second commit in the worktree", "feature2.txt")
@@ -61,8 +53,7 @@ func TestCommitLinking_AgentCommitInForeignWorktreeReHomesSession(t *testing.T) 
 		"after re-homing, the worktree's own commits link by exact match")
 }
 
-// worktreeEnv adds a linked worktree and returns a TestEnv targeting it. Entire
-// is initialised there because `.entire/` is gitignored.
+// worktreeEnv adds a linked worktree, with Entire initialised, as a TestEnv.
 func worktreeEnv(t *testing.T, parent *TestEnv, name string) *TestEnv {
 	t.Helper()
 	base := t.TempDir()
@@ -77,8 +68,7 @@ func worktreeEnv(t *testing.T, parent *TestEnv, name string) *TestEnv {
 	return &env
 }
 
-// disownSession records an owner outside this test's ancestry, so the test's
-// commits are no longer attributable to the session by process identity.
+// disownSession records an owner outside this test's ancestry.
 func disownSession(t *testing.T, env *TestEnv, sessionID string) {
 	t.Helper()
 	state, err := env.GetSessionState(sessionID)
