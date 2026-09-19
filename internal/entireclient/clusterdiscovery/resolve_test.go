@@ -701,7 +701,7 @@ func TestResolve_NilStoredContextDoesNotPanic(t *testing.T) {
 
 	// And with a matching core, the nil entry must be skipped while the real one
 	// is auto-selected.
-	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}, autoSelect: true}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name, "the valid entry is still the sole candidate")
 }
@@ -717,7 +717,7 @@ func TestResolve_NilStoredContextIsSelectable(t *testing.T) {
 			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
 		},
 	}
-	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}, autoSelect: true}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name)
 }

@@ -252,10 +252,24 @@ login on the cell its local core advertises (never on the core itself); only an
 explicit `ENTIRE_API_BASE_URL` switches to discovering a login against that
 named data host (`auth.resolveCellClientSubject` has the history, COR-1634). A
 `-j` slug the environment has no cell for fails naming the core consulted and
-the jurisdictions it does serve. `activity`/`recap` fall back from the cell to
-the data API only when `auth.DataAPIServesSelectedLogin` says both are in the
-same environment; otherwise the cell error is reported rather than production
-being asked about a staging login. `{owner}`/`{repo}`/`{repo_id}` in the path are filled
+the jurisdictions it does serve. **The data API follows the acting login the
+same way** (`auth.ResolveDataAPI`): `ENTIRE_TOKEN` when set (verbatim, to its
+`aud`'s site), else the selected login — its JWT as the bearer and its login
+server's site as the host (`us.auth.partial.to` → `https://partial.to`; a
+loopback dev core has no site and needs `ENTIRE_API_BASE_URL`), so `entire
+enable`, `search`, `dispatch`, `recap` and the printed trail links all land in
+the login's own environment; only `ENTIRE_API_BASE_URL` switches to discovering
+a saved login against a named host (an env token is sent to it verbatim), and
+even then the sole eligible saved login is *named*, never used unasked —
+auto-selection is a cluster rule (git remotes and the cluster-addressed
+`repo mirror` commands, where the cluster pins the host), which is why
+`clusterdiscovery.loginTargets.autoSelect` is set only by
+`ResolveContextForCluster`. Whenever several logins are saved, every command
+that acts as one says which on stderr (`Using context 'x'.`,
+`auth.AnnounceContext`, once per process; `git-remote-entire` keeps its own
+auto-select notice). `activity`/`recap` fall back from the cell to the data API
+freely, since both apply that precedence.
+`{owner}`/`{repo}`/`{repo_id}` in the path are filled
 from the current repo's origin remote. It is an escape hatch, so it is absent
 from `agent-help`'s curated listing but stays in `entire help` and agent-help's
 footer — an agent that needs raw access must find it rather than hand-roll curl

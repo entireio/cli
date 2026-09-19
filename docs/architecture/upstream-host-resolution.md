@@ -20,7 +20,7 @@ accept a core's JWTs.
 |---|---|---|---|
 | **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project`, `auth *`, `login` | none needed — the host *is* the core |
 | **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
-| **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
+| **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | none by default — the acting login's site is the host (`auth.ResolveDataAPI`); under `ENTIRE_API_BASE_URL`, `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
 
 `contexts.json` (`$ENTIRE_CONFIG_DIR/contexts.json`, shared with entiredb's
 CLIs) stores each login as `{Name, CoreURL, Handle, KeychainService}` plus a
@@ -92,13 +92,24 @@ Key files: `cmd/entire/cli/auth/control_plane.go` (resolver),
 
 ### Web/data API (done)
 
-`activity` / `search` / `trail` / `dispatch` dial `ENTIRE_API_BASE_URL`
-(default `entire.io`; staging `partial.to`). `entire.io` is a **resource
-server** — it validates incoming JWTs against trusted issuers
-(`ENTIRE_CORE_BASE_URL` + `ENTIRE_CORE_TRUSTED_ISSUERS`) and a fixed audience
-(`ENTIRE_CORE_JWT_AUDIENCE`). It now **advertises** all of this at
-`/.well-known/entire-api.json`, so the CLI can map the API host back to a
-core/context just like a git cluster:
+`activity` / `search` / `trail` / `dispatch` / `recap` / the `enable` report
+**follow the acting login** (`auth.ResolveDataAPI`), with the control plane's
+precedence: `ENTIRE_TOKEN` when set (the token verbatim, its `aud`'s site as
+the host), else the selected login (its refreshed JWT as the bearer, its login
+server's site as the host) — `us.auth.partial.to` → `https://partial.to`,
+`*.entire.io` → `https://entire.io`. A login server outside those, a loopback
+dev core included (the web app runs on its own port, and a core is not a
+cell), is an error naming `ENTIRE_API_BASE_URL`. Printed web links (`trail`
+URLs, `experts` session links) use the same origin (`auth.DataBaseURL`). There
+is no ambient production default: a staging login never has its request sent
+to, or its identity swapped for, entire.io.
+
+`ENTIRE_API_BASE_URL` is the exception and names the host explicitly.
+`entire.io` is a **resource server** — it validates incoming JWTs against
+trusted issuers (`ENTIRE_CORE_BASE_URL` + `ENTIRE_CORE_TRUSTED_ISSUERS`) and a
+fixed audience (`ENTIRE_CORE_JWT_AUDIENCE`). It **advertises** all of this at
+`/.well-known/entire-api.json`, so under an override the CLI can map the API
+host back to a core/context just like a git cluster:
 
 ```json
 {
@@ -127,17 +138,20 @@ Because the only field the CLI consumes is the trusted-issuer list — which *is
 a set of core URLs — the data-API discovery cache is literally the git cluster's
 cores cache (`ClusterCoresCache`), in a separate file (`api_discovery.json`).
 
-Resolution (`auth.ResolveDataAPIToken`):
+Resolution under an override (`auth.ResolveDataAPIToken`):
 
 1. Resolve the API host's trusted issuers: `api_discovery.json` when fresh, else
    a live `/.well-known/entire-api.json` fetch (TLS-authenticated — it's a trust
    root; redirects refused), cached with a 24h TTL and stale-fallback on a failed
    re-fetch. Same `resolveClusterCores` shape the git path uses.
-2. Require the **active context** with the same semantics as the git path: it is
-   used when its `CoreURL` is among the trusted issuers, and anything else is an
-   error. So `ENTIRE_API_BASE_URL=https://partial.to entire activity` needs
-   `entire auth switch staging` first — the target host never selects the identity
-   for you.
+2. Require the **selected context**: it is used when its `CoreURL` is among the
+   trusted issuers, and anything else is an error naming the saved login that
+   would work. So `ENTIRE_API_BASE_URL=https://partial.to entire activity` with
+   a prod login selected needs `entire auth switch staging` first — the target host
+   never selects the identity for you, and unlike a cluster it never
+   auto-selects the sole eligible login either. `ENTIRE_TOKEN` skips this
+   step: the env token is sent to the named host verbatim, as the cell path
+   does.
 3. Return that context's login JWT, silently re-minted from the stored refresh
    token when near expiry (`auth.RefreshedLoginToken`, keyed on `c.CoreURL`
    like the control-plane provider).
@@ -147,12 +161,8 @@ Resolution (`auth.ResolveDataAPIToken`):
    host whose context selection fails surfaces that error — the user must log
    in or pick one. (A transient outage with a warm cache uses the stale entry.)
 
-The selection rule differs from the control plane (where the active context is
-*always* used because there's no host to match): here a host **is** matched, so
-the active context is used only when the host trusts its core, and otherwise the
-sole saved login it does trust is (see [Account selection](#account-selection)).
-
-Key files: `cmd/entire/cli/auth/data_api.go` (`ResolveDataAPIToken`),
+Key files: `cmd/entire/cli/auth/data_api.go` (`ResolveDataAPI`,
+`DataBaseURL`, `ResolveDataAPIToken`),
 `cmd/entire/cli/auth/refresh.go` (`RefreshedLoginToken`),
 `internal/entireclient/clusterdiscovery/api_discovery.go` (`DiscoverAPI`,
 `ResolveContextForAPI`, sharing `selectLoginContext` *and* the cores cache with
@@ -164,20 +174,30 @@ the cluster path), `internal/entireclient/discovery/cluster_cores.go`
 
 ## Account selection
 
-One rule, everywhere a host is matched — git clusters, the data API,
-cluster-addressed control-plane commands, and entire-api cell routing under an
+One rule, everywhere a host is matched — git clusters, cluster-addressed
+control-plane commands, and the data API / entire-api cell routing under an
 explicit `ENTIRE_API_BASE_URL` (`auth/cell_data_api.go`'s
 `resolveCellClientSubject`): **the identity is the one the user selected;
-failing that, the only saved login the host accepts.** `/.well-known` decides
-which identities are *accepted*; it picks one only when exactly one fits.
+failing that, for cluster-addressed operations only, the sole saved login the
+host accepts.** `/.well-known` decides which identities are *accepted*. A git
+remote or a cluster-addressed control-plane command (`repo mirror add` /
+`remove`, `repo access list`) auto-selects because the cluster already pins the
+host, so the login can follow it; every other API follows the selected login
+instead, and a host that rejects it names the login that would work.
+
+Whenever several logins are saved, every CLI command that acts as one says
+which on stderr, once per process: `Using context 'x'.`
+(`auth.announceContext`, reached through `auth.ActiveContext`). With a single
+saved login nothing is printed. `git-remote-entire` is outside this and keeps
+its own auto-select notice below.
 
 Cell routing with **no** `ENTIRE_API_BASE_URL` matches no host: there is no
 configured data host to match against, and the production default is not a
 choice the user made, so the cell path acts as the control plane does —
 `ENTIRE_TOKEN`, else the selected context — and reads the cell `apiUrl` from
-that login's own core catalog (COR-1634). `activity`/`recap` therefore fall
-back from the cell to the data API only when `auth.DataAPIServesSelectedLogin`
-confirms both are in the same environment.
+that login's own core catalog (COR-1634). The data API applies the same
+precedence (`auth.ResolveDataAPI`), so `activity`/`recap` fall back from the
+cell to the data API without changing identity or environment.
 
 The user's selection resolves in one place, `contexts.File.Active`, with this
 precedence:
@@ -208,9 +228,12 @@ would end one session server-side while deleting another's local credentials.
 Two tiers sit underneath, in `clusterdiscovery.selectLoginContext`, and they
 apply only when the identity came from `current_context` (or there is none):
 
-- exactly one saved login is eligible **and the host is under `entire.io`,
-  `partial.to`, or `localhost`** (`clusterdiscovery.autoSelectSites` — prod,
-  staging, local dev; hardcoded, no setting or env override) → **use it**, and
+- exactly one saved login is eligible, **the resource is a cluster** — a git
+  remote or a cluster-addressed control-plane command such as `repo mirror`
+  (`loginTargets.autoSelect`, set only by `ResolveContextForCluster`), **and the
+  host is under `entire.io`, `partial.to`, or `localhost`**
+  (`clusterdiscovery.autoSelectSites` — prod, staging, local dev; hardcoded, no
+  setting or env override) → **use it**, and
   say so on stderr (`Using context 'foo'.`, via
   `clusterdiscovery.autoSelectNoticeW`). Someone with logins in two federations
   can clone from either without retargeting every shell on the machine, and

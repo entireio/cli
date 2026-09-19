@@ -83,6 +83,21 @@ func TestAuthTokenCmd(t *testing.T) {
 		require.Empty(t, out.String(), "stdout must stay clean for command substitution")
 		require.Contains(t, errOut.String(), "Not logged in")
 	})
+
+	t.Run("names the acting context among several", func(t *testing.T) {
+		seedTwoContexts(t)
+		var notice strings.Builder
+		auth.CaptureContextNoticeForTest(t, &notice)
+
+		cmd := newAuthTokenCmd()
+		cmd.SetArgs([]string{"--insecure-http-auth"})
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		require.NoError(t, cmd.ExecuteContext(t.Context()))
+		require.Len(t, strings.Split(strings.TrimSpace(out.String()), "\n"), 1, "stdout carries only the token")
+		require.Regexp(t, `^Using context '[^']+'\.\n$`, notice.String())
+	})
 }
 
 // TestAuthTokenCmd_Jurisdiction covers `entire auth token --jurisdiction`.

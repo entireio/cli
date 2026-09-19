@@ -181,6 +181,8 @@ func resolveAPIClient(ctx context.Context, to, jurisdiction string, insecure boo
 				return nil, fmt.Errorf("control-plane URL check: %w", err)
 			}
 		}
+		// Stderr, so the response body on stdout stays clean.
+		auth.AnnounceContext(target.totalContexts, target.activeContext)
 		return api.NewClientWithBaseURL(target.token, target.coreURL), nil
 	case apiTargetCell:
 		var target *auth.CellTarget

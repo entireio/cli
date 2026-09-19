@@ -92,7 +92,7 @@ func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost st
 	}
 
 	selected, err := selectLoginContext(f, "cluster "+clusterHost, clusterHost,
-		loginTargets{coreURLs: entry.CoreURLs, loginURL: entry.LoginURL}, debugf)
+		loginTargets{coreURLs: entry.CoreURLs, loginURL: entry.LoginURL, autoSelect: true}, debugf)
 	if err != nil {
 		return nil, err
 	}
@@ -268,11 +268,13 @@ func (e *noAuthContextError) Unwrap() error { return ErrNoAuthContext }
 //     through: the user named that identity, so quietly acting as another is
 //     the very failure the override exists to prevent.
 //  2. The stored current_context, when the resource accepts it. `entire auth
-//     use <name>` is the lever for every resource that context's core fronts.
+//     switch <name>` is the lever for every resource that context's core fronts.
 //  3. Otherwise the sole saved login the resource accepts, announced on
-//     autoSelectNoticeW — for a host under autoSelectSites only. Someone
-//     holding logins in two federations should be able to clone from either
-//     without first retargeting every shell on the machine.
+//     autoSelectNoticeW — for cluster-addressed operations (t.autoSelect:
+//     git remotes and the mirror commands) under autoSelectSites only. Someone holding logins in two federations should
+//     be able to clone from either without first retargeting every shell on
+//     the machine. The data API never auto-selects: it follows the selected
+//     login, so a host that rejects it names the login that would work.
 //  4. Otherwise, when several fit, ambiguousContextError — we refuse to guess
 //     which account acts.
 //
@@ -305,10 +307,13 @@ func selectLoginContext(f *contexts.File, subject, host string, t loginTargets, 
 	// override the resource rejects falls straight through to the message that
 	// blames the flag.
 	if !sel.Explicit() {
-		if len(eligible) == 1 && !autoSelectAllowed(host) {
+		if len(eligible) == 1 && !t.autoSelect {
+			debugf("%s -> sole eligible context %s not auto-selected: only cluster-addressed operations auto-select", subject, eligible[0].Name)
+		}
+		if len(eligible) == 1 && t.autoSelect && !autoSelectAllowed(host) {
 			debugf("%s -> sole eligible context %s not auto-selected: %s is not an Entire site", subject, eligible[0].Name, host)
 		}
-		if len(eligible) == 1 && autoSelectAllowed(host) {
+		if len(eligible) == 1 && t.autoSelect && autoSelectAllowed(host) {
 			debugf("%s -> sole eligible context %s", subject, eligible[0].Name)
 			// Tier 2 already returned if the stored default fit, so the login
 			// acting here is never the one the user set. Say which it is.
