@@ -77,93 +77,6 @@ func resolvePath() (string, error) {
 	return filepath.Join(configDir, FileName), nil
 }
 
-// blockRedaction is the one top-level block this package decodes. It is
-// decoded strictly (DisallowUnknownFields) and fails the load closed on an
-// unknown key, because it names an executable and an older binary must not
-// guess at it. A top-level key absent from blocks belongs to another owner —
-// the settings package's `preferences` and `repos`, or a newer binary's
-// addition — and is kept verbatim for round-tripping.
-//
-// Adding a block: a field on UserSettings, an entry in blocks, nothing else.
-const blockRedaction = "redaction"
-
-// block is the decode/encode pair for one known block. decode receives the raw
-// block (never null — decodeStrict maps null to an absent block); encode
-// reports the value to write and whether it is set.
-type block struct {
-	decode func(us *UserSettings, raw json.RawMessage) error
-	encode func(us *UserSettings) (value any, set bool)
-}
-
-var blocks = map[string]block{
-	blockRedaction: {
-		decode: func(us *UserSettings, raw json.RawMessage) error {
-			v, err := decodeStrict[RedactionConfig](raw)
-			if err == nil && v != nil {
-				err = v.validate()
-			}
-			us.Redaction = v
-			return err
-		},
-		encode: func(us *UserSettings) (any, bool) { return us.Redaction, us.Redaction != nil },
-	},
-}
-
-// RedactionConfig is the machine-local half of redaction configuration.
-type RedactionConfig struct {
-	OpenAIPrivacyFilter *OPFConfig `json:"openai_privacy_filter,omitempty"`
-}
-
-// OPFConfig holds the machine-local OpenAI Privacy Filter configuration.
-//
-// Command is the reason this block exists: it becomes argv[0] of an exec at
-// pre-push, and this file is the only root that is the developer's by
-// construction — no repository can deliver content here — so it is the only
-// place the command is honored without an ownership probe. TimeoutSeconds and
-// PromptDefault are ordinary configuration that layers between the project
-// file and the per-worktree local file; their zero values ("" and 0) mean "not
-// set here", the same as omitting the key — 0 is not a way to reset the
-// timeout.
-type OPFConfig struct {
-	Command        string `json:"command,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-	PromptDefault  string `json:"prompt_default,omitempty"`
-}
-
-func (c *RedactionConfig) validate() error {
-	opf := c.OpenAIPrivacyFilter
-	if opf == nil {
-		return nil
-	}
-	return ValidateOPFRunSettings(opf.TimeoutSeconds, opf.PromptDefault)
-}
-
-// OPF prompt_default values, duplicated from settings rather than imported:
-// settings imports this package, so the dependency cannot run the other way.
-// TestOPFPromptDefaultsMatchSettings pins the two lists together.
-const (
-	opfPromptAsk    = "ask"
-	opfPromptNever  = "never"
-	opfPromptAlways = "always"
-)
-
-// ValidateOPFRunSettings checks the OPF keys that may appear in any settings
-// tier (timeout_seconds, prompt_default). It lives here, in the leaf package,
-// so the user-file decoder and settings' own validation enforce one policy
-// with one set of messages.
-func ValidateOPFRunSettings(timeoutSeconds int, promptDefault string) error {
-	if timeoutSeconds < 0 {
-		return fmt.Errorf("openai_privacy_filter.timeout_seconds must be greater than or equal to 0 (got %d)", timeoutSeconds)
-	}
-	switch promptDefault {
-	case "", opfPromptAsk, opfPromptNever, opfPromptAlways:
-		return nil
-	default:
-		return fmt.Errorf("openai_privacy_filter.prompt_default must be one of %q, %q, %q (got %q)",
-			opfPromptAsk, opfPromptNever, opfPromptAlways, promptDefault)
-	}
-}
-
 // UserSettings is the decoded user-global settings file.
 //
 // MarshalJSON has a VALUE receiver so that both a UserSettings and a
@@ -172,8 +85,6 @@ func ValidateOPFRunSettings(timeoutSeconds int, promptDefault string) error {
 //
 //nolint:recvcheck // MarshalJSON is deliberately a value receiver; see above.
 type UserSettings struct {
-	Redaction *RedactionConfig `json:"redaction,omitempty"`
-
 	// extra holds every top-level block this package does not decode: the
 	// preference blocks the settings package owns (`preferences`, `repos` —
 	// their types live there; read them with Block) and any block a newer
@@ -210,30 +121,6 @@ func (us *UserSettings) SetBlock(key string, raw json.RawMessage) {
 	us.extra[key] = raw
 }
 
-// OPF returns the machine-local OPF configuration, or nil when the redaction
-// block or its openai_privacy_filter entry is absent.
-func (us *UserSettings) OPF() *OPFConfig {
-	if us == nil || us.Redaction == nil {
-		return nil
-	}
-	return us.Redaction.OpenAIPrivacyFilter
-}
-
-// decodeStrict decodes raw into a T, rejecting unknown keys. A JSON null is
-// "unset" and yields a nil pointer, exactly like an absent block.
-func decodeStrict[T any](raw json.RawMessage) (*T, error) {
-	if IsJSONNull(raw) {
-		return nil, nil //nolint:nilnil // nil is the documented "block unset" value, not an error
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	var v T
-	if err := decoder.Decode(&v); err != nil {
-		return nil, err //nolint:wrapcheck // the caller prefixes the block name
-	}
-	return &v, nil
-}
-
 // IsJSONNull reports whether raw is the JSON null literal. Exported because
 // the settings package applies the same "null means unset" rule to the blocks
 // it decodes itself.
@@ -241,10 +128,15 @@ func IsJSONNull(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
-// UnmarshalJSON decodes the file with per-block strictness: each block in
-// blocks is strict (an unknown key inside it is an error — an older binary
-// must fail closed rather than misread an executable name it does not
-// understand), while unknown top-level blocks are kept verbatim.
+// UnmarshalJSON keeps every top-level block verbatim.
+//
+// This package decodes none of them itself. The preference blocks are typed by
+// the settings package, which cannot be imported from here, and the blocks a
+// newer binary writes are not ours to interpret — so all of them round-trip
+// untouched and Block hands them to their owner. A block whose contents this
+// binary must fail closed on (an executable name, say) would need a strict
+// decoder registered here; there is none yet, and adding one before there is a
+// consumer would be surface with nothing behind it.
 func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -252,37 +144,19 @@ func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	}
 	*us = UserSettings{}
 	for key, value := range raw {
-		known, ok := blocks[key]
-		if !ok {
-			if us.extra == nil {
-				us.extra = make(map[string]json.RawMessage, len(raw))
-			}
-			us.extra[key] = value
-			continue
+		if us.extra == nil {
+			us.extra = make(map[string]json.RawMessage, len(raw))
 		}
-		if err := known.decode(us, value); err != nil {
-			return fmt.Errorf("%s: %w", key, err)
-		}
+		us.extra[key] = value
 	}
 	return nil
 }
 
-// MarshalJSON writes every known block that is set plus every preserved
-// unknown block. Value receiver on purpose — see the UserSettings comment.
+// MarshalJSON writes back every preserved block. Value receiver on purpose —
+// see the UserSettings comment.
 func (us UserSettings) MarshalJSON() ([]byte, error) {
-	out := make(map[string]json.RawMessage, len(us.extra)+len(blocks))
+	out := make(map[string]json.RawMessage, len(us.extra))
 	for key, raw := range us.extra {
-		out[key] = raw
-	}
-	for key, known := range blocks {
-		value, set := known.encode(&us)
-		if !set {
-			continue
-		}
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return nil, fmt.Errorf("encoding %s block: %w", key, err)
-		}
 		out[key] = raw
 	}
 	data, err := json.Marshal(out)

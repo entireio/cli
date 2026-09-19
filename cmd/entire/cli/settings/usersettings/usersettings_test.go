@@ -36,7 +36,7 @@ func TestUnknownBlocksSurviveReadModifyWrite(t *testing.T) {
 	}`)
 
 	require.NoError(t, Modify(t.Context(), func(us *UserSettings) error {
-		us.Redaction.OpenAIPrivacyFilter.TimeoutSeconds = 45
+		us.SetBlock("preferences", json.RawMessage(`{"telemetry": true}`))
 		return nil
 	}))
 
@@ -48,22 +48,12 @@ func TestUnknownBlocksSurviveReadModifyWrite(t *testing.T) {
 	assert.JSONEq(t, `{"enabled": true, "trusted_origins": ["github.com/acme/widgets"]}`, string(global))
 
 	prefs, ok := reloaded.Block("preferences")
-	require.True(t, ok, "a block owned by the settings package must survive too")
-	assert.JSONEq(t, `{"telemetry": false}`, string(prefs))
+	require.True(t, ok)
+	assert.JSONEq(t, `{"telemetry": true}`, string(prefs), "the edit itself landed")
 
-	assert.Equal(t, 45, reloaded.OPF().TimeoutSeconds, "the edit itself landed")
-	assert.Equal(t, "/opt/opf/bin/opf", reloaded.OPF().Command, "and did not disturb its sibling")
-}
-
-// A decoded block is strict: an unknown key inside it fails the load rather
-// than being ignored. It names an executable, so an older binary must not
-// guess at a key it does not understand.
-func TestDecodedBlockRejectsUnknownKey(t *testing.T) {
-	writeUserFile(t, `{"redaction": {"openai_privacy_filter": {"comand": "/opt/opf"}}}`)
-
-	_, err := Load(t.Context())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "redaction")
+	redaction, ok := reloaded.Block("redaction")
+	require.True(t, ok, "a sibling block must survive an edit to another one")
+	assert.Contains(t, string(redaction), "/opt/opf/bin/opf")
 }
 
 func TestMissingFileIsAnUnconfiguredTier(t *testing.T) {
@@ -71,7 +61,6 @@ func TestMissingFileIsAnUnconfiguredTier(t *testing.T) {
 
 	us, err := Load(t.Context())
 	require.NoError(t, err, "a missing file is not an error")
-	assert.Nil(t, us.OPF())
 	_, ok := us.Block("preferences")
 	assert.False(t, ok)
 }
@@ -83,42 +72,6 @@ func TestTrailingJSONIsRejected(t *testing.T) {
 	_, err := Load(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "multiple JSON values")
-}
-
-func TestOPFRunSettingsValidation(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		timeout int
-		prompt  string
-		wantErr string
-	}{
-		{name: "defaults", timeout: 0, prompt: ""},
-		{name: "always", timeout: 30, prompt: "always"},
-		{name: "negative timeout", timeout: -1, prompt: "", wantErr: "greater than or equal to 0"},
-		{name: "unknown prompt", timeout: 0, prompt: "sometimes", wantErr: "must be one of"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := ValidateOPFRunSettings(tc.timeout, tc.prompt)
-			if tc.wantErr == "" {
-				assert.NoError(t, err)
-				return
-			}
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.wantErr)
-		})
-	}
-}
-
-// A JSON null block is "unset", the same as omitting the key — otherwise a
-// user clearing a block by writing null would get a decode error.
-func TestNullBlockIsUnset(t *testing.T) {
-	writeUserFile(t, `{"redaction": null}`)
-
-	us, err := Load(t.Context())
-	require.NoError(t, err)
-	assert.Nil(t, us.OPF())
 }
 
 // A `repos` path key and a worktree root can spell the same directory
@@ -153,7 +106,7 @@ func TestWriteFollowsASymlinkedSettingsFile(t *testing.T) {
 	require.NoError(t, os.Symlink(realPath, filepath.Join(configDir, FileName)))
 
 	require.NoError(t, Modify(t.Context(), func(us *UserSettings) error {
-		us.Redaction = &RedactionConfig{OpenAIPrivacyFilter: &OPFConfig{Command: "/opt/opf"}}
+		us.SetBlock("preferences", json.RawMessage(`{"telemetry": true}`))
 		return nil
 	}))
 
@@ -165,7 +118,7 @@ func TestWriteFollowsASymlinkedSettingsFile(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &got))
-	assert.Contains(t, string(got["redaction"]), "/opt/opf", "the write landed on the link's target")
+	assert.Contains(t, string(got["preferences"]), "telemetry", "the write landed on the link's target")
 }
 
 // OriginKeys runs on the hook path: IsSetUpAndEnabled reaches it, and git
