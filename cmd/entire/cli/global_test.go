@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/go-git/v6/x/plugin/config"
 	"github.com/zalando/go-keyring"
@@ -38,6 +39,13 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(isolationDir, "auth-tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
+	// A developer running `go test` inside `ENTIRE_CONTEXT=… ` would otherwise
+	// have every File.Active() in the package resolve their shell's selection
+	// (and fail with UnknownContextError against the empty isolated config).
+	// contextFlagValue.Set also writes this variable process-wide; the tests
+	// that call it restore it with t.Setenv, and this keeps a future one that
+	// forgets from poisoning the rest of the run.
+	os.Unsetenv(contexts.EnvContextVar)
 
 	// ENTIRE_TOKEN is isolated by ABSENCE, not by a redirected path, so it is
 	// not in the block above. Left set, it outranks every stored context in
