@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 )
 
 // AgentPromptRejection reports one agent instruction field Load dropped as
@@ -95,6 +96,21 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 		}
 	}
 
+	// userOwned reports whether the user settings file supplied this field.
+	// Checked before the local file because the user tier merges after it.
+	userOwned := func(field string) bool {
+		switch {
+		case field == "investigate.always_prompt":
+			return s.userPromptOwnership.investigate
+		case strings.HasPrefix(field, "review_profiles."):
+			rest := strings.TrimPrefix(field, "review_profiles.")
+			name, _, ok := strings.Cut(rest, ".")
+			return ok && s.userPromptOwnership.ownsProfile(name)
+		default:
+			return false
+		}
+	}
+
 	// The deep (index AND HEAD) trackedness check is asked at most once, and
 	// only when some gated field's provenance is the local file.
 	verified := false
@@ -116,6 +132,12 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 			return ""
 		}
 		switch {
+		case userOwned(field):
+			// The user settings file applies ABOVE the local file, so when it
+			// set a field the effective value is its own regardless of what
+			// any lower layer said. It needs no trackedness probe: nothing a
+			// repository can do puts content under ~/.config.
+			return value
 		case setLocally:
 			if localVerified() {
 				return value

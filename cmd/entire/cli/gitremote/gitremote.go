@@ -330,3 +330,69 @@ func splitOwnerRepo(path string) (string, string, error) {
 	}
 	return parts[0], parts[1], nil
 }
+
+// gitNoSuchRemoteExitCode is what `git remote get-url` exits with when the
+// remote is not configured. Every other non-zero exit means git could not
+// answer the question at all — not a repository, no git on $PATH, an
+// unreadable config — which is a different fact and must not read as absence.
+const gitNoSuchRemoteExitCode = 2
+
+// GetRemoteURLsInDirIfSet returns every FETCH URL configured for remoteName in
+// dir, reporting found=false when the remote simply is not configured.
+//
+// The distinction from GetRemoteURLInDir is the point: that function collapses
+// "no such remote" and "git could not run" into one error, which is right for
+// a caller that needs a URL and cannot proceed without one. A caller deciding
+// whether a per-repository configuration entry applies needs them apart — an
+// unreadable config must not read as "this repository has no origin" and
+// silently drop the entry.
+// env, when non-nil, replaces the child's environment. Pass
+// gitrepo.EnvWithoutRepoOverrides() when dir names the target and the caller
+// can run inside a git hook: git exports GIT_DIR and GIT_WORK_TREE to its
+// hooks and they OUTRANK cmd.Dir, so an unscrubbed child reads the hook's
+// repository instead of the one named here — which for a per-repository
+// settings lookup means applying another repository's configuration.
+func GetRemoteURLsInDirIfSet(ctx context.Context, dir string, env []string, remoteName string) (urls []string, found bool, err error) {
+	return remoteURLsIfSet(ctx, dir, env, remoteName, false)
+}
+
+// GetRemotePushURLsInDirIfSet is GetRemoteURLsInDirIfSet for push URLs, which
+// are remote.<name>.pushurl when any is set and remote.<name>.url otherwise.
+func GetRemotePushURLsInDirIfSet(ctx context.Context, dir string, env []string, remoteName string) (urls []string, found bool, err error) {
+	return remoteURLsIfSet(ctx, dir, env, remoteName, true)
+}
+
+func remoteURLsIfSet(ctx context.Context, dir string, env []string, remoteName string, push bool) (urls []string, found bool, err error) {
+	args := []string{"remote", "get-url", "--all"}
+	if push {
+		args = append(args, "--push")
+	}
+	args = append(args, remoteName)
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == gitNoSuchRemoteExitCode {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("reading remote %q in %q: %w", remoteName, dir, err)
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			urls = append(urls, trimmed)
+		}
+	}
+	// git exited 0, so the remote exists. No URL is a malformed config rather
+	// than an absent remote, and reporting it as absent would hide it.
+	if len(urls) == 0 {
+		return nil, true, fmt.Errorf("remote %q has no URL", remoteName)
+	}
+	return urls, true, nil
+}
