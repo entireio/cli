@@ -201,9 +201,10 @@ wrong account. It is reported before any trust check, because "that context
 doesn't exist" and "that context isn't trusted here" are different mistakes.
 
 Every consumer resolves through `Active`, so the selection is coherent: `auth
-status` reports it, `auth contexts` marks it, and `logout` revokes and deletes
-*that* login. Resolving the removal target separately from the revocation target
-would end one session server-side while deleting another's local credentials.
+status` reports it and `auth contexts` marks it. `logout` is the one exception:
+it sweeps every stored login (`auth.StoredContexts`), revoking each on its own
+login server with its own bearer, so the override neither narrows it nor fails
+it by naming a context that is gone.
 
 Two tiers sit underneath, in `clusterdiscovery.selectLoginContext`, and they
 apply only when the identity came from `current_context` (or there is none):
@@ -230,8 +231,8 @@ An **explicit** `--context`/`$ENTIRE_CONTEXT` never falls through to either: the
 user asked for that identity by name, so acting as another behind their back is
 the failure the override exists to prevent.
 
-Multiple saved logins are fully supported — `auth contexts`, `auth switch`, and
-`logout --all-contexts` are unchanged.
+Multiple saved logins are fully supported — `auth contexts` and `auth switch`
+switch between them, and `logout` removes them all.
 
 ### The advertised issuers must be the host's own
 
