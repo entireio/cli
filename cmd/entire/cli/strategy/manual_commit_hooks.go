@@ -551,8 +551,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 // carried into the message when missing and no session is matched. Needed
 // because `commit -m` reports source "message", not "squash", and ordinary
 // matching then refused or minted an empty checkpoint. Reports whether it
-// took over; a squash of commits that carry no trailers has nothing to
-// inherit and falls through to ordinary matching, as before.
+// took over; a squash of commits that carry no trailers, or a message it could
+// not read or write, falls through to ordinary matching, as before.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	gitDir, err := GetGitDir(ctx)
@@ -575,7 +575,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
-		return true
+		return false // nothing inherited; let ordinary matching report its own failure
 	}
 	message := string(content)
 	present := make(map[string]bool)
@@ -597,7 +597,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		return true
 	}
 	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
-		return true // hook must be silent on failure
+		return false // nothing landed; hooks stay silent, ordinary matching may still try
 	}
 	logging.Info(logCtx, "prepare-commit-msg: inherited checkpoint trailers from the squashed commits",
 		slog.String("strategy", "manual-commit"),

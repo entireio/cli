@@ -103,3 +103,12 @@ func TestInheritSquashedCheckpointTrailers_NoTrailersFallsThrough(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, "Plain squash\n", string(got))
 }
+
+// A squash whose message file cannot be read inherits nothing and must not
+// claim to have taken over; ordinary matching gets to report its own failure.
+func TestInheritSquashedCheckpointTrailers_UnreadableMessageFallsThrough(t *testing.T) {
+	squashFixture(t)
+	s := NewManualCommitStrategy()
+	require.False(t, s.inheritSquashedCheckpointTrailers(context.Background(), t.TempDir(), "message"),
+		"a directory is not a readable message file")
+}
