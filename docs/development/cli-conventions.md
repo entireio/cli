@@ -186,9 +186,15 @@ the commands are always runnable in every build.
   offered the forge-qualified readings that would actually parse
   (`bareRefSuggestions`), and anything left lists the accepted shapes.
   A native ref resolves project → repo ULID → `GetRepo`, whose response is the
-  only one carrying both `clusterHost` and `path`, and clones
-  `entire://<clusterHost><path>` from the repo's home cluster (`--cluster` is
-  rejected on native refs).
+  only one carrying both `clusterHost` and `path`, then picks among the repo's
+  readable placements — the home cluster plus ready native mirrors
+  (`nativePlacements`, joining mirror slugs against the cluster catalog) —
+  through the same `selectPlacement`/`--cluster` flow as `/gh/` refs, and
+  clones `entire://<chosen host><path>` (a native mirror serves the same
+  public path as its data primary). The mirror listing and the cluster catalog
+  are best-effort without `--cluster`: if either fails (a core that 404s or
+  503s the listing, a catalog hiccup), resolution degrades to the home cluster
+  instead of failing a clone that has always worked.
   A trailing `.git` is never part of a repo name, on **either** backend
   (`gitDirSuffix` documents the mechanics): every ref parser drops it and `repo
   create` refuses a name ending in it. This is a deliberate client-side
