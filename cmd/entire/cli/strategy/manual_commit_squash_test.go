@@ -13,8 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// squashFixture: a feature branch commit carrying a trailer, squash-merged into
-// the main checkout so SQUASH_MSG exists and the change is staged.
+// squashFixture: a trailer-carrying branch commit, squash-merged into main.
 func squashFixture(t *testing.T) (string, string) {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -34,12 +33,11 @@ func squashFixture(t *testing.T) (string, string) {
 	return dir, branchCheckpoint
 }
 
-// `git merge --squash feature && git commit -m "…"` reports source "message",
-// so the hook used to run ordinary matching: refused, or a fresh checkpoint for
-// whatever session it found. The squashed commits' trailers must be inherited.
+// `merge --squash` + `commit -m` reports source "message"; the squashed commits'
+// trailers must be inherited and no session matched.
 func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
-	// A live session in this checkout must not be linked to the squash.
+	// Must not be linked to the squash.
 	saveIdentitySession(t, "sess-in-parent", func(st *SessionState) {
 		st.WorktreePath = dir
 		st.TranscriptPath = filepath.Join(dir, "transcript.jsonl")
@@ -58,8 +56,7 @@ func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testi
 	require.Equal(t, 1, strings.Count(string(got), "Entire-Checkpoint:"), "no fresh checkpoint may be minted for a squash: %q", got)
 }
 
-// Editor flow: git seeds the message from SQUASH_MSG (trailer included) and
-// reports "squash". The trailer stays and is not duplicated.
+// Editor flow: the seeded message already carries the trailer; keep it once.
 func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
 	squashMsg, err := os.ReadFile(filepath.Join(dir, ".git", "SQUASH_MSG"))
@@ -78,8 +75,7 @@ func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testi
 	require.Contains(t, string(got), branchCheckpoint)
 }
 
-// A squash of commits that carry no trailers has nothing to inherit: ordinary
-// matching must run, exactly as before the squash handling existed.
+// No trailers to inherit: ordinary matching must run.
 func TestInheritSquashedCheckpointTrailers_NoTrailersFallsThrough(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	dir := resolvedTempDir(t)
@@ -104,8 +100,7 @@ func TestInheritSquashedCheckpointTrailers_NoTrailersFallsThrough(t *testing.T) 
 	require.Equal(t, "Plain squash\n", string(got))
 }
 
-// A squash whose message file cannot be read inherits nothing and must not
-// claim to have taken over; ordinary matching gets to report its own failure.
+// Unreadable message: nothing inherited, must not claim to have taken over.
 func TestInheritSquashedCheckpointTrailers_UnreadableMessageFallsThrough(t *testing.T) {
 	squashFixture(t)
 	s := NewManualCommitStrategy()

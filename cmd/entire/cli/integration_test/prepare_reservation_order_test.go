@@ -9,10 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The checkpoint reservation must follow the message write, not precede it: a
-// trailer that never reached the message must leave no reservation behind, or
-// the next unrelated commit reuses it and post-commit condenses against a
-// checkpoint the commit does not name.
+// A trailer that never reached the message must leave no reservation behind, or
+// the next unrelated commit reuses it.
 func TestPrepareCommitMsg_UnwrittenTrailerLeavesNoReservation(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
@@ -29,8 +27,7 @@ func TestPrepareCommitMsg_UnwrittenTrailerLeavesNoReservation(t *testing.T) {
 
 	msgFile := env.commitMsgFile()
 	require.NoError(t, os.WriteFile(msgFile, []byte("Add a.txt\n"), 0o444))
-	// Human flow (TTY simulated): content detection passes, the prompt defaults
-	// to yes, and the write of the stamped message fails on the read-only file.
+	// Human flow: the stamped message cannot be written to the read-only file.
 	if out, err := env.prepareCommitMsgCmd(true, msgFile, "message").CombinedOutput(); err != nil {
 		t.Fatalf("prepare-commit-msg: %v\n%s", err, out)
 	}

@@ -12,8 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// rehomeFixture: a linked worktree as the hook's CWD and a session homed in the
-// main checkout — the launch-in-parent, work-in-worktree shape.
+// rehomeFixture: hook CWD in a linked worktree, session homed in the main checkout.
 type rehomeFixture struct {
 	mainDir     string
 	worktreeDir string

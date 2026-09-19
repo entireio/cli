@@ -171,14 +171,12 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	return states, nil
 }
 
-// isOrphanedSessionState reports whether a state whose shadow branch is missing
-// may be deleted. ACTIVE sessions may not have created it yet, a
-// LastCheckpointID is kept for reuse, and task records hold content off the
-// branch. An IDLE state with none of those is a live session between turns (a
-// read-only turn, or the turn after a linked commit), and the store is listed
-// by every worktree's hooks, so deleting it re-initialised live sessions: it is
-// an orphan only once its owner is known to have exited. ENDED and legacy
-// states keep the old rule; owner-less ones age out through the stale threshold.
+// isOrphanedSessionState reports whether a state with no shadow branch may be
+// deleted. ACTIVE sessions may not have created it yet; a LastCheckpointID and
+// task records are kept. An IDLE state with none of those is a live session
+// between turns, and every worktree's hooks list this store, so it counts as an
+// orphan only once its owner is known dead. ENDED and legacy states keep the
+// old rule; owner-less ones age out through the stale threshold.
 func isOrphanedSessionState(state *SessionState) bool {
 	if state.Phase.IsActive() || !state.LastCheckpointID.IsEmpty() || state.HasTaskContent() {
 		return false

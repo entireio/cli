@@ -241,12 +241,9 @@ func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
 
 // TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions tests that
 // listAllSessionStates cleans up stale sessions whose shadow branch no longer exists.
-// Stale sessions include: ENDED sessions that were never condensed, and IDLE
-// never-condensed sessions whose owner process is known to have exited
-// (pre-state-machine sessions normalize to IDLE on load and follow that rule). Active sessions, sessions with LastCheckpointID, record-bearing
-// sessions, and IDLE sessions whose owner is alive or unknown are kept: an IDLE session
-// with no shadow branch is the normal shape of a live session between turns, and the
-// store is listed by every worktree's hooks (see isOrphanedSessionState).
+// Deleted: ENDED never-condensed sessions, and IDLE never-condensed sessions
+// whose owner is known dead. Kept: ACTIVE, condensed, record-bearing, and IDLE
+// sessions with a live or unknown owner (see isOrphanedSessionState).
 func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -258,9 +255,7 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 
 	// None of these sessions have shadow branches → cleanup logic applies.
 
-	// Session 1: Pre-state-machine session (empty phase, no checkpoint ID).
-	// It normalizes to IDLE on load and, with no recorded owner, is KEPT until
-	// the stale threshold purges it — the same rule as session 2a.
+	// Session 1: pre-state-machine (empty phase); normalizes to IDLE, no owner: KEPT.
 	legacyEmpty := &SessionState{
 		SessionID:  "legacy-empty-phase",
 		BaseCommit: "aaa1111",
@@ -268,9 +263,7 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		StepCount:  0,
 	}
 
-	// Session 2a: IDLE session with no checkpoint ID and no recorded owner.
-	// Should be KEPT: nothing proves its agent is gone; it ages out through
-	// the stale threshold instead.
+	// Session 2a: IDLE, no checkpoint ID, no recorded owner: KEPT until stale.
 	idleUnknownOwner := &SessionState{
 		SessionID:  "idle-unknown-owner",
 		BaseCommit: "bbb2222",
@@ -279,9 +272,7 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		Phase:      "idle",
 	}
 
-	// Session 2b: IDLE session with no checkpoint ID whose owner has exited
-	// (this PID with a start fingerprint that is not this process).
-	// Should be cleaned up.
+	// Session 2b: IDLE, no checkpoint ID, owner exited (wrong start fingerprint): cleaned up.
 	idleDeadOwner := &SessionState{
 		SessionID:  "idle-dead-owner",
 		BaseCommit: "bbb2223",
@@ -291,9 +282,7 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		Owner:      &proclive.Identity{PID: os.Getpid(), Start: "not-this-process"},
 	}
 
-	// Session 2c: IDLE session with no checkpoint ID whose owner is alive —
-	// the read-only turn, or the turn right after a linked commit.
-	// Should be KEPT.
+	// Session 2c: IDLE, no checkpoint ID, owner alive (a turn between commits): KEPT.
 	liveOwner, liveOwnerOK := proclive.ResolveOwner()
 	idleLiveOwner := &SessionState{
 		SessionID:  "idle-live-owner",

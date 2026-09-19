@@ -10,10 +10,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
-// A session whose last turn changed no files has no shadow branch and no last
-// checkpoint. Every store listing used to delete that shape as an orphan, so a
-// commit hook in another worktree wiped a live session between turns. An idle
-// session whose agent is alive must survive.
+// An idle session with no shadow branch and no checkpoint is a live session
+// between turns; another worktree's commit hook must not delete it.
 func TestSessionStore_IdleLiveSessionSurvivesAnotherWorktreesCommitHook(t *testing.T) {
 	t.Parallel()
 	parent := NewRepoWithCommit(t)
@@ -32,7 +30,7 @@ func TestSessionStore_IdleLiveSessionSurvivesAnotherWorktreesCommitHook(t *testi
 	require.True(t, state.LastCheckpointID.IsEmpty(), "precondition: nothing condensed yet")
 	require.NotNil(t, state.Owner, "precondition: the hook recorded a live owner")
 
-	// A human commits in the parent; its prepare-commit-msg lists the shared store.
+	// Another worktree's hook lists the shared store.
 	parent.WriteFile("notes.txt", "unrelated\n")
 	parent.GitCommitWithShadowHooks("Unrelated commit in the parent", "notes.txt")
 

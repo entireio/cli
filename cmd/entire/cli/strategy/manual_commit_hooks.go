@@ -331,8 +331,7 @@ func isGitSequenceOperation(ctx context.Context) bool {
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
 //   - "merge": skip trailer entirely (the merged commits keep their own)
-//   - "squash": skip; git seeded the message from SQUASH_MSG, trailers included.
-//     A squash committed with -m reports "message" — see inheritSquashedCheckpointTrailers.
+//   - "squash": skip; the seeded message already carries the squashed trailers
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -540,19 +539,17 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	writeCommitMessageSpan.End()
 
-	// Only a trailer that reached the message may be reserved (see the fast path).
+	// Reserve only once the trailer reached the message.
 	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
 	return nil
 }
 
 // inheritSquashedCheckpointTrailers handles a commit made while `git merge
-// --squash` is in progress (SQUASH_MSG in the per-worktree git dir): its
-// content is the squashed commits', so their Entire-Checkpoint trailers are
-// carried into the message when missing and no session is matched. Needed
-// because `commit -m` reports source "message", not "squash", and ordinary
-// matching then refused or minted an empty checkpoint. Reports whether it
-// took over; a squash of commits that carry no trailers, or a message it could
-// not read or write, falls through to ordinary matching, as before.
+// --squash` is in progress (SQUASH_MSG present): the squashed commits'
+// Entire-Checkpoint trailers are carried into the message and no session is
+// matched. `commit -m` reports source "message", not "squash", so this runs
+// before the source switch. Reports whether it took over; no trailers or an
+// unusable message fall through to ordinary matching.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	gitDir, err := GetGitDir(ctx)
@@ -2486,10 +2483,8 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 }
 
 // reserveCheckpointForStampedSessions records the stamped checkpoint ID as each
-// session's pending condensation so post-commit can resolve the session from
-// the trailer alone (commitLinkingSet.sessionsIncludingReservedFor). A
-// different existing reservation is an interrupted condensation and is kept.
-// Best-effort: bookkeeping must not fail the commit.
+// session's pending condensation so post-commit can resolve the session from the
+// trailer alone. An existing different reservation is kept. Best-effort.
 func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
 	for _, stamped := range states {
 		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {
