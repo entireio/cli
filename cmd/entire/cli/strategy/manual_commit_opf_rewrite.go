@@ -369,6 +369,17 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	// so a too-large push fails fast with a clear remediation message.
 	var globalRedacted [][]byte
 	if len(globalBlobs) > 0 {
+		// Unlike the git-refs backend (manual_commit_opf_refs.go), this cap
+		// stays cumulative across the WHOLE unpushed v1 chain rather than being
+		// scoped per commit: each rebuilt commit is the next one's parent (see
+		// the Pass 3 loop below), so commits cannot be redacted independently
+		// without reintroducing the "chunking" hazard OPF-BUG.md rejects — a
+		// partially-rewritten chain whose ancestor is a still-un-trailered
+		// commit. Separate checkpoint refs are independent chains, which is why
+		// only that backend can scope per ref. If this cap still trips on real
+		// content after a future batchDefaultLimit resize, this backend's only
+		// remaining levers are ENTIRE_OPF_BATCH_LIMIT or converging it onto the
+		// git-refs queue model — not further chunking.
 		leafBytes := redact.SumProseLeafBytes(globalBlobs)
 		if limit := resolveBatchLimit(); leafBytes > limit {
 			return plumbing.ZeroHash, &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}

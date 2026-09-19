@@ -246,6 +246,16 @@ Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre
 
 #### When OPF actually runs
 
+> **Stale, needs a rewrite:** this section still describes one inference call
+> batching every commit/ref in the push. On `git-refs`, that changed: the cap
+> and the OPF call are now scoped per checkpoint ref, not per flush, and a
+> `git-refs` flush that can't finish inline hands the remainder to a detached
+> `entire __opf_flush` worker instead of blocking the push (see "Seeing
+> outstanding OPF work" below, and the caps subsection above, for the accurate
+> current shape). `git-branch`'s flow below is still accurate: its cap stays
+> cumulative across the whole unpushed chain. Rewrite this section for
+> `git-refs` rather than trusting the flow as written.
+
 OPF execution lives in the pre-push hook. The flow:
 
 1. **Post-commit** writes the checkpoint with **8-layer-only** redaction to local git objects — per-checkpoint refs on `git-refs`, the `entire/checkpoints/v1` branch on `git-branch`. Fast, predictable, no OPF cost on the hot path.
@@ -300,6 +310,8 @@ set -x ENTIRE_OPF_BATCH_LIMIT unlimited; git push
 **Raw-byte cap: `200 MiB` of blob content buffered in memory**, on both backends. It has no env var of its own — it is derived as 100× the batch cap, so raising `ENTIRE_OPF_BATCH_LIMIT` raises it too. It is checked incrementally as blobs load, so on a pathological push (one commit carrying a huge pasted transcript) this is the cap that fires first.
 
 The three caps protect different failure modes: the commit cap stops "100 throwaway commits", the batch cap stops "one commit with 50 MB of prose", and the raw-byte cap stops the loader exhausting memory before either of the others can be evaluated. On `git-refs` the two byte caps are cumulative across the whole flush (all queued refs together) while the commit cap is per ref.
+
+**Seeing outstanding OPF work.** On `git-refs`, `entire status` reports checkpoints whose OPF rewrite has not happened yet (`N checkpoints pending OpenAI Privacy Filter redaction`) separately from checkpoints whose rewrite has failed three times running and so will not clear on its own (`N checkpoints cannot be privacy-filtered`). `entire status --json` carries the same two facts as `checkpoint_opf_pending` and `checkpoint_opf_stuck_refs`. Both are silent when OPF is disabled. A stuck checkpoint is usually one of the caps above, but the failure tally records only how often a ref failed — `.entire/logs` names the actual reason.
 
 **Concurrent push** from another worktree: both backends compare-and-swap the local ref. If another process moved it while OPF was running, `git-branch` exits with `entire/checkpoints/v1 moved during OPF rewrite …; re-run 'git push' (no fetch needed; the move was local)` and aborts. On `git-refs` the affected ref simply stays queued and the next push picks it up. Note that the `git-refs` rewrite rebuilds every commit before touching any ref, but the ref updates themselves are not atomic *across* refs: a conflict partway through leaves the earlier refs already rewritten. They stay queued and push OPF-applied next time, so this is safe — just not "nothing moved".
 

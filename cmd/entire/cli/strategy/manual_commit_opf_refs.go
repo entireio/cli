@@ -1,6 +1,10 @@
 // Pre-push OPF rewrite for the git-refs checkpoint backend, the sibling of
-// manual_commit_opf_rewrite.go's entire/checkpoints/v1 rewrite. Both run the
-// OPF-augmented redaction once per push; only discovery and ref update differ.
+// manual_commit_opf_rewrite.go's entire/checkpoints/v1 rewrite. Beyond
+// discovery and ref update, the backends differ in scope: this one redacts one
+// queued ref per OPF call, because separate refs are independent chains, while
+// the v1 rewrite must take its whole unpushed chain as a unit (each rebuilt
+// commit is the next one's parent). That difference is documented at the v1
+// rewrite's own cap check.
 package strategy
 
 import (
@@ -29,9 +33,28 @@ import (
 // already carrying the trailer (unappliedAncestry) — bounded by the same
 // resolveBootstrapLimit the v1 path uses.
 //
+// Each ref is scanned, rebuilt and CAS-updated independently, so a ref whose
+// prose-leaf bytes exceed the inference cap is skipped — left untouched and
+// still queued — rather than failing the refs beside it. The first such failure
+// is still returned, so the caller's flush is withheld exactly as before: the
+// scoping isolates the rewrite, not the delivery.
+//
+// That isolation is not unconditional. Two conditions stop the whole flush and
+// leave every ref after them untouched: an empty effective category set, and a
+// tripped OPF circuit breaker — both mean OPF cannot scan anything, so no
+// remaining ref may be stamped applied. See the breaker check in Pass 2.
+//
 // Caller checks redact.OPFEnabled() and skips this when OPF is off. Returns
 // the same error taxonomy as RewriteUnpushedV1WithOPF; the caller fails closed
 // by withholding the flush (see prePushCheckpointRefs).
+//
+// Follow-up (not done here): Pass 2's body sits at this file's comment-density
+// ceiling — golangci's maintidx nearly failed on the breaker-check comment
+// alone. Extracting that check into a small named helper (e.g.
+// stopFlushOnBreakerTrip) would give the "second whole-flush-stop condition"
+// explanation a home that doesn't compete with the loop's own narrative, and
+// buy real headroom for the next legitimate addition. Don't resolve a future
+// maintidx failure here by trimming a safety comment instead.
 func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repository) error {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
@@ -57,15 +80,17 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	}
 
 	// Pass 1: collect every redactable blob from every un-applied commit on every
-	// queued ref, bounding raw bytes in memory exactly as the v1 collect pass
-	// does — cumulatively across the whole flush, not per ref.
+	// queued ref, keeping each ref's blobs separately addressable so Pass 2 can
+	// scan one ref at a time. Raw bytes in memory are still bounded cumulatively
+	// across the whole flush, exactly as the v1 collect pass does: that ceiling
+	// is about this process's RAM, which every ref shares, not about the
+	// per-ref inference cost the leaf-byte cap governs.
 	type pendingCommit struct {
 		commit *object.Commit
-		// blobs and paths are parallel; startIdx is this commit's offset into
-		// the global redacted slice.
-		blobs    []redact.NamedBlob
-		paths    []string
-		startIdx int
+		// blobs and paths are parallel; blobs are indexed against their own
+		// ref's redaction results, not a flush-wide slice.
+		blobs []redact.NamedBlob
+		paths []string
 	}
 	type pendingRef struct {
 		ref plumbing.ReferenceName
@@ -74,7 +99,6 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		base    plumbing.Hash
 		commits []pendingCommit // ancestor-first
 	}
-	var globalBlobs []redact.NamedBlob
 	pendings := make([]pendingRef, 0, len(queued))
 	rawCap := scaleBatchLimit(resolveBatchLimit(), rawByteCapMultiplier)
 	bootstrapLimit := resolveBootstrapLimit()
@@ -106,7 +130,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			if treeErr != nil {
 				return fmt.Errorf("load tree for %s: %w", c.Hash.String()[:7], treeErr)
 			}
-			pc := pendingCommit{commit: c, startIdx: len(globalBlobs)}
+			pc := pendingCommit{commit: c}
 			if err := collectTreeBlobs(repo, tree, "", &pc.blobs, &pc.paths); err != nil {
 				return fmt.Errorf("collect blobs %s: %w", c.Hash.String()[:7], err)
 			}
@@ -116,7 +140,6 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			if rawBytesSoFar > rawCap {
 				return &OPFRawBytesTooLargeError{RawBytes: rawBytesSoFar, Limit: rawCap}
 			}
-			globalBlobs = append(globalBlobs, pc.blobs...)
 			pr.commits = append(pr.commits, pc)
 		}
 		pendings = append(pendings, pr)
@@ -125,52 +148,98 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		return nil
 	}
 
-	// Pass 2: enforce the leaf-byte cap, then make exactly ONE OPF shell-out
-	// for the whole flush.
-	var globalRedacted [][]byte
-	if len(globalBlobs) > 0 {
-		leafBytes := redact.SumProseLeafBytes(globalBlobs)
-		if limit := resolveBatchLimit(); leafBytes > limit {
-			return &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}
-		}
-		globalRedacted, err = redact.BatchBytesWithPrivacyFilter(ctx, globalBlobs)
-		if err != nil {
-			if errors.Is(err, redact.ErrOPFNoEnabledCategories) {
-				return &OPFNoCategoriesError{}
+	// Pass 2: take each ref on its own — enforce the leaf-byte cap over that
+	// ref's blobs, make one OPF shell-out for them, replay its chain, and CAS
+	// its ref — before moving to the next. A ref that trips the cap is skipped,
+	// left exactly as it was and still queued for the next push, without
+	// blocking any other ref in this flush. That scoping is the whole point:
+	// the cap bounds one inference call's cost, and one oversized ref is no
+	// reason to leave every ref beside it unredacted.
+	//
+	// The fail-closed contract holds at ref granularity: a ref is either fully
+	// redacted, tagged and moved, or fully untouched. No ref's chain is ever
+	// partially rewritten — within a ref, each rebuilt commit is the next
+	// one's parent, so a chain that fails part-way through is abandoned whole.
+	var firstErr error
+	for _, pr := range pendings {
+		// Second whole-flush stop, alongside ErrOPFNoEnabledCategories below:
+		// a tripped process-wide breaker (this loop's own prior ref, or anything
+		// earlier in the process) makes BatchBytesWithPrivacyFilter return
+		// regex-only content with a NIL error, so break — not continue. Skipping
+		// only this ref would rebuild every later one from content OPF never saw
+		// and stamp Entire-OPF-Applied on it. Per-ref isolation covers per-ref
+		// conditions (the size cap); a broken runtime is broken for the whole
+		// process. Refs already rewritten above were scanned before the trip.
+		if redact.OPFBreakerTripped() {
+			if firstErr == nil {
+				firstErr = &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
 			}
-			return &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
+			break
 		}
-	}
 
-	// Pass 3: rebuild every commit before touching any ref, so a failure
-	// part-way through leaves every ref where it was. Each ref's chain is
-	// replayed ancestor→tip, so the rewritten parent carries into the next
-	// commit and the deepest one keeps the boundary parent.
-	rebuilt := make([]plumbing.Hash, len(pendings))
-	for i, pr := range pendings {
+		var refBlobs []redact.NamedBlob
+		for _, pc := range pr.commits {
+			refBlobs = append(refBlobs, pc.blobs...)
+		}
+
+		var refRedacted [][]byte
+		if len(refBlobs) > 0 {
+			leafBytes := redact.SumProseLeafBytes(refBlobs)
+			if limit := resolveBatchLimit(); leafBytes > limit {
+				if firstErr == nil {
+					firstErr = &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}
+				}
+				continue // leave this ref queued; the rest can still run
+			}
+			var opfErr error
+			refRedacted, opfErr = redact.BatchBytesWithPrivacyFilter(ctx, refBlobs)
+			if opfErr != nil {
+				if errors.Is(opfErr, redact.ErrOPFNoEnabledCategories) {
+					// Configuration-level failure: every ref fails identically,
+					// so report the config remediation rather than retrying.
+					return &OPFNoCategoriesError{}
+				}
+				if firstErr == nil {
+					firstErr = &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: opfErr}
+				}
+				continue
+			}
+		}
+
+		// Replay this ref's chain ancestor→tip, so the rewritten parent carries
+		// into the next commit and the deepest one keeps the boundary parent.
 		parent := pr.base
+		startIdx := 0
+		rebuildFailed := false
 		for _, pc := range pr.commits {
 			redactedByPath := make(map[string][]byte, len(pc.blobs))
 			for j, path := range pc.paths {
-				redactedByPath[path] = globalRedacted[pc.startIdx+j]
+				redactedByPath[path] = refRedacted[startIdx+j]
 			}
+			startIdx += len(pc.blobs)
 			newHash, rebuildErr := rebuildCheckpointCommit(ctx, repo, pc.commit, parent, redactedByPath)
 			if rebuildErr != nil {
-				return fmt.Errorf("rebuild checkpoint commit %s on %s: %w", pc.commit.Hash.String()[:7], pr.ref, rebuildErr)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("rebuild checkpoint commit %s on %s: %w", pc.commit.Hash.String()[:7], pr.ref, rebuildErr)
+				}
+				rebuildFailed = true
+				break
 			}
 			parent = newHash
 		}
-		rebuilt[i] = parent
-	}
+		if rebuildFailed {
+			continue // the half-built chain is abandoned; the ref never moves
+		}
 
-	// CAS each ref: a concurrent write that advanced a checkpoint ref during
-	// the rewrite must not be clobbered by our stale rebuild.
-	for i, pr := range pendings {
-		if err := checkpoint.CASPersistentRef(ctx, repo, pr.ref, rebuilt[i], pr.old); err != nil {
-			return fmt.Errorf("update checkpoint ref %s: %w", pr.ref, err)
+		// CAS: a concurrent write that advanced this checkpoint ref during the
+		// rewrite must not be clobbered by our stale rebuild.
+		if err := checkpoint.CASPersistentRef(ctx, repo, pr.ref, parent, pr.old); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("update checkpoint ref %s: %w", pr.ref, err)
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // unappliedAncestry walks first parents back from a checkpoint ref's tip and

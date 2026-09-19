@@ -14,15 +14,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
-	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/spawnmarker"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"github.com/spf13/cobra"
@@ -428,56 +426,10 @@ func spawnDetachedTrailEnablementRefresh(ctx context.Context) {
 
 // trailRefreshRecentlySpawned reports whether a detached refresh was spawned for
 // this repo within trailRefreshSpawnThrottle and, when it wasn't, records now as
-// the most recent spawn. The read-and-record is serialized with a flock keyed to
-// the shared git-common-dir (so every worktree of the repo agrees), collapsing a
-// burst of concurrent SessionStart hooks to a single child rather than one per
-// hook. Best-effort: any error resolving, locking, or writing the marker falls
-// through to spawning — never worse than before this guard existed.
+// the most recent spawn. See spawnmarker.RecentlySpawned for the mechanism.
 func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
-	return recentlySpawnedMarker(commonDir, "trail-refresh-spawn", trailRefreshSpawnThrottle, now)
+	return spawnmarker.RecentlySpawned(commonDir, "trail-refresh-spawn", trailRefreshSpawnThrottle, now)
 }
-
-// recentlySpawnedMarker reports whether the named spawn marker under the
-// shared git-common-dir was refreshed within ttl and, when it wasn't, records
-// now as the most recent spawn. The read-and-record is serialized with a flock
-// keyed to the marker (so every worktree of the repo agrees), collapsing a
-// burst of concurrent hooks to a single detached child rather than one per
-// hook. Best-effort: any error resolving, locking, or writing the marker falls
-// through to spawning — never worse than having no guard at all. Shared by the
-// trail-enablement refresh and the zombie-session sweep, each with its own
-// marker name and ttl.
-func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time.Time) bool {
-	root, err := gitdir.OpenAt(commonDir)
-	if err != nil {
-		return false
-	}
-	// Create the directory before acquiring the lock: flock opens the lock file,
-	// which fails if its parent doesn't exist yet (mirrors
-	// ModifyClonePreferences, which creates before locking).
-	if err := osroot.MkdirAllNoSymlink(root, spawnMarkerDirName, 0o750); err != nil {
-		return false
-	}
-	markerName := spawnMarkerDirName + "/" + marker
-	release, err := flock.AcquireIn(root, markerName+".lock")
-	if err != nil {
-		return false
-	}
-	defer release()
-
-	if data, readErr := osroot.ReadFileNoFollow(root, markerName); readErr == nil {
-		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
-			now.After(last) && now.Sub(last) < ttl {
-			return true
-		}
-	}
-	//nolint:errcheck // best-effort marker; a failed write just means the next hook re-spawns
-	_ = jsonutil.WriteFileAtomicIn(root, markerName, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
-	return false
-}
-
-// spawnMarkerDirName is the marker directory inside the git common dir. It is
-// the same "entire" directory clone preferences live in.
-const spawnMarkerDirName = "entire"
 
 // newRefreshTrailEnablementCmd creates the hidden command that performs the
 // (potentially slow) trails-enablement network refresh out of band. It is
