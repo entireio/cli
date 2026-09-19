@@ -26,6 +26,7 @@ var (
 	_ agent.TokenCalculator             = (*CodexAgent)(nil)
 	_ agent.InventoryAwareExtractor     = (*CodexAgent)(nil)
 	_ agent.PromptExtractor             = (*CodexAgent)(nil)
+	_ agent.ModelExtractor              = (*CodexAgent)(nil)
 	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
 	_ agent.TranscriptSanitizer         = (*CodexAgent)(nil)
 )

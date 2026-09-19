@@ -1,6 +1,7 @@
 package compact
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -213,4 +214,88 @@ func TestCompact_CodexStartLine_IgnoresTokenCountEvents(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	assertJSONLines(t, result, expected)
+}
+
+// Desktop response items are canonical; event mirrors and encrypted reasoning
+// must not become visible messages.
+func TestCompact_CodexDesktop(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"type":"session_meta","payload":{"id":"desktop"}}
+{"type":"response_item","payload":{"type":"agent_message","author":{"role":"assistant"},"content":[{"type":"input_text","text":"Visible answer"},{"type":"output_text","text":"Second block"},{"type":"reasoning","text":"PRIVATE"}]}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Visible answer"}}
+{"type":"response_item","payload":{"type":"reasoning","encrypted_content":"PRIVATE"}}
+{"type":"response_item","payload":{"type":"agent_message","author":{"role":"developer"},"content":[{"type":"input_text","text":"PRIVATE"}]}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_1","input":"print(1)"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"text","text":"first"},{"type":"image","text":"PRIVATE"},{"type":"text","text":"second"}]}}
+`)
+	out, err := Compact(redact.AlreadyRedacted(raw), agentOpts("codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(out), "Visible answer") != 1 || !strings.Contains(string(out), "Second block") {
+		t.Errorf("missing or duplicated assistant text: %s", out)
+	}
+	if strings.Contains(string(out), "PRIVATE") {
+		t.Errorf("non-visible content leaked: %s", out)
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		var parsed struct {
+			Content []struct {
+				ID     string `json:"id"`
+				Result struct {
+					Output string `json:"output"`
+				} `json:"result"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(line), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		for _, block := range parsed.Content {
+			if block.ID == "call_1" {
+				found = true
+				if block.Result.Output != "first\n\nsecond" {
+					t.Errorf("output = %q", block.Result.Output)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing associated tool call")
+	}
+}
+
+func TestCodexCustomOutputText_Shapes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, output, want string }{
+		{"string", `"plain"`, "plain"},
+		{"object", `{"type":"text","text":"plain"}`, "plain"},
+		{"array", `[{"type":"text","text":"one"},{"type":"text","text":""},{"type":"text","text":"two"}]`, "one\n\ntwo"},
+		{"empty array", `[]`, ""},
+		{"null", `null`, ""},
+		{"unsupported", `42`, ""},
+		{"malformed", `[`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := codexCustomOutputText(json.RawMessage(`{"output":` + tc.output + `}`))
+			if got != tc.want {
+				t.Errorf("output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompact_CodexDesktopMismatchedOutput(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_1","input":"print(1)"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"other","output":[{"type":"text","text":"WRONG_RESULT"}]}}
+`)
+	out, err := Compact(redact.AlreadyRedacted(raw), agentOpts("codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "call_1") || strings.Contains(string(out), "WRONG_RESULT") {
+		t.Errorf("mismatched call association: %s", out)
+	}
 }

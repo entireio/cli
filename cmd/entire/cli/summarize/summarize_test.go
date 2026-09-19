@@ -1228,3 +1228,17 @@ func TestResolveModel(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildCondensedTranscriptFromBytes_CodexDesktopExec(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"type":"session_meta","payload":{"id":"desktop"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_1","input":"print(1)"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"text","text":"tool output"}]}}
+`)
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted(raw), agent.AgentTypeCodex)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, EntryTypeTool, entries[0].Type)
+	require.Equal(t, "exec", entries[0].ToolName)
+	require.Equal(t, "print(1)", entries[0].ToolDetail)
+}
