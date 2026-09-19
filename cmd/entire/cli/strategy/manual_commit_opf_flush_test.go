@@ -68,8 +68,8 @@ func TestPrePushCheckpointRefs_SpawnsOPFFlushWhenBacklogRemains(t *testing.T) {
 		"leftover OPF work must not fail the user's git push")
 
 	require.Len(t, *spawns, 1, "exactly one detached flush child per push with a backlog")
-	assert.ElementsMatch(t, refs, queuedRefs(t, repo),
-		"the withheld flush leaves every ref queued for the worker and the next push")
+	assert.Equal(t, []plumbing.ReferenceName{refs[1]}, queuedRefs(t, repo),
+		"only the ref the cap skipped stays queued for the worker; the rewritten one shipped")
 }
 
 // The mirror case, and the reason maybeSpawnOPFFlush pre-checks at all: when the

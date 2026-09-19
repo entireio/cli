@@ -1120,8 +1120,14 @@ func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *te
 }
 
 // Backend divergence: the v1 path aborts the user's push on OPF failure; the
-// refs path fails closed by withholding the flush instead — the user's push
-// succeeds, nothing un-OPF'd ships, and the refs stay queued.
+// refs path fails closed by withholding the un-redacted refs instead — the
+// user's push succeeds, nothing un-OPF'd ships, and those refs stay queued.
+//
+// Single-ref on purpose, and still distinct from
+// TestPrePushCheckpointRefs_AlreadyRedactedRefShipsWhileSiblingStillQueued:
+// that one pins that a trailered SIBLING still ships, this one that the sole
+// ref of a failed flush ships nothing at all. Per-ref delivery must not become
+// "push it anyway when there is nothing else to push".
 func TestPrePushCheckpointRefs_OPFFailureWithholdsFlush(t *testing.T) {
 	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
@@ -1134,7 +1140,8 @@ func TestPrePushCheckpointRefs_OPFFailureWithholdsFlush(t *testing.T) {
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
 		"an OPF failure must not block the user's git push")
 
-	assert.Contains(t, buf.String(), "checkpoint refs", "the withheld push must be visible to the user")
+	assert.Contains(t, buf.String(), "1 checkpoint ref(s) were not pushed",
+		"the withheld push must be visible to the user, and say how much it held back")
 	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued for the next push")
 	lsCmd := exec.CommandContext(t.Context(), "git", "ls-remote", bareDir)
 	lsCmd.Env = testutil.GitIsolatedEnv()

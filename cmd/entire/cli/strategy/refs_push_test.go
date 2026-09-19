@@ -189,7 +189,7 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	// pushes are rejected, then recovery replays C3's delta onto C2.
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, nil)
 	output := restore()
 	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
 	assert.Equal(t, 1, pushed)
