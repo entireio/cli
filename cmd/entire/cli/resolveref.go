@@ -185,6 +185,20 @@ func parseQualifiedHandle(ref string) (provider, handle string, err error) {
 	return provider, handle, nil
 }
 
+// formatQualifiedHandle renders a provider and handle in the form every grant
+// command accepts as a grantee ("github:alice"). Inverse of
+// parseQualifiedHandle, and deliberately adjacent to it so the two spellings
+// cannot drift.
+//
+// An empty provider yields the bare handle rather than ":alice", which parses
+// as nothing and would be a grantee string no command accepts.
+func formatQualifiedHandle(provider, handle string) string {
+	if provider == "" {
+		return handle
+	}
+	return provider + ":" + handle
+}
+
 // resolveProjectRef turns a project reference (ULID or name) into its ULID. A
 // ULID is returned unchanged; a name is resolved via the server's
 // case-insensitive by-name lookup (the same call `entire project list --name`

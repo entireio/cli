@@ -58,7 +58,68 @@ the commands are always runnable in every build.
   `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
   bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
   env token's `aud`), else the active login. `auth status` shows the caller's
-  home jurisdiction so the slug is discoverable. `logout`
+  home jurisdiction so the slug is discoverable. A login served by a core
+  outside that home region reaches `--json` as `foreign_region` and is not
+  called out in the text view: the note that used to sit there existed mostly
+  to explain the display name and email a foreign core withholds, neither of
+  which this view renders any more, and what remained restated the
+  `jurisdiction` and `context` rows either side of it. It reports a count of active
+  sessions rather than the list — `--sessions` prints the full table, and
+  `--json` reports the same facts without the text view's collapse; timestamps
+  stay RFC3339 there, since the relative form the text view shows is a reading
+  aid. A second count row, `available contexts`,
+  does the same for saved logins and replaces the trailing "N login contexts
+  saved" sentence. **Both count rows are dropped at exactly one** — the sole
+  session and the sole context are the ones already described by the verdict
+  line's expiry and the `context` row, so the row costs a line and carries
+  nothing. The session half additionally requires that sole session to have been
+  *identified* as the caller's: without a `fid` match there is no expiry on the
+  verdict line to stand in for it, and dropping the row would leave the default
+  view with no count, no expiry and no route to `--sessions` — while the one
+  session listed is the login that replaced yours, which is the one worth
+  looking at. That window is reachable whenever a family is revoked inside its
+  access token's lifetime: `resolveStatusTarget` falls back to the stale bearer,
+  `/me` honours it, and `fid` names a family the listing no longer holds. That
+  state is named rather than left to be inferred — `! this login was ended
+  elsewhere and cannot be renewed`, with the verdict line carrying the *bearer's*
+  remaining life instead of a session lifetime, since with nothing left to renew
+  it that is when the user is logged out (`login_revoked` / `token_expires_at`
+  in JSON; `expires_at` stays absent, no session having been attributed).
+  What settles it differs by listing. **Zero sessions settles it alone**: the
+  endpoint includes the caller's own session — that is how a matched `fid` finds
+  itself — so none listed means none exist, the caller's included, and no
+  truncation explains zero. **With sessions listed**, absence is the only
+  evidence, so a `fid` must have actually named something; a core too old to
+  mint one is evidence of nothing and stays quiet. Do not gate this on the
+  refresh having failed: that only becomes known when a refresh is *attempted
+  and fails*, and a token still far from expiry is returned without contacting
+  the server, so requiring it left the notice silent in the commonest case —
+  every session revoked while the current bearer still had hours to run. Zero sessions still reports, being a contradiction worth seeing.
+  `logout --everywhere` is offered **only alongside the table**: it ends every
+  session at once, and in the collapsed view those sessions are a count the
+  reader cannot inspect, browser logins included. The whole logout hint is
+  withheld once a login is known revoked — "end this session" would contradict
+  the notice above it, there being no session of the caller's left to end, and
+  any session still listed belongs to the login that replaced it.
+  The drop-at-one collapse is text-only — `--json` never applies it. What the
+  JSON does omit is anything it could not determine, which is why
+  `active_sessions`, `available_contexts` and `sessions` are **pointers**:
+  absent means "not known", never zero. An unreadable listing omits
+  `active_sessions` while a real zero emits `0`; ENTIRE_TOKEN mode omits
+  `available_contexts`, never having read contexts.json, while every other path
+  emits its genuine count; and `sessions` is emitted whenever `--sessions`
+  reached the listing, as `[]` when empty, so a satisfied request stays
+  distinguishable from the default where the key is absent. Paths that return
+  before the listing — not logged in, env token, a failed fetch — omit it
+  along with the rest. The JSON carries the provider-qualified
+  `user` and deliberately not a split `handle`/`provider`: one directly usable
+  field beats two a caller has to rejoin. `auth status` also marks the caller's
+  own row `(current)`, matching the login JWT's `fid` (refresh-token family id)
+  claim against the listed session ids, since a session IS a refresh-token
+  family. That match is the only thing entitling the verdict line to state an
+  expiry: an unmatched claim renders neither marker nor expiry rather than
+  borrowing another session's, because everything reachable from here
+  (`logout`, `logout --everywhere`) ends a session. `logout`
   takes `--everywhere` (revoke every session on the active core, not just the
   current one) and `--all-contexts` (log out of every saved login)
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`

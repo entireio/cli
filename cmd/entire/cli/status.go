@@ -676,19 +676,48 @@ func timeAgo(t time.Time) string {
 	return formatRelativeDuration(time.Since(t))
 }
 
-// formatRelativeDuration renders a positive duration as "just now" / "Xm ago"
-// / "Xh ago" / "Xd ago". Shared between `entire status` and `entire auth list`
-// so the bucket thresholds and labels stay consistent.
+// formatRelativeDuration renders a signed duration relative to now: "just now"
+// near zero, "Xm ago" / "Xh ago" / "Xd ago" / "Xmo ago" in the past, and "in Xm"
+// … "in Xmo" in the future. Shared between `entire status` and `entire auth
+// status` so the bucket thresholds and labels stay consistent.
+//
+// The sign test comes first on purpose: a future duration is negative, so it
+// would otherwise satisfy d < time.Minute and report "just now" for a session
+// that expires in a month.
 func formatRelativeDuration(d time.Duration) string {
-	switch {
-	case d < time.Minute:
+	if d > -time.Minute && d < time.Minute {
+		// Also absorbs the small negative durations that clock skew produces
+		// for a timestamp the server stamped moments ago.
 		return lastUsedJustNow
+	}
+	if d < 0 {
+		return "in " + humanizeDuration(-d)
+	}
+	return humanizeDuration(d) + " ago"
+}
+
+// humanizeDuration renders a positive duration as a single coarse unit. It
+// holds the bucket ladder that formatRelativeDuration wraps with tense, so past
+// and future can never drift apart.
+//
+// Each unit's band starts at 1 — 1m, 1h, 1d, 1mo — which is why days stop at 30
+// rather than running to 60. A wider day band would make the first reachable
+// month "2mo", so a value ticking past the boundary would read 59d then 2mo and
+// look like it had doubled.
+func humanizeDuration(d time.Duration) string {
+	const (
+		day   = 24 * time.Hour
+		month = 30 * day
+	)
+	switch {
 	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < day:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < month:
+		return fmt.Sprintf("%dd", int(d/day))
 	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+		return fmt.Sprintf("%dmo", int(d/month))
 	}
 }
 
