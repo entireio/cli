@@ -35,7 +35,7 @@ import (
 // linked", and amend/post-rewrite paths (which call findSessionsForWorktree
 // directly) stay silent.
 func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context, worktreePath string) ([]*SessionState, error) {
-	linking, err := s.findCommitLinkingSet(ctx, worktreePath)
+	linking, err := s.findCommitLinkingSet(ctx, worktreePath, id.EmptyCheckpointID)
 	return linking.sessions, err
 }
 
@@ -68,7 +68,11 @@ func (l commitLinkingSet) sessionsIncludingReservedFor(checkpointID id.Checkpoin
 	return sessions
 }
 
-func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktreePath string) (commitLinkingSet, error) {
+// findCommitLinkingSet resolves the sessions a commit links to. stampedTrailer
+// is the commit's Entire-Checkpoint ID in post-commit (its reservation is a
+// third identity, see sessionsIncludingReservedFor) and empty in
+// prepare-commit-msg, the only hook that announces an unlinked commit.
+func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktreePath string, stampedTrailer id.CheckpointID) (commitLinkingSet, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		// Identity matching below needs the same listing, so nothing can
@@ -83,10 +87,13 @@ func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktre
 			sessions = append(sessions, guest)
 		}
 	}
-	if len(declined) > 0 && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
+	linking := commitLinkingSet{sessions: sessions, ancestryGuest: ancestryGuest, all: allStates}
+	if stampedTrailer != id.EmptyCheckpointID {
+		linking.sessions = linking.sessionsIncludingReservedFor(stampedTrailer)
+	} else if len(declined) > 0 && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
 		announceUnlinkedCommit(declined)
 	}
-	return commitLinkingSet{sessions: sessions, ancestryGuest: ancestryGuest, all: allStates}, nil
+	return linking, nil
 }
 
 // announceUnlinkedCommit names the candidate sessions so the user can

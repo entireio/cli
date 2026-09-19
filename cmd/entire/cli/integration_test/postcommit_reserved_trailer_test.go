@@ -46,9 +46,11 @@ func TestPostCommit_ResolvesSessionFromReservedTrailerWhenPathAndAncestryFail(t 
 	post := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	post.Dir = parent.RepoDir
 	post.Env = parent.gitHookEnv()
-	if out, err := post.CombinedOutput(); err != nil {
+	out, err := post.CombinedOutput()
+	if err != nil {
 		t.Fatalf("post-commit: %v\n%s", err, out)
 	}
+	require.NotContains(t, string(out), "not linked", "post-commit must not announce an unlinked commit it then condenses")
 
 	state, err := parent.GetSessionState(sess.ID)
 	require.NoError(t, err)

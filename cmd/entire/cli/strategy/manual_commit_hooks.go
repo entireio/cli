@@ -956,8 +956,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
 	// diverge (a dangling trailer).
-	linking, err := s.findCommitLinkingSet(ctx, worktreePath)
-	sessions := linking.sessionsIncludingReservedFor(checkpointID)
+	linking, err := s.findCommitLinkingSet(ctx, worktreePath, checkpointID)
+	sessions := linking.sessions
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
 
