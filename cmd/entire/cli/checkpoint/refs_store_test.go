@@ -3,6 +3,8 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	git "github.com/go-git/go-git/v6"
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 )
@@ -53,6 +56,43 @@ func TestGitRefsStore_WriteEnqueuesForPush(t *testing.T) {
 	refs, err := q.Drain()
 	require.NoError(t, err)
 	assert.Contains(t, refs, mustRefName(t, cid), "a session write should enqueue its checkpoint ref for push")
+}
+
+func TestGitRefsStore_WriteReportsQueueFailureAfterRefUpdate(t *testing.T) {
+	store := newRefsStore(t)
+	t.Cleanup(gitdir.Reset)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refName := mustRefName(t, cid)
+
+	_, commonDir, err := repositoryDirs(store.repo)
+	require.NoError(t, err)
+	queuePath := filepath.Join(commonDir, pushQueueFileName)
+	require.NoError(t, os.Mkdir(queuePath, 0o700))
+
+	writeReq := Session{
+		CheckpointID: cid,
+		SessionID:    "sess-1",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("transcript")),
+		AuthorName:   "Test Author",
+		AuthorEmail:  "test@example.com",
+	}
+	err = store.Write(context.Background(), writeReq)
+	require.ErrorContains(t, err, "written locally but could not be queued for push")
+
+	_, refErr := store.repo.Reference(refName, true)
+	require.NoError(t, refErr, "the surfaced partial failure must retain the local checkpoint ref")
+
+	gitdir.Reset()
+	require.NoError(t, os.Remove(queuePath))
+
+	require.NoError(t, store.Write(context.Background(), writeReq),
+		"a later write after the obstruction clears must restore push discovery")
+	queue, err := PushQueueForRepo(context.Background(), store.repo)
+	require.NoError(t, err)
+	queued, err := queue.Peek()
+	require.NoError(t, err)
+	assert.Contains(t, queued, refName)
 }
 
 func TestGitRefsStore_OnDemandRefFetch(t *testing.T) {
@@ -780,7 +820,7 @@ func TestGitRefsStore_EnqueuesAfterCancellationFollowingCAS(t *testing.T) {
 	require.NoError(t, casUpdateRef(ctx, repoRoot, refName, head.Hash(), plumbing.ZeroHash))
 
 	cancel()
-	store.enqueueForPush(ctx, refName)
+	require.NoError(t, store.enqueueForPush(ctx, refName))
 
 	q, err := PushQueueForRepo(context.Background(), store.repo)
 	require.NoError(t, err)

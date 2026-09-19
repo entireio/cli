@@ -196,29 +196,26 @@ func (s *gitRefsStore) refTip(cid id.CheckpointID, ref *plumbing.Reference) (plu
 	return ref.Hash(), tree, nil
 }
 
-// enqueueForPush records refName in the push-discovery queue, logging (never
-// returning) on failure so the local ref write still succeeds.
+// enqueueForPush records refName in the push-discovery queue.
 //
 // The queue is resolved with the cancellation stripped from ctx. By the time we
 // get here the ref is already written locally, and the queue is the ONLY
-// push-discovery mechanism there is — see the
-// pushQueueFileName doc. A ref that misses the queue is never pushed, and the
-// writers above are idempotent, so a re-run skips it as already-present and
-// never re-enqueues it: it stays local-only forever. Queue resolution is now a
-// context-free metadata read, but stripping cancellation here keeps the whole
-// post-ref bookkeeping boundary explicit and prevents a future queue operation
-// from dropping a write that already happened.
-func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.ReferenceName) {
+// push-discovery mechanism there is; see the pushQueueFileName doc. A ref that
+// misses the queue is never pushed, so failure is returned as a partial
+// outcome: the checkpoint remains readable locally,
+// but the caller must not treat it as durably queued for publication. Queue
+// resolution is now a context-free metadata read, but stripping cancellation
+// here keeps the whole post-ref bookkeeping boundary explicit and prevents a
+// future queue operation from dropping a write that already happened.
+func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.ReferenceName) error {
 	q, err := PushQueueForRepo(context.WithoutCancel(ctx), s.repo)
 	if err != nil {
-		logging.Warn(ctx, "checkpoint: resolve push queue failed; ref not enqueued",
-			slog.String("ref", refName.String()), slog.String("error", err.Error()))
-		return
+		return fmt.Errorf("resolve push queue: %w", err)
 	}
 	if err := q.Enqueue(refName); err != nil {
-		logging.Warn(ctx, "checkpoint: enqueue checkpoint ref for push failed",
-			slog.String("ref", refName.String()), slog.String("error", err.Error()))
+		return fmt.Errorf("enqueue checkpoint ref: %w", err)
 	}
+	return nil
 }
 
 func (s *gitRefsStore) updateCheckpointRef(
@@ -242,7 +239,9 @@ func (s *gitRefsStore) updateCheckpointRef(
 	if err != nil {
 		return err
 	}
-	s.enqueueForPush(ctx, refName)
+	if err := s.enqueueForPush(ctx, refName); err != nil {
+		return fmt.Errorf("checkpoint ref %s was written locally but could not be queued for push: %w", refName, err)
+	}
 	return nil
 }
 
