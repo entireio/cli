@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Generated Windows PE resource objects (mise run winres)
+*.syso
+
 # Test binary, built with `go test -c`
 *.test
 

@@ -1,0 +1,34 @@
+#!/bin/bash
+#MISE description="Generate Windows PE VERSIONINFO resources (.syso) for entire and git-remote-entire"
+#MISE quiet=true
+
+set -euo pipefail
+
+version="${1:?usage: mise run winres <version>}"
+
+base="${version%%-*}"
+IFS='.' read -r major minor patch <<<"$base"
+major="${major:-0}"
+minor="${minor:-0}"
+patch="${patch:-0}"
+
+generate() {
+    local pkg="$1" desc="$2" original_name="$3"
+    local common_flags=(
+        -manifest winres/app.manifest
+        -company "Entire"
+        -copyright "Copyright (c) Entire, Inc."
+        -description "$desc"
+        -product-name "Entire CLI"
+        -original-name "$original_name"
+        -ver-major "$major" -ver-minor "$minor" -ver-patch "$patch"
+        -product-ver-major "$major" -product-ver-minor "$minor" -product-ver-patch "$patch"
+        -file-version "$version"
+        -product-version "$version"
+    )
+    goversioninfo -64 -o "${pkg}/rsrc_windows_amd64.syso" "${common_flags[@]}" winres/versioninfo.json
+    goversioninfo -64 -arm -o "${pkg}/rsrc_windows_arm64.syso" "${common_flags[@]}" winres/versioninfo.json
+}
+
+generate "cmd/entire" "Entire CLI" "entire.exe"
+generate "cmd/git-remote-entire" "Git remote helper for entire:// URLs" "git-remote-entire.exe"
