@@ -67,10 +67,10 @@ type turnAnchorResolver struct {
 
 // newTurnAnchorResolver builds a resolver for one Run. It does no repo work
 // until resolve is first called with a non-empty candidate list. fallback
-// must be a full hex sha when non-empty — resolveImportLinkCommitSHA
-// guarantees this; a short fallback would silently degrade to the empty
-// ancestor-set path. now anchors the walk's date cutoff (Options.Now; zero
-// falls back to the wall clock).
+// must be a validated full hex sha — Run guarantees this before any writes; a
+// short fallback would silently degrade to the empty ancestor-set path. now
+// anchors the walk's date cutoff (Options.Now; zero falls back to the wall
+// clock).
 func newTurnAnchorResolver(repo *git.Repository, fallback string, now time.Time) *turnAnchorResolver {
 	if now.IsZero() {
 		now = time.Now()
@@ -87,8 +87,7 @@ func newTurnAnchorResolver(repo *git.Repository, fallback string, now time.Time)
 // from a candidate (as opposed to the fallback — callers use this to log
 // genuine fallbacks without misreporting the turn whose recorded commit IS
 // the fallback tip). Empty fallback or no candidates return fallback
-// unchanged (empty fallback → "" — unanchorable repo imports unlinked,
-// matching resolveImportLinkCommitSHA's contract).
+// unchanged. Run rejects an empty fallback before constructing this resolver.
 func (r *turnAnchorResolver) resolve(ctx context.Context, candidates []string) (anchor string, fromCandidate bool) {
 	if r.fallback == "" || len(candidates) == 0 {
 		return r.fallback, false

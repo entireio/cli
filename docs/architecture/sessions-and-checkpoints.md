@@ -484,7 +484,9 @@ both the git-branch and git-refs backends (git-refs leaves its push queue
 intact for the next elected-remote push). The dedicated `checkpoint_remote`
 URL mode is exempt — it addresses a separate metadata store directly. `entire
 status` shows the sync destination and how many checkpoints have not reached
-it yet.
+it yet. Git-refs push failures never block the user's push: refs stay queued, and
+confirmed remote rejections show one bounded warning with the remote's reason
+rather than being mislabeled as divergence (see [pre-push flow](ref-checkpoint-backend.md#pre-push-flow)).
 
 A gated push is not fully silent: when checkpoints are waiting for the
 elected remote, the hook prints a two-line stderr hint naming the elected
@@ -638,20 +640,25 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
-Checkpoints written by `entire import <agent>` additionally carry a `commit_sha`
+Checkpoints written by the import path — `entire import <agent>` and `entire
+enable`'s optional history import — additionally carry a `commit_sha`
 (omitempty) on both the session `Metadata` and the root `CheckpointSummary`,
 set to the default branch's head at import time — origin's tip is preferred
 (the commit the server already knows about), falling back to the local branch
-tip, then HEAD, then empty when nothing resolves. When the transcript itself
+tip, then HEAD. Each candidate must resolve to an actual commit object, and an
+import that finds none (an empty repository, say) is refused before anything is
+written rather than producing anchorless checkpoints; onboarding reports the
+same condition and skips its optional import instead of failing `entire
+enable`. When the transcript itself
 records the commit(s) a turn made (Claude Code `gitOperation` records), the
 turn's checkpoint instead anchors to the last such commit that resolves and is
 reachable from the resolved link anchor (the default-branch head when
 resolvable) — see `turnAnchorResolver` (`agentimport/turn_anchor.go`);
 otherwise (older transcripts, or a recorded commit that's been
 squashed/rebased away) it falls back to the default-branch head as described
-above. It is a best-effort anchor for UI display only, not
-an attribution signal, and pre-existing imported checkpoints are not
-backfilled with it.
+above. It is an anchor for UI display only, not an attribution signal — an
+imported session's local `session.State.BaseCommit` stays empty — and
+pre-existing imported checkpoints are not backfilled with it.
 
 ### Checkpoint ID Linking
 

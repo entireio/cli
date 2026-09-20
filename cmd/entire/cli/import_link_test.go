@@ -1,13 +1,52 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agentimport"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
 )
+
+func TestResolveImportLinkCommitSHA_SkipsInvalidRefTargets(t *testing.T) {
+	t.Parallel()
+	for _, invalidTarget := range []string{"missing", "tree"} {
+		t.Run(invalidTarget, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			testutil.WriteFile(t, dir, "f.txt", "init")
+			testutil.GitAdd(t, dir, "f.txt")
+			testutil.GitCommit(t, dir, "init")
+			want := testutil.GetHeadHash(t, dir)
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = repo.Close() })
+			bad := plumbing.NewHash(strings.Repeat("a", 40))
+			if invalidTarget == "tree" {
+				commit, err := repo.CommitObject(plumbing.NewHash(want))
+				require.NoError(t, err)
+				bad = commit.TreeHash
+			}
+			require.NoError(t, repo.Storer.SetReference(plumbing.NewSymbolicReference(
+				plumbing.NewRemoteReferenceName("origin", "HEAD"), plumbing.NewRemoteReferenceName("origin", "main"))))
+			require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+				plumbing.NewRemoteReferenceName("origin", "main"), bad)))
+			require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(
+				plumbing.NewBranchReferenceName("main"), bad)))
+			// Both default-branch refs are unusable, but HEAD is a real commit.
+			got, err := resolveImportLinkCommitSHA(t.Context(), repo)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}
 
 // TestResolveImportLinkCommitSHA_LocalDefaultBranchNoOrigin proves that when
 // there is no origin remote, the resolver resolves via the local default
@@ -30,7 +69,8 @@ func TestResolveImportLinkCommitSHA_LocalDefaultBranchNoOrigin(t *testing.T) {
 	head, err := repo.Head()
 	require.NoError(t, err)
 
-	got := resolveImportLinkCommitSHA(repo)
+	got, err := resolveImportLinkCommitSHA(t.Context(), repo)
+	require.NoError(t, err)
 	require.Equal(t, head.Hash().String(), got)
 }
 
@@ -76,7 +116,8 @@ func TestResolveImportLinkCommitSHA_PrefersOriginDefaultBranch(t *testing.T) {
 	localMainRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), secondHash)
 	require.NoError(t, repo.Storer.SetReference(localMainRef))
 
-	got := resolveImportLinkCommitSHA(repo)
+	got, err := resolveImportLinkCommitSHA(t.Context(), repo)
+	require.NoError(t, err)
 	require.Equal(t, firstSHA, got)
 }
 
@@ -108,22 +149,52 @@ func TestResolveImportLinkCommitSHA_HEADWhenNoDefaultBranch(t *testing.T) {
 	))
 	require.NoError(t, repo.Storer.RemoveReference(plumbing.NewBranchReferenceName("master")))
 
-	got := resolveImportLinkCommitSHA(repo)
+	got, err := resolveImportLinkCommitSHA(t.Context(), repo)
+	require.NoError(t, err)
 	require.Equal(t, sha, got)
 }
 
-// TestResolveImportLinkCommitSHA_EmptyRepo proves the resolver returns "" and
-// does not panic on a repo with no commits.
+// TestResolveImportLinkCommitSHA_EmptyRepo proves import cannot proceed with
+// no code commit to anchor to.
 func TestResolveImportLinkCommitSHA_EmptyRepo(t *testing.T) {
 	t.Parallel()
 
 	repoDir := t.TempDir()
-	// git.PlainInit deliberately (not testutil.InitRepo): the repo must stay
-	// commit-free, so the helper's user/GPG config is irrelevant here.
-	repo, err := git.PlainInit(repoDir, false)
+	testutil.InitRepo(t, repoDir)
+	repo, err := git.PlainOpen(repoDir)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = repo.Close() })
 
-	got := resolveImportLinkCommitSHA(repo)
+	got, err := resolveImportLinkCommitSHA(t.Context(), repo)
+	require.ErrorContains(t, err, "without a valid anchor commit")
 	require.Empty(t, got)
+}
+
+// A repository-config failure is not a verdict on any candidate: it fails
+// identically for every one, so the loop must stop rather than fall through and
+// end up telling the user to fetch code history that is already there. Pins both
+// the sentinel wiring and the message, since the whole point is that this
+// failure does NOT get the refs' remedy.
+func TestResolveImportLinkCommitSHA_ConfigFailureStopsInsteadOfBlamingRefs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "init")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	// Corrupted after opening: the object format is read per validation, so this
+	// is what an unreadable config looks like at the moment the anchor is checked.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[[[not ini\n"), 0o600))
+
+	got, err := resolveImportLinkCommitSHA(t.Context(), repo)
+	require.Error(t, err)
+	require.Empty(t, got)
+	require.ErrorIs(t, err, agentimport.ErrAnchorRepoConfig,
+		"the sentinel must survive the wrap, or the caller cannot tell this from a bad ref")
+	require.NotContains(t, err.Error(), "create a commit or fetch",
+		"an unreadable config must not be answered with advice about refs")
 }
