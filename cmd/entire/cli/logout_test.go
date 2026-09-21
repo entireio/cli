@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,132 +21,6 @@ import (
 )
 
 const testLogoutToken = "tok123"
-
-func TestRunLogout_RevokesServerSideThenRemovesLogin(t *testing.T) {
-	t.Parallel()
-
-	revokeCalled, cleared := false, false
-	revoke := func(context.Context) error {
-		revokeCalled = true
-		return nil
-	}
-
-	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, testLogoutToken, revoke, func() error { cleared = true; return nil })
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !revokeCalled {
-		t.Error("revoke should be called when a token exists")
-	}
-	if !cleared {
-		t.Fatal("expected the active context to be removed")
-	}
-	if !strings.Contains(out.String(), "Logged out.") {
-		t.Fatalf("stdout = %q, want to contain %q", out.String(), "Logged out.")
-	}
-	if errOut.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", errOut.String())
-	}
-}
-
-func TestRunLogout_NoTokenSkipsRevoke(t *testing.T) {
-	t.Parallel()
-
-	revokeCalled, cleared := false, false
-	revoke := func(context.Context) error {
-		revokeCalled = true
-		return nil
-	}
-
-	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, "", revoke, func() error { cleared = true; return nil })
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if revokeCalled {
-		t.Fatal("revoke should not be called without a token")
-	}
-	if !cleared {
-		t.Fatal("the login should still be removed locally")
-	}
-	if !strings.Contains(out.String(), "Logged out.") {
-		t.Fatalf("stdout = %q, want to contain %q", out.String(), "Logged out.")
-	}
-}
-
-func TestRunLogout_RevokeFailureWarnsButSucceeds(t *testing.T) {
-	t.Parallel()
-
-	revoke := func(context.Context) error {
-		return errors.New("connection refused")
-	}
-
-	cleared := false
-	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, testLogoutToken, revoke, func() error { cleared = true; return nil })
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !cleared {
-		t.Fatal("the login should still be removed when server revoke fails")
-	}
-	if !strings.Contains(errOut.String(), "server-side session revocation failed") {
-		t.Fatalf("stderr = %q, want warning about revoke failure", errOut.String())
-	}
-	if !strings.Contains(errOut.String(), "connection refused") {
-		t.Fatalf("stderr = %q, want underlying error message", errOut.String())
-	}
-	if !strings.Contains(out.String(), "Logged out.") {
-		t.Fatalf("stdout = %q, want to contain %q", out.String(), "Logged out.")
-	}
-}
-
-func TestRunLogout_RevokeUnauthorizedIsSilent(t *testing.T) {
-	t.Parallel()
-
-	revoke := func(context.Context) error {
-		return &api.HTTPError{StatusCode: http.StatusUnauthorized, Message: "Not authenticated"}
-	}
-
-	cleared := false
-	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, testLogoutToken, revoke, func() error { cleared = true; return nil })
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !cleared {
-		t.Fatal("the login should still be removed after silent 401")
-	}
-	if errOut.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty for already-invalid token", errOut.String())
-	}
-	if !strings.Contains(out.String(), "Logged out.") {
-		t.Fatalf("stdout = %q, want to contain %q", out.String(), "Logged out.")
-	}
-}
-
-func TestRunLogout_ReturnsErrorOnClearFailure(t *testing.T) {
-	t.Parallel()
-
-	revoke := func(context.Context) error { return nil }
-
-	var out, errOut bytes.Buffer
-	err := runLogout(context.Background(), &out, &errOut, testLogoutToken, revoke, func() error { return errors.New("keyring locked") })
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "keyring locked") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "keyring locked")
-	}
-	if strings.Contains(out.String(), "Logged out.") {
-		t.Fatal("should not print success message when local removal fails")
-	}
-}
 
 func TestLogoutCmd_IsRegistered(t *testing.T) {
 	t.Parallel()
@@ -163,13 +38,35 @@ func TestLogoutCmd_IsRegistered(t *testing.T) {
 	}
 }
 
-// makeLogoutContexts builds a contextsProvider returning the given contexts
-// with no active marker — `logout --all-contexts` ignores which one is current.
+func TestLogoutCmd_RejectsAllContextsFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd := newLogoutCmd()
+	cmd.SetArgs([]string{"--all-contexts"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --all-contexts") {
+		t.Fatalf("Execute() = %v, want unknown-flag error", err)
+	}
+}
+
+// makeLogoutContexts returns a fixed context list.
 func makeLogoutContexts(cs ...*contexts.Context) contextsProvider {
 	return func() ([]*contexts.Context, string, error) { return cs, "", nil }
 }
 
-func TestRunLogoutAll_RevokesAndRemovesEachContext(t *testing.T) {
+// freshBearer returns a refreshed bearer for every context.
+func freshBearer() func(context.Context, *contexts.Context) (bearer, error) {
+	return func(context.Context, *contexts.Context) (bearer, error) { return bearer{token: testLogoutToken}, nil }
+}
+
+// unitDeps wires runLogout with no TLS check.
+func unitDeps(list contextsProvider, tokenFor func(context.Context, *contexts.Context) (bearer, error), revoke revokeTargetFunc, remove func(string) error) logoutDeps {
+	return logoutDeps{listContexts: list, tokenForContext: tokenFor, revoke: revoke, removeContext: remove}
+}
+
+func TestRunLogout_RevokesAndRemovesEachContext(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(
@@ -177,7 +74,9 @@ func TestRunLogoutAll_RevokesAndRemovesEachContext(t *testing.T) {
 		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
 	)
 	tokens := map[string]string{"eu": "tok-eu", "us": "tok-us"}
-	tokenFor := func(c *contexts.Context) (string, error) { return tokens[c.Name], nil }
+	tokenFor := func(_ context.Context, c *contexts.Context) (bearer, error) {
+		return bearer{token: tokens[c.Name]}, nil
+	}
 
 	revoked := map[string]string{} // coreURL -> token
 	revoke := func(_ context.Context, coreURL, token string) error {
@@ -188,7 +87,7 @@ func TestRunLogoutAll_RevokesAndRemovesEachContext(t *testing.T) {
 	remove := func(name string) error { removed[name] = true; return nil }
 
 	var out, errOut bytes.Buffer
-	if err := runLogoutAll(context.Background(), &out, &errOut, provider, tokenFor, revoke, remove, false); err != nil {
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, tokenFor, revoke, remove)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -206,7 +105,36 @@ func TestRunLogoutAll_RevokesAndRemovesEachContext(t *testing.T) {
 	}
 }
 
-func TestRunLogoutAll_NoContexts(t *testing.T) {
+// A hand-edited contexts.json can hold null or nameless entries.
+func TestRunLogout_SkipsMalformedEntries(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(
+		nil,
+		&contexts.Context{CoreURL: "https://eu.auth.entire.io"},
+		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
+	)
+	revoked := 0
+	revoke := func(context.Context, string, string) error { revoked++; return nil }
+	var removed []string
+	remove := func(name string) error { removed = append(removed, name); return nil }
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, freshBearer(), revoke, remove)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if revoked != 1 || len(removed) != 1 || removed[0] != "us" {
+		t.Fatalf("revoked=%d removed=%v, want only the named login handled", revoked, removed)
+	}
+	if !strings.Contains(out.String(), "Logged out of 1 saved login(s).") {
+		t.Fatalf("stdout = %q, want count of 1", out.String())
+	}
+	if n := strings.Count(errOut.String(), "skipped a malformed saved login"); n != 2 {
+		t.Fatalf("stderr = %q, want one warning per malformed entry", errOut.String())
+	}
+}
+
+func TestRunLogout_NoContextsPrintsNotLoggedIn(t *testing.T) {
 	t.Parallel()
 
 	revoke := func(context.Context, string, string) error {
@@ -216,22 +144,46 @@ func TestRunLogoutAll_NoContexts(t *testing.T) {
 	remove := func(string) error { t.Fatal("remove should not run with no contexts"); return nil }
 
 	var out, errOut bytes.Buffer
-	if err := runLogoutAll(context.Background(), &out, &errOut, makeLogoutContexts(), nil, revoke, remove, false); err != nil {
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(makeLogoutContexts(), nil, revoke, remove)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out.String(), "No saved logins to remove.") {
-		t.Fatalf("stdout = %q, want the empty-state message", out.String())
+	if !strings.Contains(out.String(), "Not logged in.") {
+		t.Fatalf("stdout = %q, want %q", out.String(), "Not logged in.")
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", errOut.String())
 	}
 }
 
-func TestRunLogoutAll_RevokeFailureWarnsButContinues(t *testing.T) {
+func TestRunLogout_ListFailureNamesTheFile(t *testing.T) {
+	t.Parallel()
+
+	provider := func() ([]*contexts.Context, string, error) {
+		return nil, "", errors.New("parse contexts file: bad json")
+	}
+	deps := unitDeps(provider, nil, nil, nil)
+	deps.contextsFile = "/home/u/.config/entire/contexts.json"
+
+	var out, errOut bytes.Buffer
+	err := runLogout(context.Background(), &out, &errOut, deps)
+	if err == nil || !strings.Contains(err.Error(), "parse contexts file") {
+		t.Fatalf("err = %v, want the list failure", err)
+	}
+	if !strings.Contains(errOut.String(), "/home/u/.config/entire/contexts.json") {
+		t.Fatalf("stderr = %q, want a hint naming contexts.json", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", out.String())
+	}
+}
+
+func TestRunLogout_RevokeFailureWarnsButContinues(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(
 		&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"},
 		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
 	)
-	tokenFor := func(*contexts.Context) (string, error) { return testLogoutToken, nil }
 	revoke := func(_ context.Context, coreURL, _ string) error {
 		if coreURL == "https://eu.auth.entire.io" {
 			return errors.New("connection refused")
@@ -242,7 +194,7 @@ func TestRunLogoutAll_RevokeFailureWarnsButContinues(t *testing.T) {
 	remove := func(name string) error { removed[name] = true; return nil }
 
 	var out, errOut bytes.Buffer
-	if err := runLogoutAll(context.Background(), &out, &errOut, provider, tokenFor, revoke, remove, false); err != nil {
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, freshBearer(), revoke, remove)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !removed["eu"] || !removed["us"] {
@@ -256,37 +208,137 @@ func TestRunLogoutAll_RevokeFailureWarnsButContinues(t *testing.T) {
 	}
 }
 
-func TestRunLogoutAll_UnauthorizedRevokeIsSilent(t *testing.T) {
+// A refreshed bearer that the server still rejects is not "already
+// logged out": the session may be alive, so the user hears about it.
+func TestRunLogout_UnauthorizedFreshBearerWarns(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
-	tokenFor := func(*contexts.Context) (string, error) { return testLogoutToken, nil }
+	revoke := func(context.Context, string, string) error {
+		return &api.HTTPError{StatusCode: http.StatusUnauthorized, Message: "Not authenticated"}
+	}
+	removed := false
+	remove := func(string) error { removed = true; return nil }
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, freshBearer(), revoke, remove)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !removed {
+		t.Fatal("context should still be removed locally")
+	}
+	if !strings.Contains(errOut.String(), `revocation failed for "eu"`) {
+		t.Fatalf("stderr = %q, want a warning: a fresh bearer got 401", errOut.String())
+	}
+}
+
+// A family the server no longer has is the desired end state.
+func TestRunLogout_NotFoundRevokeIsSilent(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
+	revoke := func(context.Context, string, string) error {
+		return &api.HTTPError{StatusCode: http.StatusNotFound, Message: "not found"}
+	}
+	remove := func(string) error { return nil }
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, freshBearer(), revoke, remove)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty: the family is already gone", errOut.String())
+	}
+}
+
+// Refresh failed, the stored token got 401: nothing proves the session
+// ended, so warn and name the refresh failure.
+func TestRunLogout_StaleBearerUnauthorizedWarns(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
+	tokenFor := func(context.Context, *contexts.Context) (bearer, error) {
+		return bearer{token: testLogoutToken, stale: errors.New("dial tcp: connection refused")}, nil
+	}
+	revoke := func(context.Context, string, string) error {
+		return &api.HTTPError{StatusCode: http.StatusUnauthorized, Message: "Not authenticated"}
+	}
+	removed := false
+	remove := func(string) error { removed = true; return nil }
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, tokenFor, revoke, remove)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !removed {
+		t.Fatal("context should still be removed locally")
+	}
+	got := errOut.String()
+	if !strings.Contains(got, "may still be active") || !strings.Contains(got, "connection refused") {
+		t.Fatalf("stderr = %q, want a may-still-be-active warning carrying the refresh error", got)
+	}
+}
+
+// The login server already declared the family dead during refresh, so
+// the 401 on the stored token confirms the desired state.
+func TestRunLogout_ReauthRequiredIsSilent(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
+	tokenFor := func(context.Context, *contexts.Context) (bearer, error) {
+		return bearer{token: testLogoutToken, stale: fmt.Errorf("refresh: %w", auth.ErrReauthRequired)}, nil
+	}
 	revoke := func(context.Context, string, string) error {
 		return &api.HTTPError{StatusCode: http.StatusUnauthorized, Message: "Not authenticated"}
 	}
 	remove := func(string) error { return nil }
 
 	var out, errOut bytes.Buffer
-	if err := runLogoutAll(context.Background(), &out, &errOut, provider, tokenFor, revoke, remove, false); err != nil {
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, tokenFor, revoke, remove)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if errOut.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty: an already-invalid token is the desired state", errOut.String())
+		t.Fatalf("stderr = %q, want empty: the server already ended this session", errOut.String())
 	}
 }
 
-func TestRunLogoutAll_UnreadableTokenRemovesLocallyOnly(t *testing.T) {
+// Reauth-required excuses a 401 only. Any other revoke failure still
+// means the session may be live.
+func TestRunLogout_ReauthRequiredStillWarnsOnServerError(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
-	tokenFor := func(*contexts.Context) (string, error) { return "", errors.New("keyring locked") }
+	tokenFor := func(context.Context, *contexts.Context) (bearer, error) {
+		return bearer{token: testLogoutToken, stale: fmt.Errorf("refresh: %w", auth.ErrReauthRequired)}, nil
+	}
+	revoke := func(context.Context, string, string) error {
+		return &api.HTTPError{StatusCode: http.StatusInternalServerError, Message: "boom"}
+	}
+	remove := func(string) error { return nil }
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, tokenFor, revoke, remove)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := errOut.String(); !strings.Contains(got, "revocation failed") || !strings.Contains(got, "boom") {
+		t.Fatalf("stderr = %q, want a revocation-failed warning carrying the server error", got)
+	}
+}
+
+func TestRunLogout_UnreadableTokenRemovesLocallyOnly(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"})
+	tokenFor := func(context.Context, *contexts.Context) (bearer, error) {
+		return bearer{}, errors.New("keyring locked")
+	}
 	revokeCalled := false
 	revoke := func(context.Context, string, string) error { revokeCalled = true; return nil }
 	removed := false
 	remove := func(string) error { removed = true; return nil }
 
 	var out, errOut bytes.Buffer
-	if err := runLogoutAll(context.Background(), &out, &errOut, provider, tokenFor, revoke, remove, false); err != nil {
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, tokenFor, revoke, remove)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if revokeCalled {
@@ -298,21 +350,22 @@ func TestRunLogoutAll_UnreadableTokenRemovesLocallyOnly(t *testing.T) {
 	if !strings.Contains(errOut.String(), "removing locally only") {
 		t.Fatalf("stderr = %q, want the locally-only warning", errOut.String())
 	}
+	if !strings.Contains(out.String(), "Logged out of 1 saved login(s).") {
+		t.Fatalf("stdout = %q, want count of 1", out.String())
+	}
 }
 
-func TestRunLogoutAll_InsecureCoreSkipsRevoke(t *testing.T) {
+func TestRunLogout_InsecureCoreSkipsRevoke(t *testing.T) {
 	t.Parallel()
 
 	provider := makeLogoutContexts(&contexts.Context{Name: "local", CoreURL: "http://insecure.example.com"})
-	tokenFor := func(*contexts.Context) (string, error) { return testLogoutToken, nil }
 	revokeCalled := false
 	revoke := func(context.Context, string, string) error { revokeCalled = true; return nil }
 	removed := false
 	remove := func(string) error { removed = true; return nil }
 
 	var out, errOut bytes.Buffer
-	// insecureHTTPAuth=false: a plain-http core must not receive the bearer.
-	if err := runLogoutAll(context.Background(), &out, &errOut, provider, tokenFor, revoke, remove, false); err != nil {
+	if err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, freshBearer(), revoke, remove)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if revokeCalled {
@@ -326,14 +379,85 @@ func TestRunLogoutAll_InsecureCoreSkipsRevoke(t *testing.T) {
 	}
 }
 
-// coreRecorder counts the session-endpoint calls a fake entire-core sees, so
-// the flag-matrix test can assert exactly which revoke shape each context's
-// core received.
+// A login server that accepts the connection and never answers must not
+// hang the sweep: the per-login deadline fires and removal proceeds.
+func TestRunLogout_HangingCoreHitsDeadline(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(
+		&contexts.Context{Name: "hung", CoreURL: "https://hung.auth.entire.io"},
+		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
+	)
+	revoke := func(ctx context.Context, coreURL, _ string) error {
+		if coreURL == "https://hung.auth.entire.io" {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
+	removed := map[string]bool{}
+	remove := func(name string) error { removed[name] = true; return nil }
+	deps := unitDeps(provider, freshBearer(), revoke, remove)
+	deps.loginTimeout = 50 * time.Millisecond
+
+	var out, errOut bytes.Buffer
+	if err := runLogout(context.Background(), &out, &errOut, deps); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !removed["hung"] || !removed["us"] {
+		t.Fatalf("both logins should be removed after the deadline, got %v", removed)
+	}
+	if !strings.Contains(errOut.String(), `revocation failed for "hung"`) || !strings.Contains(errOut.String(), "deadline exceeded") {
+		t.Fatalf("stderr = %q, want a deadline warning for the hung login", errOut.String())
+	}
+}
+
+func TestRunLogout_RemoveFailureWarnsAndFails(t *testing.T) {
+	t.Parallel()
+
+	provider := makeLogoutContexts(
+		&contexts.Context{Name: "eu", CoreURL: "https://eu.auth.entire.io"},
+		&contexts.Context{Name: "us", CoreURL: "https://us.auth.entire.io"},
+	)
+	revoke := func(context.Context, string, string) error { return nil }
+	remove := func(name string) error {
+		if name == "eu" {
+			return errors.New("keyring locked")
+		}
+		return nil
+	}
+
+	var out, errOut bytes.Buffer
+	err := runLogout(context.Background(), &out, &errOut, unitDeps(provider, freshBearer(), revoke, remove))
+	if err == nil || !strings.Contains(err.Error(), "failed to remove 1 saved login(s)") {
+		t.Fatalf("err = %v, want the removal failure count", err)
+	}
+	if !strings.Contains(errOut.String(), `failed to remove saved login "eu"`) || !strings.Contains(errOut.String(), "keyring locked") {
+		t.Fatalf("stderr = %q, want a warning naming the failed context", errOut.String())
+	}
+	if !strings.Contains(out.String(), "Logged out of 1 saved login(s).") {
+		t.Fatalf("stdout = %q, want the one successful removal counted", out.String())
+	}
+}
+
+// coreRecorder counts session-endpoint calls on a fake core.
 type coreRecorder struct {
 	mu            sync.Mutex
+	refreshes     int
 	listCount     int
+	deleteCLI     int // bare collection DELETE: CLI sessions
+	deleteAll     int // collection DELETE with scope=all
 	deleteCurrent int
 	deleteByID    []string
+	bearers       []string // Authorization bearers seen on revoke calls
+
+	// failRefresh makes /oauth/token answer 500.
+	failRefresh bool
+	// noRevokeAll makes the collection DELETE answer 405 (older core).
+	noRevokeAll bool
+	// revokeStatus overrides the bare collection and /current answers;
+	// zero means 200.
+	revokeStatus int
 }
 
 func (r *coreRecorder) snapshot() (list, current, byID int) {
@@ -342,23 +466,56 @@ func (r *coreRecorder) snapshot() (list, current, byID int) {
 	return r.listCount, r.deleteCurrent, len(r.deleteByID)
 }
 
-// newCoreServer stands up a fake entire-core that answers the three session
-// endpoints logout uses: GET (list), DELETE /current, DELETE /<id>. The list
-// returns two sessions so --everywhere has something to delete per core.
+// newCoreServer fakes entire-core's refresh and session endpoints.
 func newCoreServer(t *testing.T) (*httptest.Server, *coreRecorder) {
 	t.Helper()
 	rec := &coreRecorder{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
+		if strings.HasPrefix(r.URL.Path, coreAuthSessionsPath) && r.Method == http.MethodDelete {
+			rec.bearers = append(rec.bearers, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		}
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+			rec.refreshes++
+			if rec.failRefresh {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			fresh := makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, srv.URL, time.Now().Add(time.Hour).Unix()))
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"entr_new","token_type":"Bearer","expires_in":3600}`, fresh)
 		case r.Method == http.MethodGet && r.URL.Path == coreAuthSessionsPath:
 			rec.listCount++
 			fmt.Fprint(w, `{"tokens":[{"id":"s1"},{"id":"s2"}]}`)
+		case r.Method == http.MethodDelete && r.URL.Path == coreAuthSessionsPath:
+			all := r.URL.Query().Get("scope") == "all"
+			if all {
+				rec.deleteAll++
+			} else {
+				rec.deleteCLI++
+			}
+			switch {
+			case rec.noRevokeAll:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			case !all && rec.revokeStatus != 0:
+				w.WriteHeader(rec.revokeStatus)
+				return
+			}
+			fmt.Fprint(w, `{"success":true}`)
 		case r.Method == http.MethodDelete && r.URL.Path == coreAuthSessionsPath+"/current":
 			rec.deleteCurrent++
+			if rec.revokeStatus != 0 {
+				w.WriteHeader(rec.revokeStatus)
+				return
+			}
+			fmt.Fprint(w, `{"success":true}`)
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, coreAuthSessionsPath+"/"):
 			rec.deleteByID = append(rec.deleteByID, strings.TrimPrefix(r.URL.Path, coreAuthSessionsPath+"/"))
+			fmt.Fprint(w, `{"success":true}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -367,31 +524,56 @@ func newCoreServer(t *testing.T) (*httptest.Server, *coreRecorder) {
 	return srv, rec
 }
 
-// seedTwoContexts records two login contexts pointing at two fake cores. The
-// second (recB) is recorded with activate=true, so it is the *active* context
-// — what a plain `logout` (no --all-contexts) targets.
+// isolateLogoutState points config and keyring at temp dirs.
+func isolateLogoutState(t *testing.T) {
+	t.Helper()
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv(contexts.EnvContextVar, "")
+	t.Setenv(auth.EnvTokenVar, "")
+	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+}
+
+// seedLogin records a valid login for handle on core.
+func seedLogin(t *testing.T, coreURL, handle string) {
+	t.Helper()
+	exp := time.Now().Add(time.Hour).Unix()
+	jwt := makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":%q,"exp":%d}`, coreURL, handle, exp))
+	if _, err := auth.RecordLoginContext(jwt, "", true); err != nil {
+		t.Fatalf("seed login %s: %v", handle, err)
+	}
+}
+
+// seedExpiredLogin records a login whose access token has expired,
+// paired with refresh token "entr_old".
+func seedExpiredLogin(t *testing.T, coreURL, handle string) {
+	t.Helper()
+	seedLogin(t, coreURL, handle)
+	if _, err := auth.RecordLoginContext(
+		makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":%q,"exp":%d}`, coreURL, handle, time.Now().Add(time.Hour).Unix())),
+		"entr_old", true); err != nil {
+		t.Fatalf("seed refresh token: %v", err)
+	}
+	past := time.Now().Add(-time.Hour).Unix()
+	expired := makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":%q,"exp":%d}`, coreURL, handle, past))
+	svc := tokenstore.CoreKeyringService(coreURL)
+	if err := tokenstore.Set(svc, handle, expired+tokenstore.TokenExpirationSeparator+strconv.FormatInt(past, 10)); err != nil {
+		t.Fatalf("expire access token: %v", err)
+	}
+}
+
+// seedTwoContexts records two logins on two fake cores.
 func seedTwoContexts(t *testing.T) (recA, recB *coreRecorder) {
 	t.Helper()
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
+	isolateLogoutState(t)
 	srvA, recA := newCoreServer(t)
 	srvB, recB := newCoreServer(t)
-	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, srvA.URL, exp)), "", true); err != nil {
-		t.Fatalf("seed context A: %v", err)
-	}
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"bob","exp":%d}`, srvB.URL, exp)), "", true); err != nil {
-		t.Fatalf("seed context B: %v", err)
-	}
+	seedLogin(t, srvA.URL, "alice")
+	seedLogin(t, srvB.URL, "bob")
 	return recA, recB
 }
 
-// execLogout runs the real cobra logout command with --insecure-http-auth
-// (the fake cores are http loopback) plus the given flags.
-func execLogout(t *testing.T, flags ...string) {
+// execLogout runs the cobra command against http cores.
+func execLogout(t *testing.T, flags ...string) (stdout, stderr string) {
 	t.Helper()
 	cmd := newLogoutCmd()
 	cmd.SetArgs(append([]string{"--insecure-http-auth"}, flags...))
@@ -401,52 +583,177 @@ func execLogout(t *testing.T, flags ...string) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("logout %v: %v (stderr=%q)", flags, err, errOut.String())
 	}
+	return out.String(), errOut.String()
 }
 
-// TestLogoutCommand_FlagMatrix pins all four quadrants of the --all-contexts/--everywhere
-// matrix end-to-end through the cobra command, asserting which revoke shape each
-// context's core actually received. Process-global env + keyring backend, so no
-// t.Parallel(); subtests run sequentially, each with fresh state.
-func TestLogoutCommand_FlagMatrix(t *testing.T) {
-	t.Run("logout: active context, current session", func(t *testing.T) {
+// assertNoContextsLeft fails if any login survived.
+func assertNoContextsLeft(t *testing.T) {
+	t.Helper()
+	all, _, err := auth.StoredContexts()
+	if err != nil {
+		t.Fatalf("StoredContexts: %v", err)
+	}
+	if len(all) != 0 {
+		t.Fatalf("want every context removed, %d left", len(all))
+	}
+}
+
+// TestLogoutCommand_SweepsEveryContext runs the real cobra command against two
+// fake cores. Process-global env + keyring backend, so no t.Parallel().
+func TestLogoutCommand_SweepsEveryContext(t *testing.T) {
+	t.Run("default: every CLI session on every core", func(t *testing.T) {
 		recA, recB := seedTwoContexts(t)
-		execLogout(t)
-		if l, c, b := recA.snapshot(); l+c+b != 0 {
-			t.Errorf("inactive context A should be untouched, got list=%d current=%d byID=%d", l, c, b)
+		out, errOut := execLogout(t)
+		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
+			if l, c, b := rec.snapshot(); rec.deleteCLI != 1 || rec.deleteAll != 0 || l != 0 || c != 0 || b != 0 {
+				t.Errorf("context %s: want one bare collection DELETE, got cli=%d all=%d list=%d current=%d byID=%d", name, rec.deleteCLI, rec.deleteAll, l, c, b)
+			}
 		}
-		if l, c, b := recB.snapshot(); l != 0 || c != 1 || b != 0 {
-			t.Errorf("active context B: want one current-session revoke, got list=%d current=%d byID=%d", l, c, b)
+		if !strings.Contains(out, "Logged out of 2 saved login(s).") {
+			t.Errorf("stdout = %q, want count of 2", out)
 		}
+		if errOut != "" {
+			t.Errorf("stderr = %q, want empty", errOut)
+		}
+		assertNoContextsLeft(t)
 	})
 
-	t.Run("--everywhere: active context, all sessions", func(t *testing.T) {
+	t.Run("default: older core falls back to the current session", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		recA.noRevokeAll = true
+		_, errOut := execLogout(t)
+		if l, c, b := recA.snapshot(); recA.deleteCLI != 1 || l != 0 || c != 1 || b != 0 {
+			t.Errorf("old core: want 405 then one /current revoke, got cli=%d list=%d current=%d byID=%d", recA.deleteCLI, l, c, b)
+		}
+		if _, c, _ := recB.snapshot(); recB.deleteCLI != 1 || c != 0 {
+			t.Errorf("new core: want one bare collection DELETE only, got cli=%d current=%d", recB.deleteCLI, c)
+		}
+		if errOut != "" {
+			t.Errorf("stderr = %q, want empty: the fallback is not a failure", errOut)
+		}
+		assertNoContextsLeft(t)
+	})
+
+	t.Run("--everywhere: one scope=all DELETE per core", func(t *testing.T) {
 		recA, recB := seedTwoContexts(t)
 		execLogout(t, "--everywhere")
-		if l, c, b := recA.snapshot(); l+c+b != 0 {
-			t.Errorf("inactive context A should be untouched, got list=%d current=%d byID=%d", l, c, b)
+		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
+			l, c, b := rec.snapshot()
+			if rec.deleteAll != 1 || rec.deleteCLI != 0 || l != 0 || c != 0 || b != 0 {
+				t.Errorf("context %s: want one scope=all DELETE only, got all=%d cli=%d list=%d current=%d byID=%d", name, rec.deleteAll, rec.deleteCLI, l, c, b)
+			}
 		}
-		if l, c, b := recB.snapshot(); l != 1 || c != 0 || b != 2 {
-			t.Errorf("active context B: want list + 2 by-id revokes, got list=%d current=%d byID=%d", l, c, b)
+		assertNoContextsLeft(t)
+	})
+
+	t.Run("--everywhere: older core falls back to list + delete", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		recA.noRevokeAll = true
+		_, errOut := execLogout(t, "--everywhere")
+		if l, c, b := recA.snapshot(); recA.deleteAll != 1 || l != 1 || c != 0 || b != 2 {
+			t.Errorf("old core: want 405 then list + 2 by-id revokes, got all=%d list=%d current=%d byID=%d", recA.deleteAll, l, c, b)
+		}
+		if l, _, b := recB.snapshot(); recB.deleteAll != 1 || l != 0 || b != 0 {
+			t.Errorf("new core: want one scope=all DELETE only, got all=%d list=%d byID=%d", recB.deleteAll, l, b)
+		}
+		if errOut != "" {
+			t.Errorf("stderr = %q, want empty: the fallback is not a failure", errOut)
+		}
+		assertNoContextsLeft(t)
+	})
+
+	t.Run("--context override does not narrow the sweep", func(t *testing.T) {
+		recA, recB := seedTwoContexts(t)
+		all, _, err := auth.StoredContexts()
+		if err != nil || len(all) != 2 {
+			t.Fatalf("StoredContexts = %v, %v; want 2 seeded", all, err)
+		}
+		contexts.SetFlagOverrideForTest(t, all[0].Name)
+		execLogout(t)
+		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
+			if l, c, b := rec.snapshot(); rec.deleteCLI != 1 || l != 0 || c != 0 || b != 0 {
+				t.Errorf("context %s: want one bare collection DELETE, got cli=%d list=%d current=%d byID=%d", name, rec.deleteCLI, l, c, b)
+			}
+		}
+		assertNoContextsLeft(t)
+	})
+
+	t.Run("no contexts: not logged in", func(t *testing.T) {
+		isolateLogoutState(t)
+		if out, _ := execLogout(t); !strings.Contains(out, "Not logged in.") {
+			t.Errorf("stdout = %q, want %q", out, "Not logged in.")
 		}
 	})
 
-	t.Run("--all-contexts: every context, current session each", func(t *testing.T) {
-		recA, recB := seedTwoContexts(t)
-		execLogout(t, "--all-contexts")
-		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
-			if l, c, b := rec.snapshot(); l != 0 || c != 1 || b != 0 {
-				t.Errorf("context %s: want one current-session revoke, got list=%d current=%d byID=%d", name, l, c, b)
-			}
+	// An env token is not a saved login and survives the sweep, which
+	// `auth status` will then report; say so rather than surprise.
+	t.Run("ENTIRE_TOKEN set: note that it still authenticates", func(t *testing.T) {
+		seedTwoContexts(t)
+		t.Setenv(auth.EnvTokenVar, "env-bearer")
+		_, errOut := execLogout(t)
+		if !strings.Contains(errOut, "Context provided by ENTIRE_TOKEN.") {
+			t.Errorf("stderr = %q, want the ENTIRE_TOKEN note", errOut)
 		}
+		assertNoContextsLeft(t)
+	})
+}
+
+// TestLogoutCommand_RefreshesBeforeRevoking drives the real bearer resolver:
+// an expired access token is re-minted from the refresh token and the
+// revoke carries the new bearer. Process-global state, so no t.Parallel().
+func TestLogoutCommand_RefreshesBeforeRevoking(t *testing.T) {
+	t.Run("expired token is refreshed, then revoked", func(t *testing.T) {
+		isolateLogoutState(t)
+		srv, rec := newCoreServer(t)
+		seedExpiredLogin(t, srv.URL, "alice")
+
+		_, errOut := execLogout(t)
+		if rec.refreshes != 1 || rec.deleteCLI != 1 {
+			t.Fatalf("want one refresh then one revoke, got refreshes=%d cli=%d", rec.refreshes, rec.deleteCLI)
+		}
+		if len(rec.bearers) != 1 || !strings.Contains(rec.bearers[0], ".") || rec.bearers[0] == "" {
+			t.Fatalf("revoke bearers = %v, want the re-minted JWT", rec.bearers)
+		}
+		claims := strings.Split(rec.bearers[0], ".")
+		if len(claims) != 3 {
+			t.Fatalf("bearer %q is not a JWT", rec.bearers[0])
+		}
+		if errOut != "" {
+			t.Errorf("stderr = %q, want empty", errOut)
+		}
+		assertNoContextsLeft(t)
 	})
 
-	t.Run("--all-contexts --everywhere: every context, all sessions each", func(t *testing.T) {
-		recA, recB := seedTwoContexts(t)
-		execLogout(t, "--all-contexts", "--everywhere")
-		for name, rec := range map[string]*coreRecorder{"A": recA, "B": recB} {
-			if l, c, b := rec.snapshot(); l != 1 || c != 0 || b != 2 {
-				t.Errorf("context %s: want list + 2 by-id revokes, got list=%d current=%d byID=%d", name, l, c, b)
-			}
+	t.Run("refresh fails and stored token is rejected: warn", func(t *testing.T) {
+		isolateLogoutState(t)
+		srv, rec := newCoreServer(t)
+		rec.failRefresh = true
+		rec.revokeStatus = http.StatusUnauthorized
+		seedExpiredLogin(t, srv.URL, "alice")
+
+		_, errOut := execLogout(t)
+		if rec.refreshes < 1 || rec.deleteCLI != 1 {
+			t.Fatalf("want a refresh attempt then one revoke, got refreshes=%d cli=%d", rec.refreshes, rec.deleteCLI)
 		}
+		if !strings.Contains(errOut, "may still be active") {
+			t.Fatalf("stderr = %q, want a may-still-be-active warning", errOut)
+		}
+		assertNoContextsLeft(t)
+	})
+
+	t.Run("core down: warn and remove locally", func(t *testing.T) {
+		isolateLogoutState(t)
+		srv, _ := newCoreServer(t)
+		seedExpiredLogin(t, srv.URL, "alice")
+		srv.Close()
+
+		out, errOut := execLogout(t)
+		if !strings.Contains(errOut, "Warning:") {
+			t.Fatalf("stderr = %q, want a warning about the unreachable core", errOut)
+		}
+		if !strings.Contains(out, "Logged out of 1 saved login(s).") {
+			t.Fatalf("stdout = %q, want the login counted as removed", out)
+		}
+		assertNoContextsLeft(t)
 	})
 }

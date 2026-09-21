@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
-	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
@@ -225,12 +224,12 @@ func defaultListDispatchWizardPlacements(ctx context.Context) (map[string][]stri
 // account access token the dispatch itself will send, so the picker's default
 // and the request's routing agree on which login they mean.
 func defaultResolveDispatchWizardHome(ctx context.Context) string {
-	token, err := auth.ResolveDataAPIToken(ctx, api.BaseURL())
+	target, err := auth.ResolveDataAPI(ctx)
 	if err != nil {
 		logging.Debug(ctx, "dispatch wizard: home jurisdiction unavailable", "error", err)
 		return ""
 	}
-	home, err := auth.HomeJurisdictionFromLoginJWT(token)
+	home, err := auth.HomeJurisdictionFromLoginJWT(target.Token)
 	if err != nil {
 		logging.Debug(ctx, "dispatch wizard: home jurisdiction unavailable", "error", err)
 		return ""

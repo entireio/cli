@@ -93,23 +93,25 @@ func validateEntireURLForPrinting(ref string) error {
 	return nil
 }
 
-// mirrorCloneURL synthesizes the entire:// clone URL for a GitHub mirror from
-// its cluster host and owner/repo — the form `git clone` accepts, which the
-// mirror list API doesn't return. Shared by the mirror table view (mirrorRow)
-// and `repo clone` so the wire format lives in one place.
+// forgeCloneURL synthesizes the entire:// clone URL for a repository placement
+// from its cluster host and forge-qualified name — the form `git clone`
+// accepts, which neither the mirror list API nor the repos index returns.
+// Shared by the mirror table view (mirrorRow), the native placement view and
+// `repo clone`, so the wire format lives in one place.
 //
-// HARDCODED ASSUMPTIONS (revisit if either stops holding):
-//   - The provider path segment is fixed to "gh". Mirrors are GitHub-only
-//     today; the list/index API (RepoPlacement) records no provider, so there
-//     is nothing to key off. If a non-GitHub provider ever lands, this must
-//     take a provider argument or the URL will lie.
-//   - This is a client-side RECONSTRUCTION, not the server's canonical URL.
-//     The list index gives only a cluster slug, so callers resolve slug->host
-//     (clusterHostBySlug, via a separate ListClusters call) before calling
-//     this. If /repos ever returns the clone URL (or host+provider) directly,
-//     drop this synthesis and that extra round-trip.
-func mirrorCloneURL(host, owner, repo string) string {
-	return fmt.Sprintf("%s%s/gh/%s/%s", entireCloneURLScheme, host, owner, repo)
+// The forge segment is a parameter rather than the literal "gh" it used to be:
+// the same URL shape addresses an Entire-native repo as
+// entire://<host>/et/<project>/<repo>, and a hardcoded token would have made
+// every native URL lie. repoRemoteURL builds the same string from the server's
+// own `path` field; the two must keep agreeing.
+//
+// This is a client-side RECONSTRUCTION, not the server's canonical URL. The
+// index gives only a cluster slug, so callers resolve slug->host
+// (clusterHostBySlug, via a separate ListClusters call) before calling this. If
+// the index ever returns the clone URL directly, drop this synthesis and that
+// extra round-trip.
+func forgeCloneURL(forge, host, owner, repo string) string {
+	return fmt.Sprintf("%s%s/%s/%s/%s", entireCloneURLScheme, host, forge, owner, repo)
 }
 
 // nativeCloneForge is the path token of Entire-native repos in entire:// clone
@@ -534,7 +536,7 @@ func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, picker placem
 	if err := validateClusterHost(chosen.ClusterHost); err != nil {
 		return "", fmt.Errorf("mirror has an invalid cluster host %q: %w", chosen.ClusterHost, err)
 	}
-	cloneURL := mirrorCloneURL(chosen.ClusterHost, owner, repo)
+	cloneURL := forgeCloneURL(mirrorCloneForge, chosen.ClusterHost, owner, repo)
 	return cloneURL, nil
 }
 
@@ -770,7 +772,8 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 
 // mirrorCellLabel is the human label for a mirror placement in the clone picker:
 // the physical cell and jurisdiction when known, always anchored by the cluster
-// host that goes into the clone URL.
+// host that goes into the clone URL — the value the same command takes as
+// --cluster, so a reader who cancels the picker knows what to type next.
 func mirrorCellLabel(p coreapi.ResolvedPlacement) string {
 	cell := strings.TrimSpace(p.Cell.Or(""))
 	jur := strings.TrimSpace(p.Jurisdiction.Or(""))

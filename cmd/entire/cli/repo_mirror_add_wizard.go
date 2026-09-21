@@ -32,6 +32,9 @@ const mirrorCreateConcurrency = 8
 const (
 	mirrorStatusReady      = "ready"      // clone landed, ready to use
 	mirrorStatusRegistered = "registered" // placement created, clone in progress (--no-wait)
+	mirrorStatusExists     = "exists"     // the placement was already there; this run created nothing
+	mirrorStatusRemoving   = "removing"   // teardown recorded, placement not gone yet
+	mirrorStatusRemoved    = "removed"    // the placement is gone
 	mirrorStatusSuspended  = "suspended"  // placement exists but the cluster won't serve it
 	mirrorStatusFailed     = "failed"     // initial clone reached the terminal failed status
 	mirrorStatusTimedOut   = "timed out"  // clone didn't finish within --timeout
@@ -169,6 +172,59 @@ func clusterChoices(regions []regionChoice, jurisdiction string) (opts []huh.Opt
 	return opts, defaults
 }
 
+// regionBySlug finds a catalog region by slug, folding case like every other
+// cluster lookup.
+func regionBySlug(regions []regionChoice, slug string) (regionChoice, bool) {
+	for _, r := range regions {
+		if strings.EqualFold(r.slug, slug) {
+			return r, true
+		}
+	}
+	return regionChoice{}, false
+}
+
+// regionByHost is the same lookup keyed on the public host, which is what
+// --cluster takes. DNS is case-insensitive, so the match folds case.
+func regionByHost(regions []regionChoice, host string) (regionChoice, bool) {
+	for _, r := range regions {
+		if strings.EqualFold(r.host, host) {
+			return r, true
+		}
+	}
+	return regionChoice{}, false
+}
+
+// nativeEligibleRegions narrows the catalog to the clusters a native repo may
+// be mirrored into: v1 places a replica cross-jurisdiction, so the repo's own
+// region is not on offer. Offering it would only produce a choice that
+// checkNativeMirrorTarget then refuses.
+func nativeEligibleRegions(regions []regionChoice, repo *coreapi.Repo) []regionChoice {
+	home := repo.Jurisdiction.Or("")
+	out := make([]regionChoice, 0, len(regions))
+	for _, r := range regions {
+		if home != "" && strings.EqualFold(r.jurisdiction, home) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// callerJurisdiction reports the caller's home region, which only pre-selects
+// the picker's default. A /me hiccup must not sink the command, so a failure
+// reads as "no pre-selection" rather than an error.
+func callerJurisdiction(cmd *cobra.Command) string {
+	var jurisdiction string
+	//nolint:errcheck // a pre-selection is a nicety; a failed /me must not sink the command
+	_ = runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		if me, err := c.GetMe(ctx); err == nil {
+			jurisdiction, _ = me.Jurisdiction.Get()
+		}
+		return nil
+	})
+	return jurisdiction
+}
+
 // regionLabel is the human label for a region in the picker and the results
 // table: "slug (jurisdiction)" when both are known, else whatever identifier we
 // have, falling back to the bare host.
@@ -183,91 +239,46 @@ func regionLabel(r regionChoice) string {
 	}
 }
 
-// resolveOneShotClusterHost picks the cluster `repo mirror add
-// <repo>` targets when --cluster is omitted. Non-interactive
-// callers keep the fixed defaultClusterHost so scripts stay stable and
-// offline-resolvable; on a terminal the control plane's cluster catalog is
-// offered as a single-select (skipped when only one cluster exists),
-// pre-selecting the caller's jurisdiction default — the same
-// prompt-only-when-there-is-a-choice shape `repo clone` uses for
-// multi-cluster placements.
-func resolveOneShotClusterHost(cmd *cobra.Command) (string, error) {
-	if !interactive.CanPromptInteractively() {
-		return defaultClusterHost, nil
-	}
-	errW := cmd.ErrOrStderr()
-	var (
-		regions      []regionChoice
-		jurisdiction string
-	)
-	if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		stop := startSpinner(errW, "Fetching clusters")
-		var err error
-		if regions, err = availableRegions(ctx, c); err != nil {
-			stop(false)
-			return err
-		}
-		// The jurisdiction only pre-selects the picker's default; a /me
-		// hiccup shouldn't sink the create, so fall back to no pre-selection.
-		if me, merr := c.GetMe(ctx); merr == nil {
-			jurisdiction, _ = me.Jurisdiction.Get()
-		}
-		stop(true)
-		return nil
-	}); err != nil {
-		return "", err
-	}
-	if len(regions) == 0 {
-		return "", errors.New("no clusters available to mirror into; pass --cluster explicitly")
-	}
-	if len(regions) == 1 {
-		fmt.Fprintf(errW, "Using cluster %s\n", regions[0].host)
-		return regions[0].host, nil
-	}
-	return pickOneCluster(cmd.Context(), errW, regions, jurisdiction)
-}
-
-// pickOneCluster runs the one-shot add's cluster single-select,
-// pre-selecting the default cluster for the caller's jurisdiction. A clean
-// cancel (Ctrl+C / cancelled ctx) surfaces as a SilentError so the create
-// stops instead of falling through to a cluster the user didn't choose.
-func pickOneCluster(ctx context.Context, w io.Writer, regions []regionChoice, jurisdiction string) (string, error) {
-	opts, defaults := clusterChoices(regions, jurisdiction)
-	var selected string
-	if len(defaults) > 0 {
-		selected = defaults[0]
-	}
-	form := NewAccessibleForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Select the cluster to mirror into").
-				Options(opts...).
-				Value(&selected),
-		),
-	)
-	if err := form.RunWithContext(ctx); err != nil {
-		if cerr := handleFormCancellation(w, "Mirror add", err); cerr != nil {
-			return "", cerr
-		}
-		return "", NewSilentError(errors.New("mirror add cancelled"))
-	}
-	// Guard the selection against the offered hosts (like repo clone's
-	// picker) so a zero-value fall-through can't reach the caller as a
-	// misleading "invalid --cluster" error.
-	for _, r := range regions {
-		if r.host == selected {
-			return selected, nil
-		}
-	}
-	return "", NewSilentError(errors.New("mirror add cancelled"))
-}
-
 // mirrorTarget is one unit of work: a selected repo to be mirrored into a
 // selected region. The wizard creates the cross-product of repos × regions.
 type mirrorTarget struct {
-	owner  string
+	// forge says how to read owner/repo and which API places the mirror:
+	// mirrorCloneForge is a GitHub upstream cloned into a cluster,
+	// nativeCloneForge an extra placement of a repo Entire already holds.
+	forge  string
+	owner  string // GitHub owner, or Entire project
 	repo   string
 	region regionChoice
+	// nativeRepo is the resolved repo behind an /et/ target. The native create
+	// is keyed by repo ULID and the clone URL comes from the server's own path,
+	// so both are carried rather than re-resolved once per cluster.
+	nativeRepo *coreapi.Repo
+}
+
+// ref renders the target the way the user named it, for a result row.
+func (t mirrorTarget) ref() string {
+	return "/" + t.forge + "/" + t.owner + "/" + t.repo
+}
+
+// clientHost is the cluster host this target's control-plane calls are
+// addressed at, and the key its client is cached under. Empty for a native
+// target: those are addressed by repo ULID on the active context's core, which
+// the cross-jurisdiction transport routes onward by itself.
+func (t mirrorTarget) clientHost() string {
+	if t.forge == nativeCloneForge {
+		return ""
+	}
+	return t.region.host
+}
+
+// mirrorTargetClient builds the client a target's calls go through — the core
+// fronting its cluster for a GitHub mirror, the active context for a native
+// placement.
+func mirrorTargetClient(ctx context.Context, host string) (*coreapi.Client, error) {
+	if host == "" {
+		return activeCoreClient(ctx)
+	}
+	return clusterCoreClient(ctx, host)
 }
 
 // mirrorTargets expands the selected repos and regions into the full
@@ -276,14 +287,30 @@ func mirrorTargets(repos []coreapi.AvailableMirror, regions []regionChoice) []mi
 	targets := make([]mirrorTarget, 0, len(repos)*len(regions))
 	for _, r := range repos {
 		for _, reg := range regions {
-			targets = append(targets, mirrorTarget{owner: r.Owner, repo: r.Repo, region: reg})
+			targets = append(targets, mirrorTarget{forge: mirrorCloneForge, owner: r.Owner, repo: r.Repo, region: reg})
 		}
+	}
+	return targets
+}
+
+// oneRepoTargets is the one-repo case of the same cross-product: a single
+// repository across the clusters the caller chose. It is what `mirror add
+// <repo> --cluster a,b` builds, so a one-shot add goes through the same
+// parallel engine, live progress and summary table the wizard uses.
+func oneRepoTargets(ref mirrorRepoRef, nativeRepo *coreapi.Repo, regions []regionChoice) []mirrorTarget {
+	targets := make([]mirrorTarget, 0, len(regions))
+	for _, reg := range regions {
+		targets = append(targets, mirrorTarget{
+			forge: ref.forge, owner: ref.owner, repo: ref.repo,
+			region: reg, nativeRepo: nativeRepo,
+		})
 	}
 	return targets
 }
 
 // mirrorResult is the outcome of creating one (repo, region) mirror.
 type mirrorResult struct {
+	forge       string
 	owner       string
 	repo        string
 	regionLabel string
@@ -292,14 +319,24 @@ type mirrorResult struct {
 	err         error
 }
 
-var mirrorCreateResultColumns = []string{"REPO", colHeaderRegion, colHeaderStatus, colHeaderCloneURL}
+// ref renders the repository the way the user named it. A result row that said
+// only "acme/web" would not say which forge it came from, and the two
+// directories can hold that same pair.
+func (r mirrorResult) ref() string {
+	if r.forge == "" {
+		return r.owner + "/" + r.repo
+	}
+	return "/" + r.forge + "/" + r.owner + "/" + r.repo
+}
+
+var mirrorCreateResultColumns = []string{colHeaderRepo, colHeaderRegion, colHeaderStatus, colHeaderCloneURL}
 
 func mirrorCreateResultRow(r mirrorResult) []string {
 	url := r.cloneURL
 	if url == "" {
 		url = placeholderDash
 	}
-	return []string{r.owner + "/" + r.repo, r.regionLabel, r.status, url}
+	return []string{r.ref(), r.regionLabel, r.status, url}
 }
 
 // runMirrorAddWizard is the zero-argument `entire repo mirror add` flow:
@@ -316,7 +353,7 @@ func runMirrorAddWizard(cmd *cobra.Command, opts mirrorAddOptions) error {
 	// non-interactive form rather than letting huh error obscurely.
 	if !interactive.CanPromptInteractively() {
 		fmt.Fprintln(errW, "The mirror add wizard needs an interactive terminal.")
-		fmt.Fprintln(errW, "Run 'entire repo mirror add <repo> --cluster <host>' to create one non-interactively.")
+		fmt.Fprintln(errW, "Run 'entire repo mirror add <repo> --cluster <slug>' to create one non-interactively.")
 		return NewSilentError(errors.New("not an interactive terminal"))
 	}
 
@@ -505,21 +542,26 @@ func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, juris
 // region the active login can't reach fails every pair in that region rather
 // than aborting the whole run.
 func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, opts mirrorAddOptions) []mirrorResult {
-	// One client per distinct region, built once.
+	// One client per distinct region, built once. A GitHub mirror is addressed
+	// at the cluster it lands on, so it dials that cluster's core; a native
+	// placement is addressed by repo ULID on the control plane, which the
+	// transport routes to the repo's home core on its own — so every native
+	// target shares one active-context client, keyed here by the empty host.
 	clientByHost := make(map[string]*coreapi.Client)
 	clientErrByHost := make(map[string]error)
 	for _, t := range targets {
-		if _, seen := clientByHost[t.region.host]; seen {
+		host := t.clientHost()
+		if _, seen := clientByHost[host]; seen {
 			continue
 		}
-		if _, seen := clientErrByHost[t.region.host]; seen {
+		if _, seen := clientErrByHost[host]; seen {
 			continue
 		}
-		c, err := clusterCoreClient(ctx, t.region.host)
+		c, err := mirrorTargetClient(ctx, host)
 		if err != nil {
-			clientErrByHost[t.region.host] = err
+			clientErrByHost[host] = err
 		} else {
-			clientByHost[t.region.host] = c
+			clientByHost[host] = c
 		}
 	}
 
@@ -537,7 +579,7 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 	g.SetLimit(mirrorCreateConcurrency)
 	for i, t := range targets {
 		g.Go(func() error {
-			results[i] = createOneMirror(ctx, t, clientByHost[t.region.host], clientErrByHost[t.region.host], opts,
+			results[i] = createOneMirror(ctx, t, clientByHost[t.clientHost()], clientErrByHost[t.clientHost()], opts,
 				func(status string, final, ok bool) { prog.set(i, status, final, ok) })
 			return nil
 		})
@@ -562,7 +604,10 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	if report == nil {
 		report = func(string, bool, bool) {}
 	}
-	res := mirrorResult{owner: t.owner, repo: t.repo, regionLabel: regionLabel(t.region)}
+	res := mirrorResult{forge: t.forge, owner: t.owner, repo: t.repo, regionLabel: regionLabel(t.region)}
+	if t.forge == nativeCloneForge {
+		return createOneNativeMirror(ctx, t, c, clientErr, opts, report)
+	}
 	if clientErr != nil {
 		res.status, res.err = mirrorStatusError, clientErr
 		report(mirrorStatusError, true, false)
@@ -763,7 +808,7 @@ func reportMirrorResults(outW, errW io.Writer, results []mirrorResult) error {
 	if failures > 0 {
 		for _, r := range results {
 			if r.err != nil {
-				fmt.Fprintf(errW, "%s/%s @ %s: %v\n", r.owner, r.repo, r.regionLabel, r.err)
+				fmt.Fprintf(errW, "%s @ %s: %v\n", r.ref(), r.regionLabel, r.err)
 			}
 		}
 		return NewSilentError(fmt.Errorf("%d mirror(s) failed", failures))

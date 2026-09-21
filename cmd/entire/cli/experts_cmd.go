@@ -417,27 +417,18 @@ func expertsAPIPath(repoID string) string {
 // the CLI happens to be talking to. So:
 //   - ENTIRE_WEB_BASE_URL wins when set (e.g. http://localhost:5173 for a local
 //     frontend during dev).
-//   - otherwise, if the API base is itself an entire.io host (prod/staging), use
-//     it (frontend and API share that origin).
+//   - otherwise, if the data API is an Entire site (prod/staging), use it
+//     (frontend and API share that origin).
 //   - otherwise (local dev API like 127.0.0.1) fall back to the canonical
 //     https://entire.io so links still resolve to the proper site.
 func expertsWebBaseURL() string {
 	if raw := strings.TrimSpace(os.Getenv("ENTIRE_WEB_BASE_URL")); raw != "" {
 		return strings.TrimRight(raw, "/")
 	}
-	if base := strings.TrimRight(api.BaseURL(), "/"); isEntireWebHost(base) {
-		return base
+	if base, err := auth.DataBaseURL(); err == nil && auth.EntireSite(base) != "" {
+		return strings.TrimRight(base, "/")
 	}
 	return strings.TrimRight(api.DefaultBaseURL, "/")
-}
-
-func isEntireWebHost(base string) bool {
-	u, err := url.Parse(base)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	return host == "entire.io" || strings.HasSuffix(host, ".entire.io")
 }
 
 // expertsSessionURL builds the entire.io web URL for a session, matching the

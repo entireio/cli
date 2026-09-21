@@ -20,21 +20,25 @@ import (
 var requireSecureDispatchURL = api.RequireSecureURL
 
 func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
-	baseURL := api.BaseURL()
 	if opts.InsecureHTTPAuth {
 		auth.EnableInsecureHTTP()
-	} else {
-		if err := requireSecureDispatchURL(baseURL); err != nil {
+	} else if override, ok := api.BaseURLOverride(); ok {
+		if err := requireSecureDispatchURL(override); err != nil {
 			return nil, fmt.Errorf("dispatch base URL: %w", err)
 		}
 	}
-
-	token, err := lookupResourceToken(ctx, baseURL)
+	target, err := resolveDataAPI(ctx)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return nil, errors.New("dispatch requires login — run `entire login`")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading credentials: %w", err)
+	}
+	baseURL, token := target.BaseURL, target.Token
+	if !opts.InsecureHTTPAuth {
+		if err := requireSecureDispatchURL(baseURL); err != nil {
+			return nil, fmt.Errorf("dispatch base URL: %w", err)
+		}
 	}
 
 	now := nowUTC()

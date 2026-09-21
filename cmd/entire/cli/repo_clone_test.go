@@ -455,7 +455,7 @@ func TestMirrorCloneURL(t *testing.T) {
 	t.Parallel()
 	require.Equal(t,
 		"entire://aws-us-east-2.entire.io/gh/entirehq/entire-api",
-		mirrorCloneURL("aws-us-east-2.entire.io", "entirehq", "entire-api"))
+		forgeCloneURL(mirrorCloneForge, "aws-us-east-2.entire.io", "entirehq", "entire-api"))
 }
 
 func TestMirrorCellLabel(t *testing.T) {
