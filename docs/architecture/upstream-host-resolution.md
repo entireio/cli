@@ -186,10 +186,18 @@ host, so the login can follow it; every other API follows the selected login
 instead, and a host that rejects it names the login that would work.
 
 Whenever several logins are saved, every CLI command that acts as one says
-which on stderr, once per process: `Using context 'x'.`
-(`auth.announceContext`, reached through `auth.ActiveContext`). With a single
-saved login nothing is printed. `git-remote-entire` is outside this and keeps
-its own auto-select notice below.
+which on stderr, once per process: `Using context 'x'.` (`auth.AnnounceContext`,
+reached through `auth.ActingContext`). Nothing is printed when only one login is
+saved, nor when the user named the identity for this invocation with
+`--context`/`$ENTIRE_CONTEXT` — echoing back what they just typed is noise, and
+an explicit selection is the only identity the resolvers may act as, so the
+silence cannot hide a different one. `auth.ActiveContext` is the same resolution
+*without* the notice, for callers that only describe the login (a printed link,
+a cache key) rather than act as it, and `auth.SilenceContextNotice` suppresses
+it for a whole process — `entire agent-help` uses that, because its output is
+read by an agent and the login it resolves there authenticates a background
+trail-enablement probe rather than requested work. `git-remote-entire` is
+outside all of this and keeps its own auto-select notice below.
 
 Cell routing with **no** `ENTIRE_API_BASE_URL` matches no host: there is no
 configured data host to match against, and the production default is not a
@@ -223,8 +231,11 @@ doesn't exist" and "that context isn't trusted here" are different mistakes.
 Every consumer resolves through `Active`, so the selection is coherent: `auth
 status` reports it and `auth contexts` marks it. `logout` is the one exception:
 it sweeps every stored login (`auth.StoredContexts`), revoking each on its own
-login server with its own bearer, so the override neither narrows it nor fails
-it by naming a context that is gone.
+login server with its own bearer, so an inherited `$ENTIRE_CONTEXT` neither
+narrows it nor fails it by naming a context that is gone. An explicit
+`--context` is refused there instead of ignored: it asks for one identity on a
+command that ends all of them, and honouring the ambient variable the same way
+would make `logout` unrunnable in a shell that exports it.
 
 Two tiers sit underneath, in `clusterdiscovery.selectLoginContext`, and they
 apply only when the identity came from `current_context` (or there is none):

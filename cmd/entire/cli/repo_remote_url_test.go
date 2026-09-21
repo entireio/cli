@@ -30,7 +30,7 @@ func TestRepoRemoteURL_Local(t *testing.T) {
 		{name: "bare scheme rejected", args: []string{"entire://"}, wantErr: "invalid entire URL"},
 		{name: "embedded newline rejected", args: []string{"entire://example.com/et/p/r\nfoo"}, wantErr: "whitespace or a control character"},
 		{name: "forge required", args: []string{"project/repo"}, wantErr: "did you mean"},
-		{name: "native cluster rejected", args: []string{"/et/project/repo", "--cluster", "example.com"}, wantErr: "--cluster applies"},
+		{name: "native malformed cluster rejected", args: []string{"/et/project/repo", "--cluster", "example.com@evil.com"}, wantErr: "invalid --cluster"},
 		{name: "unknown flag", args: []string{"--unknown"}, wantErr: "unknown flag"},
 		{name: "missing ref", wantErr: "accepts 1 arg"},
 		{name: "extra ref", args: []string{"a", "b"}, wantErr: "accepts 1 arg"},

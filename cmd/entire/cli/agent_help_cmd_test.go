@@ -189,7 +189,7 @@ func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
 // auth eventually reports that the user is not logged in.
 // Not parallel: changes the process working directory and auth environment.
 func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
-	t.Setenv("ENTIRE_TOKEN", "")
+	unsetEnv(t, "ENTIRE_TOKEN")
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -737,7 +737,7 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	}
 
 	// Unlisted commands are named in the footer index, not given entries.
-	for _, name := range []string{"enable", "review", "investigate", "org", "api"} {
+	for _, name := range []string{"enable", "review", "org", "api"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("unlisted command %q should still be named in the footer:\n%s", name, out)
 		}

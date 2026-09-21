@@ -81,7 +81,7 @@ func ResolveDataAPI(ctx context.Context) (DataAPI, error) {
 		}
 		return DataAPI{BaseURL: dataURL, Token: token}, nil
 	}
-	c, ok, err := ActiveContext()
+	c, ok, err := ActingContext()
 	if err != nil {
 		return DataAPI{}, err
 	}
@@ -131,7 +131,7 @@ func DataBaseURL() (string, error) {
 		}
 		return dataBaseURLForCore(core)
 	}
-	c, ok, err := activeContext()
+	c, ok, err := ActiveContext()
 	if err != nil {
 		return "", err
 	}
