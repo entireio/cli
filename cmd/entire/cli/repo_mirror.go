@@ -1309,11 +1309,23 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	fmt.Fprintln(w)
 
 	if len(row.Placements) == 0 {
-		if row.Status != "" {
+		switch {
+		case row.ID != "":
+			// Entire holds a repo record here, and such a repo always has
+			// exactly one primary placement. So no placements says something
+			// about the READ, not about the repo: it landed in the seconds
+			// between create returning coordinates and the registry carrying
+			// them (the window waitForRepoClonable polls through). Saying "not
+			// mirrored" there would report a GitHub fact about a repo that
+			// demonstrably has a home.
+			fmt.Fprintln(w, "Not placed yet: this read caught the repo before its primary was assigned.")
+		case row.Status != "":
 			fmt.Fprintf(w, "Not mirrored on any cluster (%s).\n", row.Status)
-			return
+		default:
+			// No record and no placements: a GitHub upstream Entire does not
+			// mirror, for which "not mirrored" is simply the truth.
+			fmt.Fprintln(w, "Not mirrored on any cluster.")
 		}
-		fmt.Fprintln(w, "Not mirrored on any cluster.")
 		return
 	}
 

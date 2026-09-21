@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,6 +33,23 @@ func serveRepoView(t *testing.T, repoJSON string, authoritative func(w http.Resp
 	var authReads atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		// The by-name halves of a /et/<project>/<repo> lookup, so this harness
+		// serves the path spelling as well as the ULID one.
+		case r.URL.Path == "/api/v1/projects":
+			w.Header().Set("Content-Type", "application/json")
+			assert.NoError(t, printJSON(w, &coreapi.ListProjectsOutputBody{
+				Project: coreapi.NewOptProject(coreapi.Project{
+					ID: testProjectULID, Name: r.URL.Query().Get("name"),
+					OwnerId: "01OWNER", OwnerType: coreapi.ProjectOwnerTypeOrg, Region: "us",
+				}),
+			}))
+		case r.URL.Path == "/api/v1/projects/"+testProjectULID+"/repos":
+			w.Header().Set("Content-Type", "application/json")
+			assert.NoError(t, printJSON(w, &coreapi.ListProjectReposOutputBody{
+				Repo: coreapi.NewOptRepo(coreapi.Repo{
+					ID: testDeleteULID, Name: r.URL.Query().Get("name"), OwningProjectId: testProjectULID,
+				}),
+			}))
 		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"nativeMirrors":[]}`)
@@ -137,6 +155,53 @@ func TestRepoView_ReasonFollowsTheAuthoritativeState(t *testing.T) {
 			require.Contains(t, stderr, tc.wantReason)
 		})
 	}
+}
+
+// TestRepoView_BeforeThePrimaryIsPlaced pins the read that lands in the seconds
+// between `repo create` returning clone coordinates and the registry carrying
+// them — the window waitForRepoClonable polls through, where clusterSlug and
+// path are both absent.
+//
+// A native repo always has exactly one primary, so neither of the two lines
+// this view prints may suggest otherwise: the repo is still named by its path,
+// and the empty table says the READ was early rather than that the repo is
+// mirrored nowhere.
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_BeforeThePrimaryIsPlaced(t *testing.T) {
+	// No clusterSlug, no path: only what the schema makes required, plus the
+	// state. Both fields are optional on the wire for exactly this reason.
+	body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":"provisioning","visibility":"private"}`,
+		testDeleteULID, testProjectULID)
+
+	t.Run("the caller's path names the repo until the server mints its own", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body, nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, "/et/acme/web")
+		require.NoError(t, err)
+		requireOrder(t, out, "Name:", "/et/acme/web", "Visibility:", "Private")
+		require.Contains(t, out, "Not placed yet")
+		require.NotContains(t, out, "Not mirrored on any cluster",
+			"a repo Entire holds a record for has a primary; the read was merely early")
+	})
+
+	t.Run("a ULID ref supplies no project, so the repo's own name is all there is", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body, nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		requireOrder(t, out, "Name:", "web")
+		require.NotContains(t, out, "/et/", "no project name is known, and one is never invented")
+	})
+
+	t.Run("--json carries the project the caller's path named", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body, nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, "/et/acme/web", "--json")
+		require.NoError(t, err)
+		var row repoDirRow
+		require.NoError(t, json.Unmarshal([]byte(out), &row))
+		require.Equal(t, "/et/acme/web", row.Repo)
+		require.Equal(t, "acme", row.Project, "the caller's path is the only place the project NAME appears")
+		require.Empty(t, row.Placements)
+	})
 }
 
 func TestRepoCreateReadinessFlags(t *testing.T) {
