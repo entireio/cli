@@ -77,10 +77,9 @@ the commands are always runnable in every build.
   `repo mirror list` already make to map slugs to hosts) sorted by region then
   slug. The table's columns are the values other commands take: REGION is the
   jurisdiction slug behind `org create --region` and `project create
-  --region`; CLUSTER is the placement slug `repo mirror list --cluster` filters
-  on and the key the native-mirror API is addressed by; HOST is the bare public
-  host every targeting `--cluster` takes (`repo mirror add`/`remove`, `repo
-  access list`, `repo clone`, `repo remote use`), reduced through
+  --region`; CLUSTER is the catalog slug the native-mirror API is addressed by;
+  HOST is the bare public host every targeting `--cluster` takes (`repo mirror
+  add`/`remove`, `repo access list`, `repo clone`, `repo remote use`), reduced through
   `hostFromPublicURL` so a publicUrl that fails validation renders `-` rather
   than a spoofable host. It is also what goes into an `entire://` clone URL and
   what `runCoreForCluster` dials. `--json` is the wire model, `apiUrl` and `isDefault`
@@ -114,9 +113,12 @@ the commands are always runnable in every build.
   same coordinate the `entire://` URL carries and `runCoreForCluster` dials. The
   native-mirror API is keyed by the catalog *slug* instead, so the native path
   resolves host → slug through one `GET /clusters` rather than asking for a
-  second spelling. `repo mirror list --cluster` is the exception and predates
-  this: it is a filter the server resolves, and takes either. Settling the CLI
-  on one spelling is worth doing on its own; it is not this change.
+  second spelling. `repo mirror list --cluster` takes the host too, and
+  must: it is a **client-side** filter over the rows that command prints, so it
+  can only match the spelling its CLUSTER column carries — naming a host there
+  returned "No repos found" for as long as that column printed a slug.
+  `entire cluster list` is now the last place a column headed CLUSTER prints a
+  slug; settling that is worth doing on its own and is not this change.
   `repo create` takes no cluster at all: a repo's home cluster is the primary
   cell of its owning project's region.
   `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
