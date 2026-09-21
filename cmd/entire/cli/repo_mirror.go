@@ -152,11 +152,11 @@ type repoDirRow struct {
 	Private bool   `json:"private"`
 	Status  string `json:"status"`           // shared placement status, "mixed", or candidate availability
 	Access  string `json:"access,omitempty"` // candidate only
-	// ID, Project and ProvisionReason are the identity `repo view` adds to the
-	// directory row for an Entire-native repo: the ULID other verbs address it
-	// by, its owning project by NAME, and why provisioning stopped when it did.
-	// They are absent for a GitHub upstream, which Entire holds no repo record
-	// for, and so never widen the `mirror list` rows this shape is shared with.
+	// ID, Project and ProvisionReason are --json only: the ULID other verbs
+	// address the repo by, its owning project by NAME, and why provisioning
+	// stopped when it did. They are absent for a GitHub upstream, which Entire
+	// holds no repo record for, and so never widen the `mirror list` rows this
+	// shape is shared with.
 	ID              string             `json:"id,omitempty"`
 	Project         string             `json:"project,omitempty"`
 	ProvisionReason string             `json:"provisionReason,omitempty"`
@@ -1275,15 +1275,11 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	}
 	section("Name", st.render(st.bold, row.Repo))
 	section("Visibility", st.render(visibilityColor(st, row.Private), visibilityDisplay(row.Private)))
-	// The ULID is --json only. It is an addressing detail, not something a
-	// reader of this view needs, and the two names above and below it say more
-	// in less space. A script that wants it reads `.id`.
-	if row.Project != "" {
-		section("Project", row.Project)
-	}
-	if row.ProvisionReason != "" {
-		section("Provision reason", row.ProvisionReason)
-	}
+	// The header is the two things that identify a repo and nothing else. Its
+	// ULID, its project and why provisioning stopped are all in --json; the
+	// project is already spelled inside the name, and the provision reason goes
+	// to stderr with the other per-placement detail this table has no column
+	// for (reportNativeMirrorNotes).
 	if row.Access != "" {
 		section("Access", row.Access)
 	}

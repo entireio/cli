@@ -66,9 +66,13 @@ func TestRepoView_AuthoritativeSnapshot(t *testing.T) {
 			body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","state":%q,"provisionReason":"max retries exhausted","capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, testDeleteULID, testProjectULID, state)
 			srv, authReads := serveRepoView(t, body, nil)
 
-			out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+			// The header is Name and Visibility only, so the reason a repo
+			// stopped provisioning rides on stderr with the other detail the
+			// table has no column for — never on stdout, which is the view.
+			out, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
 			require.NoError(t, err)
-			require.Contains(t, out, "max retries exhausted")
+			require.Contains(t, stderr, "max retries exhausted")
+			require.NotContains(t, out, "max retries exhausted")
 
 			out, _, err = runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--json")
 			require.NoError(t, err)

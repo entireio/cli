@@ -478,7 +478,7 @@ func runNativeRepoView(cmd *cobra.Command, ref, project string, authoritative bo
 			return printJSON(cmd.OutOrStdout(), row)
 		}
 		renderRepoDetail(cmd.OutOrStdout(), row)
-		reportNativeMirrorNotes(cmd.ErrOrStderr(), mirrors)
+		reportNativeMirrorNotes(cmd.ErrOrStderr(), repo, mirrors, clusterHostBySlug(clusters))
 		return nil
 	})
 }
@@ -547,10 +547,15 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 // own reason for a placement that is not healthy. It goes to stderr so a piped
 // table or --json stays clean, and names the cluster so a multi-placement repo
 // stays legible.
-func reportNativeMirrorNotes(w io.Writer, mirrors []coreapi.NativeMirrorPlacement) {
+func reportNativeMirrorNotes(w io.Writer, repo *coreapi.Repo, mirrors []coreapi.NativeMirrorPlacement, hostBySlug map[string]string) {
+	// The primary's equivalent of a mirror's lastError: the STATUS cell says a
+	// repo failed to provision, and this is the only place that says why.
+	if reason := strings.TrimSpace(repo.ProvisionReason.Or("")); reason != "" {
+		fmt.Fprintf(w, "%s: %s\n", placementCluster(hostBySlug, repo.ClusterSlug.Or("")), reason)
+	}
 	for _, m := range mirrors {
 		if detail := strings.TrimSpace(m.LastError.Or("")); detail != "" {
-			fmt.Fprintf(w, "%s: %s\n", m.ClusterSlug, detail)
+			fmt.Fprintf(w, "%s: %s\n", placementCluster(hostBySlug, m.ClusterSlug), detail)
 		}
 	}
 }
