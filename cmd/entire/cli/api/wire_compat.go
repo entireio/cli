@@ -88,7 +88,10 @@ func reconcileWireKeys(raw []byte) []byte {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var doc any
-	if err := dec.Decode(&doc); err != nil {
+	// Decode reads one value and ignores whatever follows, where the caller's
+	// json.Unmarshal rejects trailing data. Require EOF so a malformed body
+	// still reaches the caller as the error it would otherwise have been.
+	if err := dec.Decode(&doc); err != nil || dec.Decode(new(any)) != io.EOF {
 		return raw
 	}
 	out, err := json.Marshal(renameCompatKeys(doc, 0))

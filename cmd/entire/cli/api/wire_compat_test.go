@@ -248,3 +248,18 @@ func TestNestedCamelCaseDoesNotInflate(t *testing.T) {
 		t.Errorf("encoded %d bytes from %d: output should stay proportional", len(out), len(raw))
 	}
 }
+
+// Decoder.Decode stops at the first top-level value, so a body with trailing
+// data would be re-encoded as if it were well formed and then accepted by the
+// caller — where plain json.Unmarshal rejects it.
+func TestTrailingDataStillReachesTheCaller(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"createdAt":"x"} GARBAGE`)
+	if got := reconcileWireKeys(body); string(got) != string(body) {
+		t.Errorf("trailing data was rewritten into valid JSON: %s", got)
+	}
+	var out map[string]any
+	if err := UnmarshalTrailWire(body, &out); err == nil {
+		t.Error("want the caller's decode error for trailing data")
+	}
+}
