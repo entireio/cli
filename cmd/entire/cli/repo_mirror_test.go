@@ -1077,77 +1077,91 @@ func TestParseGitHubURL(t *testing.T) {
 	}
 }
 
-func TestParseMirrorCloneURL(t *testing.T) {
+func TestParseEntireCloneURL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                             string
-		raw                              string
-		wantCluster, wantOwner, wantRepo string
-		wantErr                          bool
+		name                   string
+		raw                    string
+		wantCluster, wantForge string
+		wantOwner, wantRepo    string
+		wantErr                bool
 	}{
 		{name: "github clone URL", raw: "entire://aws-eu-central-1.entire.io/gh/entirehq/entire-api",
-			wantCluster: "aws-eu-central-1.entire.io", wantOwner: "entirehq", wantRepo: "entire-api"},
+			wantCluster: "aws-eu-central-1.entire.io", wantForge: mirrorCloneForge, wantOwner: "entirehq", wantRepo: "entire-api"},
+		// The form the CLONE URL column prints for a native repo, which is why
+		// it has to parse: a URL read out of the table is pasted back in.
+		{name: "native clone URL", raw: "entire://aws-us-east-2.entire.io/et/acme/web",
+			wantCluster: "aws-us-east-2.entire.io", wantForge: nativeCloneForge, wantOwner: "acme", wantRepo: "web"},
+		{name: "native clone URL keeps its .git off", raw: "entire://c.entire.io/et/acme/web.git",
+			wantCluster: "c.entire.io", wantForge: nativeCloneForge, wantOwner: "acme", wantRepo: "web"},
 		{name: "owner and repo lowercased", raw: "entire://c.entire.io/gh/OctoCat/Hello-World",
-			wantCluster: "c.entire.io", wantOwner: "octocat", wantRepo: "hello-world"},
+			wantCluster: "c.entire.io", wantForge: mirrorCloneForge, wantOwner: "octocat", wantRepo: "hello-world"},
 		{name: "trailing .git is trimmed", raw: "entire://c.entire.io/gh/entireio/cli.git",
-			wantCluster: "c.entire.io", wantOwner: "entireio", wantRepo: "cli"},
+			wantCluster: "c.entire.io", wantForge: mirrorCloneForge, wantOwner: "entireio", wantRepo: "cli"},
 		{name: "interior dots in repo name are kept", raw: "entire://c.entire.io/gh/entirehq/entire-trails.el",
-			wantCluster: "c.entire.io", wantOwner: "entirehq", wantRepo: "entire-trails.el"},
+			wantCluster: "c.entire.io", wantForge: mirrorCloneForge, wantOwner: "entirehq", wantRepo: "entire-trails.el"},
 		{name: "wrong scheme", raw: "https://c.entire.io/gh/a/b", wantErr: true},
-		{name: "non-gh provider segment", raw: "entire://c.entire.io/git/a/b", wantErr: true},
+		{name: "unknown forge segment", raw: "entire://c.entire.io/git/a/b", wantErr: true},
 		{name: "missing repo", raw: "entire://c.entire.io/gh/a", wantErr: true},
+		{name: "native missing repo", raw: "entire://c.entire.io/et/acme", wantErr: true},
 		{name: "extra path segment", raw: "entire://c.entire.io/gh/a/b/c", wantErr: true},
 		{name: "not a URL", raw: "not-a-url", wantErr: true},
+		{name: "host with a URL metacharacter", raw: "entire://c.entire.io:8080:9090/gh/a/b", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cluster, provider, owner, repo, err := parseMirrorCloneURL(tt.raw)
+			cluster, ref, err := parseEntireCloneURL(tt.raw)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("parseMirrorCloneURL(%q) = (%q,%q,%q,%q), want error", tt.raw, cluster, provider, owner, repo)
-				}
+				require.Error(t, err, "parseEntireCloneURL(%q) = (%q, %+v)", tt.raw, cluster, ref)
 				return
 			}
-			if err != nil {
-				t.Fatalf("parseMirrorCloneURL(%q): %v", tt.raw, err)
-			}
-			if provider != string(coreapi.CreateMirrorInputBodyProviderGithub) {
-				t.Errorf("provider = %q, want github", provider)
-			}
-			if cluster != tt.wantCluster || owner != tt.wantOwner || repo != tt.wantRepo {
-				t.Errorf("= (%q,%q,%q), want (%q,%q,%q)", cluster, owner, repo, tt.wantCluster, tt.wantOwner, tt.wantRepo)
-			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantCluster, cluster)
+			require.Equal(t, mirrorRepoRef{forge: tt.wantForge, owner: tt.wantOwner, repo: tt.wantRepo}, ref)
 		})
 	}
 }
 
-func TestRepoView_Routing(t *testing.T) {
-	const clusterHost = "eukanuba.partial.to"
-	const cloneURL = "entire://" + clusterHost + "/gh/entirehq/librarian"
+// viewClusterHost is the cluster a `repo view` clone URL names in these tests;
+// it is deliberately not one of detailClusters' public hosts, so a test that
+// resolves on the wrong core cannot pass by coincidence.
+const viewClusterHost = "eukanuba.partial.to"
 
-	seamActive := func(t *testing.T, fn func(context.Context) (*coreapi.Client, error)) {
-		t.Helper()
-		prev := activeCoreClient
-		activeCoreClient = fn
-		t.Cleanup(func() { activeCoreClient = prev })
-	}
-	seamCluster := func(t *testing.T, fn func(context.Context, string) (*coreapi.Client, error)) {
-		t.Helper()
-		prev := clusterCoreClient
-		clusterCoreClient = fn
-		t.Cleanup(func() { clusterCoreClient = prev })
-	}
-	runGet := func(t *testing.T, args ...string) (string, error) {
-		t.Helper()
-		cmd := newRepoCmd()
-		var out, errW bytes.Buffer
-		cmd.SetOut(&out)
-		cmd.SetErr(&errW)
-		cmd.SetArgs(append([]string{"view"}, args...))
-		err := cmd.ExecuteContext(t.Context())
-		return out.String(), err
-	}
+// seamActive / seamCluster point the two core-client constructors at a test
+// server for the duration of one test. Which one a command reaches is the
+// routing question these tests ask, so they are always set as a pair: the one
+// that must not be dialed is pointed at a t.Error.
+func seamActive(t *testing.T, fn func(context.Context) (*coreapi.Client, error)) {
+	t.Helper()
+	prev := activeCoreClient
+	activeCoreClient = fn
+	t.Cleanup(func() { activeCoreClient = prev })
+}
+
+func seamCluster(t *testing.T, fn func(context.Context, string) (*coreapi.Client, error)) {
+	t.Helper()
+	prev := clusterCoreClient
+	clusterCoreClient = fn
+	t.Cleanup(func() { clusterCoreClient = prev })
+}
+
+// runRepoView runs `repo view` under the real `repo` parent, so the ref lands
+// in the routing the command itself wires rather than one the test rebuilds.
+func runRepoView(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := newRepoCmd()
+	var out, errW bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errW)
+	cmd.SetArgs(append([]string{"view"}, args...))
+	err := cmd.ExecuteContext(t.Context())
+	return out.String(), err
+}
+
+func TestRepoView_Routing(t *testing.T) {
+	const clusterHost = viewClusterHost
+	const cloneURL = "entire://" + clusterHost + "/gh/entirehq/librarian"
 
 	t.Run("a malformed clone URL errors before dialing any core", func(t *testing.T) {
 		seamActive(t, func(context.Context) (*coreapi.Client, error) {
@@ -1158,9 +1172,9 @@ func TestRepoView_Routing(t *testing.T) {
 			t.Error("a malformed clone URL dialed a cluster core")
 			return nil, errors.New("no dial expected")
 		})
-		_, err := runGet(t, "entire://")
+		_, err := runRepoView(t, "entire://")
 		require.Error(t, err)
-		require.ErrorContains(t, err, "must be entire://<cluster>/gh/<owner>/<repo>")
+		require.ErrorContains(t, err, `invalid clone URL "entire://"`)
 	})
 
 	// serveRepoDetail answers the two endpoints the owner/repo form uses: the
@@ -1208,7 +1222,7 @@ func TestRepoView_Routing(t *testing.T) {
 			}},
 		}, detailClusters)
 
-		out, err := runGet(t, "/gh/entirehq/entiredb")
+		out, err := runRepoView(t, "/gh/entirehq/entiredb")
 		require.NoError(t, err)
 		require.Equal(t, "entirehq/entiredb", *gotFilter, "the lookup must be the server-side exact-match filter")
 		requireOrder(t, out,
@@ -1225,7 +1239,7 @@ func TestRepoView_Routing(t *testing.T) {
 			candidateEntry("entirehq/notyet", "private", coreapi.RepoCandidateAccessWrite, true),
 		}, detailClusters)
 
-		out, err := runGet(t, "/gh/entirehq/notyet")
+		out, err := runRepoView(t, "/gh/entirehq/notyet")
 		require.NoError(t, err)
 		requireOrder(t, out,
 			"Name:", "entirehq/notyet",
@@ -1243,7 +1257,7 @@ func TestRepoView_Routing(t *testing.T) {
 			}},
 		}, detailClusters)
 
-		out, err := runGet(t, "/gh/entirehq/entiredb", "--json")
+		out, err := runRepoView(t, "/gh/entirehq/entiredb", "--json")
 		require.NoError(t, err)
 		var row repoDirRow
 		require.NoError(t, json.Unmarshal([]byte(out), &row))
@@ -1284,7 +1298,7 @@ func TestRepoView_Routing(t *testing.T) {
 			return coreapi.NewWithBearer(srv.URL, "tok")
 		})
 
-		out, err := runGet(t, cloneURL)
+		out, err := runRepoView(t, cloneURL)
 		require.NoError(t, err)
 		require.Equal(t, clusterHost, gotHost, "must resolve on the clone URL's cluster")
 		require.Contains(t, out, "/gh/entirehq/librarian")
@@ -1293,10 +1307,70 @@ func TestRepoView_Routing(t *testing.T) {
 
 	t.Run("/gh/owner/repo with no matching repo is a friendly error", func(t *testing.T) {
 		serveRepoDetail(t, nil, detailClusters)
-		_, err := runGet(t, "/gh/entirehq/ghost")
+		_, err := runRepoView(t, "/gh/entirehq/ghost")
 		require.Error(t, err)
 		require.ErrorContains(t, err, "no repo matching")
 	})
+}
+
+// TestRepoView_NativeCloneURL pins the native half of the clone-URL form: it is
+// the URL the CLONE URL column prints for an /et/ repo, so a reader pasting a
+// row back has to reach the same repo — and on the cluster the row named, not
+// on the active context's core.
+//
+// Not parallel: it replaces the process-global client seams.
+func TestRepoView_NativeCloneURL(t *testing.T) {
+	const clusterHost = viewClusterHost
+	const repoID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/projects":
+			assert.Equal(t, "acme", r.URL.Query().Get("name"))
+			assert.NoError(t, printJSON(w, &coreapi.ListProjectsOutputBody{
+				Project: coreapi.NewOptProject(coreapi.Project{
+					ID: testProjectULID, Name: "acme", OwnerId: "01OWNER",
+					OwnerType: coreapi.ProjectOwnerTypeOrg, Region: "us",
+				}),
+			}))
+		case r.URL.Path == "/api/v1/projects/"+testProjectULID+"/repos":
+			assert.Equal(t, "web", r.URL.Query().Get("name"))
+			assert.NoError(t, printJSON(w, &coreapi.ListProjectReposOutputBody{
+				Repo: coreapi.NewOptRepo(coreapi.Repo{ID: repoID, Name: "web", OwningProjectId: testProjectULID}),
+			}))
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			fmt.Fprint(w, `{"nativeMirrors":[]}`)
+		case r.URL.Path == testClustersPath:
+			assert.NoError(t, printJSON(w, &coreapi.ListClustersOutputBody{Clusters: []coreapi.Cluster{
+				{Slug: "us", PublicUrl: "https://" + clusterHost},
+			}}))
+		case r.URL.Path == "/api/v1/repos/"+repoID:
+			fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","clusterSlug":"us","state":"active","visibility":"private"}`, repoID, testProjectULID)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	seamActive(t, func(context.Context) (*coreapi.Client, error) {
+		t.Error("a native clone URL dialed the active context's core")
+		return nil, errors.New("wrong core")
+	})
+	var gotHost string
+	seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
+		gotHost = host
+		return coreapi.NewWithBearer(srv.URL, "tok")
+	})
+
+	out, err := runRepoView(t, "entire://"+clusterHost+"/et/acme/web")
+	require.NoError(t, err)
+	require.Equal(t, clusterHost, gotHost, "must resolve on the clone URL's cluster")
+	requireOrder(t, out,
+		"Name:", "/et/acme/web",
+		"Visibility:", "Private",
+		"CLUSTER", "ROLE", "CLONE URL", "STATUS",
+		clusterHost, "primary", "entire://"+clusterHost+"/et/acme/web", "ready",
+	)
 }
 
 // TestMirrorRefOwner pins the owner extraction the --owner filter uses, now

@@ -1208,13 +1208,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 // the lookup goes to the core fronting it — so a mirror in a federation other
 // than the active login resolves instead of reading as "no repo matching".
 func runRepoMirrorViewByName(cmd *cobra.Command, ref, clusterHost string) error {
-	run := runCore
-	if clusterHost != "" {
-		run = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
-			return runCoreForCluster(cmd, clusterHost, fn)
-		}
-	}
-	return run(cmd, func(ctx context.Context, c *coreapi.Client) error {
+	return coreRunnerFor(clusterHost)(cmd, func(ctx context.Context, c *coreapi.Client) error {
 		out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(ref)})
 		if err != nil {
 			return err
@@ -1344,39 +1338,47 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	fmt.Fprint(w, b.String())
 }
 
-// parseMirrorCloneURL decomposes an entire:// clone URL into its coordinates:
+// parseEntireCloneURL decomposes an entire:// clone URL into the cluster it
+// names and the repository inside it:
 //
-//	entire://<clusterHost>/gh/<owner>/<repo>
+//	entire://<clusterHost>/<forge>/<a>/<b>
 //
-// Only the github ("gh") provider path is recognized — an /et/ repo is named by
-// its path, and `repo view` resolves that through the repo resolver rather than
-// the mirror directory this URL form feeds. The cluster host is validated the
-// same way the create/remove verbs validate it, so a host carrying URL
-// metacharacters is rejected at the boundary rather than flowing into the list
-// filter.
-func parseMirrorCloneURL(raw string) (clusterHost, provider, owner, repo string, err error) {
+// Both forges are read, because both are printed: the CLONE URL column spells a
+// native repo entire://<host>/et/<project>/<repo>, and a URL this view prints
+// has to be one it takes back. The path after the host is handed to
+// parseMirrorRepoRef — the same grammar the bare /gh/ and /et/ refs take — so a
+// clone URL and the ref it was built from can never disagree about what a name
+// may contain.
+//
+// The cluster host is validated the way the create/remove verbs validate it, so
+// a host carrying URL metacharacters is rejected at the boundary rather than
+// flowing into the list filter. The path is checked first: for a URL with
+// neither part right, the repository half is the more useful one to report.
+//
+// A failure says only what is wrong INSIDE the URL. The accepted forms are the
+// caller's to list (badRepoRefErr), so repeating a shape here would print two
+// grammars at a reader who already typed one.
+func parseEntireCloneURL(raw string) (clusterHost string, ref mirrorRepoRef, err error) {
 	u, perr := url.Parse(raw)
 	if perr != nil || u.Scheme != "entire" {
-		return "", "", "", "", fmt.Errorf("%q is not an entire:// clone URL", raw)
+		return "", mirrorRepoRef{}, fmt.Errorf("%q is not an entire:// clone URL", raw)
 	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) != 3 || parts[0] != "gh" {
-		return "", "", "", "", fmt.Errorf("%q must be entire://<cluster>/gh/<owner>/<repo>", raw)
+	ref, rerr := parseMirrorRepoRef("/" + strings.Trim(u.Path, "/"))
+	if rerr != nil {
+		return "", mirrorRepoRef{}, fmt.Errorf("invalid clone URL %q: %w", raw, rerr)
 	}
 	if verr := validateClusterHost(u.Host); verr != nil {
-		return "", "", "", "", verr
+		return "", mirrorRepoRef{}, verr
 	}
-	// Trim a trailing .git so a URL pasted from `git remote -v` resolves the
-	// same as the bare clone URL (matching gitremote.ParseURL). GitHub repo
-	// names can contain dots, so only the suffix is trimmed, not all dots.
-	repo = strings.ToLower(strings.TrimSuffix(parts[2], gitDirSuffix))
-	return u.Host, string(coreapi.CreateMirrorInputBodyProviderGithub), strings.ToLower(parts[1]), repo, nil
+	return u.Host, ref, nil
 }
 
-// badMirrorRefErr wraps a clone-URL parse failure with the forms `repo view`
+// badRepoRefErr wraps a clone-URL parse failure with the forms `repo view`
 // accepts, so a malformed entire:// URL says what a good one looks like rather
-// than only what was wrong with this one.
-func badMirrorRefErr(err error) error {
+// than only what was wrong with this one. Both forges, because both are
+// accepted — the parser reports what was wrong inside the URL and this says
+// what the verb takes.
+func badRepoRefErr(err error) error {
 	return fmt.Errorf("%w; pass /%s/<project>/<repo>, /%s/<owner>/<repo>, a repo ULID, or a clone URL (entire://<cluster>/<forge>/<a>/<b>)",
 		err, nativeCloneForge, mirrorCloneForge)
 }

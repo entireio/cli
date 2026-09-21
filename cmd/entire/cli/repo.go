@@ -339,11 +339,17 @@ func newRepoViewCmd() *cobra.Command {
 			// keeps the clone-URL parser's reason instead of being reported as a
 			// bad repository reference.
 			if strings.HasPrefix(strings.ToLower(ref), entireCloneURLScheme) {
-				clusterHost, _, owner, repo, err := parseMirrorCloneURL(ref)
+				clusterHost, target, err := parseEntireCloneURL(ref)
 				if err != nil {
-					return badMirrorRefErr(err)
+					return badRepoRefErr(err)
 				}
-				return runRepoMirrorViewByName(cmd, owner+"/"+repo, clusterHost)
+				if target.forge == nativeCloneForge {
+					// The URL spells the /et/ path, so it is passed on as one —
+					// a --project given alongside is then checked against it by
+					// the same resolver that checks the typed path.
+					return runNativeRepoView(cmd, target.qualified(), project, clusterHost, authoritative)
+				}
+				return runRepoMirrorViewByName(cmd, target.owner+"/"+target.repo, clusterHost)
 			}
 			// Anything carrying a '/' is a repository reference in the one
 			// grammar the repo commands take, and it is parsed here so a bare
@@ -363,7 +369,9 @@ func newRepoViewCmd() *cobra.Command {
 				}
 			}
 			// A ULID or a bare name with --project, plus the /et/ path above.
-			return runNativeRepoView(cmd, ref, project, authoritative)
+			// None of those names a cluster, so all resolve on the active
+			// context's core.
+			return runNativeRepoView(cmd, ref, project, "", authoritative)
 		},
 	}
 	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Fail if the server cannot confirm provisioning state")

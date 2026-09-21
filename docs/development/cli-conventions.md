@@ -239,7 +239,12 @@ the commands are always runnable in every build.
   project — so a mirror is addressed by ULID), and an `entire://` URL is not
   parsed at all. `repo view` serves both anyway, by routing on the ref before
   the resolver is reached: a `/gh/` ref goes to the mirror directory, and an
-  `entire://` URL to the core fronting the cluster it names. `--project` serves the **bare-name** spelling alone, because
+  `entire://` URL to the core fronting the cluster it names — in **either**
+  forge, since the CLONE URL column prints the native
+  `entire://<host>/et/<project>/<repo>` form and a URL a view prints has to be
+  one it takes back. `parseEntireCloneURL` reads the path with
+  `parseMirrorRepoRef`, the same grammar the bare refs take, so a URL and the
+  ref it was built from can never disagree about what a name may contain. `--project` serves the **bare-name** spelling alone, because
   the control plane has no by-name repo route that is not project-scoped; the
   path form is checked against it for agreement, and a ULID warns that it is
   ignored rather than validating, which would cost a `GetRepo` on every command

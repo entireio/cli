@@ -412,8 +412,12 @@ func regionHosts(regions []regionChoice) []string {
 // The ref is resolved by the shared repo resolver, so every spelling `repo
 // view` has always taken reaches this view: the /et/<project>/<repo> path, a
 // bare name with --project, and a repo ULID.
-func runNativeRepoView(cmd *cobra.Command, ref, project string, authoritative bool) error {
-	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+//
+// clusterHost is empty for every one of those, which name no cluster and so
+// resolve on the active context's core. An entire:// clone URL names one, and
+// is resolved there instead (coreRunnerFor).
+func runNativeRepoView(cmd *cobra.Command, ref, project, clusterHost string, authoritative bool) error {
+	return coreRunnerFor(clusterHost)(cmd, func(ctx context.Context, c *coreapi.Client) error {
 		repoID, err := resolveRepoRef(ctx, c, ref, project)
 		if err != nil {
 			return err

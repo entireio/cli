@@ -651,6 +651,21 @@ func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx conte
 	}, fn)
 }
 
+// coreRunnerFor picks which core a ref is resolved on. Most refs name no
+// cluster and resolve on the active context's; a clone URL names its own, and
+// is resolved on the core fronting it — that is the whole reason the URL form
+// exists, since a repo in another federation is invisible to the active
+// context's core. Shared by the two record views so both forges answer a clone
+// URL the same way.
+func coreRunnerFor(clusterHost string) func(*cobra.Command, func(context.Context, *coreapi.Client) error) error {
+	if clusterHost == "" {
+		return runCore
+	}
+	return func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
+		return runCoreForCluster(cmd, clusterHost, fn)
+	}
+}
+
 // runCoreClient owns the control-plane preamble shared by the active-context
 // (runCore) and cluster-addressed (runCoreForCluster) variants: silence usage,
 // opt into plain-HTTP token exchange if requested, build the client via
