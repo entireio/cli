@@ -128,8 +128,8 @@ func TestNativeRepoDetailRow(t *testing.T) {
 		}, nativeTestClusters)
 		require.Equal(t, "/et/acme/web", row.Repo)
 		require.Equal(t, []repoDirPlacement{
-			{Cluster: "aws-us-east-2", Status: "active", Role: placementRolePrimary, CloneURL: "entire://aws-us-east-2.entire.io/et/acme/web"},
-			{Cluster: "aws-eu-central-1", Status: "ready", Role: placementRoleNativeMirror, CloneURL: "entire://aws-eu-central-1.entire.io/et/acme/web"},
+			{Cluster: "aws-us-east-2.entire.io", Status: "active", Role: placementRolePrimary, CloneURL: "entire://aws-us-east-2.entire.io/et/acme/web"},
+			{Cluster: "aws-eu-central-1.entire.io", Status: "ready", Role: placementRoleMirror, CloneURL: "entire://aws-eu-central-1.entire.io/et/acme/web"},
 		}, row.Placements)
 	})
 

@@ -468,7 +468,7 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 		// the repo's provisioning state — the same question, answered by the
 		// only field that answers it.
 		placements = append(placements, repoDirPlacement{
-			Cluster:  primary,
+			Cluster:  placementCluster(hostBySlug, primary),
 			Status:   repo.State.Or("-"),
 			Role:     placementRolePrimary,
 			CloneURL: cloneURL(primary),
@@ -480,9 +480,9 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 	})
 	for _, m := range sorted {
 		p := repoDirPlacement{
-			Cluster:  m.ClusterSlug,
+			Cluster:  placementCluster(hostBySlug, m.ClusterSlug),
 			Status:   string(m.Status),
-			Role:     placementRoleNativeMirror,
+			Role:     placementRoleMirror,
 			CloneURL: cloneURL(m.ClusterSlug),
 		}
 		if m.Status == coreapi.NativeMirrorPlacementStatusProcessing {

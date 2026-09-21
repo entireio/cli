@@ -112,19 +112,23 @@ func parseSortColumn(spec string, columns []column) (col column, desc bool, err 
 // repo, not one per placement.
 var repoDirColumns = []column{colName, colClusters, colVisibility, colStatus, colAccess}
 
-// repoDirPlacement is one GitHub-mirror placement of a directory row's repo.
+// repoDirPlacement is one placement of a directory row's repo.
 // CloneURL is omitted from JSON when the placement's cluster host couldn't be
 // resolved (unknown slug, or a publicUrl that failed validation) — the slug
 // still names the placement, and no unsafe URL is emitted.
 type repoDirPlacement struct {
+	// Cluster names the placement's cluster by its public host, the value every
+	// --cluster takes, so a cell read out of this table can be pasted back into
+	// one. See placementCluster for the unresolvable case.
 	Cluster string `json:"cluster"`
 	Status  string `json:"status"`
-	// Role is the wire vocabulary of POST /repos/resolve: "primary" or
-	// "native_mirror". It is set only for Entire-native repos, where the two
-	// differ in what you may do to the placement itself: the primary is not
-	// removable through the mirror verbs. A GitHub repo's placements are
-	// all mirrors of an upstream that is not a placement at all, so they carry
-	// no role and the column stays out of that view.
+	// Role is "primary" or "mirror" — the two things a placement of a native
+	// repo can be, in the same word the verbs use. It is set only for
+	// Entire-native repos, where the two differ in what you may do to the
+	// placement itself: the primary is not removable through the mirror verbs.
+	// A GitHub repo's placements are all mirrors of an upstream that is not a
+	// placement at all, so they carry no role and the column stays out of that
+	// view.
 	Role string `json:"role,omitempty"`
 	// Stage is the native provisioning progress (pending → provisioned →
 	// registered → seeded → announced). It qualifies a processing placement
@@ -138,10 +142,26 @@ type repoDirPlacement struct {
 	CloneURL string `json:"cloneUrl,omitempty"`
 }
 
-// Placement roles, in the control plane's own vocabulary (POST /repos/resolve).
+// placementCluster names a placement's cluster the way --cluster does, by its
+// public host. A cluster the catalog cannot resolve to a safe host (a slug it
+// does not list, or a publicUrl that failed validation) falls back to the slug:
+// the placement exists and has to stay nameable in the table, even though no
+// --cluster value reaches it — the same call CloneURL makes when it omits
+// itself rather than emit an unsafe URL.
+func placementCluster(hostBySlug map[string]string, slug string) string {
+	if host := hostBySlug[slug]; host != "" {
+		return host
+	}
+	return slug
+}
+
+// Placement roles. "mirror" is the word every verb in this subtree already
+// uses for a copy, so the column reads in the same vocabulary the commands do;
+// the control plane spells its own equivalent "native_mirror", which stays on
+// the wire and does not surface here.
 const (
-	placementRolePrimary      = "primary"
-	placementRoleNativeMirror = "native_mirror"
+	placementRolePrimary = "primary"
+	placementRoleMirror  = "mirror"
 )
 
 // repoDirRow is one directory row: one per onboarded repo (its GitHub-mirror
@@ -165,13 +185,13 @@ type repoDirRow struct {
 const repoDirStatusMixed = "mixed"
 
 // repoDirClusters renders the CLUSTERS cell: the row's placement cluster
-// slugs, comma-joined in placement order; empty for candidates.
+// hosts, comma-joined in placement order; empty for candidates.
 func repoDirClusters(r repoDirRow) string {
-	slugs := make([]string, len(r.Placements))
+	hosts := make([]string, len(r.Placements))
 	for i, p := range r.Placements {
-		slugs[i] = p.Cluster
+		hosts[i] = p.Cluster
 	}
-	return strings.Join(slugs, ", ")
+	return strings.Join(hosts, ", ")
 }
 
 func repoDirCells(r repoDirRow) []string {
@@ -329,7 +349,7 @@ func buildRepoDir(entries []coreapi.RepoIndexEntry, hostBySlug map[string]string
 			if host := hostBySlug[p.ClusterSlug]; host != "" && repo != "" {
 				clone = forgeCloneURL(entryForge, host, owner, repo)
 			}
-			placements = append(placements, repoDirPlacement{Cluster: p.ClusterSlug, Status: string(p.Status), CloneURL: clone})
+			placements = append(placements, repoDirPlacement{Cluster: placementCluster(hostBySlug, p.ClusterSlug), Status: string(p.Status), CloneURL: clone})
 			switch status {
 			case "", string(p.Status):
 				status = string(p.Status)
@@ -853,11 +873,11 @@ func applyRepoDirLocal(f repoDirLocalFilters, rows []repoDirRow) ([]repoDirRow, 
 	}
 	if f.cluster != "" {
 		// Candidates are cluster-agnostic, so --cluster keeps only onboarded
-		// rows with a placement on the named cluster. The value is the catalog
-		// slug — what placements carry, what the CLUSTERS column prints, and
-		// the same spelling every other --cluster takes. The public host inside
-		// a clone URL is not a second accepted form: PreRunE refuses it rather
-		// than let it silently match nothing.
+		// rows with a placement on the named cluster. The value is the public
+		// host — what the CLUSTERS column prints and what every other --cluster
+		// takes. This match is the reason the column had to move off the slug:
+		// the filter is client-side over these rows, so a spelling the column
+		// does not print matches nothing at all rather than erroring.
 		rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
 			return !slices.ContainsFunc(r.Placements, func(p repoDirPlacement) bool {
 				return strings.EqualFold(p.Cluster, f.cluster)
@@ -1156,7 +1176,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	// client-side caveat renders once, as the group's note (see the
 	// useGroupedFlagHelp call below), not on each flag. A flag that gains a
 	// server-side implementation must leave the group.
-	cmd.Flags().StringVar(&cluster, "cluster", "", "Keep only repos mirrored on this cluster, by slug or public host (drops onboardable candidates)")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Keep only repos mirrored on this cluster, by public host as `entire cluster list` prints it (drops onboardable candidates)")
 	cmd.Flags().StringVar(&owner, "owner", "", "Filter by upstream owner login")
 	cmd.Flags().StringVar(&name, "name", "", "Filter by substring of the NAME column, e.g. acme/web or /gh/acme (case-insensitive)")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by exact STATUS (mirrors: ready/processing/failed/suspended, matching any of a repo's placements; candidates: available/owner-only)")

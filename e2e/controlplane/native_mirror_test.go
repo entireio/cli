@@ -117,7 +117,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		require.Equal(t, ref, row.Repo)
 		require.Len(t, row.Placements, 1, "a fresh repo has only its primary")
 		require.Equal(t, "primary", row.Placements[0].Role)
-		require.Equal(t, repo.ClusterSlug, row.Placements[0].Cluster)
+		require.Equal(t, home.Host, row.Placements[0].Cluster, "placements name their cluster by host, as --cluster takes it")
 	})
 
 	phase("the forge filter decides which directory the repo is in", func(t *testing.T) {
@@ -175,9 +175,9 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		for _, p := range row.Placements {
 			byCluster[p.Cluster] = p
 		}
-		mirror, ok := byCluster[target.Slug]
+		mirror, ok := byCluster[target.Host]
 		require.True(t, ok, "the mirror is listed under the cluster it was placed on")
-		require.Equal(t, "native_mirror", mirror.Role)
+		require.Equal(t, "mirror", mirror.Role)
 		require.Equal(t, "ready", mirror.Status)
 		require.False(t, mirror.Removing)
 		require.Equal(t, cloneURL, mirror.CloneURL)

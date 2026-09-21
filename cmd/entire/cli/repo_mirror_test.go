@@ -497,8 +497,8 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		for _, h := range []string{"NAME", "CLUSTERS", "VISIBILITY", "STATUS", "ACCESS"} {
 			require.Contains(t, stdout, h)
 		}
-		// Mirror row: cluster slug + clone status, access dashed.
-		require.Regexp(t, `acme/web\s+us\s+Private\s+ready`, stdout)
+		// Mirror row: cluster host + clone status, access dashed.
+		require.Regexp(t, `acme/web\s+aws-us-east-2\.entire\.io\s+Private\s+ready`, stdout)
 		// Candidate rows: availability status + access, clusters dashed.
 		require.Contains(t, stdout, "acme/marketing")
 		require.Contains(t, stdout, "available")
@@ -518,7 +518,7 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		}, false)
 		stdout, _ := runMirrorList(t)
 		require.Equal(t, 1, strings.Count(stdout, "acme/web"), "one row per repo, not one per placement")
-		require.Regexp(t, `acme/web\s+us, eu\s+Private\s+ready`, stdout)
+		require.Regexp(t, `acme/web\s+aws-us-east-2\.entire\.io, eu-west-1\.entire\.io\s+Private\s+ready`, stdout)
 	})
 
 	t.Run("the detail hint is withheld from empty tables and --json", func(t *testing.T) {
@@ -817,9 +817,11 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 			onboardedEntry("other/api", "public", "eu"),
 			candidateEntry("acme/mkt", "public", coreapi.RepoCandidateAccessAdmin, true),
 		}, clusters, false)
-		stdout, _ := runMirrorList(t, "--cluster", "us")
+		// --cluster takes the host, which is also what the CLUSTERS cell prints:
+		// the filter is client-side over these rows, so the two must agree.
+		stdout, _ := runMirrorList(t, "--cluster", "aws-us-east-2.entire.io")
 		require.Contains(t, stdout, "acme/web")
-		require.NotContains(t, stdout, "other/api", "eu mirror must be dropped by --cluster us")
+		require.NotContains(t, stdout, "other/api", "the eu mirror must be dropped")
 		require.NotContains(t, stdout, "acme/mkt", "candidates are cluster-agnostic and dropped by --cluster")
 	})
 
@@ -1349,8 +1351,9 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 
 	t.Run("/gh/owner/repo renders the record view with a per-cluster table", func(t *testing.T) {
 		// The drill-down from the grouped `mirror list` NAME cell: identity
-		// fields, then one row per cluster mirror with clone URL + status,
-		// deterministic (cluster-slug) order — the entry delivers eu-first.
+		// fields, then one row per cluster mirror with clone URL + status, in
+		// the order the CLUSTER column prints — by host, which is what the
+		// table sorts on, so the eye can follow it. The entry delivers eu first.
 		gotFilter := serveRepoDetail(t, []coreapi.RepoIndexEntry{
 			{FullName: "entirehq/entiredb", Visibility: "private", Placements: []coreapi.RepoPlacement{
 				{ClusterSlug: "eu", Status: coreapi.RepoPlacementStatusFailed, Mirror: true},
@@ -1365,8 +1368,8 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 			"Name:", "entirehq/entiredb",
 			"Visibility:", "Private",
 			"CLUSTER", "CLONE URL", "STATUS",
-			"eu", "entire://eu-west-1.entire.io/gh/entirehq/entiredb", "failed",
-			"us", "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb", "ready",
+			"aws-us-east-2.entire.io", "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb", "ready",
+			"eu-west-1.entire.io", "entire://eu-west-1.entire.io/gh/entirehq/entiredb", "failed",
 		)
 	})
 
@@ -1398,7 +1401,7 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		var row repoDirRow
 		require.NoError(t, json.Unmarshal([]byte(out), &row))
 		require.Equal(t, repoDirRow{Repo: "/gh/entirehq/entiredb", Private: true, Status: "ready", Placements: []repoDirPlacement{
-			{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb"},
+			{Cluster: "aws-us-east-2.entire.io", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb"},
 		}}, row)
 	})
 
@@ -1468,7 +1471,7 @@ func TestRepoDirCells(t *testing.T) {
 			want: []string{"acme/web", "us", "Private", "ready", "-"},
 		},
 		{
-			name: "multi-cluster mirror row joins its slugs in one cell",
+			name: "multi-cluster mirror row joins its clusters in one cell",
 			row: repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
 				{Cluster: "us", Status: "ready"},
 				{Cluster: "eu", Status: "ready"},
@@ -1556,7 +1559,7 @@ func TestBuildRepoDir(t *testing.T) {
 		}, hosts, mirrorCloneForge)
 		require.Equal(t, []repoDirRow{
 			{Repo: "/gh/acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
-				{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+				{Cluster: "aws-us-east-2.entire.io", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
 			}},
 			{Repo: "/gh/acme/mkt", Private: false, Status: "available", Access: "admin"},
 			{Repo: "/gh/alice/x", Private: true, Status: "owner-only", Access: "read"},
@@ -1570,8 +1573,8 @@ func TestBuildRepoDir(t *testing.T) {
 		}, map[string]string{"us": "aws-us-east-2.entire.io", "eu": "eu-west-1.entire.io"}, mirrorCloneForge)
 		require.Len(t, rows, 1)
 		require.Equal(t, []repoDirPlacement{
-			{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
-			{Cluster: "eu", Status: "ready", CloneURL: "entire://eu-west-1.entire.io/gh/acme/web"},
+			{Cluster: "aws-us-east-2.entire.io", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+			{Cluster: "eu-west-1.entire.io", Status: "ready", CloneURL: "entire://eu-west-1.entire.io/gh/acme/web"},
 		}, rows[0].Placements)
 		require.Equal(t, "ready", rows[0].Status, "placements agree, so the row carries their shared status")
 	})
@@ -1597,7 +1600,7 @@ func TestBuildRepoDir(t *testing.T) {
 		require.Len(t, rows, 1)
 		require.Equal(t, []repoDirPlacement{
 			{Cluster: "ghost", Status: "ready"},
-		}, rows[0].Placements, "unresolved host → no clone URL, but the slug still names the placement")
+		}, rows[0].Placements, "unresolved host → no clone URL, and the slug names the placement in the host's place")
 	})
 
 	t.Run("native (non-mirror) placements are dropped, not given fabricated clone URLs", func(t *testing.T) {
@@ -1610,7 +1613,7 @@ func TestBuildRepoDir(t *testing.T) {
 		}, hosts, mirrorCloneForge)
 		require.Equal(t, []repoDirRow{
 			{Repo: "/gh/acme/web", Private: false, Status: "ready", Placements: []repoDirPlacement{
-				{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+				{Cluster: "aws-us-east-2.entire.io", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
 			}},
 		}, rows, "only the mirror row survives; the native repo is dropped")
 	})
@@ -1625,7 +1628,7 @@ func TestBuildRepoDir(t *testing.T) {
 		}, hosts, mirrorCloneForge)
 		require.Equal(t, []repoDirRow{
 			{Repo: "/gh/acme/web", Private: false, Status: "ready", Placements: []repoDirPlacement{
-				{Cluster: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
+				{Cluster: "aws-us-east-2.entire.io", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
 			}},
 		}, rows)
 	})
