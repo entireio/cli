@@ -154,9 +154,9 @@ type repoDirRow struct {
 	Access  string `json:"access,omitempty"` // candidate only
 	// ID, Project and ProvisionReason are the identity `repo view` adds to the
 	// directory row for an Entire-native repo: the ULID other verbs address it
-	// by, its owning project, and why provisioning stopped when it did. They are
-	// absent for a GitHub upstream, which Entire holds no repo record for, and
-	// so never widen the `mirror list` rows this shape is shared with.
+	// by, its owning project by NAME, and why provisioning stopped when it did.
+	// They are absent for a GitHub upstream, which Entire holds no repo record
+	// for, and so never widen the `mirror list` rows this shape is shared with.
 	ID              string             `json:"id,omitempty"`
 	Project         string             `json:"project,omitempty"`
 	ProvisionReason string             `json:"provisionReason,omitempty"`
@@ -1275,9 +1275,9 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	}
 	section("Name", st.render(st.bold, row.Repo))
 	section("Visibility", st.render(visibilityColor(st, row.Private), visibilityDisplay(row.Private)))
-	if row.ID != "" {
-		section("ID", row.ID)
-	}
+	// The ULID is --json only. It is an addressing detail, not something a
+	// reader of this view needs, and the two names above and below it say more
+	// in less space. A script that wants it reads `.id`.
 	if row.Project != "" {
 		section("Project", row.Project)
 	}

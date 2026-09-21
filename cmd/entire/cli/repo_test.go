@@ -716,7 +716,7 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	t.Run("a ULID ref warns that --project is ignored", func(t *testing.T) {
 		stdout, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID, "--project", "not-this-project")
 		require.NoError(t, err, "the command must still succeed")
-		require.Contains(t, stdout, repoULID, "the repo must still be shown")
+		require.Contains(t, stdout, "web", "the repo must still be shown")
 		require.Contains(t, stderr, "--project")
 		require.Contains(t, stderr, "ignored")
 	})

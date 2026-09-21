@@ -525,11 +525,19 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 		p.Removing = m.DesiredState == coreapi.NativeMirrorPlacementDesiredStateDeleted
 		placements = append(placements, p)
 	}
+	// The project's NAME comes out of the repo's own path, which already spells
+	// it — the repo record carries only the owning project's ULID, and resolving
+	// that to a name would cost a round trip to print something the path in the
+	// row above already shows.
+	project, _, perr := parseNativeCloneRef(name)
+	if perr != nil {
+		project = ""
+	}
 	return repoDirRow{
 		Repo:            name,
 		Private:         strings.EqualFold(repo.Visibility.Or(""), "private"),
 		ID:              repo.ID,
-		Project:         repo.OwningProjectId,
+		Project:         project,
 		ProvisionReason: strings.TrimSpace(repo.ProvisionReason.Or("")),
 		Placements:      placements,
 	}
