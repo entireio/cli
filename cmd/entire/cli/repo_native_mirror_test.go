@@ -115,6 +115,21 @@ func TestNativeMirrorIsFresh(t *testing.T) {
 	require.False(t, nativeMirrorIsFresh(ready))
 }
 
+// TestPrimaryPlacementStatus pins the one translation the STATUS column makes.
+// A repo's lifecycle and a placement's status answer the same two questions in
+// different words, and the column can only speak one language.
+func TestPrimaryPlacementStatus(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "ready", primaryPlacementStatus(repoStateActive))
+	require.Equal(t, "processing", primaryPlacementStatus(repoStateProvisioning))
+	require.Equal(t, "failed", primaryPlacementStatus(repoStateFailed), "already the placement word")
+
+	// State is an open string: a value the server adds later must reach the
+	// user as itself rather than be guessed at or blanked.
+	require.Equal(t, "quarantined", primaryPlacementStatus("quarantined"))
+	require.Equal(t, "-", primaryPlacementStatus("-"), "the unset placeholder survives")
+}
+
 // TestNativeRepoDetailRow pins what `repo view /et/...` shows: the primary
 // first, then every mirror, each labelled by role — because the difference
 // decides what a reader can do with it.
@@ -128,8 +143,8 @@ func TestNativeRepoDetailRow(t *testing.T) {
 		}, nativeTestClusters)
 		require.Equal(t, "/et/acme/web", row.Repo)
 		require.Equal(t, []repoDirPlacement{
-			{Cluster: "aws-us-east-2.entire.io", Status: "active", Role: placementRolePrimary, CloneURL: "entire://aws-us-east-2.entire.io/et/acme/web"},
-			{Cluster: "aws-eu-central-1.entire.io", Status: "ready", Role: placementRoleMirror, CloneURL: "entire://aws-eu-central-1.entire.io/et/acme/web"},
+			{Cluster: "aws-us-east-2.entire.io", ClusterSlug: "aws-us-east-2", Jurisdiction: "us", Status: "ready", Role: placementRolePrimary, CloneURL: "entire://aws-us-east-2.entire.io/et/acme/web"},
+			{Cluster: "aws-eu-central-1.entire.io", ClusterSlug: "aws-eu-central-1", Jurisdiction: "eu", Status: "ready", Role: placementRoleMirror, CloneURL: "entire://aws-eu-central-1.entire.io/et/acme/web"},
 		}, row.Placements)
 	})
 

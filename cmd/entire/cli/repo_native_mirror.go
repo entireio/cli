@@ -483,6 +483,28 @@ func runNativeRepoView(cmd *cobra.Command, ref, project string, authoritative bo
 	})
 }
 
+// primaryPlacementStatus renders a repo's own lifecycle state in the vocabulary
+// the rest of the STATUS column speaks. A repo says "active" where a placement
+// says "ready", and "provisioning" where one says "processing": the same two
+// facts under two names, which in a single column reads as a difference that is
+// not there.
+//
+// An unrecognised value passes through unchanged. State is an open string on
+// the wire, so translating one the server added later would be a guess printed
+// as fact — and the mapping lives on the FIELD, not the rendering, so --json
+// and `mirror list --status ready` agree with the table rather than needing
+// the repo vocabulary nobody else uses.
+func primaryPlacementStatus(state string) string {
+	switch state {
+	case repoStateActive:
+		return string(coreapi.NativeMirrorPlacementStatusReady)
+	case repoStateProvisioning:
+		return string(coreapi.NativeMirrorPlacementStatusProcessing)
+	default:
+		return state
+	}
+}
+
 // nativeRepoDetailRow shapes a native repo and its mirrors into the same row
 // the GitHub detail view renders, so both forges produce one table and one
 // --json shape. The primary comes first; the mirrors follow in slug order.
@@ -496,16 +518,25 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 		return entireCloneURLScheme + host + "/" + strings.TrimPrefix(path, "/")
 	}
 
+	jurisdictionOf := func(slug string) string {
+		if cl, ok := clusterBySlug(clusters, slug); ok {
+			return cl.Jurisdiction
+		}
+		return ""
+	}
+
 	placements := make([]repoDirPlacement, 0, len(mirrors)+1)
 	if primary := repo.ClusterSlug.Or(""); primary != "" {
 		// The primary has no placement record of its own here, so its status is
 		// the repo's provisioning state — the same question, answered by the
-		// only field that answers it.
+		// only field that answers it, in the column's own vocabulary.
 		placements = append(placements, repoDirPlacement{
-			Cluster:  placementCluster(hostBySlug, primary),
-			Status:   repo.State.Or("-"),
-			Role:     placementRolePrimary,
-			CloneURL: cloneURL(primary),
+			Cluster:      placementCluster(hostBySlug, primary),
+			ClusterSlug:  primary,
+			Jurisdiction: jurisdictionOf(primary),
+			Status:       primaryPlacementStatus(repo.State.Or("-")),
+			Role:         placementRolePrimary,
+			CloneURL:     cloneURL(primary),
 		})
 	}
 	sorted := slices.Clone(mirrors)
@@ -514,10 +545,12 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 	})
 	for _, m := range sorted {
 		p := repoDirPlacement{
-			Cluster:  placementCluster(hostBySlug, m.ClusterSlug),
-			Status:   string(m.Status),
-			Role:     placementRoleMirror,
-			CloneURL: cloneURL(m.ClusterSlug),
+			Cluster:      placementCluster(hostBySlug, m.ClusterSlug),
+			ClusterSlug:  m.ClusterSlug,
+			Jurisdiction: jurisdictionOf(m.ClusterSlug),
+			Status:       string(m.Status),
+			Role:         placementRoleMirror,
+			CloneURL:     cloneURL(m.ClusterSlug),
 		}
 		if m.Status == coreapi.NativeMirrorPlacementStatusProcessing {
 			p.Stage = string(m.Stage)

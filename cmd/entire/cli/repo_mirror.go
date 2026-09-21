@@ -96,7 +96,14 @@ type repoDirPlacement struct {
 	// --cluster takes, so a cell read out of this table can be pasted back into
 	// one. See placementCluster for the unresolvable case.
 	Cluster string `json:"cluster"`
-	Status  string `json:"status"`
+	// ClusterSlug and Jurisdiction are --json only, for the callers that must
+	// key on a cluster rather than print it: the slug is what the native-mirror
+	// API is addressed by, and the jurisdiction is what decides whether a
+	// cluster is even eligible to hold a mirror of this repo. Neither earns a
+	// column — the host names the cluster for a reader.
+	ClusterSlug  string `json:"clusterSlug,omitempty"`
+	Jurisdiction string `json:"jurisdiction,omitempty"`
+	Status       string `json:"status"`
 	// Role is "primary" or "mirror" — the two things a placement of a native
 	// repo can be, in the same word the verbs use. It is set only for
 	// Entire-native repos, where the two differ in what you may do to the

@@ -38,12 +38,14 @@ type clusterJSON struct {
 }
 
 type placementJSON struct {
-	Cluster  string `json:"cluster"`
-	Status   string `json:"status"`
-	Role     string `json:"role"`
-	Stage    string `json:"stage"`
-	Removing bool   `json:"removing"`
-	CloneURL string `json:"cloneUrl"`
+	Cluster      string `json:"cluster"`
+	ClusterSlug  string `json:"clusterSlug"`
+	Jurisdiction string `json:"jurisdiction"`
+	Status       string `json:"status"`
+	Role         string `json:"role"`
+	Stage        string `json:"stage"`
+	Removing     bool   `json:"removing"`
+	CloneURL     string `json:"cloneUrl"`
 }
 
 type repoDirJSON struct {
@@ -95,13 +97,13 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	repoRef = created.ID
 
 	repo := waitForRepoClonable(t, dir, ref)
-	require.NotEmpty(t, repo.ClusterSlug, "a provisioned repo names its primary cluster")
+	require.NotEmpty(t, repo.primary().ClusterSlug, "a provisioned repo names its primary cluster")
 
 	// A native mirror goes in a region other than the repo's own, so the target
 	// is read from the catalog rather than hardcoded: the account's home region
 	// is not this test's to assume.
 	home, target := pickClusters(t, dir, repo)
-	t.Logf("repo %s is primary on %s (%s); mirroring to %s (%s)", ref, repo.ClusterSlug, repo.Jurisdiction, target.Slug, target.Jurisdiction)
+	t.Logf("repo %s is primary on %s (%s); mirroring to %s (%s)", ref, repo.primary().ClusterSlug, repo.primary().Jurisdiction, target.Slug, target.Jurisdiction)
 
 	phase := func(label string, fn func(t *testing.T)) {
 		if t.Failed() {
@@ -252,14 +254,14 @@ func pickClusters(t *testing.T, dir string, repo repoJSON) (home, foreign cluste
 	require.NoError(t, json.Unmarshal([]byte(stdout), &clusters), "stdout is not JSON:\n%s", stdout)
 	for _, cl := range clusters {
 		switch {
-		case cl.Slug == repo.ClusterSlug:
+		case cl.Slug == repo.primary().ClusterSlug:
 			home = cl
-		case cl.Jurisdiction != repo.Jurisdiction && cl.Host != "" && foreign.Host == "":
+		case cl.Jurisdiction != repo.primary().Jurisdiction && cl.Host != "" && foreign.Host == "":
 			foreign = cl
 		}
 	}
-	require.NotEmpty(t, home.Host, "the repo's own cluster %s is in the catalog: %s", repo.ClusterSlug, stdout)
-	require.NotEmpty(t, foreign.Host, "a cluster outside %s to mirror into: %s", repo.Jurisdiction, stdout)
+	require.NotEmpty(t, home.Host, "the repo's own cluster %s is in the catalog: %s", repo.primary().ClusterSlug, stdout)
+	require.NotEmpty(t, foreign.Host, "a cluster outside %s to mirror into: %s", repo.primary().Jurisdiction, stdout)
 	return home, foreign
 }
 
