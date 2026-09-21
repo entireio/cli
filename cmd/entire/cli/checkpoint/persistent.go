@@ -1355,7 +1355,7 @@ func readSummaryFromCheckpointTree(checkpointTree *FetchingTree) (*CheckpointSum
 		return nil, nil //nolint:nilnil,nilerr // metadata.json not found
 	}
 
-	content, err := metadataFile.Contents()
+	content, err := readBlobContents(metadataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata.json: %w", err)
 	}
@@ -1407,7 +1407,7 @@ func readSessionMetadataFromTree(sessionTree *FetchingTree, sessionIndex int) (*
 		return nil, fmt.Errorf("metadata.json not found for session %d: %w", sessionIndex, err)
 	}
 
-	content, err := metadataFile.Contents()
+	content, err := readBlobContents(metadataFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session metadata: %w", err)
 	}
@@ -1438,7 +1438,14 @@ func readSessionMetadataAndPromptsFromTree(sessionTree *FetchingTree, sessionInd
 
 	var prompts string
 	if file, fileErr := sessionTree.File(paths.PromptFileName); fileErr == nil {
-		if content, contentErr := file.Contents(); contentErr == nil {
+		content, contentErr := readBlobContents(file)
+		if contentErr != nil {
+			// Oversized is a tampered/corrupt tree, not a benign missing
+			// prompt — fail loudly instead of silently reporting no prompts.
+			if errors.Is(contentErr, ErrCheckpointBlobTooLarge) {
+				return nil, "", fmt.Errorf("failed to read session prompts: %w", contentErr)
+			}
+		} else {
 			prompts = content
 		}
 	}
@@ -1459,8 +1466,11 @@ func readSessionPromptsFromTree(sessionTree *FetchingTree) (string, error) {
 	if err != nil {
 		return "", nil //nolint:nilerr // Missing prompt.txt means no recorded prompts.
 	}
-	content, err := file.Contents()
+	content, err := readBlobContents(file)
 	if err != nil {
+		if errors.Is(err, ErrCheckpointBlobTooLarge) {
+			return "", fmt.Errorf("failed to read session prompts: %w", err)
+		}
 		return "", nil //nolint:nilerr // Keep committed prompt reads best-effort.
 	}
 	return content, nil
@@ -1485,22 +1495,42 @@ func readSessionContentFromTree(ctx context.Context, sessionTree *FetchingTree) 
 	// Read session-specific metadata (auto-fetches blob if needed)
 	var agentType types.AgentType
 	if metadataFile, fileErr := sessionTree.File(paths.MetadataFileName); fileErr == nil {
-		if content, contentErr := metadataFile.Contents(); contentErr == nil {
-			if jsonErr := json.Unmarshal([]byte(content), &result.Metadata); jsonErr == nil {
-				agentType = result.Metadata.Agent
+		content, contentErr := readBlobContents(metadataFile)
+		if contentErr != nil {
+			// Oversized is a tampered/corrupt tree, not a benign missing
+			// field — fail loudly instead of silently reading as if this
+			// session had no metadata.
+			if errors.Is(contentErr, ErrCheckpointBlobTooLarge) {
+				return nil, fmt.Errorf("failed to read session metadata: %w", contentErr)
 			}
+		} else if jsonErr := json.Unmarshal([]byte(content), &result.Metadata); jsonErr == nil {
+			agentType = result.Metadata.Agent
 		}
 	}
 
 	// Read transcript (auto-fetches blobs if needed)
-	if transcript, transcriptErr := readTranscriptFromTree(ctx, sessionTree, agentType); transcriptErr == nil && transcript != nil {
+	transcript, transcriptErr := readTranscriptFromTree(ctx, sessionTree, agentType)
+	if transcriptErr != nil {
+		// A too-large chunk/transcript must not present as "no transcript" —
+		// that would silently mask an oversized/tampered blob behind
+		// ErrNoTranscript below.
+		if errors.Is(transcriptErr, ErrCheckpointBlobTooLarge) {
+			return nil, transcriptErr
+		}
+		logging.Warn(ctx, "failed to read transcript from tree", slog.String("error", transcriptErr.Error()))
+	} else if transcript != nil {
 		result.Transcript = reinjectAssets(sessionTree, agentType, transcript)
 		result.TranscriptBlobHashes = transcriptBlobHashesFromTreeEntries(sessionTree.RawEntries())
 	}
 
 	// Read prompts (auto-fetches blob if needed)
 	if file, fileErr := sessionTree.File(paths.PromptFileName); fileErr == nil {
-		if content, contentErr := file.Contents(); contentErr == nil {
+		content, contentErr := readBlobContents(file)
+		if contentErr != nil {
+			if errors.Is(contentErr, ErrCheckpointBlobTooLarge) {
+				return nil, fmt.Errorf("failed to read session prompts: %w", contentErr)
+			}
+		} else {
 			result.Prompts = content
 		}
 	}
@@ -1615,7 +1645,12 @@ func readCommittedInfoFromCheckpointTree(checkpointID id.CheckpointID, checkpoin
 	if fileErr != nil {
 		return info
 	}
-	content, contentErr := metadataFile.Contents()
+	// List enumerates every checkpoint and must not fail wholesale over one
+	// bad entry, so an oversized/tampered blob here degrades this one
+	// checkpoint's info to defaults (same as any other unreadable
+	// metadata.json) rather than aborting the whole listing. The read itself
+	// is still bounded, which is what stops the memory-exhaustion DoS.
+	content, contentErr := readBlobContents(metadataFile)
 	if contentErr != nil {
 		return info
 	}
