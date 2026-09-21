@@ -306,10 +306,10 @@ The two backends trip this differently. On `git-branch` it applies **only on boo
 So **if you hit this on a real session, that is itself worth investigating** — the interesting question is what that checkpoint contains, not what the cap is set to. There *is* an override, for when you've looked and want the content redacted anyway:
 
 ```fish
-set -x ENTIRE_OPF_BATCH_LIMIT 33554432; git push   # 32 MiB
-# or fully unbounded:
 set -x ENTIRE_OPF_BATCH_LIMIT unlimited; git push
 ```
+
+`unlimited` is not literally unlimited, and raising the number past `16 MiB` buys nothing: the `16 MiB` ceiling inside `redact/` is not configurable, so beyond it the model call is refused whatever this variable says, with a blunter error. That is deliberate — content that large is not a session.
 
 Note what the cap deliberately does *not* do: distinguish "broken" from "merely large". A byte count can't — both are just a lot of bytes. What separates them is behavior. Broken content makes the scan fail, and that has its own error path and its own circuit breaker; large content just takes longer, which is expected and fine. Real redaction of any real session takes minutes to hours no matter what this value is: benchmarked against the real `opf` binary, throughput is about **1.14 s/KB** of prose-leaf content on CPU, and Apple-Silicon MPS is measurably *slower* than CPU on this stack rather than faster. On `git-refs` nobody waits for it — the rewrite runs in a detached background worker and already-redacted refs ship without waiting for their still-redacting siblings (see "Seeing outstanding OPF work" below). `git-branch` still rewrites inline during `git push`, so there a large session is a long push.
 
