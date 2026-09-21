@@ -180,7 +180,7 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		SubagentType:            raw.AgentType,
 		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),
 		Model:                   raw.Model,
-                TaskDescription:        derefString(raw.LastAssistantMessage),
+		TaskDescription:        derefString(raw.LastAssistantMessage),
 		Timestamp:               time.Now(),
 	}, nil
 }
