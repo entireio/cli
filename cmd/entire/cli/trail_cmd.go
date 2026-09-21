@@ -1859,7 +1859,7 @@ func checkoutTrailBranch(ctx context.Context, w, errW io.Writer, found *api.Trai
 		return nil
 	}
 	fmt.Fprintf(w, "Checking out %s\n", describeTrailRef(found))
-	proceed, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
+	proceed, _, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
 	if err != nil {
 		return err
 	}

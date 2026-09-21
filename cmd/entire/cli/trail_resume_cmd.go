@@ -333,11 +333,11 @@ func resumeTrailLatest(ctx context.Context, cmd *cobra.Command, branch string, f
 	if !ensureTrailResumeBranchAvailable(ctx, w, branch) {
 		return nil
 	}
-	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
+	proceed, resolvedBranch, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
 	if err != nil || !proceed {
 		return err
 	}
-	sessions, err := restoreFromCurrentBranch(ctx, w, errW, branch, force)
+	sessions, err := restoreFromCurrentBranch(ctx, w, errW, resolvedBranch, force)
 	if err != nil {
 		return err
 	}
@@ -351,7 +351,7 @@ func resumeTrailCheckpoint(ctx context.Context, cmd *cobra.Command, branch strin
 	if !ensureTrailResumeBranchAvailable(ctx, w, branch) {
 		return nil
 	}
-	proceed, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
+	proceed, _, err := switchToBranchForResume(ctx, w, errW, branch, trailResumeSkipBranchPrompts(force))
 	if err != nil || !proceed {
 		return err
 	}
