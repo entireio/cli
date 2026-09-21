@@ -14,7 +14,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -149,7 +148,7 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 		return
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
-	target, targetCommon, err := gitWorktreeIdentity(ctx, event.CWD)
+	target, targetMeta, err := worktreeRootOf(event.CWD)
 	if err != nil {
 		logging.Debug(logCtx, "payload cwd is not a worktree; staying put",
 			slog.String("cwd", event.CWD), slog.String("error", err.Error()))
@@ -159,8 +158,8 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 	if err != nil || filepath.Clean(current) == filepath.Clean(target) {
 		return
 	}
-	_, currentCommon, err := gitWorktreeIdentity(ctx, current)
-	if err != nil || currentCommon != targetCommon {
+	currentMeta, err := gitrepo.ResolveWorktreeMetadata(current)
+	if err != nil || !sameDir(currentMeta.CommonDir, targetMeta.CommonDir) {
 		logging.Debug(logCtx, "payload cwd belongs to another repository; staying put",
 			slog.String("cwd", event.CWD))
 		return
@@ -179,27 +178,36 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 		slog.String("to", target))
 }
 
-// gitWorktreeIdentity resolves dir to its worktree root and git common dir
-// (symlinks resolved), ignoring any repository overrides in the environment.
-func gitWorktreeIdentity(ctx context.Context, dir string) (root, commonDir string, err error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
-	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
-	out, err := cmd.Output()
+// sameDir compares two directory paths with symlinks resolved.
+func sameDir(a, b string) bool {
+	if ra, err := filepath.EvalSymlinks(a); err == nil {
+		a = ra
+	}
+	if rb, err := filepath.EvalSymlinks(b); err == nil {
+		b = rb
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// worktreeRootOf finds the worktree containing dir — nearest root first, so a
+// cwd inside a subdirectory still resolves — through the canonical metadata
+// resolver rather than a git query.
+func worktreeRootOf(dir string) (string, gitrepo.WorktreeMetadata, error) {
+	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve worktree for %s: %w", dir, err)
+		return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("resolve %s: %w", dir, err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
-		return "", "", fmt.Errorf("resolve worktree for %s: unexpected git output", dir)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
 	}
-	root, commonDir = lines[0], lines[1]
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
+	for cur := abs; ; cur = filepath.Dir(cur) {
+		if meta, err := gitrepo.ResolveWorktreeMetadata(cur); err == nil {
+			return cur, meta, nil
+		}
+		if filepath.Dir(cur) == cur {
+			return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("%s is not inside a git worktree", dir)
+		}
 	}
-	if resolved, err := filepath.EvalSymlinks(commonDir); err == nil {
-		commonDir = resolved
-	}
-	return root, commonDir, nil
 }
 
 func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {

@@ -2419,7 +2419,10 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 
 // reserveCheckpointForStampedSessions records the stamped checkpoint ID as each
 // session's pending condensation so post-commit can resolve the session from the
-// trailer alone. An existing different reservation is kept. Best-effort.
+// trailer alone. An existing different reservation is kept. If the commit is
+// aborted after stamping the reservation stays, and the session's next commit
+// reuses the ID (checkpointIDForSessions) — the same reuse an interrupted
+// condensation relies on; nothing was written under it. Best-effort.
 func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
 	for _, stamped := range states {
 		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {
