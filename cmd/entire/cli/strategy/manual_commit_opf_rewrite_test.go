@@ -602,25 +602,39 @@ func TestRewriteUnpushedV1WithOPF_MultiCommit_SingleBatchCall(t *testing.T) {
 
 // Leaf-byte cap: the rewrite must refuse a push whose cumulative
 // prose-leaf bytes exceed ENTIRE_OPF_BATCH_LIMIT, returning a typed
-// error the pre-push hook can surface. Without this, a pathological
-// push (a corrupted transcript, an accidentally-embedded binary) would
-// be handed to the model whatever its size — at OPF's real throughput
-// that is hours of inference on content that was never a real session.
+// error the pre-push hook can surface. Without this backstop, input
+// that is broken rather than merely large — a corrupted transcript, an
+// accidentally-embedded binary, a multi-GiB paste — would be handed to
+// the model at whatever size it happened to be.
 func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 	cases := []struct {
 		name     string
 		envLimit string
 		wantErr  bool
 	}{
-		{name: "over_limit_rejected", envLimit: "10", wantErr: true},
+		// 5000 is under the fixture's ~10 KB of prose-leaf content and well
+		// over its ~13 KB of raw bytes divided by rawByteCapMultiplier, so it
+		// is the leaf-byte cap that trips and not the RAM ceiling that scales
+		// off the same env var.
+		{name: "over_limit_rejected", envLimit: "5000", wantErr: true},
 		{name: "unlimited_allows_any_size", envLimit: "unlimited", wantErr: false},
-		{name: "env_override_allows_above_default", envLimit: "10000000", wantErr: false},
+		// Above batchDefaultLimit (15 MiB), so the override is doing something:
+		// the default is a backstop, not a size anyone should need to raise.
+		{name: "env_override_allows_above_default", envLimit: "20000000", wantErr: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			configureFakeOPF(t, &fakeOPFForRewrite{})
 			t.Setenv(batchEnvVar, tc.envLimit)
-			repo, originalTip := setupV1Repo(t) // ~50 bytes of prose-leaf content
+			repo, _ := setupV1Repo(t)
+			// A prose-heavy second checkpoint (~10 KB of leaves, ~13 KB raw)
+			// so this fixture's raw-to-leaf ratio is ~1.2x, like real
+			// transcript content, rather than the ~22x of the tiny base
+			// fixture where structural JSON dominates. The caps are only
+			// meaningfully ordered against realistic content.
+			originalTip := addV1Checkpoint(t, repo, "b1b2c3d4e5f7", "prose-session",
+				strings.Repeat("the quick brown fox jumps over PERSONABC again ", 200),
+				strings.Repeat("look up PERSONABC please ", 40))
 
 			newTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
 			if !tc.wantErr {
@@ -647,18 +661,26 @@ func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 // OPFBatchTooLargeError message includes leaf-byte count, the limit
 // that tripped, and remediation pointing to ENTIRE_OPF_BATCH_LIMIT —
 // the user-facing message is the only thing they see when this fires.
+//
+// Order matters as much as content: the cap is a backstop no real
+// session reaches, so the message must send someone to look at the
+// content first and offer the override second, not the reverse.
 func TestOPFBatchTooLargeErrorMessage(t *testing.T) {
 	t.Parallel()
-	e := &OPFBatchTooLargeError{LeafBytes: 9_000_000, Limit: batchDefaultLimit}
+	e := &OPFBatchTooLargeError{LeafBytes: 20_000_000, Limit: batchDefaultLimit}
 	msg := e.Error()
 	for _, want := range []string{
-		"9000000",
+		"20000000",
 		strconv.Itoa(batchDefaultLimit),
 		batchEnvVar,
 		"unlimited",
 	} {
 		require.Contains(t, msg, want, "OPFBatchTooLargeError message should mention %q", want)
 	}
+	require.Contains(t, msg, "corrupted transcript",
+		"message should explain what hitting a backstop usually means")
+	require.Less(t, strings.Index(msg, "corrupted transcript"), strings.Index(msg, batchEnvVar),
+		"the content explanation must come before the override, not after it")
 }
 
 // TestRewriteUnpushedV1WithOPF_RawByteCap pins the RAM-ceiling check
@@ -673,8 +695,9 @@ func TestOPFBatchTooLargeErrorMessage(t *testing.T) {
 // setupV1Repo fixture triggers it.
 func TestRewriteUnpushedV1WithOPF_RawByteCap(t *testing.T) {
 	configureFakeOPF(t, &fakeOPFForRewrite{})
-	// leaf cap = 1 → raw ceiling = 100 bytes; the setupV1Repo
-	// checkpoint writes far more than that across its shard blobs.
+	// leaf cap = 1 → raw ceiling = rawByteCapMultiplier bytes; the
+	// setupV1Repo checkpoint writes far more than that across its
+	// shard blobs.
 	t.Setenv(batchEnvVar, "1")
 	repo, originalTip := setupV1Repo(t)
 
@@ -1096,11 +1119,12 @@ func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *te
 	configureFakeOPF(t, fake)
 	_, repo, refs := setupGitRefsOPFRepo(t, fitsID, oversizedID)
 	// A second, much larger session carries the oversized ref's own prose-leaf
-	// bytes past the cap while the other ref stays well under it. The raw-byte
-	// ceiling (cap × 100) stays far above both.
+	// bytes (~10 KB) past the cap while the other ref stays well under it. The
+	// raw-byte ceiling (cap × rawByteCapMultiplier, so 80 KB here) stays above
+	// both, so the leaf-byte cap is what this test observes.
 	addGitRefsSessionWithTranscript(t, repo, oversizedID, "sess-oversized",
 		strings.Repeat("the quick brown fox jumps over PERSONABC again ", 200))
-	t.Setenv(batchEnvVar, "2000")
+	t.Setenv(batchEnvVar, "5000")
 	before := refHashes(t, repo, refs)
 
 	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)

@@ -160,14 +160,14 @@ func resolveBootstrapLimit() int {
 // OPFBatchTooLargeError: one OPF pass — a single checkpoint ref on
 // git-refs, the whole unpushed v1 chain on git-branch — has more
 // prose-leaf content than ENTIRE_OPF_BATCH_LIMIT allows in one
-// inference call. This is a sanity ceiling on implausible content, not
-// a latency guard: see batchDefaultLimit for the time budget it is
-// derived from, and note that real content *under* the limit still
-// takes minutes to hours of inference.
+// inference call. See batchDefaultLimit: this is a backstop against
+// broken input, so hitting it says something about the content, not
+// about the size of the session.
 //
-// The user-facing remediation is identical in shape to
-// BootstrapTooLargeError: bump the limit, push without OPF, or break
-// the push into smaller pieces.
+// The message therefore leads with "look at what this checkpoint
+// holds" rather than with the override. The override is still named,
+// because someone who has looked and wants that content redacted
+// anyway needs a way through.
 type OPFBatchTooLargeError struct {
 	LeafBytes int
 	Limit     int
@@ -175,8 +175,11 @@ type OPFBatchTooLargeError struct {
 
 func (e *OPFBatchTooLargeError) Error() string {
 	return fmt.Sprintf("OPF would run inference on %d prose-leaf bytes "+
-		"(limit %d). Set ENTIRE_OPF_BATCH_LIMIT=<bytes> or =unlimited to override, "+
-		"or push without OPF (ENTIRE_OPF=no git push) and let a smaller follow-up push run OPF",
+		"(limit %d). No real session should reach this limit, so check what this "+
+		"content is — a corrupted transcript or an accidentally-embedded binary is "+
+		"the likely explanation. If it really is content you want redacted, set "+
+		"ENTIRE_OPF_BATCH_LIMIT=<bytes> or =unlimited to override, or push without "+
+		"OPF (ENTIRE_OPF=no git push)",
 		e.LeafBytes, e.Limit)
 }
 
@@ -184,42 +187,42 @@ const (
 	// batchDefaultLimit caps the cumulative prose-leaf bytes one OPF pass
 	// hands to the model: per checkpoint ref on git-refs
 	// (manual_commit_opf_refs.go), cumulative across the unpushed v1 chain
-	// on git-branch. It is a sanity ceiling — "is this plausibly a real
-	// session, or a corrupted transcript / accidentally-embedded binary?"
-	// — not a speed target. OPF-THROUGHPUT-FINDINGS.md measured the real
-	// opf runtime at ~1.14s/KB sustained (CPU; MPS confirmed slower on
-	// this stack, ~16x slower than this comment's previous estimate), so
-	// there is no byte count at which redaction is "fast" and no useful
-	// version of the question this cap used to answer.
+	// on git-branch.
 	//
-	// Sized from a stated time budget rather than guessed: 2 hours is the
-	// longest it is acceptable for the detached flush worker
-	// (manual_commit_opf_flush.go) to spend on ONE checkpoint before we
-	// would rather call its content pathological than merely large. At
-	// 1.14s/KB that is ~6.2 MiB, rounded down to 6 MiB. That leaves ~1.9x
-	// headroom over the median real single-session prose-leaf content this
-	// repo measured (OPF-BUG.md: a median checkpoint tree's full.jsonl is
-	// 3.9 MB raw at a ~0.84 prose-leaf ratio, so ~3.3 MB) — content the
-	// old 2 MiB cap rejected outright. The median is not a maximum: 18 of
-	// 20 sampled checkpoint trees already held more than 2 MiB of raw
-	// content, so real sessions run well above it.
+	// It is a backstop against genuinely broken input — a corrupted
+	// transcript, an accidentally-embedded binary, gigabytes of pasted
+	// dump — and nothing else. It is not a speed target, it is not sized
+	// against real session data, and it is not a knob anyone should have
+	// to reason about or adjust: no real session, however long, should
+	// come anywhere near it. A session that does hit it is itself the
+	// thing to investigate; "your session didn't fit, raise the number"
+	// is not the intended reading.
 	//
-	// Affordable because delivery no longer waits on it: on git-refs the
-	// rewrite runs detached and flushCheckpointRefsQueue's
-	// partitionOPFTrailered gate ships the refs that are already redacted,
-	// so a slow-but-working checkpoint holds neither its siblings nor the
-	// user's push. git-branch has no such worker — its rewrite is still
-	// inline in prePush — so there this cap doubles as the worst-case push
-	// wait. Deliberate trade: the alternative is what 2 MiB did, reject
-	// every real session.
+	// It does not try to tell "pathological" from "merely large", because
+	// a byte count cannot: both are just a lot of bytes. What actually
+	// separates the two is behavior, not size. Broken content makes the
+	// scan fail, and that has its own path — OPFRuntimeFailedError plus
+	// the process-wide circuit breaker. Large content just takes longer:
+	// OPF-THROUGHPUT-FINDINGS.md measured the real runtime at ~1.14s/KB
+	// sustained on CPU (MPS confirmed slower on this stack), so every
+	// real session is minutes to hours of inference and no cap value
+	// changes that. On git-refs nobody waits for it either — the rewrite
+	// runs detached and flushCheckpointRefsQueue's partitionOPFTrailered
+	// gate ships the refs that are already redacted, so a slow-but-working
+	// checkpoint holds neither its siblings nor the user's push.
 	//
-	// Keep the result well under redact's own opfMaxBatchInputBytes
-	// (16 MiB), which bounds the same deduplicated-leaf population at the
-	// shell-out boundary, so this more specific error trips first. Redo the
-	// arithmetic in
-	// docs/superpowers/plans/2026-09-18-opf-per-ref-delivery.md if the
-	// budget ever changes.
-	batchDefaultLimit = 6 * 1024 * 1024
+	// The value is pinned to the pipeline's one hard constraint rather
+	// than to a time budget or a multiple of an observed session size:
+	// redact's opfMaxBatchInputBytes (16 MiB) bounds the same quantity one
+	// layer lower — the deduplicated prose-leaf population
+	// BatchBytesWithPrivacyFilter feeds to the shell-out, which
+	// opfBatchedInputLen measures as those same leaf bytes plus one
+	// separator byte per leaf — as a hard, non-configurable ceiling. 15
+	// MiB sits just under it so this check still owns the error message
+	// (OPFBatchTooLargeError explains itself; the shell-out's generic
+	// "input too large" does not), with the ~1 MiB gap covering the
+	// separator bytes. Both are outer walls; neither is a size to tune.
+	batchDefaultLimit = 15 * 1024 * 1024
 	batchEnvVar       = "ENTIRE_OPF_BATCH_LIMIT"
 )
 
@@ -253,10 +256,11 @@ func scaleBatchLimit(limit, mult int) int {
 
 // OPFRawBytesTooLargeError: the cumulative raw blob bytes the
 // collection pass loaded into memory exceeded the safety ceiling.
-// Unlike the leaf-byte cap, this is about RAM headroom rather than
-// inference wall-clock — a multi-hundred-MiB push of mostly-structural
-// JSON has tiny leaf content but huge raw bytes, and would OOM the user's
-// shell before the leaf-byte cap got a chance to fire.
+// Unlike the leaf-byte cap, this is about RAM headroom rather than the
+// plausibility of the input — a multi-hundred-MiB push of
+// mostly-structural JSON has tiny leaf content but huge raw bytes, and
+// would OOM the user's shell before the leaf-byte cap got a chance to
+// fire.
 //
 // The raw ceiling is derived from ENTIRE_OPF_BATCH_LIMIT (raw =
 // leaf × rawByteCapMultiplier) so a user bumping the leaf cap
@@ -277,12 +281,22 @@ func (e *OPFRawBytesTooLargeError) Error() string {
 }
 
 // rawByteCapMultiplier ties the raw-byte RAM ceiling to the leaf-byte
-// inference cap. 100× means: default leaf cap 6 MiB → raw ceiling
-// 600 MiB. Picked to comfortably exceed any realistic JSON-scaffolding
-// ratio (real transcripts run ~1.2× raw per prose-leaf byte, and a
-// 10 MiB JSONL with 300 KB of leaves still fits) while preventing
-// pathological RAM blowups (a 5 GiB pasted dump aborts before loading).
-const rawByteCapMultiplier = 100
+// cap so there is no second env var. 16× means: default leaf cap 15 MiB
+// → raw ceiling 240 MiB.
+//
+// This one really is a resource number, unlike batchDefaultLimit: it
+// bounds what this process holds in memory at once, so it is sized
+// against real content rather than against implausible content. Real
+// transcripts run ~1.2× raw bytes per prose-leaf byte (OPF-BUG.md), so
+// 16× leaves better than an order of magnitude over a flush whose leaf
+// content is itself at the cap. That headroom is not slack: raw bytes
+// are counted per commit across the whole flush with no dedup, while
+// the leaf count dedups, so an un-applied chain re-carrying the same
+// growing full.jsonl and a blob that is mostly JSON scaffolding both
+// inflate this side only. 240 MiB absorbs that and still aborts a
+// multi-GiB paste before it exhausts the user's shell, which 100×
+// (1.5 GiB at the current leaf cap) would not.
+const rawByteCapMultiplier = 16
 
 // RewriteUnpushedV1WithOPF re-redacts unpushed entire/checkpoints/v1
 // commits with OPF, builds new commits carrying Entire-OPF-Applied:
@@ -367,11 +381,11 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	pendings := make([]pendingCommit, 0, len(unpushed))
 	// Bound raw-bytes-in-memory incrementally so a pathological push
 	// (e.g. 5 GiB of pasted dumps) aborts before exhausting the user's
-	// shell RAM. The leaf-byte cap downstream is about inference cost;
-	// this one is about memory ceiling and fires earlier. scaleBatchLimit
-	// saturates at math.MaxInt so "unlimited" actually means unlimited
-	// — without saturation, "unlimited" × 100 overflows int and the cap
-	// trips on every push.
+	// shell RAM. The leaf-byte cap downstream backstops implausible
+	// content; this one is a memory ceiling and fires earlier.
+	// scaleBatchLimit saturates at math.MaxInt so "unlimited" actually
+	// means unlimited — without saturation, "unlimited" × 16 overflows
+	// int and the cap trips on every push.
 	rawCap := scaleBatchLimit(resolveBatchLimit(), rawByteCapMultiplier)
 	var rawBytesSoFar int
 	for _, c := range unpushed {
@@ -414,8 +428,8 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		// without reintroducing the "chunking" hazard OPF-BUG.md rejects — a
 		// partially-rewritten chain whose ancestor is a still-un-trailered
 		// commit. Separate checkpoint refs are independent chains, which is why
-		// only that backend can scope per ref. If this cap still trips on real
-		// content after a future batchDefaultLimit resize, this backend's only
+		// only that backend can scope per ref. So if this cap ever trips on
+		// content that really is a chain of real sessions, this backend's only
 		// remaining levers are ENTIRE_OPF_BATCH_LIMIT or converging it onto the
 		// git-refs queue model — not further chunking.
 		leafBytes := redact.SumProseLeafBytes(globalBlobs)

@@ -3405,8 +3405,19 @@ func TestRunStatus_OPFStuckRefWarning(t *testing.T) {
 	if !strings.Contains(out, "! 1 checkpoint cannot be privacy-filtered") {
 		t.Errorf("expected the stuck-ref warning, marked like other status warnings, got:\n%s", out)
 	}
-	if !strings.Contains(out, "ENTIRE_OPF_BATCH_LIMIT") {
-		t.Errorf("stuck warning must name the override that resolves the size cap, got:\n%s", out)
+	// The warning must send people to the log first — a runtime failure is the
+	// ordinary cause of "stuck" — and name the batch-limit override only as the
+	// rare secondary case, since the cap is a backstop no real session reaches.
+	logsAt := strings.Index(out, ".entire/logs")
+	capAt := strings.Index(out, "ENTIRE_OPF_BATCH_LIMIT")
+	if logsAt < 0 {
+		t.Errorf("stuck warning must point at the log that records the actual failure, got:\n%s", out)
+	}
+	if capAt < 0 {
+		t.Errorf("stuck warning must still name the override for the rare size-cap case, got:\n%s", out)
+	}
+	if logsAt >= 0 && capAt >= 0 && logsAt > capAt {
+		t.Errorf("the log must be the primary guidance, ahead of the batch-limit override, got:\n%s", out)
 	}
 	if !strings.Contains(out, "1 checkpoint pending OpenAI Privacy Filter redaction") {
 		t.Errorf("the other queued ref is still merely pending, got:\n%s", out)

@@ -748,18 +748,23 @@ func formatPendingOPFLine(pending int) string {
 // rewrite has failed StuckOPFFailureThreshold times running, which is the count
 // that cannot be explained by one unlucky pass plus a retry.
 //
-// The size cap is named as a likely cause, not stated as the cause. The failure
-// log records how often a ref failed and never why — an oversized batch, the
-// un-OPF'd commit cap, and a broken OPF runtime all land here identically — so
-// asserting "too large" would be a guess presented as a diagnosis. The log is
-// where the actual reason is, and the override is what fixes the common case.
+// The log is the only place the real reason exists: the failure tally records
+// how often a ref failed and never why — a broken OPF runtime, the un-OPF'd
+// commit cap, and an oversized batch all land here identically — so asserting
+// any one of them would be a guess presented as a diagnosis. So the primary
+// guidance is "read the log". The size cap is named after it, and hedged,
+// because it is now a backstop against implausible content that no real session
+// should reach (see batchDefaultLimit): a ref stuck on the cap is the rare case,
+// a runtime failure the ordinary one, and leading with the override would send
+// people to raise a number that is almost certainly not what stopped them.
 func formatStuckOPFLine(stuck int) string {
 	noun := nounCheckpoints
 	if stuck == 1 {
 		noun = nounCheckpoint
 	}
 	return fmt.Sprintf("%d %s cannot be privacy-filtered: OPF redaction has failed at least %d times in a row. "+
-		"See .entire/logs for the reason; if it is the inference size cap, retry with a larger ENTIRE_OPF_BATCH_LIMIT.",
+		"See .entire/logs for the actual failure — most often the OPF runtime itself. "+
+		"Rarely it is the inference size cap, which ENTIRE_OPF_BATCH_LIMIT overrides.",
 		stuck, noun, checkpoint.StuckOPFFailureThreshold)
 }
 
