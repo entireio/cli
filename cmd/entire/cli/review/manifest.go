@@ -761,20 +761,8 @@ const localReviewManifestName = "entire-review/manifests"
 
 // localReviewManifestStore returns the shared *os.Root over the git common dir
 // and the manifest directory's name inside it.
-//
-// The common-dir resolution comes from gitdir rather than a fourth hand-rolled
-// `git rev-parse --git-common-dir` — this file had one, and it was the only copy
-// that remembered to resolve a relative answer against the worktree root.
 func localReviewManifestStore(ctx context.Context) (*os.Root, string, error) {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve worktree root: %w", err)
-	}
-	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreeRoot)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve git common dir: %w", err)
-	}
-	root, err := gitdir.OpenAt(commonDir)
+	root, err := gitdir.OpenForCurrentWorktree(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("open git common dir: %w", err)
 	}

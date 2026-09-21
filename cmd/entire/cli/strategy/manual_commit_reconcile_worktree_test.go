@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -71,14 +71,14 @@ func TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouche
 	linkedDir := filepath.Join(mainDir, ".worktrees", "feature")
 	createSessionMatchWorktree(t, mainDir, linkedDir, "feature")
 
-	linkedID, err := paths.GetWorktreeID(linkedDir)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(linkedDir)
 	require.NoError(t, err)
-	require.NotEmpty(t, linkedID, "linked worktree must have a non-empty WorktreeID")
+	require.NotEmpty(t, worktreeMetadata.WorktreeID, "linked worktree must have a non-empty WorktreeID")
 
 	state := &SessionState{
 		SessionID:    "relocated-linked-session",
 		WorktreePath: linkedDir,
-		WorktreeID:   linkedID,
+		WorktreeID:   worktreeMetadata.WorktreeID,
 	}
 
 	// Remove the linked worktree so its recorded path no longer resolves — the
@@ -92,7 +92,7 @@ func TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouche
 
 	require.Equal(t, linkedDir, state.WorktreePath,
 		"a linked-worktree session must be left untouched (no path/ID disalignment)")
-	require.Equal(t, linkedID, state.WorktreeID,
+	require.Equal(t, worktreeMetadata.WorktreeID, state.WorktreeID,
 		"a linked-worktree session's WorktreeID must be left untouched")
 }
 

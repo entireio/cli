@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/spf13/cobra"
@@ -127,7 +126,6 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
 
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 
 	// Reset global state before the test
 	gitHooksDisabled = false

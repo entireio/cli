@@ -162,7 +162,7 @@ func TestLoadClonePreferences_RejectsSymlink(t *testing.T) {
 	root := t.TempDir()
 	testutil.InitRepo(t, root)
 
-	path, err := clonePreferencesPathForWorktreeRoot(context.Background(), root)
+	path, err := clonePreferencesPathForWorktreeRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}

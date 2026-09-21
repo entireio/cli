@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -24,6 +23,21 @@ const gitDir = ".git"
 // passed to the storage as its delta-base cache, so a per-open cache makes
 // every open re-read pack data from scratch.
 var sharedObjectCache = cache.NewObjectLRUDefault()
+
+// ResolveCurrentWorktreeMetadata discovers the current worktree and resolves
+// its filesystem metadata. Callers with an explicit root should use
+// ResolveWorktreeMetadata instead.
+func ResolveCurrentWorktreeMetadata(ctx context.Context) (WorktreeMetadata, error) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return WorktreeMetadata{}, fmt.Errorf("resolve worktree root: %w", err)
+	}
+	metadata, err := ResolveWorktreeMetadata(repoRoot)
+	if err != nil {
+		return WorktreeMetadata{}, fmt.Errorf("resolve worktree metadata: %w", err)
+	}
+	return metadata, nil
+}
 
 // OpenCurrent opens the current git worktree with object alternates enabled.
 // The caller owns the returned repository and must close it.
@@ -97,18 +111,6 @@ func OpenPath(repoRoot string) (*git.Repository, error) {
 		return fallbackRepo, nil
 	}
 	return nil, fmt.Errorf("failed to open repository: %w", err)
-}
-
-// ResolveDotGitPath resolves the .git entry for a worktree without opening the
-// repository. Callers that need Git metadata should use this shared resolver.
-func ResolveDotGitPath(repoRoot string) (string, error) {
-	return resolveDotGitPath(repoRoot)
-}
-
-// ResolveCommonGitPath resolves the shared Git directory for a resolved .git
-// directory. An empty result means the repository has no commondir file.
-func ResolveCommonGitPath(dotGitPath string) (string, error) {
-	return resolveCommonGitPath(dotGitPath)
 }
 
 // openBareRepository opens a path that carries no worktree metadata.
@@ -214,51 +216,4 @@ func openWorktreeRepository(repoRoot string, metadata WorktreeMetadata) (*git.Re
 		return nil, fmt.Errorf("open repository storage: %w", err)
 	}
 	return repo, nil
-}
-
-func resolveDotGitPath(repoRoot string) (string, error) {
-	gitPath := filepath.Join(repoRoot, gitDir)
-	info, err := os.Stat(gitPath)
-	if err != nil {
-		return "", fmt.Errorf("stat .git path: %w", err)
-	}
-	if info.IsDir() {
-		return gitPath, nil
-	}
-
-	content, err := os.ReadFile(gitPath) //nolint:gosec // gitPath is resolved from the git worktree root.
-	if err != nil {
-		return "", fmt.Errorf("read .git file: %w", err)
-	}
-
-	line, _, _ := strings.Cut(string(content), "\n")
-	gitdir, ok := strings.CutPrefix(strings.TrimSpace(line), "gitdir:")
-	if !ok {
-		return "", errors.New(".git file has no gitdir prefix")
-	}
-
-	gitdir = strings.TrimSpace(gitdir)
-	if filepath.IsAbs(gitdir) {
-		return filepath.Clean(gitdir), nil
-	}
-	return filepath.Clean(filepath.Join(repoRoot, gitdir)), nil
-}
-
-func resolveCommonGitPath(dotGitPath string) (string, error) {
-	content, err := os.ReadFile(filepath.Join(dotGitPath, "commondir")) //nolint:gosec // dotGitPath is resolved from the git worktree root.
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("read commondir file: %w", err)
-	}
-
-	commonPath := strings.TrimSpace(string(content))
-	if commonPath == "" {
-		return "", nil
-	}
-	if filepath.IsAbs(commonPath) {
-		return filepath.Clean(commonPath), nil
-	}
-	return filepath.Clean(filepath.Join(dotGitPath, commonPath)), nil
 }

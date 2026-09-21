@@ -18,6 +18,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -55,37 +56,45 @@ func sanitizeTrailWorktreeName(branch string) string {
 	return name
 }
 
-// gitCommonDirForTrailWorktree returns the absolute git common dir, which is
-// the main repo's .git directory even when run from a linked worktree.
-// session.GetGitCommonDir is not reused here because it returns relative
-// rev-parse results as-is; this feature needs an absolute path for the
-// worktree location and the printed cd hint.
-func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", gitOutputError("failed to get git common dir", err)
-	}
-	gitDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitDir) {
-		cwd, wdErr := os.Getwd() //nolint:forbidigo // must resolve relative git common dir in cwd context
-		if wdErr != nil {
-			return "", fmt.Errorf("failed to get current directory: %w", wdErr)
-		}
-		gitDir = filepath.Join(cwd, gitDir)
-	}
-	return filepath.Clean(gitDir), nil
-}
-
 func trailWorktreeBaseRoot(ctx context.Context) (string, error) {
-	gitDir, err := gitCommonDirForTrailWorktree(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve worktree root: %w", err)
 	}
+	metadata, err := gitrepo.ResolveWorktreeMetadata(trailWorktreeRootSpelling(worktreeRoot))
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	gitDir := metadata.CommonDir
 	if filepath.Base(gitDir) != ".git" {
 		return "", fmt.Errorf("git common dir %q is not a .git directory", gitDir)
 	}
 	return filepath.Dir(gitDir), nil
+}
+
+// Trail checkout prints reusable paths, so preserve the caller's spelling of
+// the discovered root when a CWD ancestor identifies the same directory.
+func trailWorktreeRootSpelling(worktreeRoot string) string {
+	rootInfo, err := os.Stat(worktreeRoot)
+	if err != nil {
+		return worktreeRoot
+	}
+	cwd, err := os.Getwd() //nolint:forbidigo // Recover lexical output only after worktree discovery.
+	if err != nil {
+		return worktreeRoot
+	}
+	for candidate := cwd; ; candidate = filepath.Dir(candidate) {
+		info, err := os.Stat(candidate)
+		if err != nil {
+			return worktreeRoot
+		}
+		if os.SameFile(rootInfo, info) {
+			return candidate
+		}
+		if filepath.Dir(candidate) == candidate {
+			return worktreeRoot
+		}
+	}
 }
 
 // ensureTrailWorktreeIgnoreRule appends the .entire/worktrees/ rule to an
@@ -438,12 +447,18 @@ func printTrailWorktreeLocation(w, errW io.Writer, note, path string) {
 }
 
 func validateTrailWorktreeReuse(ctx context.Context, path, branch string) error {
-	expectedCommonDir, err := gitCommonDirForTrailWorktree(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve worktree root: %w", err)
+	}
+
+	expected, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
+	if err != nil {
+		return fmt.Errorf("resolve git common dir: %w", err)
 	}
 
 	showTop := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--show-toplevel")
+	showTop.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := showTop.Output()
 	if err != nil {
 		return err //nolint:wrapcheck // caller reports a prune hint, not this low-level probe
@@ -453,6 +468,7 @@ func validateTrailWorktreeReuse(ctx context.Context, path, branch string) error 
 	}
 
 	showCommon := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--git-common-dir")
+	showCommon.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err = showCommon.Output()
 	if err != nil {
 		return err //nolint:wrapcheck // caller reports a prune hint, not this low-level probe
@@ -461,11 +477,12 @@ func validateTrailWorktreeReuse(ctx context.Context, path, branch string) error 
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Join(path, commonDir)
 	}
-	if normalizeWorktreePath(commonDir) != normalizeWorktreePath(expectedCommonDir) {
+	if normalizeWorktreePath(commonDir) != normalizeWorktreePath(expected.CommonDir) {
 		return errors.New("path belongs to another repository")
 	}
 
 	showBranch := exec.CommandContext(ctx, "git", "-C", path, "branch", "--show-current")
+	showBranch.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err = showBranch.Output()
 	if err != nil {
 		return err //nolint:wrapcheck // caller reports a prune hint, not this low-level probe

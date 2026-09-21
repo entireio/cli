@@ -13,10 +13,10 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 // InvestigationsDirName is the directory name (under git common dir) where
@@ -105,18 +105,25 @@ type StateStore struct {
 }
 
 // NewStateStore creates a StateStore rooted at
-// <git-common-dir>/entire-investigations. Resolves the common dir via
-// session.GetGitCommonDir, so this requires a git repository context.
+// <git-common-dir>/entire-investigations in the current repository.
 func NewStateStore(ctx context.Context) (*StateStore, error) {
-	commonDir, err := session.GetGitCommonDir(ctx)
+	commonDir, err := currentCommonDir(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get git common dir: %w", err)
+		return nil, err
 	}
 	return &StateStore{
 		dir:     filepath.Join(commonDir, InvestigationsDirName),
 		parent:  commonDir,
 		dirName: InvestigationsDirName,
 	}, nil
+}
+
+func currentCommonDir(ctx context.Context) (string, error) {
+	metadata, err := gitrepo.ResolveCurrentWorktreeMetadata(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get git common dir: %w", err)
+	}
+	return metadata.CommonDir, nil
 }
 
 // NewStateStoreWithDir creates a StateStore rooted at dir. Useful for tests

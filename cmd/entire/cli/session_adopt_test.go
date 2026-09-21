@@ -14,8 +14,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -1368,11 +1368,11 @@ func TestSessionAdopt_FiltersSharedSourceStoreByFromWorktree(t *testing.T) {
 	})
 	targetRepo := setupAdoptRepo(t)
 
-	sourceWorktreeID, err := paths.GetWorktreeID(sourceRepo)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(sourceRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	siblingWorktreeID, err := paths.GetWorktreeID(siblingWorktree)
+	siblingWorktreeIDMetadata, err := gitrepo.ResolveWorktreeMetadata(siblingWorktree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1387,7 +1387,7 @@ func TestSessionAdopt_FiltersSharedSourceStoreByFromWorktree(t *testing.T) {
 		Phase:               session.PhaseActive,
 		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
 		WorktreePath:        sourceRepo,
-		WorktreeID:          sourceWorktreeID,
+		WorktreeID:          worktreeMetadata.WorktreeID,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1399,7 +1399,7 @@ func TestSessionAdopt_FiltersSharedSourceStoreByFromWorktree(t *testing.T) {
 		Phase:               session.PhaseActive,
 		BaseCommit:          testutil.GetHeadHash(t, siblingWorktree),
 		WorktreePath:        siblingWorktree,
-		WorktreeID:          siblingWorktreeID,
+		WorktreeID:          siblingWorktreeIDMetadata.WorktreeID,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1568,11 +1568,11 @@ func TestSessionAdopt_SameStoreReloadsSourceStateUnderLock(t *testing.T) {
 		runAdoptGit(t, sourceRepo, "worktree", "remove", targetWorktree, "--force")
 	})
 
-	sourceWorktreeID, err := paths.GetWorktreeID(sourceRepo)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(sourceRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	targetWorktreeID, err := paths.GetWorktreeID(targetWorktree)
+	targetWorktreeIDMetadata, err := gitrepo.ResolveWorktreeMetadata(targetWorktree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1588,7 +1588,7 @@ func TestSessionAdopt_SameStoreReloadsSourceStateUnderLock(t *testing.T) {
 		Phase:               session.PhaseActive,
 		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
 		WorktreePath:        sourceRepo,
-		WorktreeID:          sourceWorktreeID,
+		WorktreeID:          worktreeMetadata.WorktreeID,
 		LastPrompt:          "stale prompt",
 		SessionTurnCount:    1,
 	}); err != nil {
@@ -1606,7 +1606,7 @@ func TestSessionAdopt_SameStoreReloadsSourceStateUnderLock(t *testing.T) {
 		Phase:               session.PhaseActive,
 		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
 		WorktreePath:        sourceRepo,
-		WorktreeID:          sourceWorktreeID,
+		WorktreeID:          worktreeMetadata.WorktreeID,
 		LastPrompt:          "fresh hook prompt",
 		SessionTurnCount:    9,
 	}); err != nil {
@@ -1637,8 +1637,8 @@ func TestSessionAdopt_SameStoreReloadsSourceStateUnderLock(t *testing.T) {
 	if loaded.WorktreePath != targetWorktree {
 		t.Fatalf("WorktreePath = %q, want %q", loaded.WorktreePath, targetWorktree)
 	}
-	if loaded.WorktreeID != targetWorktreeID {
-		t.Fatalf("WorktreeID = %q, want %q", loaded.WorktreeID, targetWorktreeID)
+	if loaded.WorktreeID != targetWorktreeIDMetadata.WorktreeID {
+		t.Fatalf("WorktreeID = %q, want %q", loaded.WorktreeID, targetWorktreeIDMetadata.WorktreeID)
 	}
 	if loaded.LastPrompt != "fresh hook prompt" {
 		t.Fatalf("loaded LastPrompt = %q, want fresh hook prompt", loaded.LastPrompt)
@@ -1661,11 +1661,11 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 		runAdoptGit(t, sourceRepo, "worktree", "remove", targetWorktree, "--force")
 	})
 
-	sourceWorktreeID, err := paths.GetWorktreeID(sourceRepo)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(sourceRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	targetWorktreeID, err := paths.GetWorktreeID(targetWorktree)
+	targetWorktreeIDMetadata, err := gitrepo.ResolveWorktreeMetadata(targetWorktree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1681,7 +1681,7 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 		Phase:                     session.PhaseActive,
 		BaseCommit:                testutil.GetHeadHash(t, sourceRepo),
 		WorktreePath:              sourceRepo,
-		WorktreeID:                sourceWorktreeID,
+		WorktreeID:                worktreeMetadata.WorktreeID,
 		StepCount:                 4,
 		CheckpointTranscriptStart: 2,
 		LastCheckpointID:          id.MustCheckpointID("abc123def456"),
@@ -1728,8 +1728,8 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 	if loaded.WorktreePath != targetWorktree {
 		t.Fatalf("WorktreePath = %q, want %q", loaded.WorktreePath, targetWorktree)
 	}
-	if loaded.WorktreeID != targetWorktreeID {
-		t.Fatalf("WorktreeID = %q, want %q", loaded.WorktreeID, targetWorktreeID)
+	if loaded.WorktreeID != targetWorktreeIDMetadata.WorktreeID {
+		t.Fatalf("WorktreeID = %q, want %q", loaded.WorktreeID, targetWorktreeIDMetadata.WorktreeID)
 	}
 	if loaded.BaseCommit != testutil.GetHeadHash(t, targetWorktree) {
 		t.Fatalf("BaseCommit = %q, want target HEAD", loaded.BaseCommit)

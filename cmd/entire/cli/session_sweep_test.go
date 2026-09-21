@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -338,14 +339,14 @@ func TestMaybeSpawnSessionSweep_SeamAndThrottle(t *testing.T) {
 	var spawns atomic.Int32
 	var gotRoot atomic.Value
 	prevSpawn := sweepSpawn
-	prevGitCommonDir := sweepGitCommonDir
+	prevMetadata := sweepWorktreeMetadata
 	sweepSpawn = func(worktreeRoot string) {
 		spawns.Add(1)
 		gotRoot.Store(worktreeRoot)
 	}
 	t.Cleanup(func() {
 		sweepSpawn = prevSpawn
-		sweepGitCommonDir = prevGitCommonDir
+		sweepWorktreeMetadata = prevMetadata
 	})
 
 	// No zombies: no spawn (and no throttle marker written — the throttle is
@@ -366,12 +367,21 @@ func TestMaybeSpawnSessionSweep_SeamAndThrottle(t *testing.T) {
 
 	// A common-dir failure means there is no safe repository-wide throttle key.
 	// Fail closed rather than forking an unbounded child on every session start.
-	sweepGitCommonDir = func(context.Context) (string, error) {
-		return "", errors.New("common dir unavailable")
+	wantRoot, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	sweepWorktreeMetadata = func(root string) (gitrepo.WorktreeMetadata, error) {
+		require.Equal(t, wantRoot, root, "metadata resolution must use the discovered worktree root")
+		return gitrepo.WorktreeMetadata{}, errors.New("common dir unavailable")
 	}
 	maybeSpawnSessionSweep(ctx)
 	assert.Equal(t, int32(0), spawns.Load(), "common-dir failure must not spawn a sweep")
-	sweepGitCommonDir = prevGitCommonDir
+	sweepWorktreeMetadata = prevMetadata
+
+	commonFile := filepath.Join(dir, ".git", "commondir")
+	require.NoError(t, os.WriteFile(commonFile, []byte("missing\n"), 0o600))
+	maybeSpawnSessionSweep(ctx)
+	assert.Equal(t, int32(0), spawns.Load(), "broken metadata must not spawn a sweep")
+	require.NoError(t, os.Remove(commonFile))
 
 	// Zombie present: exactly one spawn, with the worktree root.
 	maybeSpawnSessionSweep(ctx)
@@ -379,8 +389,6 @@ func TestMaybeSpawnSessionSweep_SeamAndThrottle(t *testing.T) {
 	got, okRoot := gotRoot.Load().(string)
 	require.True(t, okRoot, "seam must have been handed a worktree root")
 	require.NotEmpty(t, got)
-	wantRoot, err := filepath.EvalSymlinks(dir)
-	require.NoError(t, err)
 	gotEval, err := filepath.EvalSymlinks(got)
 	require.NoError(t, err)
 	assert.Equal(t, wantRoot, gotEval, "sweep must be spawned from the worktree root")

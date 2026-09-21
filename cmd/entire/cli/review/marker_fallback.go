@@ -63,7 +63,7 @@ var pendingMarkerName = session.SessionStateDirName + "/" + pendingReviewMarkerF
 // pendingMarkerRoot returns the shared *os.Root over the git common dir the
 // marker lives in.
 func pendingMarkerRoot(ctx context.Context) (*os.Root, error) {
-	root, err := gitdir.Open(ctx)
+	root, err := gitdir.OpenForCurrentWorktree(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("locate git common dir: %w", err)
 	}
