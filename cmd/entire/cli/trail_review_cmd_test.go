@@ -82,7 +82,7 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
 	t.Chdir(repoDir)
 
-	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "", "", "", "")
+	_, err := resolveTrailReviewTarget(context.Background(), api.NewClientWithBaseURL("tok", api.DefaultBaseURL), "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for gitlab.com origin, got nil")
 	}
@@ -649,7 +649,7 @@ func TestCreateTrailReviewFindingStartsReviewThenPostsBatch(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	created, err := createTrailReviewFinding(context.Background(), client, "trl_1", api.TrailReviewCommentInput{
 		ClientID: "agent-run-1:finding-1",
@@ -702,7 +702,7 @@ func TestCreateTrailReviewFindingsPostsOneBatch(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	created, err := createTrailReviewFindings(context.Background(), client, "trl_1", []api.TrailReviewCommentInput{
 		{ClientID: "c1", Body: trailReviewStrPtr("first"), Location: api.TrailReviewLocationCreateRequest{Granularity: "whole_change"}},
@@ -746,7 +746,7 @@ func TestCreateTrailReviewFindingsHydratesLineSelectedText(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	filePath := "src/app.go"
 	line := 2
@@ -815,7 +815,7 @@ func TestCreateTrailReviewFindingSurfacesBatchError(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	_, err := createTrailReviewFinding(context.Background(), client, "trl_1", api.TrailReviewCommentInput{
 		ClientID: "c1",
@@ -933,7 +933,7 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	comments, hasMore, err := fetchTrailReviewComments(context.Background(), client, "trl_1", defaultTrailReviewListOptions())
 	if err != nil {
@@ -1022,7 +1022,7 @@ func TestFetchTrailReviewStateFollowsCursor(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	state, err := fetchTrailReviewState(context.Background(), client, "trl_1", "rvw_1")
 	if err != nil {

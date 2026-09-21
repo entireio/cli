@@ -185,7 +185,7 @@ func LocalIdentityCacheKey() (string, error) {
 		}, "|"), nil
 	}
 
-	c, ok, err := activeContext()
+	c, ok, err := ActiveContext()
 	if err != nil {
 		return "", err
 	}

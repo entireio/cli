@@ -122,12 +122,15 @@ the commands are always runnable in every build.
   (`logout`, `logout --everywhere`) ends sessions. `logout` sweeps every saved
   login: one `DELETE /api/auth/tokens` per login server ends every CLI session
   there (core tells them apart by `issuer_client_id`), then the login is
-  removed locally. `--context` never narrows it. `--everywhere` sends
-  `?scope=all`, which also ends browser and web sessions. An older server
-  answers 405; bare `logout` then ends only the bearer's own session and
-  `--everywhere` falls back to list + delete-by-id. Each login gets its own
-  deadline (`logoutLoginTimeout`), and only a failed local removal fails the
-  command
+  removed locally. Nothing narrows it: an explicit `--context` is refused
+  (`errContextFlagOnLogout`) rather than ignored, since it reads as a request
+  to end one login, and `$ENTIRE_CONTEXT` is ignored as ambient state.
+  `--everywhere` sends `?scope=all`, which also ends browser and web sessions.
+  An older server answers 405; bare `logout` then ends only the bearer's own
+  session and `--everywhere` falls back to list + delete-by-id. Each login gets
+  its own deadline (`logoutLoginTimeout`); a cancelled context stops the sweep
+  with the unreached logins intact, and a failed local removal or an interrupt
+  fails the command
 - `doctor`: bare runs the scan-and-fix flow, plus `trace`, `logs`, `bundle`
 - `cluster`: the control plane's data-plane cluster catalog — `list` only, since
   clusters are provisioned by Entire rather than by users. It renders `GET
@@ -354,7 +357,7 @@ and the inferred one is the common path.
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
 in stable releases, always runnable): `tokens`, `import`, `review`,
-`investigate`, `blame`, `why`, `experts`, and `runner`.
+`blame`, `why`, `experts`, and `runner`.
 `tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
@@ -391,9 +394,13 @@ auto-selection is a cluster rule (git remotes and the cluster-addressed
 `clusterdiscovery.loginTargets.autoSelect` is set only by
 `ResolveContextForCluster`. Whenever several logins are saved, every command
 that acts as one says which on stderr (`Using context 'x'.`,
-`auth.AnnounceContext`, once per process; `git-remote-entire` keeps its own
-auto-select notice). `activity`/`recap` fall back from the cell to the data API
-freely, since both apply that precedence.
+`auth.AnnounceContext` via `auth.ActingContext`, once per process;
+`git-remote-entire` keeps its own auto-select notice) — but not when the user
+named the identity with `--context`/`$ENTIRE_CONTEXT`. Resolve with
+`auth.ActiveContext` instead when the login is only being described rather than
+acted as, and call `auth.SilenceContextNotice` when a command must stay quiet
+for its whole run (`entire agent-help` does). `activity`/`recap` fall back from
+the cell to the data API freely, since both apply that precedence.
 `{owner}`/`{repo}`/`{repo_id}` in the path are filled
 from the current repo's origin remote. It is an escape hatch, so it is absent
 from `agent-help`'s curated listing but stays in `entire help` and agent-help's
@@ -530,10 +537,8 @@ for the `execx.NonInteractive` pattern when testing a real `entire` command.
 
 Existing good patterns:
 
-- `entire investigate --findings` prints a complete plain-text list and includes
-  `view: entire investigate show <run-id>` hints.
-- `entire investigate show <run-id>` prints the saved investigation summary and
-  findings without needing a TUI.
+- `entire review --findings`-style listings print a complete plain-text list and
+  include a `view: ...` hint naming the detail command.
 - `entire repo clone /gh/...` prompts only when several clusters are possible;
   without a TTY it asks for `--cluster`.
 - `entire experts --tui` is safe because the TUI is opt-in and non-TTY output

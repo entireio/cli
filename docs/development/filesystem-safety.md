@@ -123,9 +123,10 @@ scan reaches it through `unsupportedEntryError` and describes other types with
 
 This is deliberately redundant with the `.entire` entry scan, because the two
 cover different callers: the scan hangs off the root pre-run and
-`LoadEntireSettings`, while **eighteen files call `settings.Load` directly** —
-`strategy/hooks.go`, `manual_commit_hooks.go`, `checkpoint/remote/*`, `review/*`,
-`investigate/*` — and reach settings without ever passing the pre-run.
+`LoadEntireSettings`, while **more than twenty files call `settings.Load`
+directly** — `strategy/hooks.go`, `manual_commit_hooks.go`,
+`checkpoint/remote/*`, `review/*` — and reach settings without ever passing the
+pre-run.
 
 **`os.Root` confinement is not the invariant, and was not sufficient.** Measured
 against `readConfined` before the change: an absolute target (even one pointing
@@ -259,7 +260,8 @@ data, _ := osroot.ReadFile(root, name)
 Anchoring on the target's own parent puts every component the caller resolved
 *above* the root, so containment covers only the final component and enforces
 nothing the `filepath.Join` had not already decided. A symlink at `.claude`, at
-`.entire`, or at `entire-investigations` is resolved before the root exists.
+`.entire`, or at a per-feature subdirectory of the git common dir is resolved
+before the root exists.
 Anchoring one level up makes those components **names inside** the root, which is
 what `os.Root` and `osroot.MkdirAllNoSymlink` can actually refuse. The same
 reasoning kills a containment *check* built on a derived base:
@@ -319,14 +321,15 @@ under several of these directories are fixed constants right now, and that is no
 a reason to skip the root. Two places already carried hand-written comments
 saying validation was the only thing keeping a path inside its tree —
 `PluginDataDir` ("guarantees ENTIRE_PLUGIN_DATA_DIR always points inside the
-managed data subtree") and `investigate.RunDir` ("an unvalidated id would be a
-path-traversal sink") — which is the argument for the primitive, not against it.
+managed data subtree") and the since-extracted `investigate.RunDir` ("an
+unvalidated id would be a path-traversal sink") — which is the argument for the
+primitive, not against it.
 
 **What each anchor is actually protecting.** These are not uniform, and the
 comments at each site say which case applies:
 
 - `.entire` and the git common dir hold names built from agent-supplied session
-  IDs, tool-use IDs, and investigation run IDs. Several call sites used to carry
+  IDs and tool-use IDs. Several call sites used to carry
   hand-written comments explaining that an unvalidated ID would be a traversal
   sink feeding `os.RemoveAll`. The root makes that structural.
 - The working tree holds names from `git status` and from checkpoint **tree
@@ -532,8 +535,8 @@ comments at each site say which case applies:
   `checkpoint.WriteOptions.MetadataDirAbs` existed alongside `MetadataDir` and
   was deleted for exactly that reason. Guard tests pin the pairs that must agree.
 - **Absolute paths stay absolute when they cross a process boundary** —
-  `opencode export` takes a path, `entire investigate` hands the agent its
-  `state.json` path, a transcript path becomes a checkpoint's `SessionRef`.
+  `opencode export` takes a path, a transcript path becomes a checkpoint's
+  `SessionRef`.
   Those keep an absolute spelling; the reads and writes around them still go
   through a root.
 - **Anything outside the CLI packages takes an `fs.FS`, not a path.**

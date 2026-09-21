@@ -737,7 +737,7 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	}
 
 	// Unlisted commands are named in the footer index, not given entries.
-	for _, name := range []string{"enable", "review", "investigate", "org", "api"} {
+	for _, name := range []string{"enable", "review", "org", "api"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("unlisted command %q should still be named in the footer:\n%s", name, out)
 		}

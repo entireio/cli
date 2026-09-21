@@ -23,8 +23,7 @@ func TestClient_RevokeCurrentAuthSession_SendsDeleteWithBearer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL).WithAuthSessionsPath("/api/auth/tokens")
 
 	if err := c.RevokeCurrentAuthSession(context.Background()); err != nil {
 		t.Fatalf("RevokeCurrentAuthSession() error = %v", err)
@@ -65,8 +64,7 @@ func TestClient_RevokeSessionCollection_Scope(t *testing.T) {
 			}))
 			defer server.Close()
 
-			c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
-			c.baseURL = server.URL
+			c := NewClientWithBaseURL("tok", server.URL).WithAuthSessionsPath("/api/auth/tokens")
 			if err := tc.call(c, context.Background()); err != nil {
 				t.Fatalf("error = %v", err)
 			}
@@ -90,8 +88,7 @@ func TestClient_RevokeCurrentAuthSession_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL).WithAuthSessionsPath("/api/auth/tokens")
 
 	err := c.RevokeCurrentAuthSession(context.Background())
 	if err == nil {
@@ -126,8 +123,7 @@ func TestClient_ListAuthSessions_DecodesResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL).WithAuthSessionsPath("/api/auth/tokens")
 
 	tokens, err := c.ListAuthSessions(context.Background())
 	if err != nil {
@@ -168,8 +164,7 @@ func TestClient_ListAuthSessions_ReturnsHTTPErrorOn401(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL).WithAuthSessionsPath("/api/auth/tokens")
 
 	_, err := c.ListAuthSessions(context.Background())
 	if err == nil {
@@ -194,8 +189,7 @@ func TestClient_RevokeAuthSession_SendsDeleteWithEscapedID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL).WithAuthSessionsPath("/api/auth/tokens")
 
 	// Use an id that needs URL escaping to verify we don't blindly concat.
 	if err := c.RevokeAuthSession(context.Background(), "abc/def 1"); err != nil {
@@ -223,8 +217,7 @@ func TestClient_RevokeAuthSession_ReturnsErrorBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL).WithAuthSessionsPath("/api/auth/tokens")
 
 	err := c.RevokeAuthSession(context.Background(), "missing")
 	if err == nil {
