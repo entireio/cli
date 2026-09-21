@@ -86,6 +86,59 @@ func TestRepoView_AuthoritativeSnapshot(t *testing.T) {
 	}
 }
 
+// TestRepoView_ReasonFollowsTheAuthoritativeState pins that the why comes from
+// the same read as the state it explains. The registry copy can carry a reason
+// from an earlier attempt, or none for a failure it has not caught up with, and
+// either way the STATUS cell would be left with nothing that accounts for it.
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_ReasonFollowsTheAuthoritativeState(t *testing.T) {
+	repoJSON := func(state, reason string) string {
+		return fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","state":%q,"provisionReason":%q}`,
+			testDeleteULID, testProjectULID, state, reason)
+	}
+	for _, tc := range []struct {
+		name         string
+		plain, fresh string
+		wantReason   string
+	}{
+		{
+			name:       "a failure the registry has not caught up with",
+			plain:      repoJSON("provisioning", ""),
+			fresh:      repoJSON("failed", "cluster quota exceeded"),
+			wantReason: "cluster quota exceeded",
+		},
+		{
+			name:       "a reason left over from an earlier attempt",
+			plain:      repoJSON("failed", "max retries exhausted"),
+			fresh:      repoJSON("active", ""),
+			wantReason: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := serveRepoView(t, tc.plain, func(w http.ResponseWriter) bool {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tc.fresh)
+				return true
+			})
+
+			_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+			require.NoError(t, err)
+			out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--json")
+			require.NoError(t, err)
+			var row repoDirRow
+			require.NoError(t, json.Unmarshal([]byte(out), &row))
+
+			require.Equal(t, tc.wantReason, row.ProvisionReason)
+			if tc.wantReason == "" {
+				require.Empty(t, stderr)
+				return
+			}
+			require.Contains(t, stderr, tc.wantReason)
+		})
+	}
+}
+
 func TestRepoCreateReadinessFlags(t *testing.T) {
 	// Not parallel: shared client seam.
 	for _, tc := range []struct {

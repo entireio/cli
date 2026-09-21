@@ -448,22 +448,36 @@ func runNativeRepoView(cmd *cobra.Command, ref, project, clusterHost string, aut
 		// primary next to a "ready" mirror reads as broken. The authoritative
 		// read is the one that answers it (the same flag `repo view` exposes).
 		//
-		// Only `state` is taken from it, never the whole repo: an authoritative
-		// lifecycle response can omit clusterSlug and path (see the fixture in
-		// repo_readiness_test.go), and swapping the object wholesale would drop
-		// the primary placement and every clone URL this view exists to show.
-		// Best-effort for the same reason it is narrow — a registry-only
-		// fallback cannot answer the readiness question, and a dash is a better
-		// trade than losing the table.
+		// Only the lifecycle pair is taken from it, never the whole repo: an
+		// authoritative lifecycle response can omit clusterSlug and path (see
+		// the fixture in repo_readiness_test.go), and swapping the object
+		// wholesale would drop the primary placement and every clone URL this
+		// view exists to show. Best-effort for the same reason it is narrow — a
+		// registry-only fallback cannot answer the readiness question, and a
+		// dash is a better trade than losing the table.
 		auth, aerr := c.GetRepo(ctx, coreapi.GetRepoParams{
 			RepoId:        repo.ID,
 			Authoritative: coreapi.NewOptBool(true),
 		})
 		switch {
 		case aerr == nil:
+			// State and reason are one answer: the reason is why the state is
+			// what it is, and it is all the STATUS cell has to explain a primary
+			// that failed. Taking the state fresh and the reason from the plain
+			// read would pair them across two moments — so they move together,
+			// including when the fresh answer carries no reason at all
+			// (retainRepoCreation replaces the field for the same reason).
 			if state, ok := auth.State.Get(); ok {
 				repo.State = coreapi.NewOptString(state)
+				repo.ProvisionReason = auth.ProvisionReason
 			}
+		case errors.Is(aerr, context.Canceled), errors.Is(aerr, context.DeadlineExceeded):
+			// An interrupted read is not a readiness answer, so it is never
+			// swallowed the way a server that cannot answer is: without this the
+			// default (flagless) path printed a table built on the plain read's
+			// stale state and exited 0, reporting success for a command the user
+			// stopped.
+			return aerr
 		case authoritative && readinessCheckUnavailable(aerr):
 			// --authoritative is the caller saying the readiness answer is the
 			// point of the command, so a registry-only fallback that cannot give
