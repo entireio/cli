@@ -589,7 +589,7 @@ func partitionOPFTrailered(repo *git.Repository, refs []plumbing.ReferenceName) 
 // surfaces it). Stale entries — refs no longer present locally — are pruned so
 // they don't block the queue forever, whether or not the trailer is required:
 // an absent ref has nothing to redact and nothing to deliver.
-func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, requireOPFTrailer bool) (int, int, error) {
+func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps pushSettings, requireOPFTrailer bool) (pushedCount, withheldCount int, err error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return 0, 0, fmt.Errorf("resolve push queue: %w", err)
