@@ -219,6 +219,15 @@ guest-linked. From then on the worktree's own commits — including ones from a
 process that is not the agent's descendant — link by exact match instead of
 depending on the rescue or falling into the ambiguity refusal below.
 
+The hook itself follows first (`followAgentWorkingDirectory`): agents report
+the directory they work in on every hook payload (`Event.CWD`; Claude Code's
+`cwd` follows `EnterWorktree` and `cd`), and when that is another worktree of
+the same repository the hook process moves there before anything is resolved.
+At turn-start and turn-end `rehomeSessionToCurrentWorktree` then applies the
+same re-home under the same pending-content guard, so the first commit after
+the move already finds a correctly homed session with no process ancestry
+involved — which is what covers Windows, where ancestry cannot be read.
+
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
 `WorktreePath` match first, then sessions from a sibling worktree of the same

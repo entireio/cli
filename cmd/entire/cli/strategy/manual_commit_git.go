@@ -47,6 +47,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		invalidateStaleSubagentSnapshot(&step, state)
+		s.rehomeSessionToCurrentWorktree(ctx, repo, state)
 		_, migrateSpan := perf.Start(ctx, "migrate_shadow_branch")
 		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
 			migrateSpan.RecordError(err)

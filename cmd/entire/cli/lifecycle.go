@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -97,6 +99,8 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
+	followAgentWorkingDirectory(ctx, ag, event)
+
 	switch event.Type {
 	case agent.SessionStart:
 		return handleLifecycleSessionStart(ctx, ag, event)
@@ -133,6 +137,71 @@ const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this rep
 
 // handleLifecycleSessionStart handles session start: shows banner, checks concurrent sessions,
 // fires state machine transition.
+// followAgentWorkingDirectory moves this hook process into the worktree the
+// agent reports it is working in, when that is another worktree of the same
+// repository. Hooks run where the agent was launched while the payload's cwd
+// follows the agent (Claude Code: EnterWorktree and cd), so without this a
+// session stays homed in the launch directory while its work lands elsewhere.
+// Everything resolved from the process directory follows the move; the state
+// itself is re-homed by the strategy (rehomeSessionToCurrentWorktree).
+func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *agent.Event) {
+	if event.CWD == "" {
+		return
+	}
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	target, targetCommon, err := gitWorktreeIdentity(ctx, event.CWD)
+	if err != nil {
+		logging.Debug(logCtx, "payload cwd is not a worktree; staying put",
+			slog.String("cwd", event.CWD), slog.String("error", err.Error()))
+		return
+	}
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil || filepath.Clean(current) == filepath.Clean(target) {
+		return
+	}
+	_, currentCommon, err := gitWorktreeIdentity(ctx, current)
+	if err != nil || currentCommon != targetCommon {
+		logging.Debug(logCtx, "payload cwd belongs to another repository; staying put",
+			slog.String("cwd", event.CWD))
+		return
+	}
+	if err := os.Chdir(target); err != nil {
+		logging.Warn(logCtx, "could not follow the agent's working directory",
+			slog.String("cwd", target), slog.String("error", err.Error()))
+		return
+	}
+	paths.ClearWorktreeRootCache()
+	gitdir.ClearCache()
+	session.ClearGitCommonDirCache()
+	logging.Info(logCtx, "hook follows the agent's working directory",
+		slog.String("event", event.Type.String()),
+		slog.String("from", current),
+		slog.String("to", target))
+}
+
+// gitWorktreeIdentity resolves dir to its worktree root and git common dir
+// (symlinks resolved), ignoring any repository overrides in the environment.
+func gitWorktreeIdentity(ctx context.Context, dir string) (root, commonDir string, err error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve worktree for %s: %w", dir, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || lines[0] == "" || lines[1] == "" {
+		return "", "", fmt.Errorf("resolve worktree for %s: unexpected git output", dir)
+	}
+	root, commonDir = lines[0], lines[1]
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(commonDir); err == nil {
+		commonDir = resolved
+	}
+	return root, commonDir, nil
+}
+
 func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "session-start",

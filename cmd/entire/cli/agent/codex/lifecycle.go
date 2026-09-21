@@ -213,6 +213,7 @@ func (c *CodexAgent) parseTurnStart(ctx context.Context, stdin io.Reader) (*agen
 	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
+		CWD:        raw.CWD,
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Prompt:     raw.Prompt,
@@ -287,6 +288,7 @@ func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.
 	}
 	return &agent.Event{
 		Type:       agent.TurnEnd,
+		CWD:        raw.CWD,
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Model:      raw.Model,

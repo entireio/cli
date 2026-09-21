@@ -138,39 +138,74 @@ func (s *ManualCommitStrategy) rehomeSessionAfterOwnCommit(ctx context.Context, 
 	if worktreePath == "" || isSessionHomeWorktree(worktreePath, state) {
 		return false
 	}
-	if len(state.FilesTouched) > 0 || state.StepCount > 0 || state.HasTaskContent() {
+	if homeHoldsPendingContent(state) {
 		logging.Debug(logCtx, "post-commit: session committed outside its home worktree but the home holds pending content; staying guest-linked",
 			slog.String("session_id", state.SessionID),
 			slog.String("home_worktree", state.WorktreePath),
-			slog.String("commit_worktree", worktreePath),
-			slog.Int("files_touched", len(state.FilesTouched)),
-			slog.Int("step_count", state.StepCount))
+			slog.String("commit_worktree", worktreePath))
 		return false
 	}
+	return rehomeSession(ctx, repo, state, worktreePath, newHead, "its agent committed there")
+}
+
+// rehomeSessionToCurrentWorktree moves a session whose hook now runs in another
+// worktree of the same repository — the agent moved and the hook followed
+// (followAgentWorkingDirectory) — when the recorded home holds nothing pending.
+// Runs at turn-start and turn-end, so the first commit after the move already
+// finds a correctly homed session without process ancestry.
+func (s *ManualCommitStrategy) rehomeSessionToCurrentWorktree(ctx context.Context, repo *git.Repository, state *SessionState) {
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil || current == "" || state.WorktreePath == "" || isSessionHomeWorktree(current, state) {
+		return
+	}
+	if homeHoldsPendingContent(state) {
+		return
+	}
+	homeCommon := gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath)
+	if homeCommon == "" || homeCommon != gitCommonDirForWorktreeOrEmpty(ctx, current) {
+		return // relocated or another repository: reconcileWorktreePathForResumedTurn's territory
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return
+	}
+	rehomeSession(ctx, repo, state, current, head.Hash().String(), "its agent's hooks now run there")
+}
+
+// homeHoldsPendingContent reports whether moving the session would orphan
+// content at its current home: tracked files, shadow-branch steps or task records.
+func homeHoldsPendingContent(state *SessionState) bool {
+	return len(state.FilesTouched) > 0 || state.StepCount > 0 || state.HasTaskContent()
+}
+
+// rehomeSession re-derives every worktree-coupled field together so
+// WorktreePath and WorktreeID never disagree.
+func rehomeSession(ctx context.Context, repo *git.Repository, state *SessionState, worktreePath, newBase, why string) bool {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
-		logging.Warn(logCtx, "post-commit: cannot resolve worktree ID for re-homing; staying guest-linked",
+		logging.Warn(logCtx, "cannot resolve worktree ID for re-homing; session keeps its home",
 			slog.String("session_id", state.SessionID),
-			slog.String("commit_worktree", worktreePath),
+			slog.String("worktree", worktreePath),
 			slog.String("error", err.Error()))
 		return false
 	}
 	old := state.WorktreePath
 	state.WorktreePath = worktreePath
 	state.WorktreeID = worktreeID
-	state.BaseCommit = newHead
-	state.RealignAttributionBase(newHead)
+	state.BaseCommit = newBase
+	state.RealignAttributionBase(newBase)
 	// Re-baseline untracked files against the new tree (best-effort).
 	if untracked, untrackedErr := collectUntrackedFiles(ctx); untrackedErr == nil {
 		state.UntrackedFilesAtStart = untracked
 	}
 	captureSessionBranch(repo, state)
-	logging.Info(logCtx, "post-commit: session re-homed to the worktree its agent committed in",
+	logging.Info(logCtx, "session re-homed: "+why,
 		slog.String("session_id", state.SessionID),
 		slog.String("from", old),
 		slog.String("to", worktreePath),
 		slog.String("worktree_id", worktreeID),
-		slog.String("base_commit", truncateHash(newHead)))
+		slog.String("base_commit", truncateHash(newBase)))
 	return true
 }
 

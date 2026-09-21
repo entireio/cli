@@ -156,6 +156,7 @@ func (g *GeminiCLIAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.
 		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -169,6 +170,7 @@ func (g *GeminiCLIAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
 		Type:       agent.TurnStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		Prompt:     raw.Prompt,
 		Timestamp:  time.Now(),
 	}, nil
@@ -183,6 +185,7 @@ func (g *GeminiCLIAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		Timestamp:  time.Now(),
 	}, nil
 }

@@ -182,6 +182,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		return &agent.Event{
 			Type:      agent.SessionStart,
 			SessionID: sessionID,
+			CWD:       payload.Cwd,
 			Timestamp: now,
 		}, nil
 
@@ -195,6 +196,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 			SessionID:   sessionID,
 			SessionRef:  payload.SessionFile,
 			Prompt:      payload.Prompt,
+			CWD:         payload.Cwd,
 			Timestamp:   now,
 			SkillEvents: piSkillEvents(payload.SkillEvents),
 		}, nil
@@ -207,6 +209,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 		sessionRef := captureTranscript(ctx, sessionID, payload.SessionFile)
 		return &agent.Event{
 			Type:       agent.TurnEnd,
+			CWD:        payload.Cwd,
 			SessionID:  sessionID,
 			SessionRef: sessionRef,
 			Model:      extractModelFromPiSessionFile(sessionRef),
