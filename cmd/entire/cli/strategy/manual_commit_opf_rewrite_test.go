@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -601,9 +602,10 @@ func TestRewriteUnpushedV1WithOPF_MultiCommit_SingleBatchCall(t *testing.T) {
 
 // Leaf-byte cap: the rewrite must refuse a push whose cumulative
 // prose-leaf bytes exceed ENTIRE_OPF_BATCH_LIMIT, returning a typed
-// error the pre-push hook can surface. Without this, a runaway push
-// (10MB+ of dense prose) would tie up the user's terminal for minutes
-// without warning.
+// error the pre-push hook can surface. Without this, a pathological
+// push (a corrupted transcript, an accidentally-embedded binary) would
+// be handed to the model whatever its size — at OPF's real throughput
+// that is hours of inference on content that was never a real session.
 func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -612,7 +614,7 @@ func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 	}{
 		{name: "over_limit_rejected", envLimit: "10", wantErr: true},
 		{name: "unlimited_allows_any_size", envLimit: "unlimited", wantErr: false},
-		{name: "env_override_allows_above_default", envLimit: "1000000", wantErr: false},
+		{name: "env_override_allows_above_default", envLimit: "10000000", wantErr: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -647,11 +649,11 @@ func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 // the user-facing message is the only thing they see when this fires.
 func TestOPFBatchTooLargeErrorMessage(t *testing.T) {
 	t.Parallel()
-	e := &OPFBatchTooLargeError{LeafBytes: 5_000_000, Limit: 2_097_152}
+	e := &OPFBatchTooLargeError{LeafBytes: 9_000_000, Limit: batchDefaultLimit}
 	msg := e.Error()
 	for _, want := range []string{
-		"5000000",
-		"2097152",
+		"9000000",
+		strconv.Itoa(batchDefaultLimit),
 		batchEnvVar,
 		"unlimited",
 	} {

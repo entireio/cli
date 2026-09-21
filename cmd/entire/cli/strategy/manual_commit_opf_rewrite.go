@@ -157,10 +157,13 @@ func resolveBootstrapLimit() int {
 	return bootstrapDefaultLimit
 }
 
-// OPFBatchTooLargeError: a single push has more prose-leaf content
-// than ENTIRE_OPF_BATCH_LIMIT will allow OPF to chew through in one
-// inference call. Pushing under the limit yields a single ~10-30s
-// pause; without the cap, a 100MB-of-prose push could take an hour.
+// OPFBatchTooLargeError: one OPF pass — a single checkpoint ref on
+// git-refs, the whole unpushed v1 chain on git-branch — has more
+// prose-leaf content than ENTIRE_OPF_BATCH_LIMIT allows in one
+// inference call. This is a sanity ceiling on implausible content, not
+// a latency guard: see batchDefaultLimit for the time budget it is
+// derived from, and note that real content *under* the limit still
+// takes minutes to hours of inference.
 //
 // The user-facing remediation is identical in shape to
 // BootstrapTooLargeError: bump the limit, push without OPF, or break
@@ -178,11 +181,45 @@ func (e *OPFBatchTooLargeError) Error() string {
 }
 
 const (
-	// batchDefaultLimit caps the cumulative prose-leaf bytes one push
-	// will hand to OPF. 2 MB at ~5.4s/100KB ≈ ~110s of inference, on
-	// the high end of what's acceptable as a single push pause but
-	// generous enough that any realistic push fits.
-	batchDefaultLimit = 2 * 1024 * 1024
+	// batchDefaultLimit caps the cumulative prose-leaf bytes one OPF pass
+	// hands to the model: per checkpoint ref on git-refs
+	// (manual_commit_opf_refs.go), cumulative across the unpushed v1 chain
+	// on git-branch. It is a sanity ceiling — "is this plausibly a real
+	// session, or a corrupted transcript / accidentally-embedded binary?"
+	// — not a speed target. OPF-THROUGHPUT-FINDINGS.md measured the real
+	// opf runtime at ~1.14s/KB sustained (CPU; MPS confirmed slower on
+	// this stack, ~16x slower than this comment's previous estimate), so
+	// there is no byte count at which redaction is "fast" and no useful
+	// version of the question this cap used to answer.
+	//
+	// Sized from a stated time budget rather than guessed: 2 hours is the
+	// longest it is acceptable for the detached flush worker
+	// (manual_commit_opf_flush.go) to spend on ONE checkpoint before we
+	// would rather call its content pathological than merely large. At
+	// 1.14s/KB that is ~6.2 MiB, rounded down to 6 MiB. That leaves ~1.9x
+	// headroom over the median real single-session prose-leaf content this
+	// repo measured (OPF-BUG.md: a median checkpoint tree's full.jsonl is
+	// 3.9 MB raw at a ~0.84 prose-leaf ratio, so ~3.3 MB) — content the
+	// old 2 MiB cap rejected outright. The median is not a maximum: 18 of
+	// 20 sampled checkpoint trees already held more than 2 MiB of raw
+	// content, so real sessions run well above it.
+	//
+	// Affordable because delivery no longer waits on it: on git-refs the
+	// rewrite runs detached and flushCheckpointRefsQueue's
+	// partitionOPFTrailered gate ships the refs that are already redacted,
+	// so a slow-but-working checkpoint holds neither its siblings nor the
+	// user's push. git-branch has no such worker — its rewrite is still
+	// inline in prePush — so there this cap doubles as the worst-case push
+	// wait. Deliberate trade: the alternative is what 2 MiB did, reject
+	// every real session.
+	//
+	// Keep the result well under redact's own opfMaxBatchInputBytes
+	// (16 MiB), which bounds the same deduplicated-leaf population at the
+	// shell-out boundary, so this more specific error trips first. Redo the
+	// arithmetic in
+	// docs/superpowers/plans/2026-09-18-opf-per-ref-delivery.md if the
+	// budget ever changes.
+	batchDefaultLimit = 6 * 1024 * 1024
 	batchEnvVar       = "ENTIRE_OPF_BATCH_LIMIT"
 )
 
@@ -217,8 +254,8 @@ func scaleBatchLimit(limit, mult int) int {
 // OPFRawBytesTooLargeError: the cumulative raw blob bytes the
 // collection pass loaded into memory exceeded the safety ceiling.
 // Unlike the leaf-byte cap, this is about RAM headroom rather than
-// inference wall-clock — a 200 MiB push of mostly-structural JSON has
-// tiny leaf content but huge raw bytes, and would OOM the user's
+// inference wall-clock — a multi-hundred-MiB push of mostly-structural
+// JSON has tiny leaf content but huge raw bytes, and would OOM the user's
 // shell before the leaf-byte cap got a chance to fire.
 //
 // The raw ceiling is derived from ENTIRE_OPF_BATCH_LIMIT (raw =
@@ -240,9 +277,10 @@ func (e *OPFRawBytesTooLargeError) Error() string {
 }
 
 // rawByteCapMultiplier ties the raw-byte RAM ceiling to the leaf-byte
-// inference cap. 100× means: leaf cap 2 MiB → raw ceiling 200 MiB.
-// Picked to comfortably exceed any realistic JSON-scaffolding ratio
-// (a 10 MiB JSONL with 300 KB of leaves still fits) while preventing
+// inference cap. 100× means: default leaf cap 6 MiB → raw ceiling
+// 600 MiB. Picked to comfortably exceed any realistic JSON-scaffolding
+// ratio (real transcripts run ~1.2× raw per prose-leaf byte, and a
+// 10 MiB JSONL with 300 KB of leaves still fits) while preventing
 // pathological RAM blowups (a 5 GiB pasted dump aborts before loading).
 const rawByteCapMultiplier = 100
 

@@ -242,7 +242,7 @@ How that is enforced depends on the checkpoint backend, because they have differ
 
 (The circuit breaker is per-process, so a broken install costs one warning instead of one timeout per blob — but the push still aborts.)
 
-Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre-push rewrite batches **every redactable leaf across every unpushed commit** — v1 commits on git-branch, every unpushed commit on every queued ref on git-refs — into a single inference pass, so a typical real-world push pays the model-load cost once (~6s) plus inference (~5s per 100KB of leaf content) — not multiplied by the number of commits or blobs. A 3-commit push with ~250KB of total prose content runs in ~12–15s, not the ~50–100s a per-blob flow would take. Per-commit latency is unaffected because OPF doesn't run at commit time.
+Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). Redactable leaves are deduplicated and batched into **one inference pass per unit of work** — one pass per queued checkpoint ref on `git-refs`, one pass for the whole unpushed chain on `git-branch` — so the ~6s model load is paid once per pass rather than once per commit or per blob. Inference itself dominates and is genuinely slow: benchmarked against the real binary at roughly **1.14 s/KB** of prose-leaf content on CPU (MPS is slower, not faster), so one real session transcript is minutes to tens of minutes of model time, not seconds. On `git-refs` that runs in a detached background worker after your push returns, so it costs no push latency; on `git-branch` it runs inline in the push. Per-commit latency is unaffected either way, because OPF never runs at commit time.
 
 #### When OPF actually runs
 
@@ -299,7 +299,7 @@ set -x ENTIRE_OPF_BOOTSTRAP_LIMIT unlimited; git push
 
 The two backends trip this differently. On `git-branch` it applies **only on bootstrap** — the first push, when the remote has no v1 yet — counted across all unpushed commits. On `git-refs` it applies on **every** push, counted **per queued ref** over that ref's un-trailered ancestry. In practice the `git-refs` trigger is "OPF was enabled late" or "checkpoints were just migrated from the branch", not "first push".
 
-**Batch cap: `2 MiB` of cumulative prose-leaf content by default** (≈110s of inference), on both backends. An `OPF would run inference on …` error means you've hit it:
+**Batch cap: `6 MiB` of prose-leaf content by default** — counted **per checkpoint ref** on `git-refs`, cumulatively across the unpushed chain on `git-branch`. An `OPF would run inference on …` error means you've hit it:
 
 ```fish
 set -x ENTIRE_OPF_BATCH_LIMIT 10485760; git push   # 10 MiB
@@ -307,9 +307,13 @@ set -x ENTIRE_OPF_BATCH_LIMIT 10485760; git push   # 10 MiB
 set -x ENTIRE_OPF_BATCH_LIMIT unlimited; git push
 ```
 
-**Raw-byte cap: `200 MiB` of blob content buffered in memory**, on both backends. It has no env var of its own — it is derived as 100× the batch cap, so raising `ENTIRE_OPF_BATCH_LIMIT` raises it too. It is checked incrementally as blobs load, so on a pathological push (one commit carrying a huge pasted transcript) this is the cap that fires first.
+**This cap is a sanity ceiling against pathological content, not a speed knob.** Lowering it buys no speed — it only rejects more content — and raising it adds no cost beyond what the extra content itself takes. Real redaction of any real-sized session takes minutes to tens of minutes regardless of this value, by design, because that is simply what the model costs. Benchmarked against the real `opf` binary, throughput is about **1.14 s/KB** of prose-leaf content on CPU, and Apple-Silicon MPS is measurably *slower* than CPU on this stack rather than faster. What the cap rejects is content that is implausible for a session at all — a corrupted transcript, an accidentally-embedded binary — not content that is merely slow.
 
-The three caps protect different failure modes: the commit cap stops "100 throwaway commits", the batch cap stops "one commit with 50 MB of prose", and the raw-byte cap stops the loader exhausting memory before either of the others can be evaluated. On `git-refs` the two byte caps are cumulative across the whole flush (all queued refs together) while the commit cap is per ref.
+The `6 MiB` follows from that rate and a stated time budget: **2 hours** is the longest the background rewrite worker should spend on a single checkpoint before its content is better treated as broken than as large, and 2 hours at 1.14 s/KB is ~6.2 MiB. That leaves roughly 1.9× headroom over a median real single-session transcript (~3.3 MB of prose-leaf content) — content the previous 2 MiB cap rejected outright, along with the 18 of 20 sampled checkpoint trees in a real working checkout that already carried more than 2 MiB of raw content. Raise `ENTIRE_OPF_BATCH_LIMIT` if you have a legitimately larger session and are willing to spend proportionally longer on it; it is not the knob for making pushes faster. Because the `git-refs` rewrite runs in a detached background worker and already-redacted refs ship without waiting for their still-redacting siblings, that slowness costs no push latency on that backend (see "Seeing outstanding OPF work" below). `git-branch` still rewrites inline during `git push`, so there this cap doubles as the worst-case push wait.
+
+**Raw-byte cap: `600 MiB` of blob content buffered in memory**, on both backends, cumulative across the whole rewrite (every queued ref together on `git-refs`). It has no env var of its own — it is derived as 100× the batch cap, so raising `ENTIRE_OPF_BATCH_LIMIT` raises it too. It is checked incrementally as blobs load, so on a pathological push (one commit carrying a huge pasted transcript) this is the cap that fires first.
+
+The three caps protect different failure modes: the commit cap stops "100 throwaway commits", the batch cap stops "one checkpoint that isn't really a session", and the raw-byte cap stops the loader exhausting memory before either of the others can be evaluated.
 
 **Seeing outstanding OPF work.** On `git-refs`, `entire status` reports checkpoints whose OPF rewrite has not happened yet (`N checkpoints pending OpenAI Privacy Filter redaction`) separately from checkpoints whose rewrite has failed three times running and so will not clear on its own (`N checkpoints cannot be privacy-filtered`). `entire status --json` carries the same two facts as `checkpoint_opf_pending` and `checkpoint_opf_stuck_refs`. Both are silent when OPF is disabled. A stuck checkpoint is usually one of the caps above, but the failure tally records only how often a ref failed — `.entire/logs` names the actual reason.
 
@@ -340,7 +344,7 @@ Two notes on the `git-refs` rows:
 Two `git-branch`-shaped leftovers are easy to miss once a repo has moved on:
 
 - **A `git-branch` mirror never gets OPF'd.** Mirrors receive best-effort write fan-out only and never ref-level mutations, so a mirror branch keeps 8-layer content indefinitely. It isn't pushed at pre-push, so it doesn't reach the remote — but it is local content, and it has a `refs/heads/` reflog.
-- **Migration doesn't delete the old branch.** `entire doctor migrate-checkpoints` imports from `entire/checkpoints/v1` and leaves it in place, 8-layer, along with its reflog. Migrated refs also carry no OPF trailer, so the first push after a migration re-OPFs every migrated ref — one commit per ref keeps the commit cap happy, but the 2 MiB batch cap is the realistic trip point.
+- **Migration doesn't delete the old branch.** `entire doctor migrate-checkpoints` imports from `entire/checkpoints/v1` and leaves it in place, 8-layer, along with its reflog. Migrated refs also carry no OPF trailer, so the first push after a migration re-OPFs every migrated ref — one commit per ref keeps the commit cap happy, and the batch cap is per ref, so the realistic cost is the model time for every migrated session rather than a rejection.
 
 `.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input the shadow-branch walk and condensation read from.
 
