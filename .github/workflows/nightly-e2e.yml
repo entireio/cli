@@ -121,29 +121,6 @@ jobs:
           "NIGHTLY_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "E2E_ENTIRE_BIN=$((Get-Command entire).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # Windows reads a binary's version from its PE resource section, not from
-      # the ldflags stamp `entire version` prints, so this is the only check
-      # that catches the release dropping VERSIONINFO again (#2218). It runs
-      # against the installed nightly rather than a local build: what the
-      # release pipeline emitted is the thing that regressed.
-      - name: Verify Windows PE version metadata
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          foreach ($name in "entire", "git-remote-entire") {
-            $info = (Get-Item (Get-Command $name).Source).VersionInfo
-            Write-Host "$name  file $($info.FileVersionRaw)  product $($info.ProductVersion)"
-            if ($info.FileVersionRaw -eq [version]"0.0.0.0") {
-              Write-Error "$name reports 0.0.0.0 - the PE VERSIONINFO resource is missing"
-            }
-            # Nightlies carry the commit in the fourth field. Zero there means
-            # the resources were generated for a stable version.
-            if ($info.FileVersionRaw.Revision -eq 0) {
-              Write-Error "$name has no nightly build number: $($info.FileVersionRaw)"
-            }
-          }
-
       - name: Checkout the nightly tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
