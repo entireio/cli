@@ -291,7 +291,7 @@ func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Model:      raw.Model,
-                TaskDescription: derefString(raw.LastAssistantMessage),
+        TaskDescription: derefString(raw.LastAssistantMessage),
 		Timestamp:  time.Now(),
 	}, nil
 }
