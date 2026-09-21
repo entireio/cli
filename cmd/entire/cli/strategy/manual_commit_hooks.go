@@ -330,13 +330,8 @@ func isGitSequenceOperation(ctx context.Context) bool {
 // The source parameter indicates how the commit was initiated:
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
-//   - "merge": skip trailer entirely (auto-generated message; the merged
-//     commits keep their own trailers)
-//   - "squash": git seeds the message from SQUASH_MSG, trailers included, so
-//     nothing is stamped. A squash committed with -m reports "message"
-//     instead, which is why inheritSquashedCheckpointTrailers runs before the
-//     source switch: a squash's provenance is the squashed commits, whatever
-//     the message flag.
+//   - "merge": skip trailer entirely (the merged commits keep their own)
+//   - "squash": skip; the seeded message already carries the squashed trailers
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -550,14 +545,17 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 }
 
 // inheritSquashedCheckpointTrailers handles a commit made while `git merge
-// --squash` is in progress (SQUASH_MSG in the per-worktree git dir): its
-// content is the squashed commits', so their Entire-Checkpoint trailers are
-// carried into the message when missing and no session is matched. Needed
-// because `commit -m` reports source "message", not "squash", and ordinary
-// matching then refused or minted an empty checkpoint. Reports whether it
-// took over; a squash of commits that carry no trailers, or a message it could
-// not read or write, falls through to ordinary matching, as before.
+// --squash` is in progress (SQUASH_MSG present): the squashed commits'
+// Entire-Checkpoint trailers are carried into the message and no session is
+// matched. `commit -m` reports source "message", not "squash", so this runs
+// before the source switch — but only for those two sources: an amend must
+// keep its own logic even when an abandoned squash left SQUASH_MSG behind.
+// Reports whether it took over; no trailers or an unusable message fall
+// through to ordinary matching.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
+	if source != "message" && source != "squash" {
+		return false
+	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	gitDir, err := GetGitDir(ctx)
 	if err != nil {

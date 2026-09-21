@@ -13,10 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// squashFixture builds a repository whose feature branch carries one commit
-// with an Entire-Checkpoint trailer, then runs `git merge --squash` of that
-// branch in the main checkout so `.git/SQUASH_MSG` exists and the change is
-// staged. Returns the repo dir and the branch commit's checkpoint ID.
+// squashFixture: a trailer-carrying branch commit, squash-merged into main.
 func squashFixture(t *testing.T) (string, string) {
 	t.Helper()
 	testutil.IsolateGitConfigEnv(t)
@@ -36,17 +33,11 @@ func squashFixture(t *testing.T) (string, string) {
 	return dir, branchCheckpoint
 }
 
-// TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers covers
-// `git merge --squash feature && git commit -m "…"`, the common way worktree
-// work is integrated from the main checkout. git reports source "message"
-// for that commit, not "squash", so the hook used to run ordinary session
-// matching: it either refused (several live worktrees) or minted a fresh,
-// near-empty checkpoint for whatever session it could find. The squash's
-// provenance is the squashed commits, so their trailers are carried over from
-// SQUASH_MSG and no session is matched.
+// `merge --squash` + `commit -m` reports source "message"; the squashed commits'
+// trailers must be inherited and no session matched.
 func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
-	// A live session in this checkout must not be linked to the squash.
+	// Must not be linked to the squash.
 	saveIdentitySession(t, "sess-in-parent", func(st *SessionState) {
 		st.WorktreePath = dir
 		st.TranscriptPath = filepath.Join(dir, "transcript.jsonl")
@@ -65,10 +56,7 @@ func TestPrepareCommitMsg_SquashWithCustomMessageInheritsBranchTrailers(t *testi
 	require.Equal(t, 1, strings.Count(string(got), "Entire-Checkpoint:"), "no fresh checkpoint may be minted for a squash: %q", got)
 }
 
-// TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce covers
-// the editor flow, where git seeds the message from SQUASH_MSG (trailer
-// included) and reports source "squash": the trailer stays, and is not
-// duplicated.
+// Editor flow: the seeded message already carries the trailer; keep it once.
 func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testing.T) {
 	dir, branchCheckpoint := squashFixture(t)
 	squashMsg, err := os.ReadFile(filepath.Join(dir, ".git", "SQUASH_MSG"))
@@ -87,8 +75,7 @@ func TestPrepareCommitMsg_SquashDefaultMessageKeepsInheritedTrailerOnce(t *testi
 	require.Contains(t, string(got), branchCheckpoint)
 }
 
-// A squash of commits that carry no trailers has nothing to inherit: ordinary
-// matching must run, exactly as before the squash handling existed.
+// No trailers to inherit: ordinary matching must run.
 func TestInheritSquashedCheckpointTrailers_NoTrailersFallsThrough(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	dir := resolvedTempDir(t)
@@ -113,11 +100,23 @@ func TestInheritSquashedCheckpointTrailers_NoTrailersFallsThrough(t *testing.T) 
 	require.Equal(t, "Plain squash\n", string(got))
 }
 
-// A squash whose message file cannot be read inherits nothing and must not
-// claim to have taken over; ordinary matching gets to report its own failure.
+// Unreadable message: nothing inherited, must not claim to have taken over.
 func TestInheritSquashedCheckpointTrailers_UnreadableMessageFallsThrough(t *testing.T) {
 	squashFixture(t)
 	s := NewManualCommitStrategy()
 	require.False(t, s.inheritSquashedCheckpointTrailers(context.Background(), t.TempDir(), "message"),
 		"a directory is not a readable message file")
+}
+
+// A stale SQUASH_MSG must not turn an amend into a squash: amend keeps its own
+// preserve/restore logic.
+func TestInheritSquashedCheckpointTrailers_AmendIgnoresStaleSquashMsg(t *testing.T) {
+	_, branchCheckpoint := squashFixture(t)
+	msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(msgFile, []byte("Amended message\n"), 0o600))
+	s := NewManualCommitStrategy()
+	require.False(t, s.inheritSquashedCheckpointTrailers(context.Background(), msgFile, "commit"))
+	got, err := os.ReadFile(msgFile)
+	require.NoError(t, err)
+	require.NotContains(t, string(got), branchCheckpoint)
 }
