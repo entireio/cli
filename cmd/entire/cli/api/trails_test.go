@@ -19,8 +19,7 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	ok, err := c.TrailsEnabled(context.Background(), "g/h", "acme?org", "repo#frag")
 	if err != nil {
@@ -116,8 +115,7 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			}))
 			defer server.Close()
 
-			c := NewClient("tok")
-			c.baseURL = server.URL
+			c := NewClientWithBaseURL("tok", server.URL)
 
 			ok, err := c.TrailsEnabled(context.Background(), "gh", "acme", "repo")
 			if (err == nil) != tt.wantErrNil {

@@ -364,7 +364,6 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | Command              | Description                                              |
 | -------------------- | -------------------------------------------------------- |
 | `entire review`      | Run a multi-agent review against a branch                |
-| `entire investigate` | Run a multi-agent investigation against the current branch |
 | `entire tokens`      | Analyze token usage across sessions and checkpoints       |
 | `entire blame`       | Show which lines came from Entire checkpoints             |
 | `entire why`         | Show why a line exists                                   |

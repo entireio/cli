@@ -58,7 +58,7 @@ func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -94,7 +94,7 @@ func TestStreamOnce_JSONOutputEnvelope(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -122,7 +122,7 @@ func TestStreamOnce_ShowPingsTrimsSSECommentWhitespace(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -150,7 +150,7 @@ func TestStreamOnce_ReconnectEvent(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -176,7 +176,7 @@ func TestStreamOnce_ForbiddenEvent(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -213,7 +213,7 @@ func TestStreamOnce_TerminalHTTPStatusesDoNotReconnect(t *testing.T) {
 			defer srv.Close()
 
 			t.Setenv(api.BaseURLEnvVar, srv.URL)
-			client := api.NewClient("tok")
+			client := api.NewClientWithBaseURL("tok", srv.URL)
 
 			var stdout, stderr bytes.Buffer
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -238,7 +238,7 @@ func TestStreamOnce_TooManyRequestsIsRecoverable(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -310,7 +310,7 @@ func TestStreamOnce_SendsLastEventIDHeader(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
-	client := api.NewClient("tok")
+	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	var stdout, stderr bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

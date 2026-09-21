@@ -130,7 +130,12 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	client, repoScope, repoName, err := newRecapClient(ctx, f.insecureHTTP)
 	if err != nil {
 		if errors.Is(err, api.ErrInsecureHTTP) {
-			fmt.Fprintf(errW, "%v\nUse https://, or pass --insecure-http-auth for local dev.\n", err)
+			// Name the variable and the host it points at: the generic error says
+			// only that *some* base URL is http, which sends the reader looking for
+			// a setting they may not know they have. newRecapClient rejects the
+			// override before resolving anything, so an http URL here is always
+			// this one. insecureDataOverrideNote strips any credentials from it.
+			fmt.Fprintf(errW, "%s. Use https:// for production, or pass --insecure-http-auth for local dev.\n", insecureDataOverrideNote())
 			return NewSilentError(err)
 		}
 		// Token resolution can fail for many reasons unrelated to the
@@ -219,11 +224,12 @@ func newRecapClient(ctx context.Context, insecureHTTP bool) (client *api.Client,
 	if err != nil {
 		return nil, "", "", err
 	}
-	if target.Token != "" && !insecureHTTP {
-		if err := api.RequireSecureURL(target.BaseURL); err != nil {
-			return nil, "", "", fmt.Errorf("%s: %w", target.BaseURL, err)
-		}
-	}
+	// No second scheme check: requireSecureDataOverride above already rejected an
+	// http ENTIRE_API_BASE_URL, and every other value target.BaseURL can hold is
+	// built by auth.dataBaseURLForCore as "https://" + site. The one that mattered
+	// is the one that runs before credentials are resolved —
+	// TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery pins it.
+
 	// The data API scopes by slug, so scope and display name coincide.
 	slug := currentRepoSlug(ctx)
 	return api.NewClientWithBaseURL(target.Token, target.BaseURL), slug, slug, nil

@@ -103,19 +103,19 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
   settings-layer classification and a third rejection channel, so it waits until
   someone asks for the combination.
 - **Agent instruction fields get the same provenance gate**:
-  `investigate.always_prompt`, every `ReviewConfig.Prompt` (per-worker and
-  judge, in `review_profiles` and the legacy `review` map), and every
+  every `ReviewConfig.Prompt` (per-worker and judge, in `review_profiles` and
+  the legacy `review` map) and every
   `ReviewProfileConfig.Task` land verbatim in prompts of agents that
-  investigate/review spawn with approval checks disabled, so a committed value
+  review spawns with approval checks disabled, so a committed value
   would let a pull request steer a permission-bypassed agent. Task and Prompt
   are adjacent sections of the same composed prompt, which is why gating one
   without the other would be a formality. `settings.enforceAgentPromptTrust`
   (`settings/agent_prompt_trust.go`) honors them only from a developer-owned
   layer: clone-local preferences (in `.git/`, unreachable by clone) or a
   `classifyLocalSettingsDeep`-verified `.entire/settings.local.json`.
-  Provenance follows merge order (local replaces investigate wholesale and
+  Provenance follows merge order (local replaces
   review profiles per profile name). Rejection is a downgrade recorded in
-  `EntireSettings.AgentPromptRejections()`, and review/investigate print a
+  `EntireSettings.AgentPromptRejections()`, and review prints a
   one-line stderr notice for fields they would have used — suppressed for a
   dropped task equal to review's built-in default, which the fallback
   reproduces anyway (the non-interactive first-run setup persists exactly

@@ -2446,12 +2446,6 @@ func tryAdoptEnv(ctx context.Context, state *session.State, expectedAgent string
 // env adoption and the trail resume summary.
 const sessionKindLabelReview = "review"
 
-// sessionKindLabelInvestigate is the same for an investigate session. It is a
-// separate constant from cmdInvestigate deliberately, matching the review
-// pair: one is the command a user types, the other is a label in a log line,
-// and they are free to diverge.
-const sessionKindLabelInvestigate = "investigate"
-
 // adoptReviewEnv tags the session as a review session when ENTIRE_REVIEW_*
 // env vars are present on the current process.
 func adoptReviewEnv(ctx context.Context, state *session.State, expectedAgent string) {
@@ -2488,7 +2482,7 @@ func adoptReviewEnv(ctx context.Context, state *session.State, expectedAgent str
 // harmless if it ever arises.
 func adoptInvestigateEnv(ctx context.Context, state *session.State, expectedAgent string) {
 	tryAdoptEnv(ctx, state, expectedAgent, envAdoptionSpec{
-		kindLabel:      sessionKindLabelInvestigate,
+		kindLabel:      "investigate",
 		envSession:     provenance.InvestigateSession,
 		envAgent:       provenance.InvestigateAgent,
 		envStartingSHA: provenance.InvestigateStartingSHA,
