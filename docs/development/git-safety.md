@@ -40,13 +40,10 @@ like. Git exports `GIT_DIR`/`GIT_WORK_TREE` to the hooks it runs and
 `WorktreeRoot` honours them, while `OpenPath(".")` cannot see them, so a hook
 running for repo A opened repo B; and go-git applies neither git's
 `safe.directory` ownership check nor its `.git` parse, so the fallback opened
-repositories the user's own git refuses. Use `gitrepo.OpenCurrentOrCwd` only for
-`WarnCheckpointPolicyIfNeeded`, whose three properties do not generalise: it is
-dispatched from `main.go` after cobra, so it is the one repository open with no
-pre-run guard ahead of it; it only reads a policy ref; and it discards every
-error. Anything that writes must stop instead — that is what "we could not
-find out which repository this is" means. Key files: `gitrepo/repository.go`
-(open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
+repositories the user's own git refuses. Anything that writes must stop
+instead — that is what "we could not find out which repository this is" means.
+Key files: `gitrepo/repository.go` (open entry points) and
+`gitrepo/reftable.go` (`reftableStorer`).
 
 #### Reading Worktree Status - Always Use `gitrepo.Status`
 

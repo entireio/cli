@@ -1310,6 +1310,47 @@ func TestFormatGitPushError_RedactsRemoteURL(t *testing.T) {
 	assert.Contains(t, msg, RedactURLOrPath(remote))
 }
 
+func TestFormatGitPushError_PreservesTerminalLayout(t *testing.T) {
+	t.Parallel()
+
+	const target = "https://user:password@github.com/example/checkpoints.git"
+	const unblockURL = "https://github.com/example/checkpoints/security/secret-scanning/unblock-secret/2mQ8vR5xL9nT3bW7kP4sH6jY0cF1dZ"
+	for _, longOutput := range []bool{false, true} {
+		name := "short"
+		if longOutput {
+			name = "elided"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := "remote: GITHUB PUSH PROTECTION\nremote:   locations:\nremote:     path: 0/full.jsonl:85\n"
+			if longOutput {
+				output += strings.Repeat("remote: additional policy detail —\n", 200)
+			}
+			output += "remote: " + unblockURL + "\n! [remote rejected] (repository rule violations)\nTo " + target
+			cause := errors.New("push exited")
+			err := fmt.Errorf("caller: %w", formatGitPushError(t.Context(), cause, []byte(output), target))
+			var pushErr *PushError
+			require.ErrorAs(t, err, &pushErr)
+			require.ErrorIs(t, err, cause)
+			assert.NotContains(t, err.Error(), "\n", "logs remain single-line")
+			assert.NotContains(t, err.Error(), "user:password")
+			terminal := pushErr.Output()
+			assert.NotContains(t, terminal, "user:password")
+			assert.Contains(t, terminal, RedactURLOrPath(target))
+			assert.Contains(t, terminal, unblockURL)
+			assert.Contains(t, terminal, "\nremote:   locations:\nremote:     path:")
+			assert.Contains(t, terminal, "repository rule violations")
+			assert.LessOrEqual(t, len([]rune(terminal)), maxPushErrorDetail)
+			assert.True(t, utf8.ValidString(terminal))
+			if longOutput {
+				assert.Contains(t, terminal, "[…]")
+			} else {
+				assert.Equal(t, strings.ReplaceAll(output, target, RedactURLOrPath(target)), terminal)
+			}
+		})
+	}
+}
+
 // Multi-line git output has to stay usable as a single log attribute.
 func TestFormatGitPushError_CollapsesAndCaps(t *testing.T) {
 	t.Parallel()
@@ -1321,9 +1362,9 @@ func TestFormatGitPushError_CollapsesAndCaps(t *testing.T) {
 	assert.Contains(t, formatted.Error(), "line one line two")
 	assert.NotContains(t, formatted.Error(), "\n")
 
-	long := formatGitPushError(context.Background(), err, []byte(strings.Repeat("x", maxGitOutputDetail*2)), "origin")
+	long := formatGitPushError(context.Background(), err, []byte(strings.Repeat("x", maxPushErrorDetail*2)), "origin")
 	require.Error(t, long)
-	assert.Less(t, len([]rune(long.Error())), maxGitOutputDetail+100)
+	assert.Less(t, len([]rune(long.Error())), maxPushErrorDetail+100)
 	assert.Contains(t, long.Error(), "[…]")
 }
 
@@ -1339,7 +1380,7 @@ func TestFormatGitPushError_KeepsTailOfLongOutput(t *testing.T) {
 		b.WriteString("remote: GITHUB PUSH PROTECTION blocked a secret; unblock at https://github.com/o/r/security/secret-scanning/unblock-secret/xxxxxxxxxxxxxxxxxxxx ")
 	}
 	b.WriteString("! [remote rejected] refs/entire/checkpoints/W1/X -> refs/entire/checkpoints/W1/X (" + reason + ")")
-	require.Greater(t, b.Len(), maxGitOutputDetail, "precondition: output must exceed the cap")
+	require.Greater(t, b.Len(), maxPushErrorDetail, "precondition: output must exceed the cap")
 
 	formatted := formatGitPushError(context.Background(), &exec.ExitError{ProcessState: nil}, []byte(b.String()), "origin")
 	require.Error(t, formatted)
@@ -1355,7 +1396,7 @@ func TestFormatGitPushError_KeepsTailOfLongOutput(t *testing.T) {
 func TestFormatGitPushError_TruncationIsRuneSafe(t *testing.T) {
 	t.Parallel()
 
-	output := strings.Repeat("—", maxGitOutputDetail*2)
+	output := strings.Repeat("—", maxPushErrorDetail*2)
 	formatted := formatGitPushError(context.Background(), &exec.ExitError{ProcessState: nil}, []byte(output), "origin")
 	require.Error(t, formatted)
 	assert.True(t, utf8.ValidString(formatted.Error()), "truncated detail must remain valid UTF-8")

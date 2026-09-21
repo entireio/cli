@@ -131,6 +131,10 @@ func checkpointRefRejectionReason(err error) string {
 	}
 	detail := err.Error() // Already collapsed and elided by remote.PushWithOptions.
 	if strings.Contains(detail, "[remote rejected]") || isProtectedRefRejection(detail) {
+		var pushErr *remote.PushError
+		if errors.As(err, &pushErr) {
+			return pushErr.Output() // Keep line breaks for the terminal, not log formatting.
+		}
 		return detail
 	}
 	return ""

@@ -29,7 +29,9 @@ const stampConfigTimeout = 10 * time.Second
 // used to authenticate git push/fetch operations for checkpoint branches.
 // The token is injected as an HTTP Basic Authorization header per RFC 7617:
 // the credentials string "x-access-token:<token>" is base64-encoded and sent as
-// "Authorization: Basic <base64>". This matches GitHub's token auth for Git HTTPS.
+// "Authorization: Basic <base64>". GitHub accepts this as a token credential, and
+// GitLab ignores the Basic-auth username for Personal/Project Access Tokens, so
+// one header serves both checkpoint_remote providers.
 // SSH remotes ignore the token (with a warning).
 const CheckpointTokenEnvVar = "ENTIRE_CHECKPOINT_TOKEN"
 
@@ -448,6 +450,26 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 	return PushResult{Output: string(output)}, nil
 }
 
+// PushError retains bounded Git diagnostics in two forms: a single-line Error
+// for logging and Output with the original line breaks for terminal display.
+// Both mask the push target's embedded credentials; neither scans remote text
+// for secrets, which would destroy actionable push-protection unblock URLs.
+type PushError struct {
+	cause  error
+	detail string
+	output string
+}
+
+func (e *PushError) Error() string {
+	return fmt.Sprintf("%v (%s)", e.cause, e.detail)
+}
+
+func (e *PushError) Unwrap() error { return e.cause }
+
+// Output returns Git's bounded diagnostics without error wrappers, preserving
+// line breaks and indentation. It is not the unbounded raw PushResult.Output.
+func (e *PushError) Output() string { return e.output }
+
 // formatGitPushError enriches a failed push with git's own output, so a caller
 // that logs only the error still learns why the remote said no.
 //
@@ -461,8 +483,9 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 // stays queued forever, and the only way to see the cause was to reproduce the
 // push by hand.
 //
-// The output is collapsed to one line and capped so it stays usable as a log
-// attribute, and a URL-shaped target is redacted first because git echoes the
+// Error output is collapsed to one line and capped for log attributes; PushError
+// also retains capped multiline output for the terminal. A URL-shaped target is
+// redacted first in both forms because git echoes the
 // remote back into its messages and a URL may carry credentials (same reasoning
 // as formatGitCommandError and FetchBlobs).
 func formatGitPushError(ctx context.Context, err error, output []byte, remote string) error {
@@ -472,29 +495,46 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("deadline exceeded: %w", err)
 	}
-	return errWithGitOutput(err, output, remote)
-}
-
-// errWithGitOutput annotates err with git's own combined output, or returns err
-// unchanged when git produced none — which is what a process killed by a
-// cancelled context or an exhausted budget does.
-//
-// The output annotates the error, it never replaces it: substituting the output
-// yielded an empty message precisely when git was killed, leaving no cause and
-// nothing for errors.Is to match. The text is collapsed to one line and capped
-// so it stays usable as a log attribute, and a URL-shaped target is redacted
-// first because git echoes the remote back into its messages and a URL may carry
-// credentials (same reasoning as formatGitCommandError and FetchBlobs).
-func errWithGitOutput(err error, output []byte, remote string) error {
-	detail := strings.TrimSpace(string(output))
+	detail := gitOutputDetail(output, remote)
 	if detail == "" {
 		return err
 	}
-	if remote != "" {
-		detail = strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
+	return &PushError{
+		cause:  err,
+		detail: elideMiddle(strings.Join(strings.Fields(detail), " "), maxPushErrorDetail),
+		output: elideMiddle(detail, maxPushErrorDetail),
 	}
-	detail = strings.Join(strings.Fields(detail), " ")
-	return fmt.Errorf("%w (%s)", err, elideMiddle(detail, maxGitOutputDetail))
+}
+
+// gitOutputDetail trims git's combined output and redacts a URL-shaped target
+// out of it, because git echoes the remote back into its messages and a URL may
+// carry credentials (same reasoning as formatGitCommandError and FetchBlobs).
+// Returns "" when git produced no output — which is what a process killed by a
+// cancelled context or an exhausted budget does.
+func gitOutputDetail(output []byte, remote string) string {
+	detail := strings.TrimSpace(string(output))
+	if detail == "" || remote == "" {
+		return detail
+	}
+	return strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
+}
+
+// errWithGitOutput annotates err with git's own output, or returns err unchanged
+// when git produced none.
+//
+// The output annotates the error, it never replaces it: substituting the output
+// yielded an empty message precisely when git was killed, leaving no cause and
+// nothing for errors.Is to match.
+//
+// Deliberately not a *PushError, though it shares the folding: that type is how
+// checkpointRefRejectionReason recognises a push the remote refused, so handing
+// one back for a failed fetch would let a fetch failure be read as a rejection.
+func errWithGitOutput(err error, output []byte, remote string) error {
+	detail := gitOutputDetail(output, remote)
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w (%s)", err, elideMiddle(strings.Join(strings.Fields(detail), " "), maxPushErrorDetail))
 }
 
 // elideMiddle shortens s to at most limit runes by dropping the middle, keeping
@@ -529,11 +569,11 @@ func elideMiddle(s string, limit int) string {
 	return string(r[:head]) + marker + string(r[len(r)-tail:])
 }
 
-// maxGitOutputDetail bounds the git output folded into a push or fetch error, in runes.
+// maxPushErrorDetail bounds the git output folded into a push or fetch error, in runes.
 // Push output carries per-secret push-protection banners and progress lines and
 // can run to several KB; this keeps the error usable as a log attribute while
 // leaving room for both ends of a long rejection.
-const maxGitOutputDetail = 2000
+const maxPushErrorDetail = 2000
 
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
 func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
@@ -750,8 +790,10 @@ func extractRemoteFromArgs(args []string) string {
 
 // appendCheckpointTokenEnv appends GIT_CONFIG_COUNT-based env vars to inject
 // an Authorization header into git HTTP requests. The token is sent as a Basic
-// credential with the format "x-access-token:<token>" (base64-encoded), which
-// is compatible with GitHub's token authentication.
+// credential with the format "x-access-token:<token>" (base64-encoded). GitHub
+// accepts this as a token credential; GitLab ignores the Basic-auth username for
+// Personal/Project Access Tokens, so one header serves both checkpoint_remote
+// providers.
 //
 // Existing GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* entries are preserved; the new
 // http.extraHeader entry is appended at the next free index and

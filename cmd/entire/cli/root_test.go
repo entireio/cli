@@ -9,6 +9,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVersionFlag_OutputMatchesVersionCmd(t *testing.T) {
@@ -240,30 +241,6 @@ func TestSearchIsVisibleAtTopLevelAndUnderCheckpoint(t *testing.T) {
 	}
 }
 
-func TestCheckpointPolicyCommandIsExperimental(t *testing.T) {
-	t.Parallel()
-
-	root := NewRootCmd()
-
-	checkpointPolicy, remaining, err := root.Find([]string{"checkpoint", "policy"})
-	if err != nil {
-		t.Fatalf("find checkpoint policy command: %v", err)
-	}
-	if len(remaining) != 0 || checkpointPolicy.Use != "policy" {
-		t.Fatalf("checkpoint policy resolved to %q with remaining args %v", checkpointPolicy.Use, remaining)
-	}
-	// Gated as experimental: visible and grouped in developer builds
-	// (the default test build), hidden in shipped releases.
-	if checkpointPolicy.GroupID != experimental.GroupID {
-		t.Fatalf("checkpoint policy GroupID = %q, want %q (experimental)", checkpointPolicy.GroupID, experimental.GroupID)
-	}
-
-	topLevelPolicy, remaining, err := root.Find([]string{"policy"})
-	if err == nil && len(remaining) == 0 && topLevelPolicy.Use == "policy" {
-		t.Fatal("top-level policy command should not remain after moving policy under checkpoint")
-	}
-}
-
 func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 	t.Parallel()
 
@@ -348,4 +325,51 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestCommandGroupsRejectUnknownSubcommands pins that a group answers an
+// unknown subcommand with an error instead of printing help and reporting
+// success. Removing a verb must make its old spelling fail, not silently do
+// nothing: `entire auth use prod && entire repo delete …` would otherwise
+// delete under the previous identity.
+//
+// Each group is executed under a parent, which is what the bug needs: cobra
+// rejects an unknown subcommand only on a parentless command, and below that it
+// returns flag.ErrHelp for any command with no RunE before it ever validates
+// arguments. So NoArgs alone is a no-op on a group; it needs a RunE too.
+func TestCommandGroupsRejectUnknownSubcommands(t *testing.T) {
+	t.Parallel()
+
+	groups := map[string]func() *cobra.Command{
+		"auth":            newAuthCmd,
+		"repo":            newRepoCmd,
+		"repo access":     newRepoAccessCmd,
+		"repo grant":      newRepoGrantCmd,
+		"repo mirror":     newRepoMirrorCmd,
+		"repo protection": newRepoProtectionCmd,
+		"repo remote":     newRepoRemoteCmd,
+		"repo visibility": newRepoVisibilityCmd,
+	}
+	for name, newCmd := range groups {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			run := func(args ...string) error {
+				group := newCmd()
+				parent := &cobra.Command{Use: "entire"}
+				parent.AddCommand(group)
+				parent.SetOut(&bytes.Buffer{})
+				parent.SetErr(&bytes.Buffer{})
+				// SetArgs(nil) makes cobra read os.Args, which under `go test`
+				// is the test binary's own flags.
+				parent.SetArgs(append([]string{group.Name()}, args...))
+				return parent.ExecuteContext(t.Context())
+			}
+
+			require.Error(t, run("definitely-not-a-subcommand"),
+				"an unknown subcommand must not report success")
+			require.NoError(t, run(),
+				"the bare group must still print its help and succeed")
+		})
+	}
 }

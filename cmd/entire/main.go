@@ -32,7 +32,7 @@ func main() {
 	// election re-runs per call by design and each run shells out to git for the
 	// same two answers; one command can elect several times. Answers are
 	// partitioned per git working directory, so a command walking several repos
-	// stays correct. `entire repo mirror use` invalidates after re-pointing a
+	// stays correct. `entire repo remote use` invalidates after re-pointing a
 	// remote, and `entire mcp` narrows this to one window per request.
 	ctx = strategy.WithGitRemoteCache(ctx)
 
@@ -190,9 +190,6 @@ func main() {
 
 		cancel()
 		os.Exit(1)
-	}
-	if cli.ShouldCheckCheckpointPolicyWarning(executed) {
-		cli.WarnCheckpointPolicyIfNeeded(ctx, rootCmd.ErrOrStderr(), versioninfo.Version)
 	}
 	cancel() // Cleanup on successful exit
 }

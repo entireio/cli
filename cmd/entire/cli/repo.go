@@ -14,10 +14,11 @@ import (
 )
 
 // newRepoCmd is the `entire repo` command group: control-plane
-// repository lifecycle (create, list within a project, get, delete), the
-// `mirror`, `visibility`, `protection` and `grant` subtrees, plus the `clone`
-// convenience that resolves a mirror and shells out to `git clone`. Other git
-// content operations (log, diff, …) remain intentionally out of scope here.
+// repository lifecycle (create, list within a project, view, edit, delete),
+// the `mirror`, `remote`, `access`, `visibility`, `protection` and `grant`
+// subtrees, plus the `clone` convenience that resolves a mirror and shells
+// out to `git clone`. Other git content operations (log, diff, …) remain
+// intentionally out of scope here.
 func newRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cmdRepo,
@@ -26,18 +27,21 @@ func newRepoCmd() *cobra.Command {
 	addControlPlaneFlags(cmd)
 	cmd.AddCommand(newRepoCreateCmd())
 	cmd.AddCommand(newRepoListCmd())
-	cmd.AddCommand(newRepoGetCmd())
+	cmd.AddCommand(newRepoViewCmd())
+	cmd.AddCommand(newRepoEditCmd())
 	cmd.AddCommand(newRepoDeleteCmd())
 	cmd.AddCommand(newRepoCloneCmd())
 	cmd.AddCommand(newRepoMirrorCmd())
+	cmd.AddCommand(newRepoRemoteCmd())
+	cmd.AddCommand(newRepoAccessCmd())
 	cmd.AddCommand(newRepoVisibilityCmd())
 	cmd.AddCommand(newRepoProtectionCmd())
 	cmd.AddCommand(newRepoGrantCmd())
-	return cmd
+	return requireSubcommand(cmd)
 }
 
 // repoColumns is the human table/field view of a repo, shared by list and
-// get. CLUSTER/STATE come from optional fields, shown as "-" when unset.
+// view. CLUSTER/STATE come from optional fields, shown as "-" when unset.
 var repoColumns = []string{"ID", colHeaderName, "PROJECT", colHeaderCluster, "STATE"}
 
 func repoRow(r coreapi.Repo) []string {
@@ -45,7 +49,7 @@ func repoRow(r coreapi.Repo) []string {
 }
 
 // repoDetailColumns / repoDetailRow extend the shared repo view with the
-// provisioning reason and entire:// clone URL for the single-repo `get` output.
+// provisioning reason and entire:// clone URL for the single-repo `view` output.
 // The list view stays on the lean repoColumns — a full clone URL per row would
 // bloat the table — but a person inspecting one repo wants the URL they can
 // paste into `git clone` (COR-699). REMOTE is "-" until the repo is provisioned
@@ -133,7 +137,7 @@ and recovery instructions go to stderr.`,
 			"  entire repo create web --project acme --wait-timeout=5m",
 		PreRunE: func(_ *cobra.Command, _ []string) error {
 			// Invalid flag values are usage errors, including zero/negative
-			// durations; match mirror create and Cobra's malformed-value path.
+			// durations; match mirror add and Cobra's malformed-value path.
 			if waitTimeout <= 0 {
 				return errors.New("--wait-timeout must be positive")
 			}
@@ -213,11 +217,11 @@ and recovery instructions go to stderr.`,
 func newRepoListCmd() *cobra.Command {
 	var limit, pageSize int
 	var all, noPager bool
-	var pageToken string
+	var pageToken, project string
 	cmd := &cobra.Command{
-		Use:   "list <project>",
+		Use:   cmdList,
 		Short: "List repositories in a project",
-		Long: "List repositories in a project, addressed by name or ULID.\n\n" +
+		Long: "List repositories in the project named by --project (name or ULID).\n\n" +
 			"By default at most " + strconv.Itoa(coreListFetchBudget) + " repositories are fetched; when the project " +
 			"has more, a note on stderr says so — pass --all to fetch everything, or " +
 			"--limit N for exactly the first N (rows come in server order; this list " +
@@ -225,14 +229,14 @@ func newRepoListCmd() *cobra.Command {
 			"For manual paging, --page-size/--page-token fetch exactly one page and " +
 			"report the cursor to resume from (--json wraps rows in an {items, " +
 			"nextPageToken} envelope).",
-		Args: cobra.ExactArgs(1),
+		Args: cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			if limit < 0 {
 				return fmt.Errorf("--limit must be zero or positive, got %d", limit)
 			}
 			return validatePageSize(cmd, pageSize)
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Decide color against the real output writer before
 			// flushThroughPager swaps stdout for a buffer that never looks
 			// like a TTY; the buffered render passes the pre-styled cells
@@ -241,7 +245,7 @@ func newRepoListCmd() *cobra.Command {
 			if pageModeRequested(cmd) {
 				return flushThroughPager(cmd, noPager, func() error {
 					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-						projID, err := resolveProjectRef(ctx, c, args[0])
+						projID, err := resolveProjectRef(ctx, c, project)
 						if err != nil {
 							return err
 						}
@@ -262,7 +266,7 @@ func newRepoListCmd() *cobra.Command {
 			}
 			return flushThroughPager(cmd, noPager, func() error {
 				return runCoreList(cmd, "No repositories found in this project.", headers, row, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
-					projID, err := resolveProjectRef(ctx, c, args[0])
+					projID, err := resolveProjectRef(ctx, c, project)
 					if err != nil {
 						return nil, err
 					}
@@ -307,25 +311,29 @@ func newRepoListCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().StringVar(&project, "project", "", "Project to list (name or ULID) (required)")
+	markRequired(cmd, "project")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Fetch and show only the first N repositories (0 uses the default fetch budget)")
 	cmd.Flags().BoolVar(&all, "all", false, "Fetch every repository instead of the first "+strconv.Itoa(coreListFetchBudget)+" (slower on large projects)")
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
 	pageModeFlags(cmd, &pageSize, &pageToken)
 	addJSONFlag(cmd)
+	setFlagGroup(cmd, flagGroupScope, "project")
 	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
 	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
 	useGroupedFlagHelp(cmd,
+		flagGroup{name: flagGroupScope},
 		flagGroup{name: flagGroupNavigation},
 		flagGroup{name: flagGroupFormatting},
 	)
 	return cmd
 }
 
-func newRepoGetCmd() *cobra.Command {
+func newRepoViewCmd() *cobra.Command {
 	var project string
 	var authoritative bool
 	cmd := &cobra.Command{
-		Use:   "get <repo>",
+		Use:   "view <repo>",
 		Short: "Show a repository by /et/<project>/<repo> path, name, or ULID",
 		Long: `Show repository details. Use --authoritative to also check provisioning
 status. This command does not wait: it exits successfully when it can
@@ -336,9 +344,9 @@ provisioning has completed.
 The default read cannot confirm readiness. If the server cannot provide
 readiness information, --authoritative reports an error or a missing state;
 neither confirms readiness.`,
-		Example: "  entire repo get /et/acme/web\n" +
-			"  entire repo get /et/acme/web --json\n" +
-			"  entire repo get /et/acme/web --authoritative",
+		Example: "  entire repo view /et/acme/web\n" +
+			"  entire repo view /et/acme/web --json\n" +
+			"  entire repo view /et/acme/web --authoritative",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, repoDetailColumns, repoDetailRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
@@ -357,7 +365,7 @@ neither confirms readiness.`,
 					// cannot strip the recovery hint with the API error wrapper.
 					// The plain read is the default, so the hint names no flag: a
 					// value the user would have to restate is not a recovery step.
-					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo get %s to inspect repository details without a readiness check.\n", renderRepoReadError(err), repoID)
+					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo view %s to inspect repository details without a readiness check.\n", renderRepoReadError(err), repoID)
 					return nil, NewSilentError(err)
 				}
 				return repo, err
@@ -391,8 +399,8 @@ func newRepoDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-// repoVisibility is the field/JSON view shared by the visibility get/set
-// verbs. Repo is the reference the user passed (name or ULID); Visibility is
+// repoVisibility is the field/JSON view shared by `visibility get` and
+// `edit --visibility`. Repo is the reference the user passed (name or ULID); Visibility is
 // the server's authoritative value after the call.
 type repoVisibility struct {
 	Repo       string `json:"repo"`
@@ -419,19 +427,18 @@ func parseVisibility(s string) (coreapi.SetRepoVisibilityInputBodyVisibility, er
 	}
 }
 
-// newRepoVisibilityCmd groups the read/write verbs for a repo's visibility.
-// "public" sets the SpiceDB public_viewer wildcard, which grants pull (read)
+// newRepoVisibilityCmd holds the visibility read verb; the write is
+// `repo edit --visibility`. "public" sets the SpiceDB public_viewer wildcard, which grants pull (read)
 // to any authenticated account but never push or manage; "private" restricts
 // the repo to explicit grantees. The data plane still requires authentication,
 // so "public" means read-only-to-any-user, not anonymous/unauthenticated.
 func newRepoVisibilityCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "visibility",
-		Short: "Get or set a repository's visibility",
+		Short: "Show a repository's visibility",
 	}
 	cmd.AddCommand(newRepoVisibilityGetCmd())
-	cmd.AddCommand(newRepoVisibilitySetCmd())
-	return cmd
+	return requireSubcommand(cmd)
 }
 
 func newRepoVisibilityGetCmd() *cobra.Command {
@@ -459,18 +466,22 @@ func newRepoVisibilityGetCmd() *cobra.Command {
 	return cmd
 }
 
-func newRepoVisibilitySetCmd() *cobra.Command {
-	var project string
+// newRepoEditCmd changes a repository's settings. Visibility is the only one
+// today, so --visibility is required; further settings become further flags
+// on this command.
+func newRepoEditCmd() *cobra.Command {
+	var project, visibility string
 	cmd := &cobra.Command{
-		Use:   "set <repo> <public|private>",
-		Short: "Set a repository's visibility",
-		Long: "Set a repository's visibility.\n\n" +
-			"\"public\" grants read-only (pull) access to any authenticated Entire user; " +
-			"push and management stay restricted to grantees. \"private\" restricts the repo " +
+		Use:   "edit <repo>",
+		Short: "Edit a repository's settings",
+		Long: "Edit a repository's settings.\n\n" +
+			"--visibility public grants read-only (pull) access to any authenticated Entire user; " +
+			"push and management stay restricted to grantees. --visibility private restricts the repo " +
 			"to explicit grantees. Requires manage permission on the repo.",
-		Args: cobra.ExactArgs(2),
+		Example: "  entire repo edit /et/my-project/my-repo --visibility private",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			vis, err := parseVisibility(args[1])
+			vis, err := parseVisibility(visibility)
 			if err != nil {
 				cmd.SilenceUsage = true
 				return err
@@ -488,6 +499,8 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().StringVar(&visibility, "visibility", "", "Visibility to set: public or private (required)")
+	markRequired(cmd, "visibility")
 	bindRepoProjectFlag(cmd, &project)
 	addJSONFlag(cmd)
 	return cmd
@@ -519,7 +532,7 @@ func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
 // June 2026) and is plausibly scripted; breaking that to report a flag that was
 // already being ignored is a poor trade. It does not VALIDATE because that
 // needs GetRepo's owningProjectId, an extra round trip on every command here
-// except `repo get` — which alone already fetches the repo and prints its
+// except `repo view` — which alone already fetches the repo and prints its
 // project.
 //
 // Wired as a PreRunE because the answer needs only the flag and args[0]: no

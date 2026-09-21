@@ -2274,7 +2274,7 @@ func resolveTrailBranch(ctx context.Context, branchOverride string) (string, err
 
 // defaultTrailPushRemote is where a trail branch goes when git config declares
 // nothing — git's own fallback for a bare push. Not defaultMirrorRemote, which
-// shares the value but means "the remote `mirror use` repoints".
+// shares the value but means "the remote `remote use` repoints".
 const defaultTrailPushRemote = "origin"
 
 // resolveTrailPushRemote returns the remote a trail's branch is delivered to,

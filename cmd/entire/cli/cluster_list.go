@@ -16,7 +16,7 @@ import (
 // jurisdiction slug `org create` and `project create` name with --region,
 // CLUSTER is the slug mirror placements are keyed by (`repo mirror list
 // --cluster` accepts it), HOST is what `repo create --cluster-host`, `repo
-// mirror create` and `repo clone --cluster` take. The catalog's apiUrl is
+// mirror add --cluster` and `repo clone --cluster` take. The catalog's apiUrl is
 // --json only: the CLI dials the API URL itself.
 var clusterColumns = []string{colHeaderRegion, colHeaderCluster, "HOST"}
 
@@ -52,7 +52,7 @@ func clusterTable(clusters []coreapi.Cluster) ([]string, func(coreapi.Cluster) [
 // clusterJSON is the --json view of the catalog: the wire model with a
 // synthesized `host` merged into each cluster — the same validated bare host
 // the table's HOST column shows and that `repo create --cluster-host`, `repo
-// mirror create` and `repo clone --cluster` take — so a script reads the safe
+// mirror add --cluster` and `repo clone --cluster` take — so a script reads the safe
 // value instead of re-implementing hostFromPublicURL over publicUrl. Where
 // publicUrl fails validation the field is absent, not dashed: publicUrl stays
 // for the consumer that wants the raw value, and an absent host says

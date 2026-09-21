@@ -257,11 +257,11 @@ func reportRepoCreation(cmd *cobra.Command, result *coreapi.Repo, noWait bool, w
 	}
 	if waitErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Repository creation succeeded: %s (%s). Readiness was not confirmed: %v\n", result.Name, result.ID, renderRepoReadError(waitErr))
-		fmt.Fprintf(cmd.ErrOrStderr(), "Inspect repository details with: entire repo get %s\nCheck readiness with: entire repo get %s --authoritative\nWhen that command reports active, retry the intended push or mirror creation. If readiness remains unavailable, contact support with this repository ID. Do not create the repository again. For future creates, --no-wait skips readiness checks.\n", result.ID, result.ID)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Inspect repository details with: entire repo view %s\nCheck readiness with: entire repo view %s --authoritative\nWhen that command reports active, retry the intended push or mirror creation. If readiness remains unavailable, contact support with this repository ID. Do not create the repository again. For future creates, --no-wait skips readiness checks.\n", result.ID, result.ID)
 		return NewSilentError(errors.Join(waitErr, outputErr))
 	}
 	if noWait && (result.State.Or("") != repoStateActive || result.Foreign.Or(false)) {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Repository readiness is unconfirmed (--no-wait). Check readiness with: entire repo get %s --authoritative\n", result.ID)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Repository readiness is unconfirmed (--no-wait). Check readiness with: entire repo view %s --authoritative\n", result.ID)
 	}
 	return outputErr
 }

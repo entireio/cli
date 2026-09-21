@@ -25,7 +25,7 @@ accept a core's JWTs.
 `contexts.json` (`$ENTIRE_CONFIG_DIR/contexts.json`, shared with entiredb's
 CLIs) stores each login as `{Name, CoreURL, Handle, KeychainService}` plus a
 `CurrentContext` pointer. `CoreURL` is the JWT `iss` — the core that minted the
-token. `entire auth use <ctx>` flips `CurrentContext`.
+token. `entire auth switch <ctx>` flips `CurrentContext`.
 
 ### `entire login`: the apex dispatches, a region issues
 
@@ -78,7 +78,7 @@ The host *is* a core, so there is no discovery. `coreapi.New()` consults
    bearer (`auth.NewRefreshingLoginProvider`): the token manager is keyed on
    `c.CoreURL` as issuer, so store reads and refresh/STS hit the right core,
    and an expired access token is silently re-minted from the stored refresh
-   token. This is what makes `entire auth use <ctx>` actually retarget
+   token. This is what makes `entire auth switch <ctx>` actually retarget
    `org`/`repo`/`project`.
 2. **else** (no active context) → an error wrapping `ErrNotLoggedIn` with the
    `entire login` hint. There is no fallback host: a control-plane command
@@ -136,7 +136,7 @@ Resolution (`auth.ResolveDataAPIToken`):
 2. Require the **active context** with the same semantics as the git path: it is
    used when its `CoreURL` is among the trusted issuers, and anything else is an
    error. So `ENTIRE_API_BASE_URL=https://partial.to entire activity` needs
-   `entire auth use staging` first — the target host never selects the identity
+   `entire auth switch staging` first — the target host never selects the identity
    for you.
 3. Return that context's login JWT, silently re-minted from the stored refresh
    token when near expiry (`auth.RefreshedLoginToken`, keyed on `c.CoreURL`
@@ -186,9 +186,9 @@ precedence:
 | --- | --- | --- |
 | `--context <name>` | one command | a single cross-federation command |
 | `$ENTIRE_CONTEXT` | one process/shell | git operations, hooks, a whole shell session |
-| `current_context` (`entire auth use`) | persistent, machine-wide | your normal default |
+| `current_context` (`entire auth switch`) | persistent, machine-wide | your normal default |
 
-The two overrides exist because `auth use` is the wrong tool for a one-off: it
+The two overrides exist because `auth switch` is the wrong tool for a one-off: it
 mutates state shared by every shell, worktree, and background git hook on the
 machine, so forgetting to switch back silently retargets the next `git push`. And
 a flag alone is not enough — git invokes `git-remote-entire` itself, so
@@ -220,7 +220,7 @@ apply only when the identity came from `current_context` (or there is none):
   error. For any other host — a self-hosted `git.acme.com` advertising
   `auth.acme.com` — the sole eligible login is *named*, not used: the "does not
   accept your active login … These saved logins can authenticate it" error
-  below, so the user selects it with `auth use` or `--context`. The allowlist
+  below, so the user selects it with `auth switch` or `--context`. The allowlist
   gates only the choice made *for* the user, never one they made.
 - several are eligible → an ambiguity error naming them, sorted
   (`clusterdiscovery.ambiguousContextError`). Picking one would make the acting
@@ -230,7 +230,7 @@ An **explicit** `--context`/`$ENTIRE_CONTEXT` never falls through to either: the
 user asked for that identity by name, so acting as another behind their back is
 the failure the override exists to prevent.
 
-Multiple saved logins are fully supported — `auth contexts`, `auth use`, and
+Multiple saved logins are fully supported — `auth contexts`, `auth switch`, and
 `logout --all-contexts` are unchanged.
 
 ### The advertised issuers must be the host's own
@@ -282,7 +282,7 @@ override the host rejected: with no override, an eligible saved login is
 auto-selected or reported as ambiguous before rendering gets a say.
 
 "Points at the switch" also tracks the source: an identity that came from
-`--context` is fixed by changing that argument, not by `entire auth use`, which
+`--context` is fixed by changing that argument, not by `entire auth switch`, which
 the flag would keep overriding on the next run.
 
 The advertised servers are named whenever no saved login fits, because they are

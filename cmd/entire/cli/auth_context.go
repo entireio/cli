@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newAuthUseCmd switches the active login context, by name or by picking one
+// newAuthSwitchCmd switches the active login context, by name or by picking one
 // from the saved contexts.
 //
 // The active context is the preferred identity for both `git clone entire://…`
@@ -22,9 +22,9 @@ import (
 // recomputes every time. Activity/search/dispatch take their host from
 // ENTIRE_API_BASE_URL; trail commands route to the repository's owning cell.
 // All use the active identity.
-func newAuthUseCmd() *cobra.Command {
+func newAuthSwitchCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "use [context]",
+		Use:   "switch [context]",
 		Short: "Switch the active login context",
 		Long: "Switch the active login context.\n\n" +
 			"With no argument this lists the saved contexts and asks which to switch\n" +
@@ -105,7 +105,7 @@ func selectContextToUse(cmd *cobra.Command) (string, error) {
 	}
 
 	if !interactive.CanPromptInteractively() {
-		return "", fmt.Errorf("%d login contexts saved; name one, e.g. `entire auth use %s` (list them with `entire auth contexts`): %s",
+		return "", fmt.Errorf("%d login contexts saved; name one, e.g. `entire auth switch %s` (list them with `entire auth contexts`): %s",
 			len(named), named[0].Name, strings.Join(contextNames(named), ", "))
 	}
 
@@ -237,7 +237,7 @@ const activeContextMarker = "(active)"
 // context in use, and returns the header line followed by one line per
 // context.
 //
-// One function because `entire auth contexts` and the `entire auth use` picker
+// One function because `entire auth contexts` and the `entire auth switch` picker
 // print the same table; they differ only in styling, and sty carries that. An
 // unset authTableStyles renders every cell plain, which is what the picker
 // passes.

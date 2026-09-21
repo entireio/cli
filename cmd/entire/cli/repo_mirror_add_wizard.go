@@ -34,11 +34,11 @@ const (
 	mirrorStatusRegistered = "registered" // placement created, clone in progress (--no-wait)
 	mirrorStatusSuspended  = "suspended"  // placement exists but the cluster won't serve it
 	mirrorStatusFailed     = "failed"     // initial clone reached the terminal failed status
-	mirrorStatusTimedOut   = "timed out"  // clone didn't finish within --wait-timeout
+	mirrorStatusTimedOut   = "timed out"  // clone didn't finish within --timeout
 	mirrorStatusError      = "error"      // create or poll failed
 )
 
-// regionChoice is one mirrorable region offered by the create wizard's region
+// regionChoice is one mirrorable region offered by the add wizard's region
 // picker, sourced from the control plane's cluster catalog
 // (GET /api/v1/clusters via availableRegions).
 type regionChoice struct {
@@ -183,8 +183,8 @@ func regionLabel(r regionChoice) string {
 	}
 }
 
-// resolveOneShotClusterHost picks the cluster `repo mirror create
-// <github-url>` targets when [cluster-host] is omitted. Non-interactive
+// resolveOneShotClusterHost picks the cluster `repo mirror add
+// <repo>` targets when --cluster is omitted. Non-interactive
 // callers keep the fixed defaultClusterHost so scripts stay stable and
 // offline-resolvable; on a terminal the control plane's cluster catalog is
 // offered as a single-select (skipped when only one cluster exists),
@@ -218,7 +218,7 @@ func resolveOneShotClusterHost(cmd *cobra.Command) (string, error) {
 		return "", err
 	}
 	if len(regions) == 0 {
-		return "", errors.New("no clusters available to mirror into; pass [cluster-host] explicitly")
+		return "", errors.New("no clusters available to mirror into; pass --cluster explicitly")
 	}
 	if len(regions) == 1 {
 		fmt.Fprintf(errW, "Using cluster %s\n", regions[0].host)
@@ -227,7 +227,7 @@ func resolveOneShotClusterHost(cmd *cobra.Command) (string, error) {
 	return pickOneCluster(cmd.Context(), errW, regions, jurisdiction)
 }
 
-// pickOneCluster runs the one-shot create's cluster single-select,
+// pickOneCluster runs the one-shot add's cluster single-select,
 // pre-selecting the default cluster for the caller's jurisdiction. A clean
 // cancel (Ctrl+C / cancelled ctx) surfaces as a SilentError so the create
 // stops instead of falling through to a cluster the user didn't choose.
@@ -246,20 +246,20 @@ func pickOneCluster(ctx context.Context, w io.Writer, regions []regionChoice, ju
 		),
 	)
 	if err := form.RunWithContext(ctx); err != nil {
-		if cerr := handleFormCancellation(w, "Mirror create", err); cerr != nil {
+		if cerr := handleFormCancellation(w, "Mirror add", err); cerr != nil {
 			return "", cerr
 		}
-		return "", NewSilentError(errors.New("mirror create cancelled"))
+		return "", NewSilentError(errors.New("mirror add cancelled"))
 	}
 	// Guard the selection against the offered hosts (like repo clone's
 	// picker) so a zero-value fall-through can't reach the caller as a
-	// misleading "invalid [cluster-host]" error.
+	// misleading "invalid --cluster" error.
 	for _, r := range regions {
 		if r.host == selected {
 			return selected, nil
 		}
 	}
-	return "", NewSilentError(errors.New("mirror create cancelled"))
+	return "", NewSilentError(errors.New("mirror add cancelled"))
 }
 
 // mirrorTarget is one unit of work: a selected repo to be mirrored into a
@@ -302,10 +302,10 @@ func mirrorCreateResultRow(r mirrorResult) []string {
 	return []string{r.owner + "/" + r.repo, r.regionLabel, r.status, url}
 }
 
-// runMirrorCreateWizard is the zero-argument `entire repo mirror create` flow:
+// runMirrorAddWizard is the zero-argument `entire repo mirror add` flow:
 // verify auth, pick repos, pick regions, then create the cross-product of
 // mirrors in parallel and report the clone URLs.
-func runMirrorCreateWizard(cmd *cobra.Command, opts mirrorCreateOptions) error {
+func runMirrorAddWizard(cmd *cobra.Command, opts mirrorAddOptions) error {
 	cmd.SilenceUsage = true
 	ctx := cmd.Context()
 	outW := cmd.OutOrStdout()
@@ -315,8 +315,8 @@ func runMirrorCreateWizard(cmd *cobra.Command, opts mirrorCreateOptions) error {
 	// Without one (CI, pipes), fail fast with a clear pointer at the
 	// non-interactive form rather than letting huh error obscurely.
 	if !interactive.CanPromptInteractively() {
-		fmt.Fprintln(errW, "The mirror create wizard needs an interactive terminal.")
-		fmt.Fprintln(errW, "Run 'entire repo mirror create <github-url> [cluster-host]' to create one non-interactively.")
+		fmt.Fprintln(errW, "The mirror add wizard needs an interactive terminal.")
+		fmt.Fprintln(errW, "Run 'entire repo mirror add <repo> --cluster <host>' to create one non-interactively.")
 		return NewSilentError(errors.New("not an interactive terminal"))
 	}
 
@@ -426,7 +426,7 @@ func pickRepos(ctx context.Context, w io.Writer, repos []coreapi.AvailableMirror
 	for i, m := range repos {
 		key := m.Owner + "/" + m.Repo
 		repoByKey[key] = m
-		options[i] = huh.NewOption(key, key)
+		options[i] = huh.NewOption("/"+mirrorCloneForge+"/"+key, key)
 	}
 
 	var selected []string
@@ -447,7 +447,7 @@ func pickRepos(ctx context.Context, w io.Writer, repos []coreapi.AvailableMirror
 		),
 	)
 	if err := form.RunWithContext(ctx); err != nil {
-		return nil, handleFormCancellation(w, "Mirror create", err)
+		return nil, handleFormCancellation(w, "Mirror add", err)
 	}
 
 	chosen := make([]coreapi.AvailableMirror, 0, len(selected))
@@ -487,7 +487,7 @@ func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, juris
 		),
 	)
 	if err := form.RunWithContext(ctx); err != nil {
-		return nil, handleFormCancellation(w, "Mirror create", err)
+		return nil, handleFormCancellation(w, "Mirror add", err)
 	}
 
 	chosen := make([]regionChoice, 0, len(selected))
@@ -504,7 +504,7 @@ func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, juris
 // cluster client is built per region and shared across that region's repos; a
 // region the active login can't reach fails every pair in that region rather
 // than aborting the whole run.
-func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, opts mirrorCreateOptions) []mirrorResult {
+func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, opts mirrorAddOptions) []mirrorResult {
 	// One client per distinct region, built once.
 	clientByHost := make(map[string]*coreapi.Client)
 	clientErrByHost := make(map[string]error)
@@ -558,7 +558,7 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 // can't sink the batch. report (may be nil) is called as the mirror moves
 // through its phases so the caller can render live progress; the final call has
 // final=true and ok set to whether it succeeded.
-func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, clientErr error, opts mirrorCreateOptions, report func(status string, final, ok bool)) mirrorResult {
+func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, clientErr error, opts mirrorAddOptions, report func(status string, final, ok bool)) mirrorResult {
 	if report == nil {
 		report = func(string, bool, bool) {}
 	}
@@ -568,8 +568,8 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 		report(mirrorStatusError, true, false)
 		return res
 	}
-	opts.onPhase = func(phase mirrorCreatePhase) { report(string(phase), false, false) }
-	outcome, err := createAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, opts)
+	opts.onPhase = func(phase mirrorAddPhase) { report(string(phase), false, false) }
+	outcome, err := addAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, opts)
 	if outcome.created == nil {
 		res.status, res.err = mirrorStatusError, renderCoreError(err)
 		report(mirrorStatusError, true, false)

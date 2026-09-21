@@ -487,7 +487,7 @@ func TestAuthCmd_RegistersExpectedSubcommands(t *testing.T) {
 				name := strings.Fields(sub.Use)[0]
 				subcommands[name] = true
 			}
-			for _, want := range []string{"login", "logout", "status", "contexts", "use"} {
+			for _, want := range []string{"login", "logout", "status", "contexts", "switch"} {
 				if !subcommands[want] {
 					t.Errorf("auth missing subcommand %q (got: %v)", want, subcommands)
 				}

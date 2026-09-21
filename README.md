@@ -337,7 +337,7 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `entire login`   | Log in to Entire (browser by default; `--device` for the device-code flow)            |
 | `entire logout`  | Log out of Entire                                                                    |
-| `entire auth`    | Manage authentication (`status`, `contexts`, `use`, `token`, `login`, `logout`)       |
+| `entire auth`    | Manage authentication (`status`, `contexts`, `switch`, `token`, `login`, `logout`)       |
 
 ### Control Plane
 
@@ -346,7 +346,7 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | `entire cluster` | Show the Entire clusters you can place projects and repos on (`list`)              |
 | `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`, `grant`)           |
 | `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`, `grant`)                |
-| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`, `protection`, `grant`) |
+| `entire repo`    | Manage Entire repositories (`create`, `list`, `view`, `edit`, `delete`, `clone`, `mirror`, `remote`, `access`, `visibility`, `protection`, `grant`) |
 | `entire api`     | Make an authenticated request to an Entire API and print the response              |
 
 ### Other
@@ -381,7 +381,7 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `--agent <name>`                            | Agent to set up hooks for: `claude-code`, `codex`, `copilot-cli`, `cursor`, `factoryai-droid`, `gemini`, `opencode`, `pi` (external agents on `$PATH` also work). Enables non-interactive mode |
 | `--yes`, `-y`                               | Accept all defaults without prompting                                                                             |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
-| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo (e.g., `github:org/checkpoints-repo`)                                     |
+| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo; providers `github`, `gitlab` (e.g., `github:org/checkpoints-repo`)      |
 | `--checkpoint-push-remote <name>`           | Select an existing Git remote for checkpoints; always saves to this clone's `.entire/settings.local.json`, even with `--project` |
 | `--skip-push-sessions`                      | Disable automatic pushing of checkpoint data on git push                                                           |
 | `--local`                                   | Write settings to `.entire/settings.local.json` instead of `.entire/settings.json`                                |

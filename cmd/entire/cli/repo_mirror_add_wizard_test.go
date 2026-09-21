@@ -40,7 +40,7 @@ func TestCreateOneMirror_Suspended(t *testing.T) {
 	var final string
 	var finalOK bool
 	target := mirrorTarget{owner: "o", repo: "r", region: regionChoice{host: "c"}}
-	res := createOneMirror(ctx, target, c, nil, mirrorCreateOptions{timeout: time.Second},
+	res := createOneMirror(ctx, target, c, nil, mirrorAddOptions{timeout: time.Second},
 		func(status string, isFinal, ok bool) {
 			if isFinal {
 				final, finalOK = status, ok
@@ -90,7 +90,7 @@ func TestCreateOneMirror_PollErrorRendersCleanDetail(t *testing.T) {
 	require.NoError(t, err)
 
 	target := mirrorTarget{owner: "o", repo: "r", region: regionChoice{host: "c"}}
-	res := createOneMirror(ctx, target, c, nil, mirrorCreateOptions{timeout: time.Second}, nil)
+	res := createOneMirror(ctx, target, c, nil, mirrorAddOptions{timeout: time.Second}, nil)
 
 	require.Equal(t, mirrorStatusError, res.status)
 	require.Equal(t, "entire://cluster/gh/owner/repo", res.cloneURL, "a successful placement still yields the clone URL")
@@ -100,6 +100,24 @@ func TestCreateOneMirror_PollErrorRendersCleanDetail(t *testing.T) {
 	require.NotContains(t, res.err.Error(), "Set:", "must not leak the decoded ErrorModel struct")
 	require.NotContains(t, res.err.Error(), "decode response")
 	require.NotContains(t, res.err.Error(), "code 404")
+}
+
+func TestRepoMirrorAdd_ClusterRequiresRepo(t *testing.T) {
+	t.Parallel()
+	for _, cluster := range []string{"eu.example", "", "not a host"} {
+		t.Run(cluster, func(t *testing.T) {
+			t.Parallel()
+			cmd := newRepoMirrorAddCmd()
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs([]string{"--cluster", cluster})
+			err := cmd.ExecuteContext(t.Context())
+			require.ErrorContains(t, err, "--cluster requires <repo>")
+			require.Empty(t, out.String())
+			require.NotContains(t, errOut.String(), "wizard needs an interactive terminal")
+		})
+	}
 }
 
 func TestRunMirrorCreateWizard_RequiresTTY(t *testing.T) {
@@ -112,13 +130,13 @@ func TestRunMirrorCreateWizard_RequiresTTY(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetContext(context.Background())
 
-	err := runMirrorCreateWizard(cmd, mirrorCreateOptions{timeout: time.Minute})
+	err := runMirrorAddWizard(cmd, mirrorAddOptions{timeout: time.Minute})
 
 	var silent *SilentError
 	require.ErrorAs(t, err, &silent)
 	require.Empty(t, out.String(), "stdout must stay clean")
 	require.Contains(t, errOut.String(), "interactive terminal")
-	require.Contains(t, errOut.String(), "entire repo mirror create <github-url>")
+	require.Contains(t, errOut.String(), "entire repo mirror add <repo>")
 }
 
 func TestSelectableAvailableRepos(t *testing.T) {

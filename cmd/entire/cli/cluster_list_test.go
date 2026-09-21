@@ -53,7 +53,7 @@ func tableCells(out string) [][]string {
 }
 
 // The table is what a person copies from: REGION feeds `project create
-// --region`, HOST feeds `repo mirror create` / `repo create --cluster-host` /
+// --region`, HOST feeds `repo mirror add` / `repo create --cluster-host` /
 // `repo clone --cluster`, CLUSTER is the slug placements are keyed by. Rows are
 // sorted by region then slug, and a publicUrl that cannot be reduced to a safe
 // bare host renders dashed rather than spoofable. A catalog holding a

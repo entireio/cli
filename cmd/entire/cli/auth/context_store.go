@@ -79,7 +79,7 @@ func RememberJurisdictionAudience(name, audience string) error {
 // removeContextLocked deletes the context selected by pick — keyring slots
 // first, then the contexts.json entry — inside a single locked Modify, so
 // selection, credential deletion, and entry removal can't interleave with a
-// concurrent `auth use` or login. A nil pick result is a no-op.
+// concurrent `auth switch` or login. A nil pick result is a no-op.
 //
 // Credential deletion comes first and is part of the success contract:
 // removing the entry and then failing the keyring delete would report
