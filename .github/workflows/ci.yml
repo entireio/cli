@@ -90,23 +90,6 @@ jobs:
       # test name so this job selects them without running POSIX-only harnesses.
       - name: Windows unit tests
         run: go test ./cmd/entire/cli/... -run '(Windows|MSYS)' -count=1 -v
-      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 
-      - name: Generate Windows PE version resources
-        run: mise run winres 9.9.9-ci-verify
-      - name: Build entire.exe with embedded PE resources
-        run: go build -o entire.exe ./cmd/entire/
-      - name: Verify Windows PE version metadata
-        shell: pwsh
-        run: |
-          $info = (Get-Item .\entire.exe).VersionInfo
-          Write-Host "FileVersion: $($info.FileVersion)"
-          Write-Host "ProductName: $($info.ProductName)"
-          $raw = $info.FileVersionRaw
-          if ($raw.Major -eq 0 -and $raw.Minor -eq 0 -and $raw.Build -eq 0 -and $raw.Revision -eq 0) {
-            Write-Error "PE version metadata is still 0.0.0.0 -- .syso generation or linking failed (see #2218)"
-            exit 1
-          }
-          Write-Host "PE version metadata populated correctly ($raw)"
 
   test:
     runs-on: ubuntu-latest

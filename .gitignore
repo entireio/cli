@@ -8,8 +8,11 @@
 *.so
 *.dylib
 
-# Generated Windows PE resource objects (mise run winres)
-*.syso
+# Generated Windows PE resource objects (mise run winres). Go links a .syso
+# only from the package directory it compiles, so these two paths are the only
+# places they can be written.
+cmd/entire/*.syso
+cmd/git-remote-entire/*.syso
 
 # Test binary, built with `go test -c`
 *.test
