@@ -45,9 +45,15 @@ type TrailReviewCounts struct {
 
 // TrailReviewCommentsResponse is returned by trail/review comment list endpoints.
 type TrailReviewCommentsResponse struct {
-	Comments    []TrailReviewComment `json:"comments"`
-	NextCursor  *string              `json:"next_cursor,omitempty"`
-	EventCursor string               `json:"event_cursor,omitempty"`
+	Comments   []TrailReviewComment `json:"comments"`
+	NextCursor *string              `json:"next_cursor,omitempty"`
+	// HasMore and NextOffset are a pre-RFD-026 cell's offset window, reached
+	// through DecodeTrailJSON's rename of hasMore/nextOffset. A migrated cell
+	// sends next_cursor instead and leaves these zero. NextOffset is null on
+	// the last page, so HasMore is what gates it.
+	HasMore     bool   `json:"has_more,omitempty"`
+	NextOffset  *int   `json:"next_offset,omitempty"`
+	EventCursor string `json:"event_cursor,omitempty"`
 }
 
 // TrailReviewComment is a single agent-native review finding.

@@ -47,13 +47,17 @@ const (
 var errTrailReviewDefaultTargetNotFound = errors.New("default trail finding target not found")
 
 type trailReviewListOptions struct {
-	Status                  string
-	StatusChanged           bool
-	Severity                string
-	Freshness               string
-	IncludeDismissed        bool
-	Limit                   int
-	Cursor                  string
+	Status           string
+	StatusChanged    bool
+	Severity         string
+	Freshness        string
+	IncludeDismissed bool
+	Limit            int
+	Cursor           string
+	// Offset drives a pre-RFD-026 cell's offset window. It is not a flag:
+	// only fetchAllTrailReviewComments sets it, when the cell answered with
+	// has_more/next_offset instead of a cursor.
+	Offset                  int
 	SeverityChanged         bool
 	FreshnessChanged        bool
 	IncludeDismissedChanged bool
@@ -313,7 +317,7 @@ func runTrailReviewDashboard(cmd *cobra.Command, selector string, opts trailRevi
 		}
 		return err
 	}
-	comments, nextCursor, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
+	comments, next, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
 	if err != nil {
 		return err
 	}
@@ -323,9 +327,9 @@ func runTrailReviewDashboard(cmd *cobra.Command, selector string, opts trailRevi
 	}
 	counts := countTrailReviewComments(summaryComments)
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, counts)
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, next, counts)
 	}
-	printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, nextCursor, opts, counts)
+	printTrailReviewDashboard(cmd.OutOrStdout(), target, comments, next, opts, counts)
 	return nil
 }
 
@@ -339,14 +343,14 @@ func runTrailReviewComments(cmd *cobra.Command, selector string, opts trailRevie
 	if err != nil {
 		return err
 	}
-	comments, nextCursor, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
+	comments, next, err := fetchTrailReviewComments(cmd.Context(), client, target.Trail.ID, opts)
 	if err != nil {
 		return err
 	}
 	if opts.JSON {
-		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, nextCursor, countTrailReviewComments(comments))
+		return encodeTrailReviewJSON(cmd.OutOrStdout(), target, comments, next, countTrailReviewComments(comments))
 	}
-	printTrailReviewComments(cmd.OutOrStdout(), comments, nextCursor)
+	printTrailReviewComments(cmd.OutOrStdout(), comments, next)
 	return nil
 }
 
@@ -625,25 +629,58 @@ func normalizeCommaSet(filter, name string, valid map[string]bool) (string, erro
 	return strings.Join(out, ","), nil
 }
 
-func fetchTrailReviewComments(ctx context.Context, client *api.Client, trailID string, opts trailReviewListOptions) ([]api.TrailReviewComment, string, error) {
+// trailReviewPage is a findings page's continuation. A migrated cell returns
+// an opaque cursor; a pre-RFD-026 cell returns has_more with the next offset.
+// At most one form is set.
+type trailReviewPage struct {
+	Cursor     string
+	NextOffset *int
+}
+
+func (p trailReviewPage) more() bool { return p.Cursor != "" || p.NextOffset != nil }
+
+// token identifies a page for repeat detection. The two forms are namespaced
+// so an opaque cursor cannot collide with an offset that prints the same.
+func (p trailReviewPage) token() string {
+	switch {
+	case p.Cursor != "":
+		return "c:" + p.Cursor
+	case p.NextOffset != nil:
+		return "o:" + strconv.Itoa(*p.NextOffset)
+	default:
+		return ""
+	}
+}
+
+func trailReviewPageFrom(page api.TrailReviewCommentsResponse) trailReviewPage {
+	if cursor := stringPtrValue(page.NextCursor); cursor != "" {
+		return trailReviewPage{Cursor: cursor}
+	}
+	if page.HasMore && page.NextOffset != nil {
+		return trailReviewPage{NextOffset: page.NextOffset}
+	}
+	return trailReviewPage{}
+}
+
+func fetchTrailReviewComments(ctx context.Context, client *api.Client, trailID string, opts trailReviewListOptions) ([]api.TrailReviewComment, trailReviewPage, error) {
 	var err error
 	opts, err = normalizeTrailReviewListOptions(opts)
 	if err != nil {
-		return nil, "", err
+		return nil, trailReviewPage{}, err
 	}
 	resp, err := client.Get(ctx, trailReviewCommentsPath(trailID, opts))
 	if err != nil {
-		return nil, "", fmt.Errorf("list findings: %w", err)
+		return nil, trailReviewPage{}, fmt.Errorf("list findings: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return nil, "", err
+		return nil, trailReviewPage{}, err
 	}
 	var out api.TrailReviewCommentsResponse
 	if err := api.DecodeTrailJSON(resp, &out); err != nil {
-		return nil, "", fmt.Errorf("decode findings: %w", err)
+		return nil, trailReviewPage{}, fmt.Errorf("decode findings: %w", err)
 	}
-	return out.Comments, stringPtrValue(out.NextCursor), nil
+	return out.Comments, trailReviewPageFrom(out), nil
 }
 
 func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailID string, opts trailReviewListOptions) ([]api.TrailReviewComment, error) {
@@ -651,21 +688,39 @@ func fetchAllTrailReviewComments(ctx context.Context, client *api.Client, trailI
 		opts.Limit = defaultTrailReviewLimit
 	}
 	var all []api.TrailReviewComment
-	seenCursors := map[string]bool{opts.Cursor: true}
+	seen := map[string]bool{}
+	if start := (trailReviewPage{Cursor: opts.Cursor}).token(); start != "" {
+		seen[start] = true
+	}
 	for {
-		comments, nextCursor, err := fetchTrailReviewComments(ctx, client, trailID, opts)
+		comments, next, err := fetchTrailReviewComments(ctx, client, trailID, opts)
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, comments...)
-		if nextCursor == "" {
+		if !next.more() {
 			break
 		}
-		if seenCursors[nextCursor] {
-			return nil, fmt.Errorf("finding pagination repeated cursor %q", nextCursor)
+		token := next.token()
+		if seen[token] {
+			// Report the value the caller could actually pass back; the
+			// namespaced token is only there to keep the two forms apart.
+			if next.Cursor != "" {
+				return nil, fmt.Errorf("finding pagination repeated cursor %q", next.Cursor)
+			}
+			return nil, fmt.Errorf("finding pagination repeated offset %d", *next.NextOffset)
 		}
-		seenCursors[nextCursor] = true
-		opts = trailReviewListOptions{Limit: opts.Limit, Cursor: nextCursor}
+		seen[token] = true
+		if next.Cursor != "" {
+			// The cursor carries the cell's filters, so repeating them would
+			// be rejected as a conflict; send only per_page and cursor.
+			opts = trailReviewListOptions{Limit: opts.Limit, Cursor: next.Cursor}
+			continue
+		}
+		// A pre-RFD-026 cell has no cursor to restore filters from, so every
+		// page repeats them and only the offset advances.
+		opts.Cursor = ""
+		opts.Offset = *next.NextOffset
 	}
 	return all, nil
 }
@@ -701,9 +756,18 @@ func trailReviewCommentsPath(trailID string, opts trailReviewListOptions) string
 	}
 	if opts.Limit > 0 {
 		q.Set("per_page", strconv.Itoa(opts.Limit))
+		// A pre-RFD-026 cell reads limit/offset and ignores per_page/cursor;
+		// a migrated one does the reverse. Only a migrated cell issues a
+		// cursor, so a continuation keyed by one needs no legacy pair.
+		if opts.Cursor == "" {
+			q.Set("limit", strconv.Itoa(opts.Limit))
+		}
 	}
 	if opts.Cursor != "" {
 		q.Set("cursor", opts.Cursor)
+	}
+	if opts.Offset > 0 {
+		q.Set("offset", strconv.Itoa(opts.Offset))
 	}
 	path := trailReviewListCommentsPath(trailID)
 	if encoded := q.Encode(); encoded != "" {
@@ -1453,7 +1517,7 @@ func resolveGitRev(ctx context.Context, ref string) (string, error) {
 	return sha, nil
 }
 
-func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, counts trailReviewCommentCounts) error {
+func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, next trailReviewPage, counts trailReviewCommentCounts) error {
 	return printJSON(w, struct {
 		Counts     trailReviewCommentCounts `json:"counts"`
 		Findings   []trailReviewCommentJSON `json:"findings"`
@@ -1463,13 +1527,13 @@ func encodeTrailReviewJSON(w io.Writer, target trailReviewTarget, comments []api
 	}{
 		Counts:     counts,
 		Findings:   toTrailReviewCommentsJSON(comments),
-		HasMore:    nextCursor != "",
-		NextCursor: nextCursor,
+		HasMore:    next.more(),
+		NextCursor: next.Cursor,
 		Trail:      toTrailResourceJSON(target.Trail),
 	})
 }
 
-func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, nextCursor string, opts trailReviewListOptions, counts trailReviewCommentCounts) {
+func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments []api.TrailReviewComment, next trailReviewPage, opts trailReviewListOptions, counts trailReviewCommentCounts) {
 	trail := target.Trail
 	if trail.Number > 0 {
 		fmt.Fprintf(w, "  Trail #%d  %s\n", trail.Number, trail.Title)
@@ -1481,8 +1545,14 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 
 	fmt.Fprintf(w, "  Open findings: %d  high %d  medium %d  low %d\n", counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow)
 	fmt.Fprintf(w, "  Resolved: %d        Dismissed: %d     Stale: %d\n", counts.Resolved, counts.Dismissed, counts.Stale)
-	if nextCursor != "" {
-		fmt.Fprintf(w, "  Showing up to %d findings; next page: --cursor %q\n", opts.Limit, nextCursor)
+	if next.more() {
+		if next.Cursor == "" {
+			// A pre-RFD-026 cell pages by offset, which this CLI no longer
+			// exposes as a flag; say more exist without naming a flag.
+			fmt.Fprintf(w, "  Showing up to %d findings; more available\n", opts.Limit)
+			return
+		}
+		fmt.Fprintf(w, "  Showing up to %d findings; next page: --cursor %q\n", opts.Limit, next.Cursor)
 	}
 	fmt.Fprintln(w)
 
@@ -1503,14 +1573,18 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	fmt.Fprintln(w, "  entire trail watch")
 }
 
-func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, nextCursor string) {
+func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, next trailReviewPage) {
 	if len(comments) == 0 {
 		fmt.Fprintln(w, "No findings found.")
 	} else {
 		printTrailReviewCommentsTable(w, comments)
 	}
-	if nextCursor != "" {
-		fmt.Fprintf(w, "More findings available; next page: --cursor %q\n", nextCursor)
+	if next.more() {
+		if next.Cursor == "" {
+			fmt.Fprintln(w, "More findings available.")
+			return
+		}
+		fmt.Fprintf(w, "More findings available; next page: --cursor %q\n", next.Cursor)
 	}
 }
 

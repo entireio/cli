@@ -141,7 +141,7 @@ func TestTrailReviewCommentsPathUsesReviewQueryContract(t *testing.T) {
 		IncludeDismissed: true,
 		Limit:            25,
 	})
-	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/comments?include_dismissed=true&per_page=25&severity%5Beq%5D=high%2Cmedium&stale=any&status%5Beq%5D=open%2Cresolved"
+	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/comments?include_dismissed=true&limit=25&per_page=25&severity%5Beq%5D=high%2Cmedium&stale=any&status%5Beq%5D=open%2Cresolved"
 	if got != want {
 		t.Fatalf("trailReviewCommentsPath = %q, want %q", got, want)
 	}
@@ -865,7 +865,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	}}, comments, trailReviewPage{}, defaultTrailReviewListOptions(), countTrailReviewComments(comments))
 	text := out.String()
 	for _, want := range []string{
 		"Trail #42  Add token refresh",
@@ -897,7 +897,7 @@ func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, nil, "", defaultTrailReviewListOptions(), counts)
+	}}, nil, trailReviewPage{}, defaultTrailReviewListOptions(), counts)
 	text := out.String()
 	for _, want := range []string{
 		"Open findings: 0  high 0  medium 0  low 0",
@@ -934,12 +934,12 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClient("tok")
 
-	comments, nextCursor, err := fetchTrailReviewComments(context.Background(), client, "trl_1", defaultTrailReviewListOptions())
+	comments, next, err := fetchTrailReviewComments(context.Background(), client, "trl_1", defaultTrailReviewListOptions())
 	if err != nil {
 		t.Fatalf("fetchTrailReviewComments: %v", err)
 	}
-	if nextCursor != "" || len(comments) != 1 || comments[0].ID != trailReviewTestCommentID {
-		t.Fatalf("comments = %#v, nextCursor=%q", comments, nextCursor)
+	if next.more() || len(comments) != 1 || comments[0].ID != trailReviewTestCommentID {
+		t.Fatalf("comments = %#v, next=%#v", comments, next)
 	}
 	updated, err := patchTrailReviewCommentStatus(context.Background(), client, "trl_1", comments[0], trailReviewStatusResolved, "fixed")
 	if err != nil {

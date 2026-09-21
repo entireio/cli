@@ -633,14 +633,14 @@ func loadTrailResumeFindingsContext(ctx context.Context, client *api.Client, tra
 	if err != nil {
 		return trailResumeFindingsContext{}, err
 	}
-	top, nextCursor, err := fetchTrailReviewComments(ctx, client, trailID, trailResumeTopFindingOptions())
+	top, next, err := fetchTrailReviewComments(ctx, client, trailID, trailResumeTopFindingOptions())
 	if err != nil {
 		return trailResumeFindingsContext{}, err
 	}
 	return trailResumeFindingsContext{
 		Counts:  countTrailReviewComments(summaryComments),
 		Top:     top,
-		HasMore: nextCursor != "",
+		HasMore: next.more(),
 	}, nil
 }
 

@@ -67,7 +67,7 @@ func TestFindingWritesUseCellContract(t *testing.T) {
 func TestFindingEmptyPageDisplaysNextCursor(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	printTrailReviewComments(&out, nil, "opaque-next")
+	printTrailReviewComments(&out, nil, trailReviewPage{Cursor: "opaque-next"})
 	require.Contains(t, out.String(), `--cursor "opaque-next"`)
 }
 
@@ -99,7 +99,7 @@ func TestFindingJSONPreservesKeysAndReturnsNextCursor(t *testing.T) {
 		t.Run(cursor, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, cursor, trailReviewCommentCounts{}))
+			require.NoError(t, encodeTrailReviewJSON(&out, target, []api.TrailReviewComment{comment}, trailReviewPage{Cursor: cursor}, trailReviewCommentCounts{}))
 			var got map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(out.Bytes(), &got))
 			if cursor != "" {
@@ -176,4 +176,51 @@ func TestFindingScansFollowCellCursor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pre-RFD-026 cell pages findings by offset and never sends next_cursor.
+// Without the offset arm, fetchAllTrailReviewComments stops after page one
+// and drops the rest silently.
+func TestFindingPaginationFollowsLegacyOffsetWindow(t *testing.T) {
+	t.Parallel()
+	var queries []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		// camelCase throughout, as a pre-migration cell answers.
+		if r.URL.Query().Get("offset") == "" {
+			fmt.Fprint(w, `{"comments":[{"id":"c1","location":{}}],"hasMore":true,"nextOffset":1,"eventCursor":"7"}`)
+			return
+		}
+		fmt.Fprint(w, `{"comments":[{"id":"c2","location":{}}],"hasMore":false,"nextOffset":null,"eventCursor":"7"}`)
+	}))
+	defer srv.Close()
+
+	// NewClientWithBaseURL rather than the env var: t.Setenv is incompatible
+	// with t.Parallel.
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	all, err := fetchAllTrailReviewComments(t.Context(), client, "trail-example", trailReviewSummaryOptions())
+	require.NoError(t, err)
+	require.Len(t, all, 2, "both offset pages should be collected")
+	require.Equal(t, []string{"c1", "c2"}, []string{all[0].ID, all[1].ID})
+
+	require.Len(t, queries, 2)
+	require.Empty(t, queries[0].Get("offset"))
+	require.Equal(t, "1", queries[1].Get("offset"))
+	// No cursor exists to restore the filters, so every page repeats them.
+	require.Equal(t, queries[0].Get("stale"), queries[1].Get("stale"))
+	require.Empty(t, queries[1].Get("cursor"))
+	// The legacy pair rides alongside per_page so one request suits either cell.
+	require.Equal(t, queries[0].Get("per_page"), queries[0].Get("limit"))
+}
+
+// A migrated cell's cursor still wins when both shapes could be read.
+func TestFindingPaginationPrefersCursorOverOffset(t *testing.T) {
+	t.Parallel()
+	page := api.TrailReviewCommentsResponse{HasMore: true}
+	offset := 5
+	page.NextOffset = &offset
+	cursor := "opaque"
+	page.NextCursor = &cursor
+	require.Equal(t, trailReviewPage{Cursor: "opaque"}, trailReviewPageFrom(page))
 }
