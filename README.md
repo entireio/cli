@@ -381,7 +381,7 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `--agent <name>`                            | Agent to set up hooks for: `claude-code`, `codex`, `copilot-cli`, `cursor`, `factoryai-droid`, `gemini`, `opencode`, `pi` (external agents on `$PATH` also work). Enables non-interactive mode |
 | `--yes`, `-y`                               | Accept all defaults without prompting                                                                             |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
-| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo (e.g., `github:org/checkpoints-repo`)                                     |
+| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo; providers `github`, `gitlab` (e.g., `github:org/checkpoints-repo`)      |
 | `--checkpoint-push-remote <name>`           | Select an existing Git remote for checkpoints; always saves to this clone's `.entire/settings.local.json`, even with `--project` |
 | `--skip-push-sessions`                      | Disable automatic pushing of checkpoint data on git push                                                           |
 | `--local`                                   | Write settings to `.entire/settings.local.json` instead of `.entire/settings.json`                                |

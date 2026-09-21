@@ -831,7 +831,7 @@ func TestRunAuthStatus_CountRowsAreDroppedAtOne(t *testing.T) {
 	if strings.Contains(got, "--everywhere") {
 		t.Fatalf("output = %q, want no --everywhere hint with a single session", got)
 	}
-	if !strings.Contains(got, "Run 'entire logout' to end this session.") {
+	if !strings.Contains(got, "Run 'entire logout' to end every CLI session.") {
 		t.Fatalf("output = %q, want the plain logout hint", got)
 	}
 }
@@ -904,8 +904,8 @@ func TestRunAuthStatus_RevokedLoginIsNamed(t *testing.T) {
 	if !strings.Contains(got, "expires in 46m") && !strings.Contains(got, "expires in 47m") {
 		t.Fatalf("output = %q, want the access token's remaining life on the verdict line", got)
 	}
-	// "end this session" would contradict the notice: there is no session of
-	// the caller's left to end, and the listed one belongs to the replacement.
+	// There is no session of the caller's left to end, and the listed one
+	// belongs to the login that replaced it, so no logout is worth offering.
 	if strings.Contains(got, "entire logout") {
 		t.Fatalf("output = %q, must not offer to end a session that is already gone", got)
 	}

@@ -43,9 +43,6 @@ const (
 
 func NewCloudClient(cfg CloudConfig) *CloudClient {
 	baseURL := cfg.BaseURL
-	if baseURL == "" {
-		baseURL = api.BaseURL()
-	}
 
 	httpClient := cfg.HTTP
 	if httpClient == nil {

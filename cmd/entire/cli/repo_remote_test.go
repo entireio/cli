@@ -297,6 +297,7 @@ func TestResolveMirrorUseUpstream(t *testing.T) {
 		// defaults to "origin" when empty.
 		remote    string
 		arg       string
+		wantForge string
 		wantOwner string
 		wantRepo  string
 		wantErr   string
@@ -346,13 +347,28 @@ func TestResolveMirrorUseUpstream(t *testing.T) {
 		{
 			// A target remote that cannot name an upstream must not shadow a
 			// perfectly good origin.
-			name: "falls back to origin when the target remote is not a GitHub repo",
+			name: "falls back to origin when the target remote names no Entire forge",
 			remotes: map[string]string{
 				"origin": "git@github.com:octocat/hello-world.git",
 				"weird":  "git@gitlab.com:acme/app.git",
 			},
 			remote:    "weird",
 			wantOwner: "octocat", wantRepo: "hello-world",
+		},
+		{
+			// A clone of an Entire-native repo resolves the same way, so its
+			// remote can be repointed at another cluster without retyping it.
+			name:      "derives from a native entire origin",
+			remotes:   map[string]string{"origin": "entire://aws-us-east-2.entire.io/et/acme/web"},
+			wantForge: nativeCloneForge,
+			wantOwner: "acme", wantRepo: "web",
+		},
+		{
+			name:      "an explicit native reference wins over origin",
+			remotes:   map[string]string{"origin": "git@github.com:other/repo.git"},
+			arg:       "/et/acme/web",
+			wantForge: nativeCloneForge,
+			wantOwner: "acme", wantRepo: "web",
 		},
 		{
 			name:    "invalid explicit url errors",
@@ -364,23 +380,23 @@ func TestResolveMirrorUseUpstream(t *testing.T) {
 			wantErr: "pass a repository reference explicitly",
 		},
 		{
-			name:    "non-github origin errors naming the reason",
+			name:    "an origin on neither forge errors naming the reason",
 			remotes: map[string]string{"origin": "git@gitlab.com:acme/app.git"},
-			wantErr: "GitHub-only",
+			wantErr: "not an Entire or GitHub repo",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			remote := cmp.Or(tt.remote, "origin")
-			owner, repo, err := resolveMirrorUseUpstream(t.Context(), applyPlanRepo(t, tt.remotes), remote, tt.arg)
+			got, err := resolveMirrorUseUpstream(t.Context(), applyPlanRepo(t, tt.remotes), remote, tt.arg)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, tt.wantOwner, owner)
-			require.Equal(t, tt.wantRepo, repo)
+			want := mirrorRepoRef{forge: cmp.Or(tt.wantForge, mirrorCloneForge), owner: tt.wantOwner, repo: tt.wantRepo}
+			require.Equal(t, want, got)
 		})
 	}
 }
@@ -486,7 +502,7 @@ func TestRepoRemoteUseCmd_FlagValidation(t *testing.T) {
 	}{
 		{name: "bad remote", args: []string{"--remote", "-f"}, want: "invalid --remote"},
 		{name: "bad upstream", args: []string{"--upstream", "bad name"}, want: "invalid --upstream"},
-		{name: "bad cluster flag", args: []string{"--cluster", "not a host"}, want: "invalid cluster host"},
+		{name: "bad cluster flag", args: []string{"--cluster", "not a host"}, want: "invalid --cluster"},
 		{name: "a second positional is not a cluster host", args: []string{"github.com/a/b", "aws-us-east-2.entire.io"}, want: "accepts at most 1 arg"},
 	}
 	for _, tt := range tests {

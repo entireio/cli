@@ -41,6 +41,45 @@ func TestClient_RevokeCurrentAuthSession_SendsDeleteWithBearer(t *testing.T) {
 	}
 }
 
+// TestClient_RevokeSessionCollection_Scope pins the wire shape core
+// switches on: the bare collection is CLI sessions only, scope=all is
+// every session.
+func TestClient_RevokeSessionCollection_Scope(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		call      func(*Client, context.Context) error
+		wantQuery string
+	}{
+		{"cli", (*Client).RevokeCLIAuthSessions, ""},
+		{"all", (*Client).RevokeAllAuthSessions, "scope=all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotMethod, gotPath, gotQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"success":true}`)) //nolint:errcheck // test handler
+			}))
+			defer server.Close()
+
+			c := NewClient("tok").WithAuthSessionsPath("/api/auth/tokens")
+			c.baseURL = server.URL
+			if err := tc.call(c, context.Background()); err != nil {
+				t.Fatalf("error = %v", err)
+			}
+			if gotMethod != http.MethodDelete || gotPath != "/api/auth/tokens" {
+				t.Errorf("request = %s %s, want DELETE /api/auth/tokens", gotMethod, gotPath)
+			}
+			if gotQuery != tc.wantQuery {
+				t.Errorf("query = %q, want %q", gotQuery, tc.wantQuery)
+			}
+		})
+	}
+}
+
 func TestClient_RevokeCurrentAuthSession_ReturnsHTTPErrorOn401(t *testing.T) {
 	t.Parallel()
 

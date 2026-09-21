@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -19,16 +20,19 @@ import (
 // itself should not call this helper.
 func stubCloudDispatchAuth(t *testing.T) {
 	t.Helper()
-	oldResource := lookupResourceToken
+	oldResolve := resolveDataAPI
 	oldRequire := requireSecureDispatchURL
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
+	resolveDataAPI = stubDataAPI
 	requireSecureDispatchURL = func(string) error { return nil }
 	t.Cleanup(func() {
-		lookupResourceToken = oldResource
+		resolveDataAPI = oldResolve
 		requireSecureDispatchURL = oldRequire
 	})
+}
+
+// stubDataAPI returns the test token for the configured data host.
+func stubDataAPI(context.Context) (auth.DataAPI, error) {
+	return auth.DataAPI{BaseURL: api.BaseURL(), Token: testCloudDispatchToken}, nil
 }
 
 func TestServerMode_HappyPath(t *testing.T) {
@@ -369,14 +373,12 @@ func TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	oldResource := lookupResourceToken
+	oldResolve := resolveDataAPI
 	oldNow := nowUTC
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
+	resolveDataAPI = stubDataAPI
 	nowUTC = func() time.Time { return time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() {
-		lookupResourceToken = oldResource
+		resolveDataAPI = oldResolve
 		nowUTC = oldNow
 	})
 
@@ -402,11 +404,9 @@ func TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck(t *testing.T) {
 // fire. If a future refactor drops the check, this test breaks before the
 // leak reaches users.
 func TestServerMode_RejectsPlainHTTPBaseURL(t *testing.T) {
-	oldResource := lookupResourceToken
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
-	t.Cleanup(func() { lookupResourceToken = oldResource })
+	oldResolve := resolveDataAPI
+	resolveDataAPI = stubDataAPI
+	t.Cleanup(func() { resolveDataAPI = oldResolve })
 
 	t.Setenv("ENTIRE_API_BASE_URL", "http://dispatch.example.invalid")
 

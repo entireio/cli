@@ -146,7 +146,7 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 
 - **D-1 non-origin reads**: pushing checkpoints to `upstream` (hook `$1`) while every read path fetches from `origin` is incoherent. Decide: teach reads to use the checkpoint-bearing remote (e.g. remember last push remote, or consult `branch.<name>.remote`), or document origin-only support and warn on non-origin pushes. B1/B2/B4 pin whichever is chosen.
 - **D-2 multi-remote queue clearing** (git-refs): queue entries are deleted after a successful push to *any* remote — second remote permanently misses refs. Probably needs per-remote tracking or "delete only when pushed to the fetch-resolution target". D7 pins current behavior until then.
-- **D-3 forge map / provider table**: only `github.com`→`gh` and github/gitlab provider hosts exist; GHE/self-hosted silently degrade (`{repo_id}`, trails). Decide config story before writing tests beyond pinning.
+- **D-3 forge map / provider table**: `checkpoint_remote` accepts github and gitlab (per-feature gates in `docs/development/checkpoint-implementation.md`). Still open: `gitremote.hostToForge` only maps `github.com`→`gh`, so the `entire://` push-through mirror and trails remain github-only; `--issue-link` hard-codes github.com; repo protection keys off the control-plane `provider` enum; and GHE/self-hosted gitlab silently degrade (`{repo_id}`, trails). Decide config story before writing tests beyond pinning.
 
 ## 5. Suggested sequencing
 

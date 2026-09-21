@@ -54,8 +54,8 @@ const (
 
 // applyInsecureHTTPAuth relaxes the tokenmanager's HTTP guard when the user
 // passed --insecure-http-auth, and reports whether per-target TLS checks
-// should be skipped. status/logout enforce TLS on the specific core they
-// dial (the active context's), not on any global origin.
+// should be skipped. status/logout enforce TLS on the specific cores they
+// dial, not on any global origin.
 func applyInsecureHTTPAuth(insecureHTTPAuth bool) bool {
 	if insecureHTTPAuth {
 		auth.EnableInsecureHTTP()
@@ -215,6 +215,8 @@ func newAuthTokenCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
 				return NewSilentError(errors.New("not logged in"))
 			}
+			// Stderr, so $(entire auth token) stays clean.
+			auth.AnnounceContext(target.totalContexts, target.activeContext)
 			fmt.Fprintln(cmd.OutOrStdout(), target.token)
 			return nil
 		},
@@ -296,10 +298,9 @@ type contextsProvider func() ([]*contexts.Context, string, error)
 // tests don't reach the network; production wires auth.RefreshedLoginToken.
 type loginTokenResolver func(ctx context.Context, c *contexts.Context) (string, error)
 
-// statusTarget is the resolved core to act against: the active context's
-// CoreURL + its session token. Zero coreURL/token means not logged in.
-// Shared by `auth status` (profile + session list) and `logout`
-// (revocation) so both hit the same login server.
+// statusTarget is the core `auth status` reports on: the active
+// context's CoreURL + its session token. Zero coreURL/token means not
+// logged in.
 //
 // envToken marks the target as resolved from ENTIRE_TOKEN rather than a stored
 // context: the bearer is the env token itself, sent verbatim to its own aud,
@@ -316,9 +317,8 @@ type statusTarget struct {
 // resolveAuthStatusTarget picks the target for `entire auth status`, honouring
 // ENTIRE_TOKEN: when it is set the request dials the token's own aud (exactly
 // as coreapi.New does), so status must report that core, not a stored context
-// that the request never touches. `logout` deliberately does NOT use this —
-// logout manages a stored login session, which an ephemeral env token has none
-// of, so it stays on resolveStatusTarget (the active context).
+// that the request never touches. `logout` does not use this: it sweeps
+// every stored login, and an ephemeral env token is not one of them.
 func resolveAuthStatusTarget(ctx context.Context, listContexts contextsProvider, resolveLogin loginTokenResolver) (statusTarget, error) {
 	if raw, ok := os.LookupEnv(auth.EnvTokenVar); ok {
 		return resolveEnvTokenStatusTarget(raw)
@@ -339,16 +339,15 @@ func resolveEnvTokenStatusTarget(raw string) (statusTarget, error) {
 	return statusTarget{coreURL: coreURL, token: token, envToken: true}, nil
 }
 
-// resolveStatusTarget picks the core + token for `entire auth status` (and
-// `logout`) from the active contexts.json context (so `auth switch` retargets
-// status onto that login server). No active context means not logged in —
-// the zero-token target renders the `entire login` hint.
+// resolveStatusTarget picks the core + token for `entire auth status` from
+// the active contexts.json context (so `auth switch` retargets status onto
+// that login server). No active context means not logged in — the
+// zero-token target renders the `entire login` hint.
 //
 // The token is resolved through resolveLogin, which transparently re-mints
 // an expired login JWT from the stored refresh token: an
-// expired-but-refreshable session must report "logged in", not "re-login",
-// and `logout`'s revoke call gets a bearer that still authenticates. When
-// refresh fails (revoked family, network, opaque token), the raw stored
+// expired-but-refreshable session must report "logged in", not "re-login".
+// When refresh fails (revoked family, network, opaque token), the raw stored
 // token is used and the /me liveness probe is the arbiter — preserving the
 // accurate "no longer valid" outcome for a genuinely dead session.
 //
@@ -652,19 +651,19 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("%d %s", len(d.sessions), pluralize("session", len(d.sessions)))))
 	}
 
-	// Nothing to offer when the caller's own session is already gone: "end this
-	// session" would contradict the notice above it, and the sessions that are
-	// listed belong to the login that replaced this one. The banner's `entire
-	// login` is the action.
+	// Nothing to offer when the caller's own session is already gone: the
+	// sessions that are listed belong to the login that replaced this one, so
+	// there is nothing here worth ending. The banner's `entire login` is the
+	// action.
 	if d.sessionErr == nil && len(d.sessions) > 0 && !d.revoked {
 		// --everywhere is offered only alongside the table. It ends every
-		// session at once, and in the collapsed view those sessions are a count
-		// the reader cannot inspect — browser logins included. The count row
+		// session at once — browser logins included — and in the collapsed view
+		// those sessions are a count the reader cannot inspect. The count row
 		// already says how to bring them on screen; once they are, the bulk
 		// action arrives with its subject attached.
-		hint := "Run 'entire logout' to end this session."
+		hint := "Run 'entire logout' to end every CLI session."
 		if opts.Sessions && len(d.sessions) > 1 {
-			hint = fmt.Sprintf("Run 'entire logout' to end this session, or 'entire logout --everywhere' to end all %d.", len(d.sessions))
+			hint = fmt.Sprintf("Run 'entire logout' to end every CLI session, or 'entire logout --everywhere' to end all %d.", len(d.sessions))
 		}
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, hint)
