@@ -4,19 +4,20 @@ package cli
 // plain strings, so without a name here a rename means finding every `Use:`,
 // alias and hard-coded command path by hand.
 const (
-	cmdAgent      = "agent"
-	cmdCheckpoint = "checkpoint"
-	cmdCreateName = "create <name>"
-	cmdList       = "list"
-	cmdListRepo   = "list <repo>"
-	cmdGrant      = "grant"
-	cmdOrg        = "org"
-	cmdRepo       = "repo"
-	cmdReview     = "review"
-	cmdSession    = "session"
-	cmdStatus     = "status"
-	cmdTokens     = "tokens"
-	cmdTrail      = "trail"
+	cmdAgent       = "agent"
+	cmdCheckpoint  = "checkpoint"
+	cmdCreateName  = "create <name>"
+	cmdList        = "list"
+	cmdListRepo    = "list <repo>"
+	cmdGrant       = "grant"
+	cmdInvestigate = "investigate"
+	cmdOrg         = "org"
+	cmdRepo        = "repo"
+	cmdReview      = "review"
+	cmdSession     = "session"
+	cmdStatus      = "status"
+	cmdTokens      = "tokens"
+	cmdTrail       = "trail"
 
 	// Plural aliases, kept beside the names they alias.
 	cmdCheckpointsAlias = "checkpoints"

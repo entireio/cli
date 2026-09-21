@@ -21,7 +21,7 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:     "Run a multi-agent review against the current branch",
 	},
 	{
-		CommandPath: []string{"investigate"},
+		CommandPath: []string{cmdInvestigate},
 		Invocation:  "entire investigate",
 		Summary:     "Run a multi-agent investigation against a topic, issue, or seed doc",
 	},
