@@ -585,8 +585,12 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 		project = ""
 	}
 	return repoDirRow{
-		Repo:            name,
-		Private:         strings.EqualFold(repo.Visibility.Or(""), "private"),
+		Repo:    name,
+		Private: strings.EqualFold(repo.Visibility.Or(""), "private"),
+		// The same fold the GitHub path applies. Leaving it unset emitted
+		// `"status": ""` for a repo whose placements plainly agreed, which is
+		// half of a row shape the two forges are supposed to share.
+		Status:          sharedPlacementStatus(placements),
 		ID:              repo.ID,
 		Project:         project,
 		ProvisionReason: strings.TrimSpace(repo.ProvisionReason.Or("")),

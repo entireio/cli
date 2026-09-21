@@ -170,6 +170,24 @@ type repoDirRow struct {
 	Placements      []repoDirPlacement `json:"placements,omitempty"`
 }
 
+// sharedPlacementStatus folds a row's placements into the one STATUS cell the
+// row shows: the status they all share, or repoDirStatusMixed when they
+// disagree. Both forges fold it the same way, so `--status ready` means the
+// same thing whichever kind of repo produced the row — and a row that skipped
+// the fold reported an empty status for a repo that plainly had one.
+func sharedPlacementStatus(placements []repoDirPlacement) string {
+	status := ""
+	for _, p := range placements {
+		switch status {
+		case "", p.Status:
+			status = p.Status
+		default:
+			return repoDirStatusMixed
+		}
+	}
+	return status
+}
+
 // repoDirStatusMixed is the STATUS cell of a repo whose placements disagree;
 // `--status <one of them>` still matches the row (see applyRepoDirLocal).
 const repoDirStatusMixed = "mixed"
@@ -330,7 +348,6 @@ func buildRepoDir(entries []coreapi.RepoIndexEntry, hostBySlug map[string]string
 		}
 		owner, repo, _ := strings.Cut(name, "/")
 		var placements []repoDirPlacement
-		status := ""
 		for _, p := range e.Placements {
 			if !forgeFromProvider && !placementServesForge(p, entryForge) {
 				continue
@@ -339,18 +356,23 @@ func buildRepoDir(entries []coreapi.RepoIndexEntry, hostBySlug map[string]string
 			if host := hostBySlug[p.ClusterSlug]; host != "" && repo != "" {
 				clone = forgeCloneURL(entryForge, host, owner, repo)
 			}
-			placements = append(placements, repoDirPlacement{Cluster: placementCluster(hostBySlug, p.ClusterSlug), Status: string(p.Status), CloneURL: clone})
-			switch status {
-			case "", string(p.Status):
-				status = string(p.Status)
-			default:
-				status = repoDirStatusMixed
-			}
+			// clusterSlug and jurisdiction ride along here exactly as they do on
+			// the native path: the need they serve — keying on a cluster rather
+			// than printing it — is a property of a placement, not of a forge,
+			// and the index already returns both, so omitting them left half of
+			// one row shape unable to answer what the other half could.
+			placements = append(placements, repoDirPlacement{
+				Cluster:      placementCluster(hostBySlug, p.ClusterSlug),
+				ClusterSlug:  p.ClusterSlug,
+				Jurisdiction: p.Jurisdiction,
+				Status:       string(p.Status),
+				CloneURL:     clone,
+			})
 		}
 		if len(placements) == 0 {
 			continue // an onboarded repo with nowhere to clone from is not a row
 		}
-		rows = append(rows, repoDirRow{Repo: qualifyRepoRef(entryForge, name), Private: private, Status: status, Placements: placements})
+		rows = append(rows, repoDirRow{Repo: qualifyRepoRef(entryForge, name), Private: private, Status: sharedPlacementStatus(placements), Placements: placements})
 	}
 	return rows
 }
@@ -1356,7 +1378,7 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 // neither part right, the repository half is the more useful one to report.
 //
 // A failure says only what is wrong INSIDE the URL. The accepted forms are the
-// caller's to list (badRepoRefErr), so repeating a shape here would print two
+// caller's to list (badMirrorRefErr), so repeating a shape here would print two
 // grammars at a reader who already typed one.
 func parseEntireCloneURL(raw string) (clusterHost string, ref mirrorRepoRef, err error) {
 	u, perr := url.Parse(raw)
