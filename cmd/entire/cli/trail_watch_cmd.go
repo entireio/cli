@@ -401,7 +401,7 @@ type reviewStreamEvent struct {
 
 func printReadyEvent(w io.Writer, data string) {
 	var p reviewReadyPayload
-	if err := json.Unmarshal([]byte(data), &p); err == nil {
+	if err := api.UnmarshalTrailWire([]byte(data), &p); err == nil {
 		parts := []string{"● connected"}
 		if p.TrailID != "" {
 			parts = append(parts, "to trail "+p.TrailID)
@@ -433,7 +433,9 @@ func printStreamError(errW io.Writer, data string) {
 
 func parseReviewStreamEvent(eventName, data string) (reviewStreamEvent, bool) {
 	var ev reviewStreamEvent
-	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+	// A pre-RFD-026 cell frames these in camelCase and does not project the
+	// payload's keys; UnmarshalTrailWire reconciles both (wire_compat.go).
+	if err := api.UnmarshalTrailWire([]byte(data), &ev); err != nil {
 		return ev, false
 	}
 	if ev.EventType == "" {

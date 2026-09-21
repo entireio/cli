@@ -640,7 +640,7 @@ func fetchTrailReviewComments(ctx context.Context, client *api.Client, trailID s
 		return nil, "", err
 	}
 	var out api.TrailReviewCommentsResponse
-	if err := api.DecodeJSON(resp, &out); err != nil {
+	if err := api.DecodeTrailJSON(resp, &out); err != nil {
 		return nil, "", fmt.Errorf("decode findings: %w", err)
 	}
 	return out.Comments, stringPtrValue(out.NextCursor), nil
@@ -1087,7 +1087,7 @@ func postTrailReviewFindingBatch(ctx context.Context, client *api.Client, trailI
 		return nil, err
 	}
 	var batch api.TrailReviewCommentBatchResponse
-	if err := api.DecodeJSON(resp, &batch); err != nil {
+	if err := api.DecodeTrailJSON(resp, &batch); err != nil {
 		return nil, fmt.Errorf("decode finding batch response: %w", err)
 	}
 	if len(batch.Results) == 0 {
@@ -1124,7 +1124,7 @@ func startTrailReview(ctx context.Context, client *api.Client, trailID string) (
 		return api.TrailReviewStartResponse{}, err
 	}
 	var out api.TrailReviewStartResponse
-	if err := api.DecodeJSON(resp, &out); err != nil {
+	if err := api.DecodeTrailJSON(resp, &out); err != nil {
 		return api.TrailReviewStartResponse{}, fmt.Errorf("decode review: %w", err)
 	}
 	if out.ReviewID == "" {
@@ -1202,7 +1202,7 @@ func fetchTrailReviewState(ctx context.Context, client *api.Client, trailID, rev
 			if err := checkTrailResponse(resp); err != nil {
 				return err
 			}
-			if err := api.DecodeJSON(resp, &page); err != nil {
+			if err := api.DecodeTrailJSON(resp, &page); err != nil {
 				return fmt.Errorf("decode review state: %w", err)
 			}
 			return nil
@@ -1426,7 +1426,7 @@ func patchTrailReviewComment(ctx context.Context, client *api.Client, trailID st
 		return api.TrailReviewComment{}, err
 	}
 	var updated api.TrailReviewComment
-	if err := api.DecodeJSON(resp, &updated); err != nil {
+	if err := api.DecodeTrailJSON(resp, &updated); err != nil {
 		return api.TrailReviewComment{}, fmt.Errorf("decode updated finding: %w", err)
 	}
 	return updated, nil

@@ -460,7 +460,7 @@ func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePa
 // decodeTrailResource decodes entire-api's direct detail resource.
 func decodeTrailResource(resp *http.Response) (api.TrailResource, error) {
 	var resource api.TrailResource
-	if err := api.DecodeJSON(resp, &resource); err != nil {
+	if err := api.DecodeTrailJSON(resp, &resource); err != nil {
 		return api.TrailResource{}, fmt.Errorf("decode trail resource: %w", err)
 	}
 	return resource, nil
@@ -592,7 +592,7 @@ func listTrailResources(ctx context.Context, client *api.Client, basePath string
 			if err := checkTrailResponse(resp); err != nil {
 				return err
 			}
-			if err := api.DecodeJSON(resp, &page); err != nil {
+			if err := api.DecodeTrailJSON(resp, &page); err != nil {
 				return fmt.Errorf("failed to decode trail list: %w", err)
 			}
 			return nil
@@ -1187,7 +1187,7 @@ func postTrailCreate(ctx context.Context, client *api.Client, basePath, forge, o
 	saveTrailsEnabledForRemoteBestEffort(ctx, forge, owner, repoName, true)
 
 	var createResp api.TrailCreateResponse
-	if err := api.DecodeJSON(resp, &createResp); err != nil {
+	if err := api.DecodeTrailJSON(resp, &createResp); err != nil {
 		return api.TrailCreateResponse{}, fmt.Errorf("failed to decode create response: %w", err)
 	}
 	return createResp, nil
@@ -1667,7 +1667,7 @@ func sendTrailPatch(ctx context.Context, client *api.Client, path string, req ap
 		return err
 	}
 	var updateResp api.TrailUpdateResponse
-	if err := api.DecodeJSON(resp, &updateResp); err != nil {
+	if err := api.DecodeTrailJSON(resp, &updateResp); err != nil {
 		return fmt.Errorf("failed to decode update response: %w", err)
 	}
 	return nil
@@ -1724,7 +1724,7 @@ func sendTrailBody(ctx context.Context, client *api.Client, path, body, ifMatch 
 	// really was this route's JSON response, and drains the body — the same
 	// check sendTrailPatch makes on the metadata route.
 	var doc api.TrailBodyDocument
-	if err := api.DecodeJSON(resp, &doc); err != nil {
+	if err := api.DecodeTrailJSON(resp, &doc); err != nil {
 		return fmt.Errorf("failed to decode trail body response: %w", err)
 	}
 	return nil
@@ -2178,7 +2178,7 @@ func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, m
 			if err := checkTrailResponse(resp); err != nil {
 				return err
 			}
-			if err := api.DecodeJSON(resp, &listResp); err != nil {
+			if err := api.DecodeTrailJSON(resp, &listResp); err != nil {
 				return fmt.Errorf("decode trail list: %w", err)
 			}
 			return nil

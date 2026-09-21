@@ -136,7 +136,7 @@ func fetchAllTrailDiscussions(ctx context.Context, client *api.Client, path stri
 			if err := checkTrailResponse(resp); err != nil {
 				return err
 			}
-			if err := api.DecodeJSON(resp, &page); err != nil {
+			if err := api.DecodeTrailJSON(resp, &page); err != nil {
 				return fmt.Errorf("failed to decode discussions response: %w", err)
 			}
 			return nil
@@ -210,7 +210,7 @@ func newTrailCommentShowCmd() *cobra.Command {
 					return err
 				}
 				var out api.TrailDiscussionDetailResponse
-				if err := api.DecodeJSON(resp, &out); err != nil {
+				if err := api.DecodeTrailJSON(resp, &out); err != nil {
 					return fmt.Errorf("failed to decode discussion response: %w", err)
 				}
 				return printTrailDiscussionDetail(cmd.OutOrStdout(), out, jsonOut)
@@ -270,7 +270,7 @@ func newTrailCommentAddCmd() *cobra.Command {
 					return err
 				}
 				var out api.TrailDiscussionCreateResponse
-				if err := api.DecodeJSON(resp, &out); err != nil {
+				if err := api.DecodeTrailJSON(resp, &out); err != nil {
 					return fmt.Errorf("failed to decode discussion response: %w", err)
 				}
 				if jsonOut {
@@ -311,7 +311,7 @@ func newTrailCommentReplyCmd() *cobra.Command {
 					return err
 				}
 				var out api.TrailDiscussionMessageResponse
-				if err := api.DecodeJSON(resp, &out); err != nil {
+				if err := api.DecodeTrailJSON(resp, &out); err != nil {
 					return fmt.Errorf("failed to decode message response: %w", err)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Added message %s to discussion %s\n", out.Message.ID, discussionID)
@@ -346,7 +346,7 @@ func newTrailCommentEditCmd() *cobra.Command {
 					return err
 				}
 				var out api.TrailDiscussionMessageResponse
-				if err := api.DecodeJSON(resp, &out); err != nil {
+				if err := api.DecodeTrailJSON(resp, &out); err != nil {
 					return fmt.Errorf("failed to decode message response: %w", err)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Edited message %s\n", out.Message.ID)
@@ -422,7 +422,7 @@ func newTrailCommentResolveCmd(use string, resolved bool, shortVerb, successVerb
 					return err
 				}
 				var out api.TrailDiscussionUpdateResponse
-				if err := api.DecodeJSON(resp, &out); err != nil {
+				if err := api.DecodeTrailJSON(resp, &out); err != nil {
 					return fmt.Errorf("failed to decode discussion response: %w", err)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s discussion %s\n", successVerb, out.Discussion.ID)

@@ -82,7 +82,7 @@ func submitTrailApproval(ctx context.Context, w, errW io.Writer, insecureHTTP bo
 			return err
 		}
 		var out api.TrailApprovalResponse
-		if err := api.DecodeJSON(resp, &out); err != nil {
+		if err := api.DecodeTrailJSON(resp, &out); err != nil {
 			return fmt.Errorf("failed to decode approval response: %w", err)
 		}
 		fmt.Fprintf(w, "%s trail #%d\n", successVerb, found.Number)
@@ -183,7 +183,7 @@ func runTrailApprovals(ctx context.Context, w, errW io.Writer, insecureHTTP bool
 			return err
 		}
 		var out api.TrailApprovalsResponse
-		if err := api.DecodeJSON(resp, &out); err != nil {
+		if err := api.DecodeTrailJSON(resp, &out); err != nil {
 			return fmt.Errorf("failed to decode approvals response: %w", err)
 		}
 		if jsonOut {
