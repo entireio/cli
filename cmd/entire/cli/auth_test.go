@@ -82,7 +82,7 @@ func TestRunAuthStatus_NotLoggedIn(t *testing.T) {
 func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	t.Parallel()
 
-	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 1}
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "eu.auth.entire.io", totalContexts: 2}
 
 	var out bytes.Buffer
 	if err := runAuthStatus(context.Background(), &out, okProfile, noSessions, target, authStatusOptions{}); err != nil {
@@ -802,12 +802,18 @@ func TestRunAuthStatus_MultipleContextsHint(t *testing.T) {
 	if !hasMetadataRow(out.String(), availableContextsRowLabel, "3 · run 'entire auth contexts' to list them") {
 		t.Fatalf("output = %q, want a saved-contexts row with the listing hint", out.String())
 	}
+	// The count says how many there are; the context row says which of them is
+	// acting. Neither is worth a line without the other.
+	if !hasMetadataLabel(out.String(), "context") {
+		t.Fatalf("output = %q, want the active-context row alongside the count", out.String())
+	}
 }
 
-// A count of one is dropped on both rows: the sole context and the sole session
-// are the ones already described above, so the row costs a line and carries no
-// information. The session half requires the sole session to actually be the
-// caller's — see TestRunAuthStatus_UnidentifiedSingleSessionStillCounts.
+// A count of one is dropped on every context and session row. A sole login is
+// not a choice, so neither naming it nor counting it tells the reader anything;
+// the sole session is already described by the verdict line's expiry. The
+// session half requires that session to actually be the caller's — see
+// TestRunAuthStatus_UnidentifiedSingleSessionStillCounts.
 func TestRunAuthStatus_CountRowsAreDroppedAtOne(t *testing.T) {
 	t.Parallel()
 
@@ -822,7 +828,7 @@ func TestRunAuthStatus_CountRowsAreDroppedAtOne(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := out.String()
-	for _, unwanted := range []string{availableContextsRowLabel, activeSessionsRowLabel} {
+	for _, unwanted := range []string{"context", availableContextsRowLabel, activeSessionsRowLabel} {
 		if hasMetadataLabel(got, unwanted) {
 			t.Fatalf("output = %q, want no %q row at a count of one", got, unwanted)
 		}

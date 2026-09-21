@@ -630,10 +630,14 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 	fmt.Fprintln(w)
 
 	rows := authProfileRows(d.profile)
-	if t.activeContext != "" {
-		rows = append(rows, authContextRow(sty, t.activeContext, t.coreURL))
-	}
+	// Both context rows are a way to say "this login, not the others", so both
+	// wait until there are others. With a sole login there is nothing to
+	// distinguish it from, and naming it describes a choice the user does not
+	// have.
 	if t.totalContexts > 1 {
+		if t.activeContext != "" {
+			rows = append(rows, authContextRow(sty, t.activeContext, t.coreURL))
+		}
 		rows = append(rows, authContextsCountRow(sty, t.totalContexts))
 	}
 	rows = append(rows, explainRow{Label: authTokenRowLabel, Value: tokenstore.BackendDescription()})
@@ -831,7 +835,7 @@ func authProfileRows(p *authProfile) []explainRow {
 // authContextRow names the active login context, appending the login server's
 // host only when the context name does not already spell it. The name defaults
 // to the host, so repeating it would be noise — but a context the user named
-// "work" would otherwise leave the server unnamed anywhere in the output.
+// "work" would otherwise leave the server unnamed among the several on show.
 func authContextRow(sty statusStyles, name, coreURL string) explainRow {
 	value := name
 	if host := authServerHost(coreURL); host != "" && !strings.EqualFold(name, host) {
@@ -872,9 +876,9 @@ func authSessionsRow(sty statusStyles, sessions []api.AuthSession, listErr error
 }
 
 // authContextsCountRow reports how many saved logins exist, and how to see
-// them — the same count-plus-hint shape as the session row, and dropped at one
-// for the same reason: the sole context is the one already named on the row
-// above, so counting it says nothing. Callers gate on total > 1.
+// them — the same count-plus-hint shape as the session row. Callers gate on
+// total > 1, which is also when the context row above it appears: a count of
+// one would be counting the only thing there is.
 func authContextsCountRow(sty statusStyles, total int) explainRow {
 	return explainRow{
 		Label: availableContextsRowLabel,

@@ -63,16 +63,19 @@ the commands are always runnable in every build.
   called out in the text view: the note that used to sit there existed mostly
   to explain the display name and email a foreign core withholds, neither of
   which this view renders any more, and what remained restated the
-  `jurisdiction` and `context` rows either side of it. It reports a count of active
+  `jurisdiction` row beside it. It reports a count of active
   sessions rather than the list — `--sessions` prints the full table, and
   `--json` reports the same facts without the text view's collapse; timestamps
   stay RFC3339 there, since the relative form the text view shows is a reading
   aid. A second count row, `available contexts`,
   does the same for saved logins and replaces the trailing "N login contexts
-  saved" sentence. **Both count rows are dropped at exactly one** — the sole
-  session and the sole context are the ones already described by the verdict
-  line's expiry and the `context` row, so the row costs a line and carries
-  nothing. The session half additionally requires that sole session to have been
+  saved" sentence. **Both count rows are dropped at exactly one**, and with the
+  context count goes the `context` row naming the active login. Both of those
+  rows exist to say "this login, not the others", so both wait until there are
+  others: a sole login is not a choice, and describing it as one costs two lines
+  to tell the reader nothing they can act on. The sole session is likewise
+  already described by the verdict line's expiry. The session half
+  additionally requires that sole session to have been
   *identified* as the caller's: without a `fid` match there is no expiry on the
   verdict line to stand in for it, and dropping the row would leave the default
   view with no count, no expiry and no route to `--sessions` — while the one
