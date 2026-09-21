@@ -8,8 +8,10 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -128,6 +130,65 @@ func TestPushQueuedCheckpointRefs_ShipsReadyRefsAndReportsTheRest(t *testing.T) 
 		"the already-redacted ref must reach the remote")
 	require.Equal(t, []plumbing.ReferenceName{refs[1]}, queuedRefs(t, repo),
 		"only the ref OPF could not finish stays queued")
+}
+
+// TestFlushCheckpointRefsQueue_WithholdsARefEnqueuedAfterTheReadinessRead walks
+// the exact timeline that made a pre-computed exclusion list fail open, in the
+// order a concurrent session produces it:
+//
+//  1. the readiness read (RefsAwaitingOPF) — what the delivery path used to take
+//     BEFORE calling the flush, and pass in as the set to exclude;
+//  2. another session finalizes a checkpoint and enqueues its ref, untrailered.
+//     That ref cannot be in the snapshot from step 1: it did not exist yet;
+//  3. the flush drains the queue — and the new ref IS in what it drained.
+//
+// A flush that excludes the caller's snapshot ships that ref having never
+// checked it for the OPF trailer, which is 8-layer content leaving the machine
+// under an OPFRun decision. A flush that reads the trailer off the set it
+// drained cannot: there is no set it did not check.
+//
+// So this test is also the guard against a regression to the two-step pattern.
+// The flush is told only WHETHER the trailer is required; the step-1 snapshot is
+// computed here purely to pin that it is blind to the racing ref, and is
+// deliberately not passed anywhere.
+func TestFlushCheckpointRefsQueue_WithholdsARefEnqueuedAfterTheReadinessRead(t *testing.T) {
+	// No t.Parallel: the fixture uses t.Chdir.
+	const earlyID, lateID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, earlyID)
+	earlyRef := refs[0]
+
+	// The gate's inline rewrite: the queued ref is redacted and trailered, so it
+	// is genuinely ready to ship.
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	// Step 1: the pre-Drain readiness read. Nothing is awaiting OPF yet.
+	snapshot, err := RefsAwaitingOPF(t.Context(), repo)
+	require.NoError(t, err)
+	require.Empty(t, snapshot, "the rewritten ref carries the trailer, so nothing is awaiting OPF")
+
+	// Step 2: a concurrent session finalizes a checkpoint, enqueuing a ref that
+	// has never been near OPF.
+	addGitRefsSession(t, repo, lateID, "sess-late")
+	lateRef := mustRefName(t, id.MustCheckpointID(lateID))
+	require.NotContains(t, snapshot, lateRef,
+		"the racing ref must be invisible to the earlier read — that is the window")
+	require.ElementsMatch(t, []plumbing.ReferenceName{earlyRef, lateRef}, queuedRefs(t, repo),
+		"both refs are queued, so both are in what the flush drains")
+
+	// Step 3: the flush. It is handed no exclusion set, only the requirement.
+	pushed, withheld, err := flushCheckpointRefsQueue(
+		t.Context(), repo, pushSettings{remote: bareDir}, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed, "the trailered ref must still ship; per-ref delivery is the point")
+	assert.Equal(t, 1, withheld, "the racing untrailered ref must be counted as held back")
+
+	assert.NotEmpty(t, remoteRefHash(t, bareDir, earlyRef),
+		"the already-redacted ref must reach the remote")
+	assertRefsAbsentFromRemote(t, bareDir, []plumbing.ReferenceName{lateRef},
+		"a ref enqueued after the readiness read must not ship unchecked")
+	assert.Equal(t, []plumbing.ReferenceName{lateRef}, queuedRefs(t, repo),
+		"the withheld ref stays queued untouched, for the worker and the next push")
 }
 
 // TestPrePushCheckpointRefs_OPFSkipShipsTheWholeQueueUnchanged is the other half

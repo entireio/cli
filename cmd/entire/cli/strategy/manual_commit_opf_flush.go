@@ -116,19 +116,39 @@ func RefsAwaitingOPF(ctx context.Context, repo *git.Repository) ([]plumbing.Refe
 	existing, _ := partitionLocalRefs(repo, queued)
 	awaiting := make([]plumbing.ReferenceName, 0, len(existing))
 	for _, refName := range existing {
-		ref, refErr := repo.Reference(refName, true)
-		if refErr != nil {
-			continue // vanished between the peek and here; not our backlog
-		}
-		commit, commitErr := repo.CommitObject(ref.Hash())
-		if commitErr != nil {
-			continue
-		}
-		if !trailers.HasOPFApplied(commit.Message) {
+		// An unknown trailer state (the ref vanished between the peek and here,
+		// or its tip will not load) is not this worker's backlog: there is no
+		// rewrite it could usefully attempt. Delivery reads the same state with
+		// the opposite default — see refTipCarriesOPFApplied.
+		applied, known := refTipCarriesOPFApplied(repo, refName)
+		if known && !applied {
 			awaiting = append(awaiting, refName)
 		}
 	}
 	return awaiting, nil
+}
+
+// refTipCarriesOPFApplied reports whether refName's tip commit carries the
+// Entire-OPF-Applied trailer, and whether that question could be answered at
+// all: a ref that has vanished, or a tip commit that will not load, has no
+// trailer state to report.
+//
+// Both callers need the second return and they choose opposite defaults for it,
+// which is why it is not folded into the first. RefsAwaitingOPF treats an
+// unanswerable ref as not its work; delivery treats it as not shippable, because
+// "we could not read the trailer" must never ship as "the trailer is there".
+// One shared reader so the two can never disagree about what carrying the
+// trailer means.
+func refTipCarriesOPFApplied(repo *git.Repository, refName plumbing.ReferenceName) (applied, known bool) {
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		return false, false
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		return false, false
+	}
+	return trailers.HasOPFApplied(commit.Message), true
 }
 
 // maybeSpawnOPFFlush fires one detached __opf_flush child when OPF is enabled
