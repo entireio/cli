@@ -125,7 +125,7 @@ the commands are always runnable in every build.
   branch without the flag never lowers it and `--server-side-merge-only=false`
   is the explicit way down. A short branch name expands to `refs/heads/`,
   `HEAD` and `refs/...` pass through. The `mirror` subtree is
-  server-side (`add`, `list`, `get`, `remove`; `add` and `remove` name clusters
+  server-side (`add`, `list`, `remove`; `add` and `remove` name clusters
   with `--cluster <host>`, repeatable or comma-separated, and place or tear down
   every named cluster in parallel through one engine — `mirrorTargets` →
   `createMirrors`/`removeMirrors` → a summary table — so a one-shot verb reports
@@ -202,9 +202,10 @@ the commands are always runnable in every build.
   rule would send the reader to fix something that would be refused again.
   `repo access list` is the one verb still GitHub-only (it reads GitHub
   collaborators; native access is grants), and it points a native ref at
-  `entire repo grant list`. `repo mirror get` takes a mirror ULID or an
-  `entire://` clone URL besides, since those address a placement rather than
-  name a repo.
+  `entire repo grant list`. `repo view` takes a repo ULID, a bare name with
+  `--project`, and an `entire://` clone URL besides — the URL because it is the
+  only form naming its own cluster, so it is the only one that reaches a repo in
+  another federation.
   `clone`
   accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
   ref, or a full `entire://` URL passed through verbatim. **Every ref names its
@@ -233,7 +234,9 @@ the commands are always runnable in every build.
   clone shapes are not: a `/gh/` mirror ref is refused there (the by-name
   lookup resolves a project and then a repo inside it, and a mirror is in no
   project — so a mirror is addressed by ULID), and an `entire://` URL is not
-  parsed at all. `--project` serves the **bare-name** spelling alone, because
+  parsed at all. `repo view` serves both anyway, by routing on the ref before
+  the resolver is reached: a `/gh/` ref goes to the mirror directory, and an
+  `entire://` URL to the core fronting the cluster it names. `--project` serves the **bare-name** spelling alone, because
   the control plane has no by-name repo route that is not project-scoped; the
   path form is checked against it for agreement, and a ULID warns that it is
   ignored rather than validating, which would cost a `GetRepo` on every command

@@ -24,7 +24,7 @@ import (
 // unused ceiling costs nothing.
 //
 // The CLI is given less than the harness so a stalled seed surfaces as the
-// command's own message ("still being created, check with mirror get") rather
+// command's own message ("still being created, check with repo view") rather
 // than as a killed process with no explanation.
 const (
 	nativeMirrorSeedTimeout = 5 * time.Minute
@@ -112,7 +112,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	}
 
 	phase("before: only the primary is listed", func(t *testing.T) {
-		stdout, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		stdout, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, stdout)
 		require.Equal(t, ref, row.Repo)
 		require.Len(t, row.Placements, 1, "a fresh repo has only its primary")
@@ -167,7 +167,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	})
 
 	phase("get shows the primary and the mirror, each by role", func(t *testing.T) {
-		stdout, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		stdout, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, stdout)
 		require.Len(t, row.Placements, 2)
 		require.Equal(t, "primary", row.Placements[0].Role)
@@ -229,7 +229,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		require.Contains(t, stdout, ref)
 		require.Contains(t, stdout, "removed")
 
-		after, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		after, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, after)
 		require.Len(t, row.Placements, 1, "only the primary is left")
 		require.Equal(t, "primary", row.Placements[0].Role)

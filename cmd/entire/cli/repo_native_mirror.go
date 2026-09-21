@@ -294,7 +294,7 @@ func renderNativeMirrorCreateError(err error, ref, clusterSlug string) error {
 	if !strings.Contains(detail, "being deleted") {
 		return rendered
 	}
-	return fmt.Errorf("%w; a previous mirror of %s on %s is still being torn down \u2014 wait for it to disappear from `entire repo mirror get %s`, then add it again",
+	return fmt.Errorf("%w; a previous mirror of %s on %s is still being torn down \u2014 wait for it to disappear from `entire repo view %s`, then add it again",
 		rendered, ref, clusterSlug, ref)
 }
 
@@ -400,24 +400,44 @@ func regionHosts(regions []regionChoice) []string {
 	return out
 }
 
-// runNativeMirrorGet is `repo mirror get /et/<project>/<repo>`: the repo's
-// identity, then every cluster holding a copy of it.
+// runNativeRepoView is `repo view` for an Entire-native repo: its identity,
+// then every cluster holding a copy of it.
 //
 // The view joins two reads because neither is complete on its own: the repo
 // carries its primary placement, and /native-mirrors lists only the ADDITIONAL
 // ones. It deliberately does not go through the /repos directory that the
 // GitHub path uses — only this endpoint carries stage and lastError, the two
 // fields that say anything useful about a placement that is stuck.
-func runNativeMirrorGet(cmd *cobra.Command, ref mirrorRepoRef) error {
-	name := nativeRefOf(ref)
+//
+// The ref is resolved by the shared repo resolver, so every spelling `repo
+// view` has always taken reaches this view: the /et/<project>/<repo> path, a
+// bare name with --project, and a repo ULID.
+func runNativeRepoView(cmd *cobra.Command, ref, project string, authoritative bool) error {
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		repo, clusters, err := loadNativeRepo(ctx, c, ref)
+		repoID, err := resolveRepoRef(ctx, c, ref, project)
 		if err != nil {
 			return err
 		}
+		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+		if err != nil {
+			return err
+		}
+		cat, err := c.ListClusters(ctx)
+		if err != nil {
+			return err
+		}
+		clusters := cat.Clusters
 		mirrors, err := listNativeMirrors(ctx, c, repo.ID)
 		if err != nil {
 			return err
+		}
+		// The server's own path is the repo's name here, rather than a ref
+		// rebuilt from what the user typed: `repo view` also takes a ULID and a
+		// bare name, neither of which spells the /et/<project>/<repo> form the
+		// other verbs want back.
+		name := strings.TrimSpace(repo.Path.Or(""))
+		if name == "" {
+			name = repo.Name
 		}
 		// A plain repo read leaves `state` unset, which would dash the one cell
 		// in this table that says whether the primary is usable — and a dashed
@@ -431,13 +451,27 @@ func runNativeMirrorGet(cmd *cobra.Command, ref mirrorRepoRef) error {
 		// Best-effort for the same reason it is narrow — a registry-only
 		// fallback cannot answer the readiness question, and a dash is a better
 		// trade than losing the table.
-		if authoritative, aerr := c.GetRepo(ctx, coreapi.GetRepoParams{
+		auth, aerr := c.GetRepo(ctx, coreapi.GetRepoParams{
 			RepoId:        repo.ID,
 			Authoritative: coreapi.NewOptBool(true),
-		}); aerr == nil {
-			if state, ok := authoritative.State.Get(); ok {
+		})
+		switch {
+		case aerr == nil:
+			if state, ok := auth.State.Get(); ok {
 				repo.State = coreapi.NewOptString(state)
 			}
+		case authoritative && readinessCheckUnavailable(aerr):
+			// --authoritative is the caller saying the readiness answer is the
+			// point of the command, so a registry-only fallback that cannot give
+			// one is an error rather than a dashed cell. Print here so
+			// renderCoreError cannot strip the recovery hint with the API error
+			// wrapper; the plain read is the default, so the hint names no flag.
+			fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo view %s to inspect repository details without a readiness check.\n", renderRepoReadError(aerr), repoID)
+			return NewSilentError(aerr)
+		case authoritative:
+			// Any other failure of the authoritative read is a real error under
+			// the flag, and reads better as itself than as a readiness hint.
+			return aerr
 		}
 		row := nativeRepoDetailRow(name, repo, mirrors, clusters)
 		if jsonRequested(cmd) {
@@ -492,9 +526,12 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 		placements = append(placements, p)
 	}
 	return repoDirRow{
-		Repo:       name,
-		Private:    strings.EqualFold(repo.Visibility.Or(""), "private"),
-		Placements: placements,
+		Repo:            name,
+		Private:         strings.EqualFold(repo.Visibility.Or(""), "private"),
+		ID:              repo.ID,
+		Project:         repo.OwningProjectId,
+		ProvisionReason: strings.TrimSpace(repo.ProvisionReason.Or("")),
+		Placements:      placements,
 	}
 }
 

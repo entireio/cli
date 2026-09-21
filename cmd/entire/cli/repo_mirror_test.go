@@ -22,10 +22,6 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// mirrorsAPIPath is the control-plane mirrors collection endpoint, shared by the
-// fake servers in these tests.
-const mirrorsAPIPath = "/api/v1/mirrors"
-
 func TestExplainSuspendedMirror(t *testing.T) {
 	t.Parallel()
 	const id = "01KS6KFJR2XS6PZ188MVYE07AN"
@@ -506,7 +502,7 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 		require.Contains(t, stdout, "alice/dotfiles")
 		require.Contains(t, stdout, "owner-only")
 		// The NAME cell is the handle into the detail view.
-		require.Contains(t, stderr, "entire repo mirror get /gh/<owner>/<repo>")
+		require.Contains(t, stderr, "entire repo view /gh/<owner>/<repo>")
 	})
 
 	t.Run("a multi-cluster repo lists once, clusters joined in one cell", func(t *testing.T) {
@@ -524,11 +520,11 @@ func TestRepoMirrorList_Merged(t *testing.T) {
 	t.Run("the detail hint is withheld from empty tables and --json", func(t *testing.T) {
 		serveRepoList(t, nil, clusters, false)
 		_, stderr := runMirrorList(t)
-		require.NotContains(t, stderr, "mirror get", "no rows, nothing to drill into")
+		require.NotContains(t, stderr, "repo view", "no rows, nothing to drill into")
 
 		serveRepoList(t, []coreapi.RepoIndexEntry{onboardedEntry("acme/web", "private", "us")}, clusters, false)
 		_, stderr = runMirrorList(t, "--json")
-		require.NotContains(t, stderr, "mirror get", "scripts already get nested placements in the rows")
+		require.NotContains(t, stderr, "repo view", "scripts already get nested placements in the rows")
 	})
 
 	t.Run("empty directory prints the empty sentence", func(t *testing.T) {
@@ -1126,127 +1122,10 @@ func TestParseMirrorCloneURL(t *testing.T) {
 	}
 }
 
-func TestResolveMirrorRef(t *testing.T) {
-	t.Parallel()
-	// 26 Crockford base32 chars (no I/L/O/U) so the ULID short-circuit fires.
-	const mirrorULID = "0123456789ABCDEFGHJKMNPQRS"
-	const otherULID = "0123456789ABCDEFGHJKMNPQRT"
-	const cloneURL = "entire://aws-eu-central-1.entire.io/gh/entirehq/entire-api"
-
-	t.Run("ULID passes through without a network call", func(t *testing.T) {
-		t.Parallel()
-		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			t.Error("unexpected HTTP call for a ULID ref")
-			w.WriteHeader(http.StatusInternalServerError)
-		})
-		got, err := resolveMirrorRef(context.Background(), c, mirrorULID)
-		if err != nil {
-			t.Fatalf("resolveMirrorRef: %v", err)
-		}
-		if got != mirrorULID {
-			t.Errorf("resolveMirrorRef = %q, want the ULID unchanged", got)
-		}
-		if n := calls.Load(); n != 0 {
-			t.Errorf("ULID ref made %d HTTP calls, want 0", n)
-		}
-	})
-
-	t.Run("clone URL resolves to the matching mirror's ULID", func(t *testing.T) {
-		t.Parallel()
-		var gotCluster, gotProvider, gotOwner string
-		c, _ := resolveTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			q := r.URL.Query()
-			gotCluster, gotProvider, gotOwner = q.Get("cluster"), q.Get("provider"), q.Get("owner")
-			if err := printJSON(w, &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
-				{MirrorId: otherULID, Owner: "entirehq", Repo: "other", ClusterHost: "aws-eu-central-1.entire.io"},
-				{MirrorId: mirrorULID, Owner: "entirehq", Repo: "entire-api", ClusterHost: "aws-eu-central-1.entire.io"},
-			}}); err != nil {
-				t.Errorf("encode mirrors: %v", err)
-			}
-		})
-		got, err := resolveMirrorRef(context.Background(), c, cloneURL)
-		if err != nil {
-			t.Fatalf("resolveMirrorRef: %v", err)
-		}
-		if got != mirrorULID {
-			t.Errorf("resolveMirrorRef = %q, want %q", got, mirrorULID)
-		}
-		// The (cluster, provider, owner) narrowing must be server-side; only the
-		// repo is matched client-side (ListMirrors has no repo filter).
-		if gotCluster != "aws-eu-central-1.entire.io" || gotProvider != string(coreapi.CreateMirrorInputBodyProviderGithub) || gotOwner != "entirehq" {
-			t.Errorf("filters = cluster %q provider %q owner %q, want the clone URL's coords", gotCluster, gotProvider, gotOwner)
-		}
-	})
-
-	t.Run("no matching repo is a friendly error", func(t *testing.T) {
-		t.Parallel()
-		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			if err := printJSON(w, &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
-				{MirrorId: otherULID, Owner: "entirehq", Repo: "other", ClusterHost: "aws-eu-central-1.entire.io"},
-			}}); err != nil {
-				t.Errorf("encode mirrors: %v", err)
-			}
-		})
-		_, err := resolveMirrorRef(context.Background(), c, cloneURL)
-		if err == nil || !strings.Contains(err.Error(), "no mirror matching") {
-			t.Errorf("resolveMirrorRef no match: err = %v, want a \"no mirror matching\" error", err)
-		}
-	})
-
-	t.Run("unparseable ref errors before any call", func(t *testing.T) {
-		t.Parallel()
-		c, calls := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-			t.Error("unexpected HTTP call for an unparseable ref")
-			w.WriteHeader(http.StatusInternalServerError)
-		})
-		if _, err := resolveMirrorRef(context.Background(), c, "not-a-url"); err == nil {
-			t.Fatal("resolveMirrorRef unparseable: want an error")
-		}
-		if n := calls.Load(); n != 0 {
-			t.Errorf("unparseable ref made %d HTTP calls, want 0", n)
-		}
-	})
-}
-
-// TestRepoMirrorGet_Routing pins which core `mirror get <ref>` dials. A clone
-// URL names its cluster, so it must be resolved on the core fronting that
-// cluster (clusterCoreClient), not the active context — the original bug:
-// `mirror get entire://<cluster>/…` for a cluster in a federation other than
-// the active login failed with "no mirror matching" until the user switched
-// contexts. A ULID carries no cluster coordinate and stays on the active
-// context; an unparseable ref must error before dialing anything.
-//
-// Not parallel: swaps the package-level activeCoreClient/clusterCoreClient
-// seams.
-func TestRepoMirrorGet_Routing(t *testing.T) {
-	const mirrorULID = "0123456789ABCDEFGHJKMNPQRS"
+func TestRepoView_Routing(t *testing.T) {
 	const clusterHost = "eukanuba.partial.to"
 	const cloneURL = "entire://" + clusterHost + "/gh/entirehq/librarian"
 
-	// mirrorServer answers both the list (clone-URL resolution) and the
-	// GetMirror-by-ULID calls for the librarian mirror.
-	mirrorServer := func(t *testing.T) *httptest.Server {
-		t.Helper()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			switch r.URL.Path {
-			case mirrorsAPIPath:
-				assert.NoError(t, printJSON(w, &coreapi.ListMirrorsOutputBody{Mirrors: []coreapi.Mirror{
-					{MirrorId: mirrorULID, Owner: "entirehq", Repo: "librarian", ClusterHost: clusterHost},
-				}}))
-			case mirrorsAPIPath + "/" + mirrorULID:
-				assert.NoError(t, printJSON(w, &coreapi.Mirror{
-					MirrorId: mirrorULID, Owner: "entirehq", Repo: "librarian", ClusterHost: clusterHost,
-					IsPrivate: coreapi.NewOptBool(true),
-				}))
-			default:
-				t.Errorf("unexpected request path %q", r.URL.Path)
-				w.WriteHeader(http.StatusNotFound)
-			}
-		}))
-		t.Cleanup(srv.Close)
-		return srv
-	}
 	seamActive := func(t *testing.T, fn func(context.Context) (*coreapi.Client, error)) {
 		t.Helper()
 		prev := activeCoreClient
@@ -1265,55 +1144,23 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		var out, errW bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&errW)
-		cmd.SetArgs(append([]string{"mirror", "get"}, args...))
+		cmd.SetArgs(append([]string{"view"}, args...))
 		err := cmd.ExecuteContext(t.Context())
 		return out.String(), err
 	}
 
-	t.Run("clone URL dials the cluster's core, not the active context", func(t *testing.T) {
-		srv := mirrorServer(t)
+	t.Run("a malformed clone URL errors before dialing any core", func(t *testing.T) {
 		seamActive(t, func(context.Context) (*coreapi.Client, error) {
-			t.Error("clone-URL get dialed the active context's core")
-			return nil, errors.New("wrong core")
-		})
-		var gotHost string
-		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
-			gotHost = host
-			return coreapi.NewWithBearer(srv.URL, "tok")
-		})
-		out, err := runGet(t, cloneURL)
-		require.NoError(t, err)
-		require.Equal(t, clusterHost, gotHost, "must resolve on the clone URL's cluster")
-		require.Contains(t, out, "entirehq/librarian")
-		require.Contains(t, out, cloneURL)
-	})
-
-	t.Run("ULID dials the active context", func(t *testing.T) {
-		srv := mirrorServer(t)
-		seamActive(t, func(context.Context) (*coreapi.Client, error) {
-			return coreapi.NewWithBearer(srv.URL, "tok")
-		})
-		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
-			t.Errorf("ULID get dialed cluster core %q; a ULID has no cluster coordinate", host)
-			return nil, errors.New("wrong core")
-		})
-		out, err := runGet(t, mirrorULID)
-		require.NoError(t, err)
-		require.Contains(t, out, "entirehq/librarian")
-	})
-
-	t.Run("unparseable ref errors before dialing any core", func(t *testing.T) {
-		seamActive(t, func(context.Context) (*coreapi.Client, error) {
-			t.Error("unparseable ref dialed the active context's core")
+			t.Error("a malformed clone URL dialed the active context's core")
 			return nil, errors.New("no dial expected")
 		})
 		seamCluster(t, func(context.Context, string) (*coreapi.Client, error) {
-			t.Error("unparseable ref dialed a cluster core")
+			t.Error("a malformed clone URL dialed a cluster core")
 			return nil, errors.New("no dial expected")
 		})
-		_, err := runGet(t, "not-a-url")
+		_, err := runGet(t, "entire://")
 		require.Error(t, err)
-		require.ErrorContains(t, err, "expected a forge-qualified repository reference")
+		require.ErrorContains(t, err, "must be entire://<cluster>/gh/<owner>/<repo>")
 	})
 
 	// serveRepoDetail answers the two endpoints the owner/repo form uses: the
@@ -1405,6 +1252,45 @@ func TestRepoMirrorGet_Routing(t *testing.T) {
 		}}, row)
 	})
 
+	// The record view for a clone URL is resolved on the core fronting the
+	// URL's own cluster, which is the whole reason this form exists: a mirror
+	// in another federation is invisible to the active context's core.
+	t.Run("a clone URL renders the record view on its own cluster's core", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case testClustersPath:
+				assert.NoError(t, printJSON(w, &coreapi.ListClustersOutputBody{Clusters: detailClusters}))
+			case testReposPath:
+				assert.Equal(t, "entirehq/librarian", r.URL.Query().Get("filter"))
+				assert.NoError(t, printJSON(w, &coreapi.ListReposOutputBody{Repos: []coreapi.RepoIndexEntry{
+					{FullName: "entirehq/librarian", Visibility: "private", Placements: []coreapi.RepoPlacement{
+						{ClusterSlug: "us", Status: coreapi.RepoPlacementStatusReady, Mirror: true},
+					}},
+				}}))
+			default:
+				t.Errorf("unexpected path %q", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		seamActive(t, func(context.Context) (*coreapi.Client, error) {
+			t.Error("a clone URL dialed the active context's core")
+			return nil, errors.New("wrong core")
+		})
+		var gotHost string
+		seamCluster(t, func(_ context.Context, host string) (*coreapi.Client, error) {
+			gotHost = host
+			return coreapi.NewWithBearer(srv.URL, "tok")
+		})
+
+		out, err := runGet(t, cloneURL)
+		require.NoError(t, err)
+		require.Equal(t, clusterHost, gotHost, "must resolve on the clone URL's cluster")
+		require.Contains(t, out, "/gh/entirehq/librarian")
+		require.Contains(t, out, "aws-us-east-2.entire.io")
+	})
+
 	t.Run("/gh/owner/repo with no matching repo is a friendly error", func(t *testing.T) {
 		serveRepoDetail(t, nil, detailClusters)
 		_, err := runGet(t, "/gh/entirehq/ghost")
@@ -1420,40 +1306,6 @@ func TestMirrorRefOwner(t *testing.T) {
 	require.Equal(t, "acme", mirrorRefOwner("/gh/acme/web"))
 	require.Equal(t, "acme", mirrorRefOwner(qualifyRepoRef(mirrorCloneForge, "acme/web")))
 	require.Empty(t, mirrorRefOwner(""))
-}
-
-func TestMirrorRow(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		mirror coreapi.Mirror
-		want   []string
-	}{
-		{
-			name:   "private mirror synthesises clone URL",
-			mirror: coreapi.Mirror{Owner: "entirehq", Repo: "entire.io", ClusterHost: "aws-us-east-2.entire.io", IsPrivate: coreapi.NewOptBool(true)},
-			want:   []string{"entirehq/entire.io", "entire://aws-us-east-2.entire.io/gh/entirehq/entire.io", "Private"},
-		},
-		{
-			name:   "public mirror, unset IsPrivate defaults to Public",
-			mirror: coreapi.Mirror{Owner: "octocat", Repo: "hello", ClusterHost: "eu-west-1.entire.io"},
-			want:   []string{"octocat/hello", "entire://eu-west-1.entire.io/gh/octocat/hello", "Public"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := mirrorRow(tt.mirror)
-			if len(got) != len(tt.want) {
-				t.Fatalf("mirrorRow len = %d, want %d (%v)", len(got), len(tt.want), got)
-			}
-			for i := range tt.want {
-				if got[i] != tt.want[i] {
-					t.Errorf("mirrorRow[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
 }
 
 func TestRepoDirCells(t *testing.T) {
@@ -2308,13 +2160,13 @@ func TestRepoAccessList_NativeRefNamesTheGrantCommand(t *testing.T) {
 	require.ErrorContains(t, err, "entire repo grant list")
 }
 
-// TestRepoMirrorGet_NamesARepoOneWay pins the subtree's single grammar: a repo
-// is named /gh/<owner>/<repo> and nothing else. The bare pair used to be
-// accepted here and rejected by every sibling verb, and the qualified form was
-// rejected here and accepted by every sibling.
+// TestRepoView_NamesARepoOneWay pins the grammar of the verb that replaced
+// `mirror get`: a repo is named with its forge, and because `repo view` serves
+// BOTH, a bare pair is answered with both spellings rather than the one the
+// resolver happens to reach first.
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
-func TestRepoMirrorGet_NamesARepoOneWay(t *testing.T) {
+func TestRepoView_NamesARepoOneWay(t *testing.T) {
 	var filters []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		filters = append(filters, r.URL.Query().Get("filter"))
@@ -2329,7 +2181,7 @@ func TestRepoMirrorGet_NamesARepoOneWay(t *testing.T) {
 
 	run := func(ref string) error {
 		filters = nil
-		cmd := newRepoMirrorGetCmd()
+		cmd := newRepoViewCmd()
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)

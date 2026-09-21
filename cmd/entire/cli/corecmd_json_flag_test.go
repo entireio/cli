@@ -43,7 +43,6 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo remote url":    false,
 		"repo mirror add":    false,
 		"repo mirror list":   true,
-		"repo mirror get":    true,
 		"repo mirror remove": false,
 		// `remote use` writes local git config and reports what it changed;
 		// there is no object to render, so it stays off the --json surface like

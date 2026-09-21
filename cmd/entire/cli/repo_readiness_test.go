@@ -17,35 +17,67 @@ import (
 
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // Not parallel: runCoreCmd replaces the process-global client seam.
-func TestRepoGetAuthoritativeSnapshot(t *testing.T) {
+// serveRepoView answers the four reads `repo view` makes for a native repo:
+// the plain repo read, the cluster catalog, the native-mirror list, and the
+// authoritative repo read that fills the primary's STATUS. repoJSON is the
+// body for both repo reads; authoritative, when non-nil, overrides the status
+// and body of the authoritative one so a readiness failure can be simulated
+// without breaking the plain read.
+func serveRepoView(t *testing.T, repoJSON string, authoritative func(w http.ResponseWriter) bool) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var authReads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"nativeMirrors":[]}`)
+		case r.URL.Path == "/api/v1/clusters":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.URL.Query().Get("authoritative") == "true":
+			authReads.Add(1)
+			if authoritative != nil && authoritative(w) {
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, repoJSON)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, repoJSON)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &authReads
+}
+
+// TestRepoView_AuthoritativeSnapshot pins that `repo view` always reads the
+// repo authoritatively, so the primary's STATUS says whether it is usable
+// rather than dashing. The provision reason rides along, which is the field
+// that says why a repo stopped where it did.
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_AuthoritativeSnapshot(t *testing.T) {
 	for _, state := range []string{"provisioning", "active", "failed", "", "future"} {
 		t.Run(state, func(t *testing.T) {
-			var reads atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				reads.Add(1)
-				if r.Method != http.MethodGet || r.URL.Query().Get("authoritative") != "true" {
-					t.Errorf("expected authoritative GET, got %s %s", r.Method, r.URL)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":%q,"provisionReason":"max retries exhausted","capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, testDeleteULID, testProjectULID, state)
-			}))
-			defer srv.Close()
-			for _, args := range [][]string{{testDeleteULID}, {testDeleteULID, "--json"}} {
-				out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, append(args, "--authoritative")...)
-				require.NoError(t, err)
-				require.Contains(t, out, "max retries exhausted")
-				if len(args) > 1 {
-					var obj map[string]any
-					require.NoError(t, json.Unmarshal([]byte(out), &obj))
-					require.Equal(t, state, obj["state"])
-				}
-			}
-			require.EqualValues(t, 2, reads.Load(), "one snapshot per invocation")
+			body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","state":%q,"provisionReason":"max retries exhausted","capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, testDeleteULID, testProjectULID, state)
+			srv, authReads := serveRepoView(t, body, nil)
+
+			out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+			require.NoError(t, err)
+			require.Contains(t, out, "max retries exhausted")
+
+			out, _, err = runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--json")
+			require.NoError(t, err)
+			var row repoDirRow
+			require.NoError(t, json.Unmarshal([]byte(out), &row))
+			require.Equal(t, "max retries exhausted", row.ProvisionReason)
+			require.Equal(t, testDeleteULID, row.ID)
+
+			require.EqualValues(t, 2, authReads.Load(), "one authoritative snapshot per invocation")
 		})
 	}
 }
@@ -509,78 +541,75 @@ func TestRepoCreateMirrorReadinessFlags(t *testing.T) {
 	}
 }
 
+// TestRepoViewAuthoritativeFlag pins what --authoritative now decides. The
+// authoritative read happens either way — it is what makes the primary's
+// STATUS mean anything — so the flag says only whether a readiness answer is
+// REQUIRED: without it a failed readiness read dashes the cell and the view
+// still renders; with it the command fails.
+//
+// hint marks the failures a plain read could still answer. Every other status
+// is a statement about the repository, so retrying without the readiness check
+// changes nothing and the hint must stay away.
+//
 // Not parallel: runCoreCmd replaces the shared client constructor.
 func TestRepoViewAuthoritativeFlag(t *testing.T) {
-	// hint marks the failures a plain read could still answer. Every other
-	// status is a statement about the repository, so retrying without the
-	// readiness check changes nothing and the hint must stay away.
+	const repoBody = `{"id":"` + testDeleteULID + `","name":"web","owningProjectId":"` + testProjectULID + `","provider":"entire","path":"/et/acme/web","capabilities":{"canManage":false,"canPush":false,"canPull":true}}`
 	for _, tc := range []struct {
-		name, flag, query, body string
-		status                  int
-		hint                    bool
+		name, body string
+		status     int
+		hint       bool
 	}{
-		{name: "default"},
-		{name: "explicit", flag: "--authoritative=true", query: "true"},
-		{name: "plain", flag: "--authoritative=false"},
-		{name: "unavailable", flag: "--authoritative", query: "true", status: 503, hint: true},
-		{name: "rejected parameter", flag: "--authoritative", query: "true", status: 422, hint: true,
+		{name: "unavailable", status: 503, hint: true},
+		{name: "rejected parameter", status: 422, hint: true,
 			body: `{"detail":"repository read failed","errors":[{"message":"unknown query parameter","location":"query.authoritative"}]}`},
-		{name: "unrelated validation", flag: "--authoritative", query: "true", status: 422,
+		{name: "unrelated validation", status: 422,
 			body: `{"detail":"repository read failed","errors":[{"message":"expected a ULID","location":"path.repo_id"}]}`},
-		{name: "forbidden", flag: "--authoritative", query: "true", status: 403},
-		{name: "missing", flag: "--authoritative", query: "true", status: 404},
+		{name: "forbidden", status: 403},
+		{name: "missing", status: 404},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var calls atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				assert.Equal(t, tc.query, r.URL.Query().Get("authoritative"))
-				assert.Equal(t, tc.query != "", r.URL.Query().Has("authoritative"))
-				if tc.status != 0 {
-					w.Header().Set("Content-Type", "application/problem+json")
-					w.WriteHeader(tc.status)
-					if tc.body != "" {
-						fmt.Fprint(w, tc.body)
-					} else {
-						fmt.Fprintf(w, `{"status":%d,"detail":"repository read failed"}`, tc.status)
-					}
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, testDeleteULID, testProjectULID)
-			}))
-			defer srv.Close()
-			args := []string{testDeleteULID}
-			if tc.flag != "" {
-				args = append(args, tc.flag)
-			}
-			_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, args...)
-			if tc.status != 0 {
-				require.Error(t, err)
-				var silent *SilentError
-				if !errors.As(err, &silent) {
-					stderr += err.Error()
-				}
-				// The server's own message reaches the user either way.
-				require.Contains(t, stderr, "repository read failed")
-				if tc.hint {
-					require.Contains(t, stderr, "entire repo view "+testDeleteULID+" to inspect")
-					require.Contains(t, stderr, "without a readiness check")
+			fail := func(w http.ResponseWriter) bool {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					fmt.Fprint(w, tc.body)
 				} else {
-					require.NotContains(t, stderr, "readiness check")
+					fmt.Fprintf(w, `{"status":%d,"detail":"repository read failed"}`, tc.status)
 				}
-				if tc.hint && tc.status == 422 {
-					require.Contains(t, stderr, "query.authoritative")
-					require.Contains(t, stderr, "unknown query parameter")
-				}
-				// The plain read is the default; naming a flag value would send
-				// the user to restate one they never had to pass.
-				require.NotContains(t, stderr, "--authoritative=false")
-				require.NotContains(t, stderr, "--no-wait")
-			} else {
-				require.NoError(t, err)
+				return true
 			}
-			require.EqualValues(t, 1, calls.Load(), "no silent fallback")
+
+			// Without the flag the readiness failure is swallowed: the STATUS
+			// cell dashes and the rest of the view is still worth printing.
+			srv, _ := serveRepoView(t, repoBody, fail)
+			out, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+			require.NoError(t, err, "a failed readiness read must not sink the view")
+			require.Contains(t, out, "/et/acme/web")
+			require.NotContains(t, stderr, "readiness check")
+
+			srv, _ = serveRepoView(t, repoBody, fail)
+			_, stderr, err = runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--authoritative")
+			require.Error(t, err)
+			var silent *SilentError
+			if !errors.As(err, &silent) {
+				stderr += err.Error()
+			}
+			// The server's own message reaches the user either way.
+			require.Contains(t, stderr, "repository read failed")
+			if tc.hint {
+				require.Contains(t, stderr, "entire repo view "+testDeleteULID+" to inspect")
+				require.Contains(t, stderr, "without a readiness check")
+			} else {
+				require.NotContains(t, stderr, "readiness check")
+			}
+			if tc.hint && tc.status == 422 {
+				require.Contains(t, stderr, "query.authoritative")
+				require.Contains(t, stderr, "unknown query parameter")
+			}
+			// The plain read is the default; naming a flag value would send the
+			// user to restate one they never had to pass.
+			require.NotContains(t, stderr, "--authoritative=false")
+			require.NotContains(t, stderr, "--no-wait")
 		})
 	}
 }

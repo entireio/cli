@@ -115,7 +115,7 @@ func TestNativeMirrorIsFresh(t *testing.T) {
 	require.False(t, nativeMirrorIsFresh(ready))
 }
 
-// TestNativeRepoDetailRow pins what `mirror get /et/...` shows: the primary
+// TestNativeRepoDetailRow pins what `repo view /et/...` shows: the primary
 // first, then every mirror, each labelled by role — because the difference
 // decides what a reader can do with it.
 func TestNativeRepoDetailRow(t *testing.T) {
@@ -220,7 +220,7 @@ func TestRenderNativeMirrorCreateError(t *testing.T) {
 	}}
 	got = renderNativeMirrorCreateError(deleting, "/et/acme/web", "aws-eu-central-1")
 	require.ErrorContains(t, got, "still being torn down")
-	require.ErrorContains(t, got, "entire repo mirror get /et/acme/web")
+	require.ErrorContains(t, got, "entire repo view /et/acme/web")
 }
 
 // TestCreateOneNativeMirror_RefusalReachesTheResult runs the refusal through

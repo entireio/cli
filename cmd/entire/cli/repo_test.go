@@ -115,41 +115,6 @@ func TestParseVisibility(t *testing.T) {
 	}
 }
 
-func TestRepoDetailRow(t *testing.T) {
-	t.Parallel()
-
-	t.Run("includes the entire:// remote", func(t *testing.T) {
-		t.Parallel()
-		row := repoDetailRow(coreapi.Repo{
-			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
-			Name:            "web",
-			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
-			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
-			Path:            coreapi.NewOptString("acme/web"),
-			State:           coreapi.NewOptString("active"),
-		})
-		if len(row) != len(repoDetailColumns) {
-			t.Fatalf("row has %d cells, want %d (one per column)", len(row), len(repoDetailColumns))
-		}
-		if want := "entire://aws-us-east-2.entire.io/acme/web"; row[len(row)-1] != want {
-			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], want)
-		}
-	})
-
-	t.Run("shows - when the remote is not yet resolvable", func(t *testing.T) {
-		t.Parallel()
-		row := repoDetailRow(coreapi.Repo{
-			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
-			Name:            "web",
-			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
-			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
-		})
-		if row[len(row)-1] != "-" {
-			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], "-")
-		}
-	})
-}
-
 func TestRepoCreateOutput_StampsRemote(t *testing.T) {
 	t.Parallel()
 	repo := &coreapi.Repo{
@@ -731,10 +696,19 @@ func TestRepoList_GroupedFlagHelp(t *testing.T) {
 // Not parallel: swaps the package-level activeCoreClient seam via runCoreCmd.
 func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	const repoULID = "0123456789ABCDEFGHJKMNPQR5"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := printJSON(w, &coreapi.Repo{ID: repoULID, Name: "web", OwningProjectId: ulidProjectWidgets}); err != nil {
-			t.Errorf("encode repo: %v", err)
+		// The view joins the repo read with the cluster catalog and the
+		// native-mirror list, so the fake has to answer all three.
+		var body any = &coreapi.Repo{ID: repoULID, Name: "web", OwningProjectId: ulidProjectWidgets}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			body = &coreapi.ListNativeMirrorsOutputBody{}
+		case r.URL.Path == testClustersPath:
+			body = &coreapi.ListClustersOutputBody{}
+		}
+		if err := printJSON(w, body); err != nil {
+			t.Errorf("encode response: %v", err)
 		}
 	}))
 	t.Cleanup(srv.Close)
