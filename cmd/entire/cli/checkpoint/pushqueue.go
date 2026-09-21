@@ -159,24 +159,32 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	}
 	defer release()
 
-	current, _, err := q.readLocked(root)
+	current, _, err := q.readAllLocked(root)
 	if err != nil {
 		return err
 	}
-	removed := make(map[string]struct{}, len(refs))
+
+	// Remove only the entries that existed when the caller drained the queue.
+	// Drain compacts the queue to one entry per ref, so the first matching
+	// occurrence is the drained entry; a later matching occurrence was appended
+	// after Drain and must remain queued for the next push.
+	remaining := make(map[string]int, len(refs))
 	for _, r := range refs {
-		removed[r.String()] = struct{}{}
+		remaining[r.String()]++
 	}
+
 	kept := make([]plumbing.ReferenceName, 0, len(current))
 	for _, r := range current {
-		if _, drop := removed[r.String()]; drop {
+		key := r.String()
+		if count := remaining[key]; count > 0 {
+			remaining[key] = count - 1
 			continue
 		}
 		kept = append(kept, r)
 	}
+
 	return q.rewriteLocked(root, kept)
 }
-
 // rewriteLocked replaces the queue file with exactly refs (de-duplicated, one
 // line each), or removes the file when refs is empty so a clean repo has no
 // stray queue. The caller must hold the lock. The write is atomic (temp file +
@@ -211,7 +219,7 @@ func (q *PushQueue) rewriteLocked(root *os.Root, refs []plumbing.ReferenceName) 
 // malformed records), so callers can detect when the file holds more than the
 // de-duplicated set and is worth compacting: rawLines > len(refs) exactly when
 // there were redundant lines.
-func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
+func (q *PushQueue) readAllLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
 	f, err := root.Open(pushQueueFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -221,7 +229,6 @@ func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, ra
 	}
 	defer f.Close()
 
-	seen := make(map[string]struct{})
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -230,14 +237,11 @@ func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, ra
 			continue
 		}
 		rawLines++
+
 		var entry pushQueueEntry
 		if err := json.Unmarshal(line, &entry); err != nil || entry.Ref == "" {
 			continue
 		}
-		if _, dup := seen[entry.Ref]; dup {
-			continue
-		}
-		seen[entry.Ref] = struct{}{}
 		refs = append(refs, plumbing.ReferenceName(entry.Ref))
 	}
 	if err := scanner.Err(); err != nil {
@@ -246,6 +250,31 @@ func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, ra
 	return refs, rawLines, nil
 }
 
+// readLocked parses the queue file into de-duplicated refs, preserving first-seen
+// order. The caller must hold the lock. Malformed lines are skipped rather than
+// failing the whole drain ? a single bad record must not strand every queued ref.
+//
+// rawLines is the number of non-empty lines seen (including duplicates and
+// malformed records), so callers can detect when the file holds more than the
+// de-duplicated set and is worth compacting: rawLines > len(refs) exactly when
+// there were redundant lines.
+func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
+	all, rawLines, err := q.readAllLocked(root)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	seen := make(map[string]struct{}, len(all))
+	for _, ref := range all {
+		if _, dup := seen[ref.String()]; dup {
+			continue
+		}
+		seen[ref.String()] = struct{}{}
+		refs = append(refs, ref)
+	}
+
+	return refs, rawLines, nil
+}
 // writeQueueAtomic writes data to a temp file inside root and renames it over
 // the queue file, so a reader (under the lock) never sees a half-written queue.
 func writeQueueAtomic(root *os.Root, data []byte) error {
