@@ -26,9 +26,9 @@ func TestMain(m *testing.M) {
 	// it), and testing.Testing() is false in that child — so the internal
 	// testdirs fallback and the in-memory keyring mock don't apply there, and
 	// the child's tokenstore default backend reaches the developer's real OS
-	// keychain. Set the file-backed token store and isolated config/cache dirs
-	// process-wide so spawned children inherit them. Mirrors the integration
-	// and e2e TestMains.
+	// keychain. Set the file-backed token store and isolated config, cache, and
+	// auth lock dirs process-wide so spawned children inherit them. Mirrors the
+	// integration and e2e TestMains.
 	isolationDir, err := os.MkdirTemp("", "entire-cli-test-*")
 	if err != nil {
 		panic(fmt.Errorf("failed to create test isolation dir: %w", err))
@@ -38,6 +38,7 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(isolationDir, "auth-tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
+	os.Setenv("ENTIRE_AUTH_LOCK_DIR", filepath.Join(isolationDir, "auth-locks"))
 
 	// ENTIRE_TOKEN is isolated by ABSENCE, not by a redirected path, so it is
 	// not in the block above. Left set, it outranks every stored context in

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/testdirs"
 )
 
@@ -22,6 +24,8 @@ import (
 // token carries no usable ExpiresAt. The server is the real authority; this
 // only governs when local readers consider the cached token stale.
 const defaultSavedTokenTTL = time.Hour
+
+const authLockDirEnvVar = "ENTIRE_AUTH_LOCK_DIR"
 
 // contextTokenStore adapts one login context's keyring slots to auth-go's
 // tokenstore.Store, so tokenmanager can load, refresh, and persist that
@@ -123,6 +127,10 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 	if c.KeychainService == "" || c.Handle == "" {
 		return nil, fmt.Errorf("context %q has no keychain slot", c.Name)
 	}
+	lockDir, err := tokenManagerLockDir()
+	if err != nil {
+		return nil, err
+	}
 	mgr, err := tokenmanager.New(tokenmanager.Config{
 		Issuer:            strings.TrimRight(c.CoreURL, "/"),
 		ClientID:          oauthClientID,
@@ -131,7 +139,7 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 		Transport:         transport,
 		AllowInsecureHTTP: allowInsecureHTTP,
 		UserAgent:         oauthClientID,
-		LockDir:           tokenManagerLockDir(),
+		LockDir:           lockDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init token manager for context %q: %w", c.Name, err)
@@ -139,26 +147,20 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 	return mgr, nil
 }
 
-// tokenManagerLockDir picks the directory holding auth-go's cross-process
-// advisory lock file. Empty means auth-go's own default,
-// os.UserCacheDir()/auth-go, which is what production wants.
-//
-// Under `go test` that default is the developer's real user cache directory
-// (~/Library/Caches/auth-go on macOS, which os.UserCacheDir resolves without
-// consulting XDG_CACHE_HOME), so every test that builds a per-context manager
-// litters it with lock files keyed on (ClientID, Issuer). Route it to the same
-// throwaway per-process directory the config, cache, and tokenstore surfaces
-// already use under test — internal/testdirs exists precisely so a test that
-// forgets an override cannot reach real user state.
-//
-// The lock file holds no credentials; the harm is writing into a directory that
-// is not ours to write to, and sharing a cross-process lock with whatever else
-// is running.
-func tokenManagerLockDir() string {
-	if dir, ok := testdirs.Dir("authlock"); ok {
-		return dir
+// Spawned binaries need an inherited override because testing.Testing is false
+// there, and macOS's os.UserCacheDir ignores XDG_CACHE_HOME. In-process tests
+// use testdirs; production without an override keeps auth-go's default.
+func tokenManagerLockDir() (string, error) {
+	if dir := os.Getenv(authLockDirEnvVar); dir != "" {
+		if err := userdirs.RequireAbsoluteOverride(authLockDirEnvVar, dir); err != nil {
+			return "", fmt.Errorf("resolve auth lock directory: %w", err)
+		}
+		return dir, nil
 	}
-	return ""
+	if dir, ok := testdirs.Dir("authlock"); ok {
+		return dir, nil
+	}
+	return "", nil
 }
 
 // reauthError carries a friendly, context-named re-login message while still
