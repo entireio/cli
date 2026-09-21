@@ -12,21 +12,53 @@ major="${major:-0}"
 minor="${minor:-0}"
 patch="${patch:-0}"
 
+build=0
+case "$version" in
+*-nightly.*)
+    # Nightly tags end in the commit: 0.10.7-nightly.<stamp>.<short sha>.
+    sha="${version##*.}"
+    if [[ ! "$sha" =~ ^[0-9a-f]{4,}$ ]]; then
+        echo "winres: no commit sha at the end of nightly version '$version'" >&2
+        exit 1
+    fi
+    # The fourth VERSIONINFO field is a uint16, so it carries the first four
+    # hex digits of that commit (81a05d785 -> 0x81a0 -> 33184). That is enough
+    # to tell apart the nightlies sharing one patch version — roughly a release
+    # cycle's worth, under 1% chance of a clash — and it points straight back at
+    # a commit, which a timestamp would not. Ordering is deliberately not a
+    # property here: nothing compares these numerically, and the whole tag is in
+    # the FileVersion string either way. Stable releases keep build 0.
+    build=$((16#${sha:0:4}))
+    ;;
+esac
+
+# goversioninfo does not range-check these fields. It packs them as "%04x%04x"
+# and parses the result as a uint32, so a value above 65535 silently shifts into
+# the patch field (-ver-build 20260920 yields 0.10.28981.10296) rather than
+# failing the release.
+for field in major minor patch build; do
+    value="${!field}"
+    if ((value < 0 || value > 65535)); then
+        echo "winres: $field=$value is outside the uint16 VERSIONINFO range (0-65535)" >&2
+        exit 1
+    fi
+done
+
 generate() {
     local pkg="$1" desc="$2" original_name="$3"
     local common_flags=(
-        -manifest winres/app.manifest
         -company "Entire"
-        -copyright "Copyright (c) Entire, Inc."
+        -copyright "Copyright (c) 2026 Entire Inc."
         -description "$desc"
         -product-name "Entire CLI"
+        -internal-name "$original_name"
         -original-name "$original_name"
-        -ver-major "$major" -ver-minor "$minor" -ver-patch "$patch"
-        -product-ver-major "$major" -product-ver-minor "$minor" -product-ver-patch "$patch"
+        -ver-major "$major" -ver-minor "$minor" -ver-patch "$patch" -ver-build "$build"
+        -product-ver-major "$major" -product-ver-minor "$minor" -product-ver-patch "$patch" -product-ver-build "$build"
         -file-version "$version"
         -product-version "$version"
     )
-    goversioninfo -64 -o "${pkg}/rsrc_windows_amd64.syso" "${common_flags[@]}" winres/versioninfo.json
+    goversioninfo -64 -arm=false -o "${pkg}/rsrc_windows_amd64.syso" "${common_flags[@]}" winres/versioninfo.json
     goversioninfo -64 -arm -o "${pkg}/rsrc_windows_arm64.syso" "${common_flags[@]}" winres/versioninfo.json
 }
 
