@@ -13,6 +13,7 @@ minor="${minor:-0}"
 patch="${patch:-0}"
 
 build=0
+version_string="$version"
 case "$version" in
 *-nightly.*)
     # Nightly tags end in the commit: 0.10.7-nightly.<stamp>.<short sha>.
@@ -29,6 +30,12 @@ case "$version" in
     # property here: nothing compares these numerically, and the whole tag is in
     # the FileVersion string either way. Stable releases keep build 0.
     build=$((16#${sha:0:4}))
+    # Lead the version string with the same four components as the fixed
+    # fields. goversioninfo parses the string's leading x.y.z[.w] and warns on
+    # every invocation when it disagrees with them — and it always disagrees
+    # once the fourth field is non-zero. It also ties the bare 33184 that
+    # Explorer's "File version" row shows back to the commit beside it.
+    version_string="$major.$minor.$patch.$build-${version#*-}"
     ;;
 esac
 
@@ -55,8 +62,8 @@ generate() {
         -original-name "$original_name"
         -ver-major "$major" -ver-minor "$minor" -ver-patch "$patch" -ver-build "$build"
         -product-ver-major "$major" -product-ver-minor "$minor" -product-ver-patch "$patch" -product-ver-build "$build"
-        -file-version "$version"
-        -product-version "$version"
+        -file-version "$version_string"
+        -product-version "$version_string"
     )
     goversioninfo -64 -arm=false -o "${pkg}/rsrc_windows_amd64.syso" "${common_flags[@]}" winres/versioninfo.json
     goversioninfo -64 -arm -o "${pkg}/rsrc_windows_arm64.syso" "${common_flags[@]}" winres/versioninfo.json
