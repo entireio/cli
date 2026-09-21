@@ -103,10 +103,13 @@ func TestReviewCmd_ListAgents(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"claude-code", "codex", "--agent"} {
+	for _, want := range []string{"claude-code", "codex", "--agent", "entire agent add"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--agents output missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "configure --agent") {
+		t.Errorf("--agents output should NOT hint at the stale `configure --agent` flag:\n%s", out)
 	}
 }
 
@@ -252,6 +255,12 @@ func TestRunReview_MissingHooksAborts(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "hooks are not installed") {
 		t.Errorf("expected 'hooks are not installed' in stderr, got: %s", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "entire agent add") {
+		t.Errorf("expected 'entire agent add' hint in stderr, got: %s", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "configure --agent") {
+		t.Errorf("stderr should NOT hint at the stale `configure --agent` flag, got: %s", errBuf.String())
 	}
 
 	_, ok, readErr := review.ReadPendingReviewMarker(context.Background())
@@ -482,6 +491,12 @@ func TestRunReview_FlagOverrideMustBeEligibleAgent(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "Hooks are not installed") {
 		t.Errorf("stderr should mention 'Hooks are not installed', got: %s", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "entire agent add") {
+		t.Errorf("stderr should hint at `entire agent add`, got: %s", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "configure --agent") {
+		t.Errorf("stderr should NOT hint at the stale `configure --agent` flag, got: %s", errBuf.String())
 	}
 }
 
