@@ -1546,13 +1546,13 @@ func printTrailReviewDashboard(w io.Writer, target trailReviewTarget, comments [
 	fmt.Fprintf(w, "  Open findings: %d  high %d  medium %d  low %d\n", counts.Open, counts.OpenHigh, counts.OpenMedium, counts.OpenLow)
 	fmt.Fprintf(w, "  Resolved: %d        Dismissed: %d     Stale: %d\n", counts.Resolved, counts.Dismissed, counts.Stale)
 	if next.more() {
+		// A pre-RFD-026 cell pages by offset, which this CLI no longer exposes
+		// as a flag, so there is nothing to name for it.
 		if next.Cursor == "" {
-			// A pre-RFD-026 cell pages by offset, which this CLI no longer
-			// exposes as a flag; say more exist without naming a flag.
 			fmt.Fprintf(w, "  Showing up to %d findings; more available\n", opts.Limit)
-			return
+		} else {
+			fmt.Fprintf(w, "  Showing up to %d findings; next page: --cursor %q\n", opts.Limit, next.Cursor)
 		}
-		fmt.Fprintf(w, "  Showing up to %d findings; next page: --cursor %q\n", opts.Limit, next.Cursor)
 	}
 	fmt.Fprintln(w)
 
@@ -1582,9 +1582,9 @@ func printTrailReviewComments(w io.Writer, comments []api.TrailReviewComment, ne
 	if next.more() {
 		if next.Cursor == "" {
 			fmt.Fprintln(w, "More findings available.")
-			return
+		} else {
+			fmt.Fprintf(w, "More findings available; next page: --cursor %q\n", next.Cursor)
 		}
-		fmt.Fprintf(w, "More findings available; next page: --cursor %q\n", next.Cursor)
 	}
 }
 

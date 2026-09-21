@@ -45,8 +45,14 @@ func TestDecodesLegacyCamelCaseIntoCurrentStruct(t *testing.T) {
 	if page.Total != 1 {
 		t.Errorf("Total = %d, want 1 (totalCount -> total_count)", page.Total)
 	}
-	if page.NextCursor == nil || *page.NextCursor != "tok-1" {
-		t.Errorf("NextCursor = %v, want tok-1 (nextPageToken -> next_cursor)", page.NextCursor)
+	// A legacy continuation must land in NextPageToken, never NextCursor: the
+	// two go back out under different request parameters, and a legacy token
+	// echoed as `cursor` is ignored, repeating page one.
+	if page.NextCursor != nil {
+		t.Errorf("NextCursor = %v, want nil for a legacy page token", *page.NextCursor)
+	}
+	if page.NextPageToken == nil || *page.NextPageToken != "tok-1" {
+		t.Errorf("NextPageToken = %v, want tok-1", page.NextPageToken)
 	}
 	if len(page.Trails) != 1 {
 		t.Fatalf("got %d trails, want 1", len(page.Trails))

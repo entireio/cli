@@ -1064,8 +1064,8 @@ func TestTrailWatchDescription(t *testing.T) {
 
 func TestTrailListPageQueryEncodesFilters(t *testing.T) {
 	t.Parallel()
-	got := trailListPageQuery([]trail.Status{trail.StatusOpen, trail.StatusDraft}, 10, "")
-	want := "?per_page=10&status%5Beq%5D=open%2Cdraft"
+	got := trailListPageQuery([]trail.Status{trail.StatusOpen, trail.StatusDraft}, 10, trailListPage{})
+	want := "?pageSize=10&per_page=10&status%5Beq%5D=open%2Cdraft"
 	if got != want {
 		t.Fatalf("trailListPageQuery = %q, want %q", got, want)
 	}
@@ -1073,15 +1073,15 @@ func TestTrailListPageQueryEncodesFilters(t *testing.T) {
 
 func TestTrailListPageQueryAnyStatusOmitsStatusParam(t *testing.T) {
 	t.Parallel()
-	got := trailListPageQuery(nil, 10, "")
-	if got != "?per_page=10" {
-		t.Fatalf("trailListPageQuery = %q, want %q", got, "?per_page=10")
+	got := trailListPageQuery(nil, 10, trailListPage{})
+	if got != "?pageSize=10&per_page=10" {
+		t.Fatalf("trailListPageQuery = %q, want %q", got, "?pageSize=10&per_page=10")
 	}
 }
 
 func TestTrailListPageQueryCapsPageSizeAtServerMax(t *testing.T) {
 	t.Parallel()
-	got := trailListPageQuery(nil, 5000, "")
+	got := trailListPageQuery(nil, 5000, trailListPage{})
 	if !strings.Contains(got, "per_page=100") {
 		t.Fatalf("expected per_page capped at 100, got %q", got)
 	}
@@ -1184,7 +1184,7 @@ func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
 
 func TestTrailListPageQueryUsesEntireAPIPagination(t *testing.T) {
 	t.Parallel()
-	got := trailListPageQuery([]trail.Status{trail.StatusOpen}, 100, "next page")
+	got := trailListPageQuery([]trail.Status{trail.StatusOpen}, 100, trailListPage{Cursor: "next page"})
 	want := "?cursor=next+page&per_page=100"
 	if got != want {
 		t.Fatalf("trailListPageQuery = %q, want %q", got, want)

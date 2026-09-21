@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -116,4 +117,44 @@ func requireCamelCaseKeys(t *testing.T, raw json.RawMessage) {
 		}
 	}
 	walk("$", decoded)
+}
+
+// A pre-RFD-026 cell continues a list with pageToken, not cursor. Sending the
+// legacy token back as `cursor` is ignored there, so page one repeats.
+func TestTrailListFollowsLegacyPageToken(t *testing.T) {
+	t.Parallel()
+	var queries []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		// camelCase throughout, as a pre-migration cell answers.
+		if r.URL.Query().Get("pageToken") == "" {
+			fmt.Fprint(w, `{"items":[{"branch":"a","base":"main","title":"A","status":"open"}],"totalCount":2,"nextPageToken":"tok-2"}`)
+			return
+		}
+		fmt.Fprint(w, `{"items":[{"branch":"b","base":"main","title":"B","status":"open"}],"totalCount":2,"nextPageToken":null}`)
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	items, total, err := listTrailResources(t.Context(), client, "/api/v1/trails/gh/acme/widget", nil, "", 50)
+	require.NoError(t, err)
+	require.Len(t, items, 2, "both legacy pages should be collected")
+	require.Equal(t, 2, total)
+
+	require.Len(t, queries, 2)
+	require.Empty(t, queries[0].Get("pageToken"))
+	require.Equal(t, "tok-2", queries[1].Get("pageToken"))
+	// The legacy token must never be echoed back as a cursor.
+	require.Empty(t, queries[1].Get("cursor"))
+	// pageSize rides alongside per_page so the page size survives either cell.
+	require.Equal(t, queries[0].Get("per_page"), queries[0].Get("pageSize"))
+}
+
+// A migrated cell's cursor wins if a response somehow carries both forms.
+func TestTrailListPrefersCursorOverPageToken(t *testing.T) {
+	t.Parallel()
+	cursor, token := "opaque", "tok-2"
+	got := trailListPageFrom(api.TrailListResponse{NextCursor: &cursor, NextPageToken: &token})
+	require.Equal(t, trailListPage{Cursor: "opaque"}, got)
 }

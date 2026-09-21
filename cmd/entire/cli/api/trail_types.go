@@ -13,6 +13,10 @@ type TrailListResponse struct {
 	Trails     []TrailResource `json:"items"`
 	Total      int             `json:"total_count"`
 	NextCursor *string         `json:"next_cursor"`
+	// NextPageToken is a pre-RFD-026 cell's continuation, reached through
+	// DecodeTrailJSON's snake_case rewrite of nextPageToken. It is sent back
+	// as pageToken, not cursor — see trailListPageQuery.
+	NextPageToken *string `json:"next_page_token,omitempty"`
 }
 
 // TrailResource represents a trail returned by entire-api. The backend uses

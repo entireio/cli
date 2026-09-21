@@ -34,13 +34,14 @@ import (
 // wireRenames covers the fields whose NAME changed, not just their case;
 // snakeWireKey handles everything else mechanically.
 //
-// The review-comment page is deliberately absent. hasMore/nextOffset ->
-// next_cursor is an offset-to-cursor model change, not a rename: the two carry
-// different meanings and drive different request parameters, so the paging
-// loop has to branch on which one it got. Aliasing them here would hand that
-// loop a cursor built from an offset.
+// Pagination continuations are deliberately absent, because their values go
+// back out in a request whose PARAMETER name differs too. Renaming
+// nextPageToken to next_cursor would make the trail list follow a legacy
+// token and then send it as `cursor`, which a legacy cell ignores — page one
+// repeats. hasMore/nextOffset is the same trap plus a model change. Both are
+// handled by the paging loops, which branch on the form they were given and
+// send the matching parameter.
 var wireRenames = map[string]string{
-	"nextPageToken":      "next_cursor",
 	"repositoryId":       "repo_id",
 	"thread":             "discussion",
 	"threadId":           "discussion_id",
