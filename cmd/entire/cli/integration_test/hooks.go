@@ -1061,6 +1061,37 @@ func (r *OpenCodeHookRunner) SimulateOpenCodeSessionEnd(sessionID, _ string) err
 	return r.runOpenCodeHookWithInput("session-end", input)
 }
 
+// SimulateOpenCodeSubagentStart simulates the subagent-start hook: the parent's
+// task part bound callID to the child session.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description string) error {
+	r.T.Helper()
+	return r.runOpenCodeHookWithInput("subagent-start", map[string]string{
+		"session_id":       parentID,
+		"tool_use_id":      toolUseID,
+		"subagent_id":      childID,
+		"subagent_type":    subagentType,
+		"task_description": description,
+	})
+}
+
+// SimulateOpenCodeSubagentStop simulates the subagent-stop hook. The Go handler
+// exports the child with `opencode export`; under ENTIRE_TEST_OPENCODE_MOCK_EXPORT
+// it reads .entire/tmp/<childID>.json instead, so callers copy the child's
+// transcript there first with env.CopyTranscriptToEntireTmp (the same helper
+// mid-turn tests use for the parent). Omitting that copy exercises the
+// export-failure path.
+func (r *OpenCodeHookRunner) SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description string) error {
+	r.T.Helper()
+	return r.runOpenCodeHookWithInput("subagent-stop", map[string]string{
+		"session_id":       parentID,
+		"tool_use_id":      toolUseID,
+		"subagent_id":      childID,
+		"subagent_type":    subagentType,
+		"task_description": description,
+		"model":            "test-model",
+	})
+}
+
 // OpenCodeSession represents a simulated OpenCode session.
 type OpenCodeSession struct {
 	ID             string // Raw session ID (e.g., "opencode-session-1")
@@ -1198,6 +1229,20 @@ func (env *TestEnv) SimulateOpenCodeSessionEnd(sessionID, transcriptPath string)
 	env.T.Helper()
 	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
 	return runner.SimulateOpenCodeSessionEnd(sessionID, transcriptPath)
+}
+
+// SimulateOpenCodeSubagentStart is a convenience method on TestEnv.
+func (env *TestEnv) SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description string) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSubagentStart(parentID, toolUseID, childID, subagentType, description)
+}
+
+// SimulateOpenCodeSubagentStop is a convenience method on TestEnv.
+func (env *TestEnv) SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description string) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodeSubagentStop(parentID, toolUseID, childID, subagentType, description)
 }
 
 // CopyTranscriptToEntireTmp copies an OpenCode transcript to .entire/tmp/<sessionID>.json.
