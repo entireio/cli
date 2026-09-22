@@ -425,16 +425,20 @@ const (
 	// re-derived from it: that cap is a byte-sized memory-safety backstop
 	// with no time budget in it at all.
 	//
-	// Three hours buys ~9 MB of batched input at the measured rate, sized
-	// against the real figures in docs/development/opf-bug-investigation.md:
-	// a median checkpoint's transcript is 3.9 MB raw (~3.3 MB of prose
-	// leaves), and the largest figure there — a ref's whole un-trailered
-	// ancestry at ~9.5 MB raw — is measured before the dedup the batch
-	// redactor applies to near-identical trees, so what the model actually
-	// sees stays closer to one session's text than to the summed chain.
-	// Content up to ~4.6 MB, comfortably past a median session, keeps the
-	// full doubled allowance; past that the allowance narrows toward 1x, so
-	// only a machine materially slower than the benchmark trips it.
+	// Three hours buys ~9 MB of batched input at the measured rate WITHOUT
+	// the 2x margin above, or ~4.6 MB WITH it — two framings of the same
+	// clamp, not two different capacities. Sized against the real figures
+	// in docs/development/opf-bug-investigation.md: a median checkpoint's
+	// transcript is 3.9 MB raw (~3.3 MB of prose leaves), and the largest
+	// figure there — a ref's whole un-trailered ancestry at ~9.5 MB raw —
+	// is measured before the dedup the batch redactor applies to
+	// near-identical trees, so what the model actually sees stays closer
+	// to one session's text than to the summed chain. Content up to the
+	// ~4.6 MB with-margin figure, comfortably past a median session, keeps
+	// the full doubled allowance; past that the allowance narrows toward
+	// 1x (still not zero) as it approaches the ~9 MB without-margin
+	// figure, so only a machine materially slower than the benchmark
+	// trips it.
 	//
 	// The clamp is also what bounds one call's blast radius on the work
 	// queued behind it: the detached flush worker (strategy.RunOPFFlush)
