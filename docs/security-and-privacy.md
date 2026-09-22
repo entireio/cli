@@ -215,7 +215,7 @@ The interactive prompt offers three options and reacts to **Ctrl-C** for cancell
 
 ```
 Run OpenAI Privacy Filter on these checkpoints?
-Adds ~30s but redacts names/PII the regex layers can't catch.
+Adds at least ~30s, longer for large sessions, but redacts names/PII the regex layers can't catch.
 Ctrl-C to cancel the push.
 
   ▸ Yes — run OPF this push
@@ -228,7 +228,7 @@ Ctrl-C to cancel the push.
 - **Always** runs OPF this push AND writes `prompt_default: "always"` to `.entire/settings.local.json` so future pushes don't ask.
 - **Ctrl-C** cancels OPF. What that costs depends on the backend: on `git-branch` your `git push` aborts and exits non-zero; on `git-refs` your push completes and the checkpoint refs stay queued for a later push. Either way nothing under-redacted reaches the remote.
 
-Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and run OPF automatically when enabled, printing `→ OpenAI Privacy Filter: scanning checkpoints before push (may take ~30s)…` to stderr so the wait isn't silent. Progress and completion are reported as `→ OpenAI Privacy Filter: scanning checkpoints…` and `✓ OpenAI Privacy Filter: done (12.4s, 37 blobs)`. Set `ENTIRE_OPF=no` to skip OPF in those contexts without disabling the feature globally.
+Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and run OPF automatically when enabled, printing `→ OpenAI Privacy Filter: scanning checkpoints before push (at least ~30s, longer for large sessions)…` to stderr so the wait isn't silent. Progress and completion are reported as `→ OpenAI Privacy Filter: scanning checkpoints…` and `✓ OpenAI Privacy Filter: done (12.4s, 37 blobs)`. Set `ENTIRE_OPF=no` to skip OPF in those contexts without disabling the feature globally.
 
 **CI consideration**: if you've enabled OPF locally and your CI runs `git push` (e.g. an agent-driven workflow), the CI push will attempt to run OPF too. If the `opf` binary isn't installed in CI, the failure is fail-closed rather than silently shipping under-redacted content — by design, since "I enabled OPF" should mean "no content leaves my machines without OPF." On `git-branch` that aborts the CI push; on `git-refs` the push succeeds but the checkpoints don't ship, which means they can accumulate unpushed until someone notices. The remedies are (a) install `opf` in CI, (b) set `ENTIRE_OPF=no` for CI pushes, or (c) set `prompt_default: "never"` if you only want OPF on interactive pushes.
 
@@ -245,30 +245,23 @@ Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). Redacta
 
 #### When OPF actually runs
 
-> **Stale, needs a rewrite:** this section still describes one inference call
-> batching every commit/ref in the push. On `git-refs`, that changed: the cap
-> and the OPF call are now scoped per checkpoint ref, not per flush, and a
-> `git-refs` flush that can't finish inline hands the remainder to a detached
-> `entire __opf_flush` worker instead of blocking the push (see "Seeing
-> outstanding OPF work" below, and the caps subsection above, for the accurate
-> current shape). `git-branch`'s flow below is still accurate: its cap stays
-> cumulative across the whole unpushed chain. Rewrite this section for
-> `git-refs` rather than trusting the flow as written.
-
-OPF execution lives in the pre-push hook. The flow:
+OPF execution starts in the pre-push hook, but the two backends differ sharply in what happens from there:
 
 1. **Post-commit** writes the checkpoint with **8-layer-only** redaction to local git objects — per-checkpoint refs on `git-refs`, the `entire/checkpoints/v1` branch on `git-branch`. Fast, predictable, no OPF cost on the hot path.
-2. **Pre-push** (`git push`): if OPF is enabled, the hook re-reads each not-yet-OPF'd commit, runs the OpenAI Privacy Filter over its blobs to add the categories the regex layers don't catch (person names, addresses, etc.), and builds **new commits** carrying an `Entire-OPF-Applied: true` trailer. Each backend then points its own local ref at the new tip with a compare-and-swap, and the (now 9-layer-redacted) commits are what get pushed.
-3. The original 8-layer-only commits become **unreachable** in the local git object database and eventually get swept by `git gc`.
+2. **Pre-push** (`git push`): if OPF is enabled, the hook makes one inline attempt to rewrite not-yet-OPF'd commits, adding the categories the regex layers don't catch (person names, addresses, etc.) and building **new commits** carrying an `Entire-OPF-Applied: true` trailer.
+   - On **`git-branch`**, this inline attempt is the whole story: it rewrites the entire unpushed `entire/checkpoints/v1` chain in one shot, cumulative-cap-checked as a single unit, and the push waits on it — up to the adaptive shell-out timeout's ceiling (currently 3 hours; see "Batch cap" above) in the worst case. There is no background follow-up on this backend.
+   - On **`git-refs`**, the cap and the OPF call are scoped per checkpoint ref, not per flush: each queued ref is checked and rewritten independently. **Delivery is also per-ref**: only refs that already carry the trailer ship with this push; a ref still being processed, or one that trips the cap/timeout, simply stays queued — it does not withhold delivery of its already-redacted siblings. Whatever the inline attempt can't finish is handed to a detached `entire __opf_flush` worker, which continues rewriting the remainder in the background without blocking the push (see "Seeing outstanding OPF work" below).
+3. Once a commit is rewritten, its backend points the local ref at the new tip with a compare-and-swap, and the (now 9-layer-redacted) commit is what gets pushed. The original 8-layer-only commit becomes **unreachable** in the local git object database and eventually gets swept by `git gc`.
 
-The two backends differ in **how they find the commits to rewrite**:
+The two backends differ in **how they find the commits to rewrite, and in how failure is scoped**:
 
 | | `git-refs` | `git-branch` |
 |---|---|---|
-| What it walks | Every ref in the push-discovery queue | The `entire/checkpoints/v1` commit chain |
-| Where it stops | The first ancestor already carrying `Entire-OPF-Applied: true` — the trailer is the watermark | The remote's v1 tip, fetched live (not a stale tracking ref) |
+| What it walks | Every ref in the push-discovery queue, independently | The `entire/checkpoints/v1` commit chain, as one unit |
+| Where it stops | Per ref: the first ancestor already carrying `Entire-OPF-Applied: true` — the trailer is the watermark | The remote's v1 tip, fetched live (not a stale tracking ref) |
 | Already-OPF'd commits | Left byte-identical; they *are* the boundary | Re-parented onto the new chain, but not re-redacted |
 | Ref update | Each queued ref rewritten in place, CAS'd individually | One CAS on the local v1 ref |
+| A ref/chain that can't finish in time or trips the cap | Stays queued alone; siblings still ship this push; a background worker keeps retrying it | Blocks the whole push until it finishes or the shell-out's adaptive timeout kills it (up to ~3h) |
 
 In steady state the `git-refs` walk stops at the last commit the previous push OPF'd. That is usually the tip's parent, but not always: each write to a checkpoint advances its ref by one commit, so a turn that creates a checkpoint and then backfills its transcript and summary leaves a three-commit chain to rewrite.
 
@@ -282,7 +275,7 @@ This means:
 
 #### Divergence, caps, and concurrent pushes
 
-The rewrite refuses to proceed in a divergent or oversized state rather than silently rebasing or shipping unscanned content. As always, `git-branch` enforces this by aborting your push and `git-refs` by withholding the checkpoint refs.
+The rewrite refuses to proceed in a divergent or oversized state rather than silently rebasing or shipping unscanned content. `git-branch` enforces this by aborting your push outright. `git-refs` enforces it per ref: the affected ref stays queued and unshipped, but any sibling ref that already carries the trailer ships with this push regardless — a divergent or oversized ref no longer withholds delivery of everything else.
 
 **Divergence.** On `git-branch`, if local `entire/checkpoints/v1` has commits that aren't ancestors of the remote's v1, the hook exits with a `entire/checkpoints/v1 has diverged from remote` error. Fetch the remote and either reset local v1 to the remote tip or resolve manually before pushing.
 
@@ -311,6 +304,8 @@ set -x ENTIRE_OPF_BATCH_LIMIT unlimited; git push
 `unlimited` is not literally unlimited, and raising the number past `256 MiB` buys nothing: the `256 MiB` ceiling inside `redact/` is not configurable, so beyond it the model call is refused whatever this variable says, with a blunter error. That is deliberate — content that large is not a session.
 
 Note what the cap deliberately does *not* do: distinguish "broken" from "merely large". A byte count can't — both are just a lot of bytes. What separates them is behavior. Broken content makes the scan fail, and that has its own error path and its own circuit breaker; large content just takes longer, which is expected and fine. Real redaction of any real session takes minutes to hours no matter what this value is: benchmarked against the real `opf` binary, throughput is about **1.14 s/KB** of prose-leaf content on CPU, and Apple-Silicon MPS is measurably *slower* than CPU on this stack rather than faster. On `git-refs` nobody waits for it — the rewrite runs in a detached background worker and already-redacted refs ship without waiting for their still-redacting siblings (see "Seeing outstanding OPF work" below). `git-branch` still rewrites inline during `git push`, so there a large session is a long push.
+
+This is only *mostly* size-independent, and worth being honest about: the shell-out's own timeout is adaptive but still has a ceiling (currently 3 hours; see `redact/opf.go`'s `opfTimeoutCeiling`), so a single ref's content in the multi-MB range — well under this 128 MiB cap, but large enough at the real ~1.14 s/KB rate to approach that ceiling — could still be misclassified as "broken" and trip the circuit breaker, even though it's just large. No real session measured so far comes close to that range, so this is a latent edge case rather than an active one, but a much larger real session than anything seen today could hit it.
 
 **Raw-byte cap: `256 MiB` of blob content buffered in memory**, on both backends, cumulative across the whole rewrite (every queued ref together on `git-refs`). This one really is a resource limit — it bounds what the process holds at once — and unlike the batch cap it is sized against real content: transcripts run about 1.2× raw bytes per prose-leaf byte, and raw bytes are counted per commit with no deduplication, so the ceiling stays comfortably above a flush whose leaf content is itself at the batch cap without ballooning into gigabytes. It has no env var of its own — it is derived as 2× the batch cap, so raising `ENTIRE_OPF_BATCH_LIMIT` raises it too. It is checked incrementally as blobs load, so on a genuinely runaway push (one commit carrying a huge pasted transcript) this is the cap that fires first.
 

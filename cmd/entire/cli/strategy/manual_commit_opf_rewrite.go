@@ -54,8 +54,10 @@ func (e *V1DivergedError) Error() string {
 // BootstrapTooLargeError: more un-OPF'd commits to rewrite than the
 // safety cap — a first push to a remote with no v1 yet, or a checkpoint
 // ref whose un-trailered ancestry runs deep because OPF was enabled
-// late. OPF inference is ~30s per commit, so unbounded bootstraps could
-// take hours.
+// late. OPF inference cost scales with each commit's own content, not a
+// fixed per-commit price (~1.14s/KB measured, see
+// docs/development/opf-throughput-findings.md), so unbounded bootstraps
+// against many real commits could take far longer than a quick pass.
 type BootstrapTooLargeError struct {
 	Count, Limit int
 }
@@ -137,8 +139,12 @@ func (e *OPFNoCategoriesError) Error() string {
 }
 
 const (
-	// bootstrapDefaultLimit caps first-push history rewrites. Picked
-	// to bound worst-case wall-clock at ~50min @ 30s/commit.
+	// bootstrapDefaultLimit caps first-push history rewrites. This bounds
+	// COUNT (how many commits get pulled into one bootstrap rewrite), not
+	// wall-clock time — each commit's own content cost is governed
+	// separately by the leaf-byte cap (batchDefaultLimit) and the
+	// shell-out's adaptive timeout, not by a fixed per-commit estimate.
+	// 100 is a plausible-history-depth number, not a time budget.
 	bootstrapDefaultLimit = 100
 	bootstrapEnvVar       = "ENTIRE_OPF_BOOTSTRAP_LIMIT"
 )

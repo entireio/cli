@@ -98,7 +98,7 @@ func resolveOPFDecisionForPrePush(ctx context.Context, opf *settings.OPFSettings
 		return OPFAbort, err
 	}
 	if d == OPFRun && !hasTTY {
-		fmt.Fprintln(errOut, "→ OpenAI Privacy Filter: scanning checkpoints before push (may take ~30s)…")
+		fmt.Fprintln(errOut, "→ OpenAI Privacy Filter: scanning checkpoints before push (at least ~30s, longer for large sessions)…")
 	}
 	return d, nil
 }
@@ -122,7 +122,7 @@ func askOPFPrompt(ctx context.Context) (OPFDecision, error) {
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Run OpenAI Privacy Filter on these checkpoints?").
-				Description("Adds ~30s but redacts names/PII the regex layers can't catch. Ctrl-C to cancel the push.").
+				Description("Adds at least ~30s, longer for large sessions, but redacts names/PII the regex layers can't catch. Ctrl-C to cancel the push.").
 				Options(
 					huh.NewOption("Yes — run OPF this push", choiceYes),
 					huh.NewOption("No — skip OPF, push as-is", choiceNo),
