@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
@@ -158,23 +159,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"import":   {agentHelpAudienceTaskDriven, false},
 	"runner":   {agentHelpAudienceTaskDriven, false},
 
-	// The user's to start. review and investigate are not destructive but spawn
-	// paid multi-agent runs, so an uninvited one spends the user's money.
-	"agent":       {agentHelpAudienceUserOwned, false},
-	"auth":        {agentHelpAudienceUserOwned, false},
-	"clean":       {agentHelpAudienceUserOwned, false},
-	"cluster":     {agentHelpAudienceUserOwned, false},
-	"configure":   {agentHelpAudienceUserOwned, false},
-	"disable":     {agentHelpAudienceUserOwned, false},
-	"enable":      {agentHelpAudienceUserOwned, false},
-	"investigate": {agentHelpAudienceUserOwned, false},
-	"login":       {agentHelpAudienceUserOwned, false},
-	"logout":      {agentHelpAudienceUserOwned, false},
-	"org":         {agentHelpAudienceUserOwned, false},
-	"plugin":      {agentHelpAudienceUserOwned, false},
-	"project":     {agentHelpAudienceUserOwned, false},
-	"repo":        {agentHelpAudienceUserOwned, false},
-	"review":      {agentHelpAudienceUserOwned, false},
+	// The user's to start. review is not destructive but spawns a paid
+	// multi-agent run, so an uninvited one spends the user's money.
+	"agent":     {agentHelpAudienceUserOwned, false},
+	"auth":      {agentHelpAudienceUserOwned, false},
+	"clean":     {agentHelpAudienceUserOwned, false},
+	"cluster":   {agentHelpAudienceUserOwned, false},
+	"configure": {agentHelpAudienceUserOwned, false},
+	"disable":   {agentHelpAudienceUserOwned, false},
+	"enable":    {agentHelpAudienceUserOwned, false},
+	"login":     {agentHelpAudienceUserOwned, false},
+	"logout":    {agentHelpAudienceUserOwned, false},
+	"org":       {agentHelpAudienceUserOwned, false},
+	"plugin":    {agentHelpAudienceUserOwned, false},
+	"project":   {agentHelpAudienceUserOwned, false},
+	"repo":      {agentHelpAudienceUserOwned, false},
+	"review":    {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,
@@ -335,6 +335,10 @@ command tree so it always matches this binary. With no arguments it prints a
 high-level map of when to use entire and which subcommand; pass a command path
 (e.g. "agent-help checkpoint") to see that command's exact, current flags.`,
 		RunE: func(c *cobra.Command, args []string) error {
+			// The enablement probe below authenticates as the selected login, but
+			// nothing here acts on the user's behalf, and this output is read by an
+			// agent — so resolve it without the "Using context 'x'." notice.
+			auth.SilenceContextNotice()
 			// Resolve the origin remote once and derive both the repo line and the
 			// trails-enablement check from it (avoids two git subprocesses per run).
 			repoLine, trailsEnabled := agentHelpRepoContext(c.Context())
@@ -407,10 +411,7 @@ func agentHelpRepoContextWithRefresh(
 		return repoLine, decision == trailEnablementCacheEnabled
 	}
 
-	// ResolveDataAPIToken performs data-host discovery before it can reject a
-	// missing login. The scope already carries the locally resolved auth identity,
-	// so avoid making an unauthenticated first run wait on a network request that
-	// cannot produce an enabled decision.
+	// No login means no enabled decision; skip the refresh.
 	if scope.AuthKey == "" {
 		return repoLine, false
 	}

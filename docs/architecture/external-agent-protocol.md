@@ -53,7 +53,6 @@ Returns agent metadata and declared capabilities.
   "name": "cursor",
   "type": "Cursor",
   "description": "Cursor - AI-powered code editor",
-  "is_preview": true,
   "protected_dirs": [".cursor"],
   "hook_names": ["session-start", "session-end", "stop"],
   "capabilities": {

@@ -41,7 +41,6 @@ var _ agent.Agent = (*recordingResumeAgent)(nil)
 func (a *recordingResumeAgent) Name() types.AgentName                          { return "recording-resume" }
 func (a *recordingResumeAgent) Type() types.AgentType                          { return "recording-resume" }
 func (a *recordingResumeAgent) Description() string                            { return "recording resume agent" }
-func (a *recordingResumeAgent) IsPreview() bool                                { return false }
 func (a *recordingResumeAgent) DetectPresence(_ context.Context) (bool, error) { return true, nil }
 func (a *recordingResumeAgent) ProtectedDirs() []string                        { return nil }
 func (a *recordingResumeAgent) ReadTranscript(string) ([]byte, error)          { return nil, nil }

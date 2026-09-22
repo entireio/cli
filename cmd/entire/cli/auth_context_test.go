@@ -260,48 +260,6 @@ func TestCompleteContextNames_NoContexts(t *testing.T) {
 	}
 }
 
-func TestPromoteNextLogin(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
-	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
-	t.Cleanup(restore)
-
-	// No contexts: silent.
-	var empty bytes.Buffer
-	promoteNextLogin(&empty, &empty)
-	if empty.Len() != 0 {
-		t.Fatalf("no contexts should be silent, got %q", empty.String())
-	}
-
-	exp := time.Now().Add(time.Hour).Unix()
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://a.example.com","handle":"alice","exp":%d}`, exp)), "", true); err != nil {
-		t.Fatalf("record a: %v", err)
-	}
-	if _, err := auth.RecordLoginContext(makeContextJWT(t, fmt.Sprintf(`{"iss":"https://b.example.com","handle":"bob","exp":%d}`, exp)), "", true); err != nil {
-		t.Fatalf("record b: %v", err)
-	}
-
-	// A current context is set: promotion is a no-op (nothing to promote into).
-	var noop bytes.Buffer
-	promoteNextLogin(&noop, &noop)
-	if noop.Len() != 0 {
-		t.Fatalf("with a current context set, promote should be silent, got %q", noop.String())
-	}
-
-	// Clear the active context (as logout does): the remaining login is promoted.
-	if err := auth.RemoveCurrentContext(); err != nil {
-		t.Fatalf("remove current: %v", err)
-	}
-	var buf bytes.Buffer
-	promoteNextLogin(&buf, &buf)
-	if !strings.Contains(buf.String(), "Now using") {
-		t.Fatalf("expected promotion message, got %q", buf.String())
-	}
-	if _, current, err := auth.Contexts(); err != nil || current == "" {
-		t.Fatalf("expected a context to be promoted to current (current=%q, err=%v)", current, err)
-	}
-}
-
 // setupContextsForUse records one login context per host into an isolated config
 // dir and returns their names in on-disk order. Only the first stays active, so
 // a test can tell the picker's default from whatever was recorded last.

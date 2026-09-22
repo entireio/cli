@@ -131,7 +131,6 @@ const validInfoJSON = `{
   "name": "test",
   "type": "Test Agent",
   "description": "A test agent",
-  "is_preview": true,
   "protected_dirs": [".test"],
   "hook_names": ["session-start", "stop"],
   "capabilities": {
@@ -299,9 +298,6 @@ func TestExternalAgent_Identity(t *testing.T) {
 	if ea.Description() != "A test agent" {
 		t.Errorf("Description() = %q, want %q", ea.Description(), "A test agent")
 	}
-	if !ea.IsPreview() {
-		t.Error("IsPreview() = false, want true")
-	}
 	dirs := ea.ProtectedDirs()
 	if len(dirs) != 1 || dirs[0] != ".test" {
 		t.Errorf("ProtectedDirs() = %v, want [.test]", dirs)
@@ -320,7 +316,6 @@ func TestIsExternal_WithProtectedFilesWrapper(t *testing.T) {
   "name": "test",
   "type": "Test Agent",
   "description": "A test agent",
-  "is_preview": false,
   "protected_dirs": [".test"],
   "protected_files": [".test/config.json"],
   "hook_names": [],
@@ -503,7 +498,6 @@ func TestExternalAgent_CompactTranscript(t *testing.T) {
   "name": "compact-capable",
   "type": "Compact Capable",
   "description": "Agent with transcript compaction",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"compact_transcript": true}
@@ -559,7 +553,6 @@ func TestExternalAgent_CompactTranscript_InvalidBase64(t *testing.T) {
   "name": "compact-capable",
   "type": "Compact Capable",
   "description": "Agent with transcript compaction",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"compact_transcript": true}
@@ -641,7 +634,6 @@ func TestWrap_NoCapabilities(t *testing.T) {
   "name": "minimal",
   "type": "Minimal",
   "description": "Minimal agent",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}
@@ -678,7 +670,6 @@ func TestWrap_HooksOnly(t *testing.T) {
   "name": "hooks-only",
   "type": "Hooks Only",
   "description": "Agent with hooks only",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": ["stop"],
   "capabilities": {"hooks": true}
@@ -712,7 +703,6 @@ func TestWrap_PreparerOnly(t *testing.T) {
   "name": "preparer-only",
   "type": "Preparer Only",
   "description": "Agent with preparer only",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"transcript_preparer": true}
@@ -749,7 +739,6 @@ func TestWrap_AnalyzerAndPreparer(t *testing.T) {
   "name": "analyzer-preparer",
   "type": "Analyzer Preparer",
   "description": "Agent with analyzer and preparer",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"transcript_analyzer": true, "transcript_preparer": true}
@@ -786,7 +775,6 @@ func TestWrap_HooksAnalyzerPreparer(t *testing.T) {
   "name": "hooks-analyzer-preparer",
   "type": "Hooks Analyzer Preparer",
   "description": "Agent with hooks, analyzer and preparer",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": ["stop"],
   "capabilities": {"hooks": true, "transcript_analyzer": true, "transcript_preparer": true}
@@ -826,7 +814,6 @@ func TestWrap_CompactTranscriptOnly(t *testing.T) {
   "name": "compact-only",
   "type": "Compact Only",
   "description": "Agent with compact transcript only",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"compact_transcript": true}

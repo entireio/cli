@@ -25,7 +25,7 @@ func TestParseDispatchFlags_ServerReposAreAllowed(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{"entireio/cli", "entireio/entire.io"},
+		[]string{"gh/entireio/cli", "gh/entireio/entire.io"},
 		"",
 		"",
 		false,
@@ -56,7 +56,7 @@ func TestParseDispatchFlags_NormalizesRepoScopeValues(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{" entireio/cli ", "", "entireio/cli", " otherco/service ", "   "},
+		[]string{" gh/entireio/cli ", "", "gh/entireio/cli", " gh/otherco/service ", "   "},
 		"",
 		"",
 		false,
@@ -64,7 +64,7 @@ func TestParseDispatchFlags_NormalizesRepoScopeValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(opts.RepoPaths, ","); got != "entireio/cli,otherco/service" {
+	if got := strings.Join(opts.RepoPaths, ","); got != "gh/entireio/cli,gh/otherco/service" {
 		t.Fatalf("expected normalized repo scope, got %q", got)
 	}
 	if opts.Branches != nil {
@@ -81,7 +81,7 @@ func TestParseDispatchFlags_LocalRejectsRepos(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{"entireio/cli"},
+		[]string{"gh/entireio/cli"},
 		"",
 		"",
 		false,
@@ -103,7 +103,7 @@ func TestParseDispatchFlags_CloudRejectsAllBranches(t *testing.T) {
 		"7d",
 		"",
 		true,
-		[]string{"entireio/cli"},
+		[]string{"gh/entireio/cli"},
 		"",
 		"",
 		false,
@@ -119,7 +119,7 @@ func TestParseDispatchFlags_CloudRejectsAllBranches(t *testing.T) {
 func TestParseDispatchFlags_CloudCapsReposAtFive(t *testing.T) {
 	t.Parallel()
 
-	repos := []string{"a/b", "c/d", "e/f", "g/h", "i/j", "k/l"}
+	repos := []string{"gh/a/b", "gh/c/d", "gh/e/f", "gh/g/h", "gh/i/j", "gh/k/l"}
 	_, err := parseDispatchFlags(
 		&cobra.Command{},
 		false,
@@ -173,7 +173,7 @@ func TestParseDispatchFlags_InsecureHTTPAuthFlag(t *testing.T) {
 		"7d",
 		"",
 		false,
-		[]string{"entireio/cli"},
+		[]string{"gh/entireio/cli"},
 		"",
 		"",
 		true,
@@ -377,7 +377,7 @@ func TestDispatchPreflight_CloudSkipsLocalPreparationAndProvider(t *testing.T) {
 	})
 
 	cmd := newDispatchCmd()
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +709,7 @@ func TestNewDispatchCmd_CloudDispatchDoesNotResolveLocalProvider(t *testing.T) {
 	})
 
 	cmd := newDispatchCmd()
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +802,7 @@ func TestNewDispatchCmd_NonTerminalPrintsPlainMarkdown(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	cmd.SetContext(context.Background())
 
 	if err := cmd.Execute(); err != nil {
@@ -841,7 +841,7 @@ func TestNewDispatchCmd_TerminalUsesInteractiveRenderer(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	cmd.SetContext(context.Background())
 
 	if err := cmd.Execute(); err != nil {
@@ -894,7 +894,7 @@ func TestNewDispatchCmd_AccessibleModeSkipsInteractiveRenderer(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"--repos", "entireio/cli"})
+	cmd.SetArgs([]string{"--repos", "gh/entireio/cli"})
 	cmd.SetContext(context.Background())
 
 	if err := cmd.Execute(); err != nil {

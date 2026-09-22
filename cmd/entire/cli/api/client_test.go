@@ -180,8 +180,7 @@ func TestClient_Get(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("my-token")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("my-token", server.URL)
 
 	resp, err := c.Get(context.Background(), "/api/v1/test")
 	if err != nil {
@@ -211,8 +210,7 @@ func TestClient_Post_JSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	resp, err := c.Post(context.Background(), "/api/v1/things", map[string]string{"name": "test"})
 	if err != nil {
@@ -242,8 +240,7 @@ func TestClient_Post_NilBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	resp, err := c.Post(context.Background(), "/api/v1/action", nil)
 	if err != nil {

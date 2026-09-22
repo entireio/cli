@@ -25,8 +25,7 @@ func TestClient_ListRepositories_SendsSortAndDecodesResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	repos, err := c.ListRepositories(context.Background(), RepositorySortRecent)
 	if err != nil {
@@ -66,8 +65,7 @@ func TestClient_ListRepositories_OmitsQueryWhenSortEmpty(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	if _, err := c.ListRepositories(context.Background(), ""); err != nil {
 		t.Fatal(err)
@@ -87,8 +85,7 @@ func TestClient_ListRepositories_ErrorResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	_, err := c.ListRepositories(context.Background(), RepositorySortRecent)
 	if err == nil {

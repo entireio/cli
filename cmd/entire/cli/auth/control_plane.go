@@ -46,18 +46,20 @@ type ControlPlaneTarget struct {
 // callers render the `entire login` hint. There is no fallback host — a
 // control-plane command without a login has no identity to act as.
 func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
-	c, ok, err := activeContext()
+	c, ok, err := ActingContext()
 	if err != nil {
 		return ControlPlaneTarget{}, err
 	}
 	if !ok {
-		return ControlPlaneTarget{}, &reauthError{
-			msg:      "not logged in; run `entire login`",
-			sentinel: ErrNotLoggedIn,
-		}
+		return ControlPlaneTarget{}, errNoLogin()
 	}
 
 	return targetForContext(c)
+}
+
+// errNoLogin is the not-logged-in error with the login hint.
+func errNoLogin() error {
+	return &reauthError{msg: "not logged in; run `entire login`", sentinel: ErrNotLoggedIn}
 }
 
 // ResolveControlPlaneTargetForCluster chooses which core a *resource-provider*
@@ -87,6 +89,10 @@ func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string
 	if err != nil {
 		return ControlPlaneTarget{}, err
 	}
+	// Cluster discovery announces an auto-selected login itself.
+	if f, selected, ok, serr := activeContextIn(); serr == nil && ok && selected.Name == c.Name {
+		announceContext(len(f.Contexts), c)
+	}
 	return targetForContext(c)
 }
 
@@ -100,29 +106,4 @@ func targetForContext(c *contexts.Context) (ControlPlaneTarget, error) {
 		return ControlPlaneTarget{}, fmt.Errorf("build token source for context %q: %w", c.Name, err)
 	}
 	return ControlPlaneTarget{CoreURL: strings.TrimRight(c.CoreURL, "/"), TokenSource: src}, nil
-}
-
-// activeContext returns the active contexts.json login and ok=true, or
-// ok=false when there is no current context or it carries no CoreURL (an
-// unusable pointer we treat as "no active context" rather than dialing an
-// empty host).
-//
-// A `--context`/$ENTIRE_CONTEXT selection is honoured here too, so the identity
-// the control plane acts as is the same one git and the data API use. An
-// explicit selection naming no saved context is a hard error rather than
-// ok=false: "you asked for a context that doesn't exist" must not degrade into
-// the `entire login` hint.
-func activeContext() (c *contexts.Context, ok bool, err error) {
-	f, err := contexts.Load(userdirs.Config())
-	if err != nil {
-		return nil, false, fmt.Errorf("load contexts: %w", err)
-	}
-	sel, err := f.Active()
-	if err != nil {
-		return nil, false, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
-	}
-	if sel.Context == nil || sel.Context.CoreURL == "" {
-		return nil, false, nil
-	}
-	return sel.Context, true, nil
 }

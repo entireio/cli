@@ -56,6 +56,8 @@ type projectRefClient interface {
 type repoRefClient interface {
 	projectRefClient
 	ListProjectRepos(ctx context.Context, params coreapi.ListProjectReposParams) (*coreapi.ListProjectReposOutputBody, error)
+	ResolveRepos(ctx context.Context, request *coreapi.ResolveReposInputBody) (*coreapi.ResolveReposResponse, error)
+	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
 }
 
 // looksLikeULID reports whether s has the shape of a ULID: 26 characters drawn
@@ -242,11 +244,40 @@ func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string
 	if projectRef == "" {
 		return "", fmt.Errorf("repo %q is a name; pass --project <name|ULID> to resolve it, use its /%s/<project>/<repo> path, or a repo ULID", ref, nativeCloneForge)
 	}
-	projID, err := resolveProjectRef(ctx, c, projectRef)
-	if err != nil {
-		return "", err
+	// The path lookup takes names only. A project ULID has no name route, so
+	// it stays on the project-scoped listing.
+	if !looksLikeULID(projectRef) {
+		return resolveNativeRepoByPath(ctx, c, projectRef, ref)
 	}
-	return resolveRepoInProject(ctx, c, ref, projID)
+	return resolveRepoInProject(ctx, c, ref, projectRef)
+}
+
+// resolveNativeRepoByPath resolves <project>/<repo> through POST /repos/resolve,
+// which needs repo#pull only. The project-scoped lookups need project#inspect,
+// which a direct repo grant does not confer.
+//
+// The server answers unknown and unauthorized alike, so the miss is one error.
+// It wraps errNamedRefNotFound so routing callers classify it as definitive.
+func resolveNativeRepoByPath(ctx context.Context, c repoRefClient, project, repoName string) (string, error) {
+	fullName := project + "/" + repoName
+	out, err := c.ResolveRepos(ctx, &coreapi.ResolveReposInputBody{
+		Repositories: []coreapi.RepoReference{{Provider: repoProviderEntire, FullName: fullName}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("resolve repo: %w", err)
+	}
+	for _, r := range out.Resolutions {
+		if r.Provider != repoProviderEntire || !strings.EqualFold(r.RequestedFullName, fullName) {
+			continue
+		}
+		if r.Status == coreapi.RepoResolutionStatusUnavailable {
+			break
+		}
+		if id := strings.TrimSpace(r.RepoId.Or("")); id != "" {
+			return id, nil
+		}
+	}
+	return "", noRepoAtPathErr(project, repoName)
 }
 
 // resolveRepoPathRef resolves a slash-bearing repo ref: the native
@@ -254,8 +285,8 @@ func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string
 // parseNativeCloneRef owns that grammar). The ref names its own project, so a
 // --project given alongside it is checked for agreement rather than trusted or
 // ignored: a name compares case-insensitively (the server matches lower(name)
-// and project names are globally unique), a ULID against the resolved project
-// id — neither costs an extra round trip.
+// and project names are globally unique) before any request; a ULID compares
+// against the resolved repo's owning project, which costs one GetRepo.
 func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef string) (string, error) {
 	// The refusal is about the ref SHAPE, not about the command. Several
 	// commands sharing this resolver DO address mirror repos by ULID — `repo
@@ -299,14 +330,20 @@ func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef st
 	if projectRef != "" && !looksLikeULID(projectRef) && !strings.EqualFold(projectRef, project) {
 		return "", projectMismatchErr(projectRef, project, ref)
 	}
-	projID, err := resolveProjectRef(ctx, c, project)
+	repoID, err := resolveNativeRepoByPath(ctx, c, project, repoName)
 	if err != nil {
 		return "", err
 	}
-	if projectRef != "" && looksLikeULID(projectRef) && !strings.EqualFold(projectRef, projID) {
-		return "", projectMismatchErr(projectRef, project, ref)
+	if projectRef != "" && looksLikeULID(projectRef) {
+		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+		if err != nil {
+			return "", fmt.Errorf("get repo: %w", err)
+		}
+		if !strings.EqualFold(projectRef, repo.OwningProjectId) {
+			return "", projectMismatchErr(projectRef, project, ref)
+		}
 	}
-	return resolveRepoInProject(ctx, c, repoName, projID)
+	return repoID, nil
 }
 
 // resolveRepoPath resolves the one repo spelling `repo grant` accepts, the
@@ -314,7 +351,7 @@ func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef st
 // names the repo the way the API and `repo clone` do, and access management
 // should not need a lookup to know which project it is touching. The grammar
 // is parseNativeCloneRef, shared with clone. Both parsed segments are names by
-// construction, so they take the by-name lookups directly rather than
+// construction, so they take the path lookup directly rather than
 // resolveRepoRef, whose ULID passthrough would read a ULID-shaped NAME as an id.
 //
 // A ref that never named the et/ token is answered with the accepted shape and
@@ -331,11 +368,7 @@ func resolveRepoPath(ctx context.Context, c repoRefClient, ref string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("invalid repo ref %q: %w", ref, err)
 	}
-	projID, err := resolveProjectByName(ctx, c, project)
-	if err != nil {
-		return "", err
-	}
-	return resolveRepoInProject(ctx, c, repoName, projID)
+	return resolveNativeRepoByPath(ctx, c, project, repoName)
 }
 
 func projectMismatchErr(projectRef, project, ref string) error {
@@ -380,6 +413,10 @@ func noProjectNamedErr(name string) error {
 
 func noRepoNamedErr(name string) error {
 	return &namedRefNotFoundError{message: fmt.Sprintf("no repo named %q in that project (run `entire repo list --project <project>` to see names, or pass a ULID)", name)}
+}
+
+func noRepoAtPathErr(project, repoName string) error {
+	return &namedRefNotFoundError{message: fmt.Sprintf("repo /%s/%s/%s not found or not shared with you", nativeCloneForge, project, repoName)}
 }
 
 // resolvedRefLabel formats a reference for a success message so it always

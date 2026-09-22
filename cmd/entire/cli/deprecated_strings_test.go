@@ -43,6 +43,9 @@ func TestNoDeprecatedCommandFormsInUserFacingStrings(t *testing.T) {
 		"entire grant org",     // → entire org grant
 		"entire grant project", // → entire project grant
 		"entire grant repo",    // → entire repo grant
+		// A repo's home cluster is its owning project's region, so there is
+		// nothing for a caller to choose.
+		"--cluster-host", // → removed; the owning project's region decides
 	}
 
 	var offenders []string

@@ -106,12 +106,14 @@ type Options struct {
 	Now           time.Time
 	DryRun        bool
 
-	// LinkCommitSHA, when non-empty, is the fallback anchor written to each
-	// imported checkpoint's metadata as commit_sha — the commit the UI shows
-	// imported sessions against. The caller resolves it (default branch head
-	// when resolvable; see resolveImportLinkCommitSHA); Run does not. A turn
-	// whose transcript records a resolvable commit that is an ancestor of this
-	// fallback anchors to that real commit instead (see turnAnchorResolver).
+	// LinkCommitSHA is the required full hexadecimal fallback commit ID written
+	// to imported checkpoint metadata as commit_sha — the commit the UI shows
+	// imported sessions against. The caller resolves it (the default branch
+	// head; see resolveImportLinkCommitSHA); Run validates the exact
+	// commit object and canonicalizes its ID before any writes, even on dry-run
+	// or fully skipped imports. A turn whose transcript records a resolvable
+	// commit that is an ancestor of this fallback anchors to that real commit
+	// instead (see turnAnchorResolver).
 	LinkCommitSHA string
 
 	// Progress, when non-nil, receives session/turn progress notifications
@@ -195,6 +197,12 @@ func DeriveCheckpointID(sessionID, turnUUID string) id.CheckpointID {
 // idempotent: turns whose deterministic ID already exists are skipped.
 func Run(ctx context.Context, repo *git.Repository, imp Importer, opts Options) (Result, error) {
 	var res Result
+	validatedAnchor, err := ValidateAnchorCommit(repo, opts.LinkCommitSHA)
+	if err != nil {
+		return res, err
+	}
+	// opts is a value, so this cannot surprise a caller reusing its Options.
+	opts.LinkCommitSHA = validatedAnchor
 	files, err := imp.Discover(opts.RepoRoot, opts.OverridePath, opts.Now, opts.SessionFilter)
 	if err != nil {
 		return res, fmt.Errorf("discover %s sessions: %w", imp.Name(), err)

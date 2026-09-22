@@ -25,14 +25,14 @@ const (
 )
 
 // grantWiringHandler serves the lookups a grant command makes before its
-// DELETE — handle resolution for a provider:handle grantee, and the project and
-// repo by-name lookups behind a /et/<project>/<repo> ref — and records the
-// DELETE. record is called with the DELETE's method and path; deleteFn writes
-// the DELETE response (e.g. 204 or a 404 problem).
+// DELETE — handle resolution for a provider:handle grantee, and the path
+// lookup behind a /et/<project>/<repo> ref — and records the DELETE. record is
+// called with the DELETE's method and path; deleteFn writes the DELETE
+// response (e.g. 204 or a 404 problem).
 func grantWiringHandler(t *testing.T, record func(method, path string), deleteFn func(w http.ResponseWriter)) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && !strings.HasSuffix(r.URL.Path, "/repos/resolve") {
 			record(r.Method, r.URL.Path)
 			deleteFn(w)
 			return
@@ -47,12 +47,10 @@ func grantWiringHandler(t *testing.T, record func(method, path string), deleteFn
 				Handle:         "alice",
 				ProviderUserId: "12345",
 			}
-		case strings.HasSuffix(r.URL.Path, "/repos"):
-			payload = &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: wiringRepoULID, Name: "web"})}
-		case strings.HasSuffix(r.URL.Path, "/projects"):
-			payload = &coreapi.ListProjectsOutputBody{Project: coreapi.NewOptProject(coreapi.Project{ID: wiringProjULID, Name: "acme", OwnerId: wiringOrgULID, OwnerType: coreapi.ProjectOwnerTypeOrg})}
+		case strings.HasSuffix(r.URL.Path, "/repos/resolve"):
+			payload = nativeResolution("acme/web", wiringRepoULID)
 		default:
-			t.Errorf("unexpected GET %s", r.URL.Path)
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			return
 		}
 		if err := printJSON(w, payload); err != nil {

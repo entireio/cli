@@ -253,7 +253,7 @@ jobs:
         env:
           AGENT: codex
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          E2E_CODEX_MODEL: gpt-5.4-mini
+          E2E_CODEX_MODEL: gpt-5.6-luna
         run: |
           set +e
           set -uo pipefail

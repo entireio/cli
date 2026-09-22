@@ -252,7 +252,6 @@ var _ agent.Agent = (*restoreLogsOnlyAgent)(nil)
 func (a *restoreLogsOnlyAgent) Name() types.AgentName                          { return a.name }
 func (a *restoreLogsOnlyAgent) Type() types.AgentType                          { return a.agentType }
 func (a *restoreLogsOnlyAgent) Description() string                            { return "restore logs test agent" }
-func (a *restoreLogsOnlyAgent) IsPreview() bool                                { return false }
 func (a *restoreLogsOnlyAgent) DetectPresence(_ context.Context) (bool, error) { return true, nil }
 func (a *restoreLogsOnlyAgent) ProtectedDirs() []string                        { return nil }
 func (a *restoreLogsOnlyAgent) ReadTranscript(string) ([]byte, error)          { return nil, nil }
@@ -299,7 +298,6 @@ type fakeExternalAgent struct {
 func (f *fakeExternalAgent) Name() types.AgentName                          { return f.name }
 func (f *fakeExternalAgent) Type() types.AgentType                          { return f.agentType }
 func (f *fakeExternalAgent) Description() string                            { return "Fake external agent" }
-func (f *fakeExternalAgent) IsPreview() bool                                { return false }
 func (f *fakeExternalAgent) DetectPresence(_ context.Context) (bool, error) { return false, nil }
 func (f *fakeExternalAgent) ProtectedDirs() []string                        { return nil }
 func (f *fakeExternalAgent) ReadTranscript(_ string) ([]byte, error)        { return nil, nil }

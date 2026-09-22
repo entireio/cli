@@ -130,7 +130,12 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 	client, repoScope, repoName, err := newRecapClient(ctx, f.insecureHTTP)
 	if err != nil {
 		if errors.Is(err, api.ErrInsecureHTTP) {
-			fmt.Fprintf(errW, "ENTIRE_API_BASE_URL is set to an insecure http:// URL (%s). Use https:// for production, or pass --insecure-http-auth for local dev.\n", api.BaseURL())
+			// Name the variable and the host it points at: the generic error says
+			// only that *some* base URL is http, which sends the reader looking for
+			// a setting they may not know they have. newRecapClient rejects the
+			// override before resolving anything, so an http URL here is always
+			// this one. insecureDataOverrideNote strips any credentials from it.
+			fmt.Fprintf(errW, "%s. Use https:// for production, or pass --insecure-http-auth for local dev.\n", insecureDataOverrideNote())
 			return NewSilentError(err)
 		}
 		// Token resolution can fail for many reasons unrelated to the
@@ -173,17 +178,11 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 // 401s via recapLoadErrorMessage so flag effects (--week, --agent, ...)
 // and the real auth error are not collapsed into one "sign in" hint.
 //
-// Goes through auth.ResolveDataAPIToken (the same context-aware path as
-// activity/search/dispatch) so the data host's /.well-known/entire-api.json
-// picks the matching login context whose login JWT is the bearer; a host that
-// doesn't advertise discovery is a surfaced error, not a fallback.
-// ErrNotLoggedIn is collapsed back into an empty token so the caller's "render
-// with no bearer, let the server respond 401" path still fires. Every other
-// resolution failure (no eligible/ambiguous context, refresh rejected,
-// network error, keyring locked) surfaces verbatim to the caller — previously
-// these were all relabelled as keyring read failures via keyringReadError,
-// which sent users on wild goose chases when the keyring was fine and the real
-// problem was downstream.
+// Goes through auth.ResolveDataAPI (the same login-following path as
+// activity/search/dispatch). ErrNotLoggedIn is collapsed back into an empty
+// token so the caller's "render with no bearer, let the server respond 401"
+// path still fires. Every other resolution failure (refresh rejected, network
+// error, keyring locked) surfaces verbatim to the caller.
 // newRecapClient returns the recap client, the value to pass as /me/recap's
 // ?repo= (its team/contributors scope), and the repo's owner/repo display name.
 // The scope is the current repo's ULID when routed to an entire-api cell (which
@@ -198,43 +197,42 @@ func runRecap(ctx context.Context, w, errW io.Writer, f *recapFlags) error {
 // before it existed. Expected fallbacks (region has no cell yet, not logged in)
 // are silent; unexpected ones are debug-logged (logCellClientFallback). Only
 // failures of the data-API path itself surface — except ErrNotLoggedIn, which
-// recap tolerates, rendering and letting the server answer 401.
-//
-// The fallback is taken only while the data API can act as the same login
-// (auth.DataAPIServesSelectedLogin), which is true when no login is selected —
-// so the tolerant path still serves the logged-out case, while a selected
-// staging login whose refresh failed is reported rather than answered by an
-// auto-selected production login.
+// recap tolerates, rendering and letting the server answer 401. Both paths
+// act as the same login (auth.ResolveDataAPI mirrors the cell path's
+// precedence), so a selected staging login whose refresh failed is reported,
+// never answered by a production login.
 func newRecapClient(ctx context.Context, insecureHTTP bool) (client *api.Client, repoScope, repoName string, err error) {
 	cellClient, cellErr := auth.NewEntireAPICellClient(ctx, insecureHTTP, nil)
 	if cellErr == nil {
 		repoID, repoSlug := currentRepoRef(ctx)
 		return cellClient, repoID, repoSlug, nil
 	}
-	if !auth.DataAPIServesSelectedLogin() {
-		return nil, "", "", cellErr //nolint:wrapcheck // NewEntireAPICellClient already returns contextual auth errors
-	}
 	logCellClientFallback(ctx, cellErr)
 
 	if insecureHTTP {
 		auth.EnableInsecureHTTP()
+	} else if err := requireSecureDataOverride(); err != nil {
+		return nil, "", "", err
 	}
-	token, err := auth.ResolveDataAPIToken(ctx, api.BaseURL())
+	target, err := auth.ResolveDataAPI(ctx)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
-		token = ""
-		err = nil
+		target, err = auth.DataAPI{BaseURL: api.BaseURL()}, nil
+		if base, berr := auth.DataBaseURL(); berr == nil {
+			target.BaseURL = base
+		}
 	}
 	if err != nil {
 		return nil, "", "", err
 	}
-	if token != "" && !insecureHTTP {
-		if err := api.RequireSecureURL(api.BaseURL()); err != nil {
-			return nil, "", "", fmt.Errorf("base URL check: %w", err)
-		}
-	}
+	// No second scheme check: requireSecureDataOverride above already rejected an
+	// http ENTIRE_API_BASE_URL, and every other value target.BaseURL can hold is
+	// built by auth.dataBaseURLForCore as "https://" + site. The one that mattered
+	// is the one that runs before credentials are resolved —
+	// TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery pins it.
+
 	// The data API scopes by slug, so scope and display name coincide.
 	slug := currentRepoSlug(ctx)
-	return api.NewClient(token), slug, slug, nil
+	return api.NewClientWithBaseURL(target.Token, target.BaseURL), slug, slug, nil
 }
 
 func handleRecapFetchError(w io.Writer, err error) error {

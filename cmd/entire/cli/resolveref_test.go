@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -246,6 +247,42 @@ func TestResolveRepoRef(t *testing.T) {
 			t.Errorf("resolveRepoRef unknown name: err = %v, want a \"no repo named\" error", err)
 		}
 	})
+
+	t.Run("name under --project <name> resolves like a path, no project lookup", func(t *testing.T) {
+		t.Parallel()
+		// `repo view web --project widgets`: a repo-only grantee holds repo#pull
+		// but not project#inspect, so the name pair must go through
+		// repos/resolve. nativePathHandler refuses any /projects call.
+		var gotFullName string
+		c, calls := resolveTestClient(t, nativePathHandler(t, &gotFullName))
+		got, err := resolveRepoRef(context.Background(), c, "web", "widgets")
+		if err != nil {
+			t.Fatalf("resolveRepoRef: %v", err)
+		}
+		if got != ulidRepoWeb {
+			t.Errorf("resolveRepoRef = %q, want web id", got)
+		}
+		if gotFullName != "widgets/web" {
+			t.Errorf("server received fullName=%q, want %q", gotFullName, "widgets/web")
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("name under project name made %d HTTP calls, want 1 (repos/resolve)", n)
+		}
+	})
+
+	t.Run("unknown name under --project <name> is one friendly miss", func(t *testing.T) {
+		t.Parallel()
+		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			if err := printJSON(w, &coreapi.ResolveReposResponse{Resolutions: []coreapi.RepoResolution{{
+				Provider: repoProviderEntire, RequestedFullName: "widgets/nope", Status: coreapi.RepoResolutionStatusUnavailable,
+			}}}); err != nil {
+				t.Errorf("encode resolution: %v", err)
+			}
+		})
+		_, err := resolveRepoRef(context.Background(), c, "nope", "widgets")
+		require.ErrorIs(t, err, errNamedRefNotFound)
+		require.EqualError(t, err, "repo /et/widgets/nope not found or not shared with you")
+	})
 }
 
 // TestResolveRepoRef_NativePath covers the /et/<project>/<repo> path grammar
@@ -253,35 +290,52 @@ func TestResolveRepoRef(t *testing.T) {
 // every repo-ref command, --project alongside it is checked for agreement, and
 // the #2252 rule holds at the resolver — no ref is read as a forge it did not
 // name, and no slash-bearing ref reaches the by-name lookup.
-// nativePathHandler serves the two lookups a /et/widgets/web ref makes:
-// GET /projects?name=widgets and GET /projects/{id}/repos?name=web. It also
-// records the repo name the server was asked for, so tests can pin server-side
-// filtering and the .git trim.
-func nativePathHandler(t *testing.T, gotRepoName *string) http.HandlerFunc {
+// nativePathHandler serves the one lookup a /et/widgets/web ref makes, POST
+// /repos/resolve, plus GET /repos/{id} for the --project ULID agreement check.
+// It records the full name the server was asked to resolve, so tests can pin
+// server-side matching and the .git trim. Any /projects call is refused: a
+// native ref must resolve with repo#pull alone.
+func nativePathHandler(t *testing.T, gotFullName *string) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/repos") {
-			*gotRepoName = r.URL.Query().Get("name")
-			if err := printJSON(w, &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: ulidRepoWeb, Name: "web"})}); err != nil {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/repos/resolve"):
+			var in coreapi.ResolveReposInputBody
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				t.Errorf("decode resolve body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(in.Repositories) != 1 || in.Repositories[0].Provider != repoProviderEntire {
+				t.Errorf("resolve body = %+v, want one entire reference", in.Repositories)
+			}
+			if len(in.Repositories) > 0 {
+				*gotFullName = in.Repositories[0].FullName
+			}
+			// The CLI matches on the echoed requested name.
+			if err := printJSON(w, nativeResolution(*gotFullName, ulidRepoWeb)); err != nil {
+				t.Errorf("encode resolution: %v", err)
+			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/repos/"+ulidRepoWeb):
+			if err := printJSON(w, &coreapi.Repo{ID: ulidRepoWeb, Name: "web", OwningProjectId: ulidProjectWidgets}); err != nil {
 				t.Errorf("encode repo: %v", err)
 			}
-			return
-		}
-		if err := printJSON(w, &coreapi.ListProjectsOutputBody{Project: coreapi.NewOptProject(coreapi.Project{ID: ulidProjectWidgets, Name: "widgets", OwnerId: ulidOrgAcme, OwnerType: coreapi.ProjectOwnerTypeOrg})}); err != nil {
-			t.Errorf("encode project: %v", err)
+		default:
+			t.Errorf("unexpected %s %s: a native ref must not need a project lookup", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusForbidden)
 		}
 	}
 }
 
 func TestResolveRepoRef_NativePath(t *testing.T) {
 	t.Parallel()
-	t.Run("native /et/ path resolves via its embedded project", func(t *testing.T) {
+	t.Run("native /et/ path resolves in one pull-gated call", func(t *testing.T) {
 		t.Parallel()
 		for _, ref := range []string{"/et/widgets/web", "et/widgets/web", "/et/widgets/web.git"} {
 			t.Run(ref, func(t *testing.T) {
 				t.Parallel()
-				var gotRepoName string
-				c, calls := resolveTestClient(t, nativePathHandler(t, &gotRepoName))
+				var gotFullName string
+				c, calls := resolveTestClient(t, nativePathHandler(t, &gotFullName))
 				got, err := resolveRepoRef(context.Background(), c, ref, "")
 				if err != nil {
 					t.Fatalf("resolveRepoRef(%q): %v", ref, err)
@@ -289,31 +343,48 @@ func TestResolveRepoRef_NativePath(t *testing.T) {
 				if got != ulidRepoWeb {
 					t.Errorf("resolveRepoRef = %q, want web id", got)
 				}
-				if gotRepoName != "web" {
-					t.Errorf("server received repo name=%q, want %q", gotRepoName, "web")
+				if gotFullName != "widgets/web" {
+					t.Errorf("server received fullName=%q, want %q", gotFullName, "widgets/web")
 				}
-				if n := calls.Load(); n != 2 {
-					t.Errorf("path ref made %d HTTP calls, want 2 (project + repo lookup)", n)
+				if n := calls.Load(); n != 1 {
+					t.Errorf("path ref made %d HTTP calls, want 1 (repos/resolve)", n)
 				}
 			})
 		}
 	})
 
+	t.Run("a repo the server does not resolve is one friendly miss", func(t *testing.T) {
+		t.Parallel()
+		// Unknown and unshared repos share the server's "unavailable" answer.
+		c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			if err := printJSON(w, &coreapi.ResolveReposResponse{Resolutions: []coreapi.RepoResolution{{
+				Provider: repoProviderEntire, RequestedFullName: "widgets/web", Status: coreapi.RepoResolutionStatusUnavailable,
+			}}}); err != nil {
+				t.Errorf("encode resolution: %v", err)
+			}
+		})
+		_, err := resolveRepoRef(context.Background(), c, "/et/widgets/web", "")
+		require.ErrorIs(t, err, errNamedRefNotFound)
+		require.EqualError(t, err, "repo /et/widgets/web not found or not shared with you")
+	})
+
 	t.Run("--project agreeing with the path is allowed", func(t *testing.T) {
 		t.Parallel()
-		// A name compares case-insensitively (the server matches lower(name));
-		// a ULID compares against the resolved project id.
-		for _, project := range []string{"widgets", "WIDGETS", ulidProjectWidgets} {
+		// A name compares locally; a ULID costs one GetRepo.
+		for project, wantCalls := range map[string]int64{"widgets": 1, "WIDGETS": 1, ulidProjectWidgets: 2} {
 			t.Run(project, func(t *testing.T) {
 				t.Parallel()
-				var gotRepoName string
-				c, _ := resolveTestClient(t, nativePathHandler(t, &gotRepoName))
+				var gotFullName string
+				c, calls := resolveTestClient(t, nativePathHandler(t, &gotFullName))
 				got, err := resolveRepoRef(context.Background(), c, "/et/widgets/web", project)
 				if err != nil {
 					t.Fatalf("resolveRepoRef with --project %q: %v", project, err)
 				}
 				if got != ulidRepoWeb {
 					t.Errorf("resolveRepoRef = %q, want web id", got)
+				}
+				if n := calls.Load(); n != wantCalls {
+					t.Errorf("--project %q made %d HTTP calls, want %d", project, n, wantCalls)
 				}
 			})
 		}
@@ -336,14 +407,11 @@ func TestResolveRepoRef_NativePath(t *testing.T) {
 
 	t.Run("--project ULID disagreeing with the path is rejected", func(t *testing.T) {
 		t.Parallel()
-		var gotRepoName string
-		c, _ := resolveTestClient(t, nativePathHandler(t, &gotRepoName))
+		var gotFullName string
+		c, _ := resolveTestClient(t, nativePathHandler(t, &gotFullName))
 		_, err := resolveRepoRef(context.Background(), c, "/et/widgets/web", ulidOrgGlobex)
 		if err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Errorf("mismatched --project ULID: err = %v, want a \"does not match\" error", err)
-		}
-		if gotRepoName != "" {
-			t.Error("repo lookup must not run when --project disagrees with the path")
 		}
 	})
 
@@ -437,25 +505,25 @@ func TestResolveRepoRef_NativePath(t *testing.T) {
 }
 
 // TestResolveRepoPath covers the one repo spelling `repo grant` accepts, the
-// native /et/<project>/<repo> path: it resolves through the project and repo
-// by-name lookups exactly as the path does elsewhere, and everything else — a
-// ULID, a bare name, a bare pair, a /gh/ mirror ref — is refused locally with
-// the shape named, before any request is made.
+// native /et/<project>/<repo> path: it resolves through the same path lookup
+// as the path does elsewhere, and everything else — a ULID, a bare name, a
+// bare pair, a /gh/ mirror ref — is refused locally with the shape named,
+// before any request is made.
 func TestResolveRepoPath(t *testing.T) {
 	t.Parallel()
 
-	t.Run("a native path resolves via its embedded project", func(t *testing.T) {
+	t.Run("a native path resolves in one call", func(t *testing.T) {
 		t.Parallel()
 		for _, ref := range []string{"/et/widgets/web", "et/widgets/web", "/et/widgets/web.git"} {
 			t.Run(ref, func(t *testing.T) {
 				t.Parallel()
-				var gotRepoName string
-				c, calls := resolveTestClient(t, nativePathHandler(t, &gotRepoName))
+				var gotFullName string
+				c, calls := resolveTestClient(t, nativePathHandler(t, &gotFullName))
 				got, err := resolveRepoPath(context.Background(), c, ref)
 				require.NoError(t, err)
 				require.Equal(t, ulidRepoWeb, got)
-				require.Equal(t, "web", gotRepoName)
-				require.EqualValues(t, 2, calls.Load(), "project + repo lookup")
+				require.Equal(t, "widgets/web", gotFullName)
+				require.EqualValues(t, 1, calls.Load(), "repos/resolve")
 			})
 		}
 	})
@@ -464,17 +532,18 @@ func TestResolveRepoPath(t *testing.T) {
 		t.Parallel()
 		// The server's name rules admit 26 base32 characters, so a project or
 		// repo can be NAMED like a ULID. Inside a path both segments are names
-		// by construction and must go through the by-name lookups, never the
-		// ULID passthrough that a bare ref gets.
+		// by construction and must go to the path lookup, never the ULID
+		// passthrough that a bare ref gets.
 		for _, ref := range []string{"/et/widgets/" + ulidAccount, "/et/" + ulidAccount + "/web"} {
 			t.Run(ref, func(t *testing.T) {
 				t.Parallel()
-				var gotRepoName string
-				c, calls := resolveTestClient(t, nativePathHandler(t, &gotRepoName))
+				var gotFullName string
+				c, calls := resolveTestClient(t, nativePathHandler(t, &gotFullName))
 				got, err := resolveRepoPath(context.Background(), c, ref)
 				require.NoError(t, err)
 				require.Equal(t, ulidRepoWeb, got)
-				require.EqualValues(t, 2, calls.Load(), "project + repo lookup")
+				require.Equal(t, strings.TrimPrefix(ref, "/et/"), gotFullName)
+				require.EqualValues(t, 1, calls.Load(), "repos/resolve")
 			})
 		}
 	})

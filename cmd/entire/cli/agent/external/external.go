@@ -74,10 +74,6 @@ func (e *Agent) Description() string {
 	return e.info.Description
 }
 
-func (e *Agent) IsPreview() bool {
-	return e.info.IsPreview
-}
-
 func (e *Agent) DetectPresence(ctx context.Context) (bool, error) {
 	stdout, err := e.run(ctx, nil, "detect")
 	if err != nil {

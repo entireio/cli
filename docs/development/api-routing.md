@@ -84,9 +84,9 @@ and `auth status` renders it as "could not be read from …" rather than "Not
 logged in" (`statusTarget.storeErr`). A Delete that misses in both stores
 returns `ErrNotFound` silently, so `logout` can still remove a context on a
 machine whose keyring has vanished; the store cannot tell a logout from login's
-best-effort clear of a stale slot, so it is `logout` that warns, from
-`statusTarget.storeErr`, when the token could not be read: revocation was
-skipped and any copy in that store was not removed.
+best-effort clear of a stale slot, so it is `logout`'s sweep that warns, per
+saved login, when a token could not be read and it is removing that login
+locally only.
 
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 

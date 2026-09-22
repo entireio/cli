@@ -70,8 +70,13 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 type repoJSON struct {
 	ID          string `json:"id"`
 	ClusterHost string `json:"clusterHost"`
-	Path        string `json:"path"`
-	State       string `json:"state"`
+	// ClusterSlug and Jurisdiction name the repo's primary placement the way
+	// `--cluster` and the cluster catalog do; the native mirror tests pick a
+	// target against them rather than hardcoding a region pair.
+	ClusterSlug  string `json:"clusterSlug"`
+	Jurisdiction string `json:"jurisdiction"`
+	Path         string `json:"path"`
+	State        string `json:"state"`
 }
 
 // waitForRepoClonable reads the repo by its /et/<project>/<repo> path, the
