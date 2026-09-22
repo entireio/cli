@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // shCmd returns a Cmd that runs the given shell snippet via `sh -c`. Used
@@ -81,8 +82,113 @@ func TestConfigurePrivacyFilter_AppliesDefaults(t *testing.T) {
 	if got.Command != "opf" {
 		t.Errorf("default Command: want \"opf\", got %q", got.Command)
 	}
-	if got.Timeout != 30 {
-		t.Errorf("default Timeout: want 30, got %d", got.Timeout)
+	// Timeout is deliberately NOT defaulted here: normalizing it would make an
+	// unset setting indistinguishable from an explicit timeout_seconds, and
+	// the size-adaptive deadline would never run. A small batch still lands on
+	// the same ~30s the old fixed default gave.
+	if got.Timeout != 0 {
+		t.Errorf("unset Timeout must stay 0 so the adaptive deadline can apply, got %d", got.Timeout)
+	}
+	if d := adaptiveOPFTimeout(got.Timeout, 4*1024); d != opfTimeoutFloor {
+		t.Errorf("small batch with unset Timeout: want %s, got %s", opfTimeoutFloor, d)
+	}
+}
+
+func TestAdaptiveOPFTimeout(t *testing.T) {
+	t.Parallel()
+	const mib = 1024 * 1024
+	cases := []struct {
+		name       string
+		configured int
+		batchedLen int
+		want       time.Duration
+	}{
+		{"unset tiny batch lands on the floor", 0, 1024, opfTimeoutFloor},
+		{"unset empty batch lands on the floor", 0, 0, opfTimeoutFloor},
+		// 1 MiB × 1.14 s/KB × 2 = 2334.72s, well past the floor and far
+		// short of the ceiling.
+		{"unset large batch scales with size", 0, mib, 2334720 * time.Millisecond},
+		{"unset huge batch is clamped at the ceiling", 0, 64 * mib, opfTimeoutCeiling},
+		// An explicit setting wins in both directions: it is not raised for a
+		// batch the formula would give hours, nor lowered below the floor.
+		{"explicit override wins over a scaled estimate", 45, 64 * mib, 45 * time.Second},
+		{"explicit override wins below the floor", 5, 1024, 5 * time.Second},
+		{"negative configured value is treated as unset", -1, 1024, opfTimeoutFloor},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := adaptiveOPFTimeout(tc.configured, tc.batchedLen); got != tc.want {
+				t.Errorf("adaptiveOPFTimeout(%d, %d) = %s, want %s",
+					tc.configured, tc.batchedLen, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShellOut_RedactBatchDeadlineFollowsBatchSize pins the wiring, not the
+// formula: the deadline RedactBatch installs must come from the size of the
+// batch it is about to send, so a legitimately slow large call is not killed
+// on a small call's budget.
+func TestShellOut_RedactBatchDeadlineFollowsBatchSize(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name           string
+		timeoutSeconds int
+		input          string
+		wantAtLeast    time.Duration
+		wantAtMost     time.Duration
+	}{
+		{
+			name:        "unset timeout, small input: the floor",
+			input:       "hello world",
+			wantAtLeast: opfTimeoutFloor - 5*time.Second,
+			wantAtMost:  opfTimeoutFloor,
+		},
+		{
+			name:        "unset timeout, 1 MiB input: scaled well past the floor",
+			input:       strings.Repeat("a", 1024*1024),
+			wantAtLeast: 30 * time.Minute,
+			wantAtMost:  opfTimeoutCeiling,
+		},
+		{
+			name:           "explicit timeout ignores batch size",
+			timeoutSeconds: 5,
+			input:          strings.Repeat("a", 1024*1024),
+			wantAtLeast:    time.Second,
+			wantAtMost:     5 * time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			var remaining time.Duration
+			rt := &shellOut{
+				command:        "opf",
+				timeoutSeconds: tc.timeoutSeconds,
+				commandRunner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+					mu.Lock()
+					if deadline, ok := ctx.Deadline(); ok {
+						remaining = time.Until(deadline)
+					}
+					mu.Unlock()
+					return shCmd(ctx, `cat >/dev/null; printf '{"detected_spans":[]}'`)
+				},
+			}
+			if _, err := rt.RedactBatch(context.Background(), []string{tc.input}, []string{"private_person"}); err != nil {
+				t.Fatalf("RedactBatch: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if remaining == 0 {
+				t.Fatal("command context carried no deadline")
+			}
+			if remaining < tc.wantAtLeast || remaining > tc.wantAtMost {
+				t.Errorf("deadline remaining = %s, want within [%s, %s]",
+					remaining, tc.wantAtLeast, tc.wantAtMost)
+			}
+		})
 	}
 }
 

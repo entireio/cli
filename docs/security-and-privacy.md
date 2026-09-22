@@ -182,15 +182,14 @@ Full settings reference:
         "private_date": false,
         "account_number": false,
         "secret": false
-      },
-      "timeout_seconds": 30
+      }
     }
   }
 }
 ```
 
 - `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`. **Only read from `.entire/settings.local.json`**, and only when that file is untracked; see [Why `command` is local-only](#why-command-is-local-only).
-- `timeout_seconds` — per-invocation timeout. Defaults to `30`.
+- `timeout_seconds` — deadline for one `opf` invocation. Omitted by default, and that is the setting you want: with it unset the deadline is computed from the size of the batch actually being sent, using the benchmarked ~1.14 s/KB rate with a 2× margin — a 30s floor for small inputs, scaling up with content, clamped at 3 hours. The clamp is not a budget for how long redaction may take; it is the point past which "the runtime is stuck" explains the wait better than "this is still working", and it is there so one wedged call cannot sit in front of everything else queued behind it. Setting the key pins a fixed deadline of exactly that many seconds no matter how much content the call carries, which is only worth doing to make behavior deterministic in a test or a deliberately constrained environment. A fixed timeout that fires on a scan that was working is worse than any cap rejection: it trips the per-process circuit breaker, which abandons every other checkpoint in the same pass, not just the slow one.
 - `prompt_default` — `"ask"` (default), `"never"`, or `"always"`. Controls whether the pre-push hook surfaces an interactive prompt before running OPF. `ENTIRE_OPF=yes` or `ENTIRE_OPF=no` on a single `git push` invocation overrides this for that push only.
 
 ### Why `command` is local-only

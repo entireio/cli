@@ -2464,18 +2464,21 @@ func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error
 // pre-push hook as well as the network push.
 //
 // The hook's compute cost is smaller than it looks: OPF makes exactly one
-// shell-out per push (see manual_commit_opf_rewrite.go and
-// manual_commit_opf_refs.go), bounded by
-// redaction.openai_privacy_filter.timeout_seconds — 30s by default — and an
-// oversized first run is rejected outright by BootstrapTooLargeError or
-// OPFRawBytesTooLargeError rather than allowed to run long. What is genuinely
-// unbounded is the OPF prompt, which waits on a person. Ten minutes is sized to
-// leave room for someone to answer it, not to cover a slow scan; two minutes
-// was not enough for either.
+// shell-out per unit of work (see manual_commit_opf_rewrite.go and
+// manual_commit_opf_refs.go), and an oversized first run is rejected outright
+// by BootstrapTooLargeError or OPFRawBytesTooLargeError rather than allowed to
+// run long. What is genuinely unbounded is the OPF prompt, which waits on a
+// person. Ten minutes is sized to leave room for someone to answer it, not to
+// cover a slow scan; two minutes was not enough for either.
 //
-// Known limitation: timeout_seconds is validated only as >= 0, so a value
-// configured above this bound is truncated and the push is cut short. Deriving
-// the bound from that setting is the fix if anyone hits it.
+// Known limitation: this bound is not derived from the scan's own deadline, and
+// that deadline can exceed it — it scales with batch size
+// (redact.adaptiveOPFTimeout), and an explicit
+// redaction.openai_privacy_filter.timeout_seconds is honored verbatim however
+// large. A scan running past ten minutes therefore cuts this push short. The
+// scan itself is not interrupted (see below: the hook is orphaned, not killed),
+// so on git-refs the refs stay queued and ship on a later push; deriving the
+// bound from the scan's deadline is the fix if anyone hits it.
 //
 // What expiry kills is git, and only git: exec.CommandContext's default Cancel
 // is Process.Kill() on the child's PID, no Setpgid is set, and no group signal
