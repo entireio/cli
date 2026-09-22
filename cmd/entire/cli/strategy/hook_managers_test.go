@@ -61,8 +61,8 @@ func TestDetectHookManagers_Lefthook(t *testing.T) {
 	if managers[0].ConfigPath != "lefthook.yml" {
 		t.Errorf("expected lefthook.yml, got %s", managers[0].ConfigPath)
 	}
-	if managers[0].OverwritesHooks {
-		t.Error("Lefthook should have OverwritesHooks=false")
+	if !managers[0].OverwritesHooks {
+		t.Error("Lefthook should have OverwritesHooks=true")
 	}
 }
 
@@ -348,26 +348,53 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 	}
 }
 
-func TestHookManagerWarning_GitHooksManager(t *testing.T) {
+func TestHookManagerWarning_Lefthook(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: true},
 	}
 
 	warning := hookManagerWarning(managers, "entire")
 
-	// Category B: should be a Note, not a Warning
-	if !strings.Contains(warning, "Note: Lefthook detected") {
-		t.Error("warning should contain 'Note: Lefthook detected'")
+	if !strings.Contains(warning, "Warning: Lefthook detected") {
+		t.Error("warning should contain 'Warning: Lefthook detected'")
 	}
-	if !strings.Contains(warning, "run 'entire enable' to restore") {
-		t.Error("warning should mention running 'entire enable'")
+	if !strings.Contains(warning, "scripts receive Git's hook arguments") {
+		t.Error("warning should explain that Lefthook scripts receive hook arguments")
 	}
+	if !strings.Contains(warning, "<source_dir>/pre-push/entire.sh") {
+		t.Error("warning should use Lefthook's script layout")
+	}
+	if !strings.Contains(warning, `pre-push "$@"`) {
+		t.Error("pre-push script should preserve all Git hook arguments")
+	}
+	if strings.Contains(warning, "lefthook.ymlpre-push") {
+		t.Error("warning should not concatenate the config file with hook names")
+	}
+	if !strings.Contains(warning, "Wire each script in lefthook.yml") {
+		t.Error("warning should name the detected Lefthook config")
+	}
+	if !strings.Contains(warning, "configured source_dir") {
+		t.Error("warning should account for custom Lefthook source directories")
+	}
+	if strings.Contains(warning, "Note: Lefthook detected") {
+		t.Error("Lefthook should use warning-level messaging")
+	}
+}
 
-	// Should NOT contain hook file copy-paste instructions
-	if strings.Contains(warning, "prepare-commit-msg:") {
-		t.Error("category B warning should not contain hook file instructions")
+func TestHookManagerWarning_LefthookConfigPath(t *testing.T) {
+	t.Parallel()
+
+	warning := hookManagerWarning([]hookManager{
+		{Name: "Lefthook", ConfigPath: ".lefthook.toml", OverwritesHooks: true},
+	}, "entire")
+
+	if !strings.Contains(warning, "Wire each script in .lefthook.toml") {
+		t.Error("warning should name the detected config format and path")
+	}
+	if !strings.Contains(warning, "equivalent syntax for JSON/TOML") {
+		t.Error("warning should identify the displayed config syntax")
 	}
 }
 
@@ -409,7 +436,7 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 
 	managers := []hookManager{
 		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: true},
 	}
 
 	warning := hookManagerWarning(managers, "entire")
@@ -417,8 +444,8 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 	if !strings.Contains(warning, "Warning: Husky detected") {
 		t.Error("should contain Husky warning")
 	}
-	if !strings.Contains(warning, "Note: Lefthook detected") {
-		t.Error("should contain Lefthook note")
+	if !strings.Contains(warning, "Warning: Lefthook detected") {
+		t.Error("should contain Lefthook warning")
 	}
 }
 
