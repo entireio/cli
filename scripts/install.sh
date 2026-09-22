@@ -96,21 +96,63 @@ detect_arch() {
 
 fetch_github_json() {
     local url="$1"
-    local curl_opts=(-fsSL)
+    local curl_opts=(-sSL)
+    local response http_status body curl_error curl_error_message curl_exit
+
+    curl_opts+=(
+        -H "Accept: application/vnd.github+json"
+        -H "X-GitHub-Api-Version: 2026-03-10"
+    )
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         curl_opts+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
     fi
 
-    curl "${curl_opts[@]}" "$url" 2>/dev/null
+    curl_error=$(mktemp)
+    if response=$(curl "${curl_opts[@]}" -w $'\n%{http_code}' "$url" 2>"$curl_error"); then
+        rm -f "$curl_error"
+    else
+        curl_exit=$?
+        curl_error_message=$(<"$curl_error")
+        rm -f "$curl_error"
+        error "Could not connect to the GitHub API (curl exit code ${curl_exit}): ${curl_error_message}"
+    fi
+
+    http_status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+
+    case "$http_status" in
+        2??)
+            printf '%s\n' "$body"
+            ;;
+        401)
+            if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+                error "GitHub rejected GITHUB_TOKEN. Check that it is valid, or unset GITHUB_TOKEN and rerun the installation."
+            fi
+            error "GitHub returned HTTP 401 Unauthorized."
+            ;;
+        403|429)
+            error "GitHub returned HTTP ${http_status}. The API rate limit may have been exceeded. Set a valid GITHUB_TOKEN and try again."
+            ;;
+        5??)
+            error "GitHub API is temporarily unavailable (HTTP ${http_status}). Please try again later."
+            ;;
+        *)
+            error "GitHub API request failed with HTTP ${http_status}."
+            ;;
+    esac
 }
 
 get_latest_stable_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-    local version
-    version=$(fetch_github_json "$url" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
+    local response version
+
+    if ! response=$(fetch_github_json "$url"); then
+        return 1
+    fi
+    version=$(printf '%s\n' "$response" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)
 
     if [[ -z "$version" ]]; then
-        error "Failed to fetch latest version from GitHub. Please check your internet connection."
+        error "GitHub returned an unexpected response without a release tag."
     fi
 
     echo "$version"
@@ -118,11 +160,15 @@ get_latest_stable_version() {
 
 get_latest_nightly_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20"
-    local version
-    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep 'nightly' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
+    local response version
+
+    if ! response=$(fetch_github_json "$url"); then
+        return 1
+    fi
+    version=$(printf '%s\n' "$response" | grep '"tag_name"' | grep 'nightly' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)
 
     if [[ -z "$version" ]]; then
-        error "Failed to fetch latest nightly version from GitHub. Please check your internet connection."
+        error "GitHub returned an unexpected response without a nightly release tag."
     fi
 
     echo "$version"
