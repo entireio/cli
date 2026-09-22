@@ -343,10 +343,19 @@ func TestShellOut_RedactBatchRejectsOversizedInputBeforeCommand(t *testing.T) {
 		},
 	}
 
-	_, err := rt.RedactBatch(context.Background(),
-		[]string{strings.Repeat("x", 16*1024*1024+1)},
-		[]string{"private_person"},
-	)
+	// One chunk reused across the slice: Go strings share backing storage,
+	// so the whole input weighs 16 MiB in memory while presenting more than
+	// opfMaxBatchInputBytes of length to the size check. Materializing a
+	// single 256 MiB string instead would make this test allocate the very
+	// buffer the limit exists to prevent.
+	const chunkBytes = 16 * 1024 * 1024
+	chunk := strings.Repeat("x", chunkBytes)
+	inputs := make([]string, opfMaxBatchInputBytes/chunkBytes+1)
+	for i := range inputs {
+		inputs[i] = chunk
+	}
+
+	_, err := rt.RedactBatch(context.Background(), inputs, []string{"private_person"})
 	if err == nil {
 		t.Fatal("RedactBatch: want oversized input error, got nil")
 	}

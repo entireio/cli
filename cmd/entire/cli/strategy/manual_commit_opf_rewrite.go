@@ -211,18 +211,22 @@ const (
 	// gate ships the refs that are already redacted, so a slow-but-working
 	// checkpoint holds neither its siblings nor the user's push.
 	//
-	// The value is pinned to the pipeline's one hard constraint rather
-	// than to a time budget or a multiple of an observed session size:
-	// redact's opfMaxBatchInputBytes (16 MiB) bounds the same quantity one
-	// layer lower — the deduplicated prose-leaf population
-	// BatchBytesWithPrivacyFilter feeds to the shell-out, which
-	// opfBatchedInputLen measures as those same leaf bytes plus one
-	// separator byte per leaf — as a hard, non-configurable ceiling. 15
-	// MiB sits just under it so this check still owns the error message
+	// The value is therefore picked to be unreachable rather than to hug
+	// anything. The largest real session measured holds a few MiB of
+	// prose-leaf text, so 128 MiB is more than an order of magnitude
+	// above any session that exists; content that reaches it has to be a
+	// mistake. It also sits well clear of redact's opfMaxBatchInputBytes
+	// (256 MiB), which bounds the same quantity one layer lower — the
+	// deduplicated prose-leaf population BatchBytesWithPrivacyFilter
+	// feeds to the shell-out, which opfBatchedInputLen measures as those
+	// same leaf bytes plus one separator byte per leaf. That one is a
+	// pure memory-safety wall with no override; keeping real distance
+	// below it means this check owns the error message a user can act on
 	// (OPFBatchTooLargeError explains itself; the shell-out's generic
-	// "input too large" does not), with the ~1 MiB gap covering the
-	// separator bytes. Both are outer walls; neither is a size to tune.
-	batchDefaultLimit = 15 * 1024 * 1024
+	// "input too large" does not) and that raising this limit, or setting
+	// ENTIRE_OPF_BATCH_LIMIT=unlimited, still leaves the process's
+	// allocation protected. Neither number is a size to tune.
+	batchDefaultLimit = 128 * 1024 * 1024
 	batchEnvVar       = "ENTIRE_OPF_BATCH_LIMIT"
 )
 
@@ -281,22 +285,33 @@ func (e *OPFRawBytesTooLargeError) Error() string {
 }
 
 // rawByteCapMultiplier ties the raw-byte RAM ceiling to the leaf-byte
-// cap so there is no second env var. 16× means: default leaf cap 15 MiB
-// → raw ceiling 240 MiB.
+// cap so there is no second env var. 2× means: default leaf cap 128 MiB
+// → raw ceiling 256 MiB.
 //
 // This one really is a resource number, unlike batchDefaultLimit: it
-// bounds what this process holds in memory at once, so it is sized
-// against real content rather than against implausible content. Real
+// bounds what this process holds in memory at once, so what matters is
+// the absolute ceiling, not the multiple. 256 MiB is the same order as
+// redact's opfMaxBatchInputBytes — both answer "what can this process
+// safely allocate", and the two buffers coexist during a rewrite. The
+// multiplier exists only so one env var moves both; it is not itself
+// the sized quantity, which is why it comes DOWN as batchDefaultLimit
+// goes up. Holding the old 16× against a 128 MiB leaf cap would put
+// this at 2 GiB, which stops being a memory ceiling at all.
+//
+// 2× still preserves the ordering the error messages depend on. Real
 // transcripts run ~1.2× raw bytes per prose-leaf byte (OPF-BUG.md), so
-// 16× leaves better than an order of magnitude over a flush whose leaf
-// content is itself at the cap. That headroom is not slack: raw bytes
-// are counted per commit across the whole flush with no dedup, while
-// the leaf count dedups, so an un-applied chain re-carrying the same
-// growing full.jsonl and a blob that is mostly JSON scaffolding both
-// inflate this side only. 240 MiB absorbs that and still aborts a
-// multi-GiB paste before it exhausts the user's shell, which 100×
-// (1.5 GiB at the current leaf cap) would not.
-const rawByteCapMultiplier = 16
+// content of real shape sitting exactly at the leaf cap buffers ~154
+// MiB of raw bytes and trips the leaf-byte cap — the check that
+// explains itself — before this one. What lands here instead is the
+// asymmetry: raw bytes are counted per commit across the whole flush
+// with no dedup, while the leaf count dedups, so an un-applied chain
+// re-carrying the same growing full.jsonl, or a blob that is mostly
+// JSON scaffolding, inflates this side only. Content whose raw-to-leaf
+// ratio exceeds 2× therefore aborts on RAM rather than on leaf bytes,
+// which is the right call: at a quarter-gigabyte of buffered blobs
+// memory really is the binding constraint, and the error says so and
+// names the env var that scales both.
+const rawByteCapMultiplier = 2
 
 // RewriteUnpushedV1WithOPF re-redacts unpushed entire/checkpoints/v1
 // commits with OPF, builds new commits carrying Entire-OPF-Applied:

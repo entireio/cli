@@ -41,14 +41,16 @@ func swapOPFFlushSpawn(t *testing.T) *[]string {
 
 // addOversizedRef grows oversizedID's ref past the per-ref leaf-byte cap and
 // sets that cap low enough for the other ref to stay comfortably under it.
-// 5000 also keeps the raw-byte ceiling that scales off the same env var
-// (× rawByteCapMultiplier) above this fixture, so the leaf-byte cap is what
-// these tests exercise.
+// The fixture's single repeated leaf is exactly 9400 bytes; 7000 trips the
+// leaf-byte cap while keeping the raw-byte ceiling that scales off the same
+// env var (7000 × rawByteCapMultiplier(2) = 14000) above this fixture's
+// actual raw content (~12.4 KB across the unpushed commits), so the
+// leaf-byte cap is what these tests exercise, not the raw ceiling.
 func addOversizedRef(t *testing.T, repo *git.Repository) {
 	t.Helper()
 	addGitRefsSessionWithTranscript(t, repo, flushOversizedID, "sess-oversized",
 		strings.Repeat("the quick brown fox jumps over PERSONABC again ", 200))
-	t.Setenv(batchEnvVar, "5000")
+	t.Setenv(batchEnvVar, "7000")
 }
 
 // The point of the whole change: the pre-push hook hands leftover OPF work to a

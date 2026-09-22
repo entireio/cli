@@ -361,9 +361,26 @@ const (
 	//     span boundaries)
 	opfBatchSeparator = "\x1e"
 
-	// Keep a pathological transcript or process from making the CLI allocate
-	// unbounded buffers while preparing or reading an OPF shell-out.
-	opfMaxBatchInputBytes    = 16 * 1024 * 1024
+	// opfMaxBatchInputBytes bounds the joined input this process buffers
+	// before handing it to the opf shell-out. It exists for exactly one
+	// reason: a buffer this size is safe to allocate on any machine
+	// capable of running this CLI, so no pathological or corrupted input
+	// can make the CLI allocate its way into an out-of-memory crash. It
+	// bounds process memory, not content legitimacy.
+	//
+	// It is therefore NOT tuned to how big a session is, and it is not
+	// user-configurable — not even via ENTIRE_OPF_BATCH_LIMIT=unlimited,
+	// which waives the friendlier strategy-layer cap (batchDefaultLimit in
+	// cmd/entire/cli/strategy) and never this one. "Unlimited" means "stop
+	// applying the sanity check", not "remove memory protection". Judging
+	// whether input is plausible belongs to that cap, which owns the
+	// explanatory error; this is the last wall and its error is blunt by
+	// design. Nothing real should ever reach it: the cap above sits far
+	// below, so hitting this means the layer above was explicitly waived.
+	opfMaxBatchInputBytes = 256 * 1024 * 1024
+
+	// opfMaxProcessOutputBytes bounds what we buffer back from the opf
+	// process's stdout/stderr, for the same allocate-no-further reason.
 	opfMaxProcessOutputBytes = 1 * 1024 * 1024
 )
 

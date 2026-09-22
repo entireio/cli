@@ -612,15 +612,18 @@ func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 		envLimit string
 		wantErr  bool
 	}{
-		// 5000 is under the fixture's ~10 KB of prose-leaf content and well
-		// over its ~13 KB of raw bytes divided by rawByteCapMultiplier, so it
-		// is the leaf-byte cap that trips and not the RAM ceiling that scales
-		// off the same env var.
-		{name: "over_limit_rejected", envLimit: "5000", wantErr: true},
+		// 8000 is under the fixture's ~10 KB of prose-leaf content and over
+		// its 12,960 raw bytes divided by rawByteCapMultiplier, so it is the
+		// leaf-byte cap that trips and not the RAM ceiling that scales off
+		// the same env var. Both bounds are tight enough to matter: below
+		// ~6.5 KB the raw ceiling fires first, above ~10 KB nothing fires.
+		{name: "over_limit_rejected", envLimit: "8000", wantErr: true},
 		{name: "unlimited_allows_any_size", envLimit: "unlimited", wantErr: false},
-		// Above batchDefaultLimit (15 MiB), so the override is doing something:
-		// the default is a backstop, not a size anyone should need to raise.
-		{name: "env_override_allows_above_default", envLimit: "20000000", wantErr: false},
+		// Above batchDefaultLimit (128 MiB), so the override is doing
+		// something: the default is a backstop, not a size anyone should need
+		// to raise. Still below redact's 256 MiB allocation wall, which no
+		// override moves.
+		{name: "env_override_allows_above_default", envLimit: "200000000", wantErr: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1120,11 +1123,11 @@ func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *te
 	_, repo, refs := setupGitRefsOPFRepo(t, fitsID, oversizedID)
 	// A second, much larger session carries the oversized ref's own prose-leaf
 	// bytes (~10 KB) past the cap while the other ref stays well under it. The
-	// raw-byte ceiling (cap × rawByteCapMultiplier, so 80 KB here) stays above
-	// both, so the leaf-byte cap is what this test observes.
+	// raw-byte ceiling (cap × rawByteCapMultiplier, so 16 KB here) stays above
+	// the flush's raw bytes, so the leaf-byte cap is what this test observes.
 	addGitRefsSessionWithTranscript(t, repo, oversizedID, "sess-oversized",
 		strings.Repeat("the quick brown fox jumps over PERSONABC again ", 200))
-	t.Setenv(batchEnvVar, "5000")
+	t.Setenv(batchEnvVar, "8000")
 	before := refHashes(t, repo, refs)
 
 	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
