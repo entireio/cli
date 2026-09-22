@@ -203,7 +203,7 @@ const (
 	// separates the two is behavior, not size. Broken content makes the
 	// scan fail, and that has its own path — OPFRuntimeFailedError plus
 	// the process-wide circuit breaker. Large content just takes longer:
-	// OPF-THROUGHPUT-FINDINGS.md measured the real runtime at ~1.14s/KB
+	// docs/development/opf-throughput-findings.md measured the real runtime at ~1.14s/KB
 	// sustained on CPU (MPS confirmed slower on this stack), so every
 	// real session is minutes to hours of inference and no cap value
 	// changes that. On git-refs nobody waits for it either — the rewrite
@@ -299,7 +299,8 @@ func (e *OPFRawBytesTooLargeError) Error() string {
 // this at 2 GiB, which stops being a memory ceiling at all.
 //
 // 2× still preserves the ordering the error messages depend on. Real
-// transcripts run ~1.2× raw bytes per prose-leaf byte (OPF-BUG.md), so
+// transcripts run ~1.2× raw bytes per prose-leaf byte (see
+// docs/development/opf-bug-investigation.md), so
 // content of real shape sitting exactly at the leaf cap buffers ~154
 // MiB of raw bytes and trips the leaf-byte cap — the check that
 // explains itself — before this one. What lands here instead is the
@@ -440,7 +441,8 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		// stays cumulative across the WHOLE unpushed v1 chain rather than being
 		// scoped per commit: each rebuilt commit is the next one's parent (see
 		// the Pass 3 loop below), so commits cannot be redacted independently
-		// without reintroducing the "chunking" hazard OPF-BUG.md rejects — a
+		// without reintroducing the "chunking" hazard rejected in
+		// docs/development/opf-bug-investigation.md — a
 		// partially-rewritten chain whose ancestor is a still-un-trailered
 		// commit. Separate checkpoint refs are independent chains, which is why
 		// only that backend can scope per ref. So if this cap ever trips on
