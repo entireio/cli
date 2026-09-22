@@ -111,3 +111,33 @@ func TestRehomeSessionAfterOwnCommit_OnlyForTheCondensedAncestryGuest(t *testing
 		})
 	}
 }
+
+func TestRehomeSessionToCurrentWorktree_NeedsAStrongSignal(t *testing.T) {
+	fx := newRehomeFixture(t)
+	repo, err := OpenRepository(context.Background())
+	require.NoError(t, err)
+	defer repo.Close()
+
+	s := &ManualCommitStrategy{}
+	cases := map[string]struct {
+		ctx        context.Context
+		editedHere bool
+		moved      bool
+	}{
+		"hook merely runs here":    {ctx: context.Background()},
+		"payload named this tree":  {ctx: WithAgentWorkingTree(context.Background()), moved: true},
+		"hook captured edits here": {ctx: context.Background(), editedHere: true, moved: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			state := *fx.state
+			s.rehomeSessionToCurrentWorktree(tc.ctx, repo, &state, tc.editedHere)
+			if tc.moved {
+				assert.Equal(t, fx.worktreeDir, state.WorktreePath)
+				assert.Equal(t, fx.head, state.BaseCommit)
+			} else {
+				assert.Equal(t, fx.mainDir, state.WorktreePath, "a signal-less hook must not move the session")
+			}
+		})
+	}
+}

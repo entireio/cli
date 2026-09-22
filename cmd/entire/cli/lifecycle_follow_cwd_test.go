@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -39,12 +40,13 @@ func TestFollowAgentWorkingDirectory(t *testing.T) {
 	require.NoError(t, err)
 
 	cases := map[string]struct {
-		cwd  string
-		want string // process directory afterwards
+		cwd       string
+		want      string // process directory afterwards
+		confirmed bool   // the payload named the tree the hook now runs in
 	}{
-		"another worktree of the repo":       {cwd: worktree, want: worktree},
-		"a subdirectory of that worktree":    {cwd: filepath.Join(worktree, "src", "pkg"), want: worktree},
-		"a subdirectory of the current tree": {cwd: filepath.Join(parent, ".git"), want: parent},
+		"another worktree of the repo":       {cwd: worktree, want: worktree, confirmed: true},
+		"a subdirectory of that worktree":    {cwd: filepath.Join(worktree, "src", "pkg"), want: worktree, confirmed: true},
+		"a subdirectory of the current tree": {cwd: filepath.Join(parent, ".git"), want: parent, confirmed: true},
 		"a different repository":             {cwd: other, want: parent},
 		"a directory that does not exist":    {cwd: filepath.Join(parent, "nope"), want: parent},
 		"no cwd in the payload":              {cwd: "", want: parent},
@@ -53,7 +55,9 @@ func TestFollowAgentWorkingDirectory(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Chdir(parent)
 			paths.ClearWorktreeRootCache()
-			followAgentWorkingDirectory(context.Background(), ag, &agent.Event{Type: agent.TurnStart, CWD: tc.cwd})
+			ctx := followAgentWorkingDirectory(context.Background(), ag, &agent.Event{Type: agent.TurnStart, CWD: tc.cwd})
+			require.Equal(t, tc.confirmed, strategy.AgentWorkingTreeConfirmed(ctx),
+				"only a payload naming the current tree lets a hook re-home a session")
 			got, err := os.Getwd()
 			require.NoError(t, err)
 			require.Equal(t, tc.want, resolved(got))

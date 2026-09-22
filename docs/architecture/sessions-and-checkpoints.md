@@ -226,7 +226,14 @@ the same repository the hook process moves there before anything is resolved.
 At turn-start and turn-end `rehomeSessionToCurrentWorktree` then applies the
 same re-home under the same pending-content guard, so the first commit after
 the move already finds a correctly homed session with no process ancestry
-involved — which is what covers Windows, where ancestry cannot be read.
+involved — which is what covers Windows, where ancestry cannot be read. A hook
+re-homes only on a strong signal: the payload named the tree it now runs in
+(`strategy.WithAgentWorkingTree`, set by the dispatcher) or the turn-end
+capture found edits there. A hook that merely runs in the launch directory
+never moves a session, so agents whose payloads carry no working directory
+(Cursor, Factory Droid, OpenCode, external agents) keep the home their own
+commit chose instead of oscillating between the launch directory and the
+worktree; for them the own-commit and captured-edit signals are what re-home.
 
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact

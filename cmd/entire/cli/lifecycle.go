@@ -98,7 +98,7 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
-	followAgentWorkingDirectory(ctx, ag, event)
+	ctx = followAgentWorkingDirectory(ctx, ag, event)
 
 	switch event.Type {
 	case agent.SessionStart:
@@ -142,32 +142,36 @@ const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this rep
 // follows the agent (Claude Code: EnterWorktree and cd), so without this a
 // session stays homed in the launch directory while its work lands elsewhere.
 // Everything resolved from the process directory follows the move; the state
-// itself is re-homed by the strategy (rehomeSessionToCurrentWorktree).
-func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *agent.Event) {
+// itself is re-homed by the strategy (rehomeSessionToCurrentWorktree), which
+// the returned context authorises only when the payload named this tree.
+func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *agent.Event) context.Context {
 	if event.CWD == "" {
-		return
+		return ctx
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	target, targetMeta, err := worktreeRootOf(event.CWD)
 	if err != nil {
 		logging.Debug(logCtx, "payload cwd is not a worktree; staying put",
 			slog.String("cwd", event.CWD), slog.String("error", err.Error()))
-		return
+		return ctx
 	}
 	current, err := paths.WorktreeRoot(ctx)
-	if err != nil || filepath.Clean(current) == filepath.Clean(target) {
-		return
+	if err != nil {
+		return ctx
+	}
+	if filepath.Clean(current) == filepath.Clean(target) {
+		return strategy.WithAgentWorkingTree(ctx)
 	}
 	currentMeta, err := gitrepo.ResolveWorktreeMetadata(current)
 	if err != nil || !sameDir(currentMeta.CommonDir, targetMeta.CommonDir) {
 		logging.Debug(logCtx, "payload cwd belongs to another repository; staying put",
 			slog.String("cwd", event.CWD))
-		return
+		return ctx
 	}
 	if err := os.Chdir(target); err != nil {
 		logging.Warn(logCtx, "could not follow the agent's working directory",
 			slog.String("cwd", target), slog.String("error", err.Error()))
-		return
+		return ctx
 	}
 	paths.ClearWorktreeRootCache()
 	gitdir.ClearCache()
@@ -176,6 +180,7 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 		slog.String("event", event.Type.String()),
 		slog.String("from", current),
 		slog.String("to", target))
+	return strategy.WithAgentWorkingTree(ctx)
 }
 
 // sameDir compares two directory paths with symlinks resolved.
@@ -197,8 +202,12 @@ func worktreeRootOf(dir string) (string, gitrepo.WorktreeMetadata, error) {
 	if err != nil {
 		return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("resolve %s: %w", dir, err)
 	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
+		return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("%s is not a directory", dir)
 	}
 	for cur := abs; ; cur = filepath.Dir(cur) {
 		if meta, err := gitrepo.ResolveWorktreeMetadata(cur); err == nil {

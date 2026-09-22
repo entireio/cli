@@ -148,12 +148,28 @@ func (s *ManualCommitStrategy) rehomeSessionAfterOwnCommit(ctx context.Context, 
 	return rehomeSession(ctx, repo, state, worktreePath, newHead, "its agent committed there")
 }
 
-// rehomeSessionToCurrentWorktree moves a session whose hook now runs in another
-// worktree of the same repository — the agent moved and the hook followed
-// (followAgentWorkingDirectory) — when the recorded home holds nothing pending.
-// Runs at turn-start and turn-end, so the first commit after the move already
-// finds a correctly homed session without process ancestry.
-func (s *ManualCommitStrategy) rehomeSessionToCurrentWorktree(ctx context.Context, repo *git.Repository, state *SessionState) {
+type agentWorkingTreeKey struct{}
+
+// WithAgentWorkingTree marks ctx as running in the tree the agent's hook
+// payload named; only such a hook may re-home a session.
+func WithAgentWorkingTree(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentWorkingTreeKey{}, true)
+}
+
+// AgentWorkingTreeConfirmed reports whether WithAgentWorkingTree marked ctx.
+func AgentWorkingTreeConfirmed(ctx context.Context) bool {
+	return ctx.Value(agentWorkingTreeKey{}) == true
+}
+
+// rehomeSessionToCurrentWorktree moves a session whose hook runs in another
+// worktree of the same repository, when the recorded home holds nothing pending
+// and the hook has a strong signal that the agent works here: the payload named
+// this tree or the hook captured edits in it. A hook that merely runs in the
+// launch directory never moves a session.
+func (s *ManualCommitStrategy) rehomeSessionToCurrentWorktree(ctx context.Context, repo *git.Repository, state *SessionState, editedHere bool) {
+	if !editedHere && !AgentWorkingTreeConfirmed(ctx) {
+		return
+	}
 	current, err := paths.WorktreeRoot(ctx)
 	if err != nil || current == "" || state.WorktreePath == "" || isSessionHomeWorktree(current, state) {
 		return
