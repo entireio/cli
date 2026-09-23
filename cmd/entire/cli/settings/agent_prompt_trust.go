@@ -100,8 +100,6 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 	// Checked before the local file because the user tier merges after it.
 	userOwned := func(field string) bool {
 		switch {
-		case field == "investigate.always_prompt":
-			return s.userPromptOwnership.investigate
 		case strings.HasPrefix(field, "review_profiles."):
 			rest := strings.TrimPrefix(field, "review_profiles.")
 			name, _, ok := strings.Cut(rest, ".")

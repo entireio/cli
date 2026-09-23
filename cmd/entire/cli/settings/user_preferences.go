@@ -52,7 +52,6 @@ type UserPreferences struct {
 	ReviewProfiles        map[string]ReviewProfileConfig `json:"review_profiles,omitempty"`
 	ReviewDefaultProfile  string                         `json:"review_default_profile,omitempty"`
 	ReviewFixAgent        string                         `json:"review_fix_agent,omitempty"`
-	Investigate           *InvestigateConfig             `json:"investigate,omitempty"`
 	SummaryGeneration     *SummaryGenerationSettings     `json:"summary_generation,omitempty"`
 	SummaryTimeoutSeconds int                            `json:"summary_timeout_seconds,omitempty"`
 
@@ -281,10 +280,6 @@ func applyUserPreferences(settings *EntireSettings, prefs *UserPreferences) {
 	if prefs.ReviewFixAgent != "" {
 		settings.ReviewFixAgent = prefs.ReviewFixAgent
 	}
-	if prefs.Investigate != nil {
-		cfg := *prefs.Investigate
-		settings.Investigate = &cfg
-	}
 	if prefs.SummaryGeneration != nil {
 		if settings.SummaryGeneration == nil {
 			settings.SummaryGeneration = &SummaryGenerationSettings{}
@@ -387,18 +382,13 @@ func applyUserTier(ctx context.Context, settings *EntireSettings, worktreeRoot s
 // settings.local.json and clone preferences. The user file is developer-owned
 // by a stronger argument than either — a repository cannot deliver content to
 // ~/.config at all — but an unrecognised source is indistinguishable from an
-// untrusted one, so investigate.always_prompt and every review profile task or
-// prompt set there were silently dropped with a reason naming two files the
-// developer had not used.
+// untrusted one, so every review profile task or prompt set there was silently
+// dropped with a reason naming two files the developer had not used.
 type userPromptOwnership struct {
-	investigate bool
-	profiles    map[string]bool
+	profiles map[string]bool
 }
 
 func (o *userPromptOwnership) note(prefs *UserPreferences) {
-	if prefs.Investigate != nil {
-		o.investigate = true
-	}
 	for name := range prefs.ReviewProfiles {
 		if o.profiles == nil {
 			o.profiles = map[string]bool{}

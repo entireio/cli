@@ -257,7 +257,6 @@ func TestUserTier_InstructionFieldsSurviveTheAgentPromptGate(t *testing.T) {
 	_, project, local := newUserTierRepo(t)
 	writeUserSettings(t, `{
 	  "preferences": {
-	    "investigate": {"always_prompt": "Check the error paths."},
 	    "review_profiles": {"mine": {"task": "Only real defects.",
 	      "agents": {"claude-code": {"prompt": "Be terse."}}}}
 	  }
@@ -268,8 +267,6 @@ func TestUserTier_InstructionFieldsSurviveTheAgentPromptGate(t *testing.T) {
 
 	assert.Empty(t, s.AgentPromptRejections(),
 		"nothing from the user's own settings file may be reported as untrusted")
-	require.NotNil(t, s.Investigate)
-	assert.Equal(t, "Check the error paths.", s.Investigate.AlwaysPrompt)
 	profile := s.ReviewProfiles["mine"]
 	assert.Equal(t, "Only real defects.", profile.Task)
 	assert.Equal(t, "Be terse.", profile.Agents["claude-code"].Prompt)
