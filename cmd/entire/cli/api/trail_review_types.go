@@ -5,33 +5,33 @@ import "time"
 // TrailReviewStateResponse is returned by GET /api/v1/trails/{trail_id}/reviews/{id}.
 type TrailReviewStateResponse struct {
 	Review      TrailReview            `json:"review"`
-	CodeVersion TrailReviewCodeVersion `json:"codeVersion"`
+	CodeVersion TrailReviewCodeVersion `json:"code_version"`
 	Counts      TrailReviewCounts      `json:"counts"`
 	Comments    []TrailReviewComment   `json:"comments"`
-	NextCursor  *string                `json:"nextCursor"`
-	EventCursor string                 `json:"eventCursor"`
+	NextCursor  *string                `json:"next_cursor"`
+	EventCursor string                 `json:"event_cursor"`
 }
 
 // TrailReview represents a review session.
 type TrailReview struct {
 	ID            string    `json:"id"`
-	TrailID       string    `json:"trailId"`
-	CodeVersionID string    `json:"codeVersionId"`
-	ActorID       string    `json:"actorId"`
+	TrailID       string    `json:"trail_id"`
+	CodeVersionID string    `json:"code_version_id"`
+	ActorID       string    `json:"actor_id"`
 	Summary       *string   `json:"summary"`
-	StartedAt     time.Time `json:"startedAt"`
+	StartedAt     time.Time `json:"started_at"`
 }
 
 // TrailReviewCodeVersion pins the base/head that a review covers.
 type TrailReviewCodeVersion struct {
 	ID           string    `json:"id"`
-	TrailID      string    `json:"trailId"`
-	RepositoryID string    `json:"repositoryId"`
-	BaseRef      *string   `json:"baseRef"`
-	HeadRef      *string   `json:"headRef"`
-	BaseSHA      *string   `json:"baseSha"`
-	HeadSHA      *string   `json:"headSha"`
-	CapturedAt   time.Time `json:"capturedAt"`
+	TrailID      string    `json:"trail_id"`
+	RepositoryID string    `json:"repo_id"`
+	BaseRef      *string   `json:"base_ref"`
+	HeadRef      *string   `json:"head_ref"`
+	BaseSHA      *string   `json:"base_sha"`
+	HeadSHA      *string   `json:"head_sha"`
+	CapturedAt   time.Time `json:"captured_at"`
 }
 
 // TrailReviewCounts are review-scoped comment counts.
@@ -46,66 +46,65 @@ type TrailReviewCounts struct {
 // TrailReviewCommentsResponse is returned by trail/review comment list endpoints.
 type TrailReviewCommentsResponse struct {
 	Comments    []TrailReviewComment `json:"comments"`
-	HasMore     bool                 `json:"hasMore"`
-	NextOffset  *int                 `json:"nextOffset"`
-	EventCursor string               `json:"eventCursor,omitempty"`
+	NextCursor  *string              `json:"next_cursor,omitempty"`
+	EventCursor string               `json:"event_cursor,omitempty"`
 }
 
 // TrailReviewComment is a single agent-native review finding.
 type TrailReviewComment struct {
 	ID                        string                       `json:"id"`
-	TrailID                   string                       `json:"trailId"`
-	RepositoryID              string                       `json:"repositoryId"`
-	ReviewID                  string                       `json:"reviewId"`
-	CodeVersionID             string                       `json:"codeVersionId"`
-	ActorID                   string                       `json:"actorId"`
+	TrailID                   string                       `json:"trail_id"`
+	RepositoryID              string                       `json:"repo_id"`
+	ReviewID                  string                       `json:"review_id"`
+	CodeVersionID             string                       `json:"code_version_id"`
+	ActorID                   string                       `json:"actor_id"`
 	Title                     *string                      `json:"title"`
 	Body                      *string                      `json:"body"`
 	Severity                  *string                      `json:"severity"`
 	Confidence                *float64                     `json:"confidence"`
 	Status                    string                       `json:"status"`
-	StatusReason              *string                      `json:"statusReason"`
-	StaleOutcome              string                       `json:"staleOutcome"`
-	StaleCheckedAt            *time.Time                   `json:"staleCheckedAt"`
-	StaleCheckedCodeVersionID *string                      `json:"staleCheckedCodeVersionId"`
-	ClientID                  *string                      `json:"clientId"`
-	ClientIDHash              *string                      `json:"clientIdHash"`
-	CreatedAt                 time.Time                    `json:"createdAt"`
-	UpdatedAt                 time.Time                    `json:"updatedAt"`
+	StatusReason              *string                      `json:"status_reason"`
+	StaleOutcome              string                       `json:"stale_outcome"`
+	StaleCheckedAt            *time.Time                   `json:"stale_checked_at"`
+	StaleCheckedCodeVersionID *string                      `json:"stale_checked_code_version_id"`
+	ClientID                  *string                      `json:"client_id"`
+	ClientIDHash              *string                      `json:"client_id_hash"`
+	CreatedAt                 time.Time                    `json:"created_at"`
+	UpdatedAt                 time.Time                    `json:"updated_at"`
 	Location                  TrailReviewLocation          `json:"location"`
-	SuggestedChanges          []TrailReviewSuggestedChange `json:"suggestedChanges,omitempty"`
-	ThreadID                  *string                      `json:"threadId,omitempty"`
-	ThreadMessageCount        int                          `json:"threadMessageCount,omitempty"`
-	OutgoingLinks             []TrailReviewOutgoingLink    `json:"outgoingLinks,omitempty"`
+	SuggestedChanges          []TrailReviewSuggestedChange `json:"suggested_changes,omitempty"`
+	DiscussionID              *string                      `json:"discussion_id,omitempty"`
+	DiscussionMessageCount    int                          `json:"discussion_message_count,omitempty"`
+	OutgoingLinks             []TrailReviewOutgoingLink    `json:"outgoing_links,omitempty"`
 }
 
 // TrailReviewStartRequest starts a review session for a trail via
 // POST /api/v1/trails/{trail_id}/reviews. All fields are optional; the server
 // resolves the code version (base/head) when they are omitted.
 type TrailReviewStartRequest struct {
-	HeadSHA *string `json:"headSha,omitempty"`
-	BaseSHA *string `json:"baseSha,omitempty"`
-	BaseRef *string `json:"baseRef,omitempty"`
-	HeadRef *string `json:"headRef,omitempty"`
+	HeadSHA *string `json:"head_sha,omitempty"`
+	BaseSHA *string `json:"base_sha,omitempty"`
+	BaseRef *string `json:"base_ref,omitempty"`
+	HeadRef *string `json:"head_ref,omitempty"`
 }
 
 // TrailReviewStartResponse is returned by POST /api/v1/trails/{trail_id}/reviews.
 type TrailReviewStartResponse struct {
-	ReviewID       string            `json:"reviewId"`
-	TrailID        string            `json:"trailId"`
-	RepositoryID   string            `json:"repositoryId"`
-	CodeVersionID  string            `json:"codeVersionId"`
-	BaseSHA        *string           `json:"baseSha"`
-	HeadSHA        *string           `json:"headSha"`
-	EventStreamURL string            `json:"eventStreamUrl"`
-	DiffURL        string            `json:"diffUrl"`
-	FilesURL       string            `json:"filesUrl"`
+	ReviewID       string            `json:"review_id"`
+	TrailID        string            `json:"trail_id"`
+	RepositoryID   string            `json:"repo_id"`
+	CodeVersionID  string            `json:"code_version_id"`
+	BaseSHA        *string           `json:"base_sha"`
+	HeadSHA        *string           `json:"head_sha"`
+	EventStreamURL string            `json:"event_stream_url"`
+	DiffURL        string            `json:"diff_url"`
+	FilesURL       string            `json:"files_url"`
 	Limits         TrailReviewLimits `json:"limits"`
 }
 
 // TrailReviewLimits carries the server-enforced batch limits for a review.
 type TrailReviewLimits struct {
-	MaxCommentsPerBatch int `json:"maxCommentsPerBatch"`
+	MaxCommentsPerBatch int `json:"max_comments_per_batch"`
 }
 
 // TrailReviewCommentBatchRequest posts a batch of findings to a review via
@@ -119,14 +118,14 @@ type TrailReviewCommentBatchRequest struct {
 // TrailReviewCommentInput is a single finding within a batch create request.
 // client_id (an idempotency key) and location are required by the API.
 type TrailReviewCommentInput struct {
-	ClientID        string                                   `json:"clientId"`
+	ClientID        string                                   `json:"client_id"`
 	Body            *string                                  `json:"body,omitempty"`
 	Severity        *string                                  `json:"severity,omitempty"`
 	Confidence      *float64                                 `json:"confidence,omitempty"`
 	Status          *string                                  `json:"status,omitempty"`
-	StatusReason    *string                                  `json:"statusReason,omitempty"`
+	StatusReason    *string                                  `json:"status_reason,omitempty"`
 	Location        TrailReviewLocationCreateRequest         `json:"location"`
-	SuggestedChange *TrailReviewSuggestedChangeCreateRequest `json:"suggestedChange,omitempty"`
+	SuggestedChange *TrailReviewSuggestedChangeCreateRequest `json:"suggested_change,omitempty"`
 }
 
 // TrailReviewCommentBatchResponse is returned by the batch comment endpoint.
@@ -138,10 +137,10 @@ type TrailReviewCommentBatchResponse struct {
 // Status is one of "created", "existing", or "error"; Comment is populated for
 // the first two, Error for the last.
 type TrailReviewCommentBatchResult struct {
-	ClientID        string                        `json:"clientId"`
+	ClientID        string                        `json:"client_id"`
 	Status          string                        `json:"status"`
 	Comment         *TrailReviewComment           `json:"comment,omitempty"`
-	SuggestedChange *TrailReviewSuggestedChange   `json:"suggestedChange,omitempty"`
+	SuggestedChange *TrailReviewSuggestedChange   `json:"suggested_change,omitempty"`
 	Error           *TrailReviewCommentBatchError `json:"error,omitempty"`
 }
 
@@ -156,13 +155,13 @@ type TrailReviewCommentBatchError struct {
 // TrailReviewLocationCreateRequest identifies where a new finding applies.
 type TrailReviewLocationCreateRequest struct {
 	Granularity  string  `json:"granularity"`
-	FilePath     *string `json:"filePath,omitempty"`
-	StartLine    *int    `json:"startLine,omitempty"`
-	StartColumn  *int    `json:"startColumn,omitempty"`
-	EndLine      *int    `json:"endLine,omitempty"`
-	EndColumn    *int    `json:"endColumn,omitempty"`
-	SelectedText *string `json:"selectedText,omitempty"`
-	NearbyText   *string `json:"nearbyText,omitempty"`
+	FilePath     *string `json:"file_path,omitempty"`
+	StartLine    *int    `json:"start_line,omitempty"`
+	StartColumn  *int    `json:"start_column,omitempty"`
+	EndLine      *int    `json:"end_line,omitempty"`
+	EndColumn    *int    `json:"end_column,omitempty"`
+	SelectedText *string `json:"selected_text,omitempty"`
+	NearbyText   *string `json:"nearby_text,omitempty"`
 	Language     *string `json:"language,omitempty"`
 }
 
@@ -180,55 +179,55 @@ type TrailReviewLocationCreateRequest struct {
 //   - ExpectedLines is the byte-exact content of ExpectedStartLine..ExpectedEndLine
 //     with line endings intact — not CRLF-normalized display text.
 type TrailReviewSuggestedChangeCreateRequest struct {
-	ChangeType        string  `json:"changeType"`
+	ChangeType        string  `json:"change_type"`
 	Patch             *string `json:"patch,omitempty"`
 	Instruction       *string `json:"instruction,omitempty"`
-	ExpectedFilePath  *string `json:"expectedFilePath,omitempty"`
-	ExpectedFileHash  *string `json:"expectedFileHash,omitempty"`
-	ExpectedStartLine *int    `json:"expectedStartLine,omitempty"`
-	ExpectedEndLine   *int    `json:"expectedEndLine,omitempty"`
-	ExpectedLines     *string `json:"expectedLines,omitempty"`
+	ExpectedFilePath  *string `json:"expected_file_path,omitempty"`
+	ExpectedFileHash  *string `json:"expected_file_hash,omitempty"`
+	ExpectedStartLine *int    `json:"expected_start_line,omitempty"`
+	ExpectedEndLine   *int    `json:"expected_end_line,omitempty"`
+	ExpectedLines     *string `json:"expected_lines,omitempty"`
 }
 
 // TrailReviewLocation identifies where a finding applies.
 type TrailReviewLocation struct {
 	ID              string  `json:"id"`
-	ReviewCommentID string  `json:"reviewCommentId"`
-	CodeVersionID   string  `json:"codeVersionId"`
+	ReviewCommentID string  `json:"review_comment_id"`
+	CodeVersionID   string  `json:"code_version_id"`
 	Granularity     string  `json:"granularity"`
-	FilePath        *string `json:"filePath"`
-	StartLine       *int    `json:"startLine"`
-	StartColumn     *int    `json:"startColumn"`
-	EndLine         *int    `json:"endLine"`
-	EndColumn       *int    `json:"endColumn"`
-	SelectedText    *string `json:"selectedText"`
-	NearbyText      *string `json:"nearbyText"`
+	FilePath        *string `json:"file_path"`
+	StartLine       *int    `json:"start_line"`
+	StartColumn     *int    `json:"start_column"`
+	EndLine         *int    `json:"end_line"`
+	EndColumn       *int    `json:"end_column"`
+	SelectedText    *string `json:"selected_text"`
+	NearbyText      *string `json:"nearby_text"`
 	Language        *string `json:"language"`
 }
 
 // TrailReviewSuggestedChange describes a machine-applicable or manual fix.
 type TrailReviewSuggestedChange struct {
 	ID                string    `json:"id"`
-	ReviewCommentID   string    `json:"reviewCommentId"`
-	CodeVersionID     string    `json:"codeVersionId"`
-	ChangeType        string    `json:"changeType"`
+	ReviewCommentID   string    `json:"review_comment_id"`
+	CodeVersionID     string    `json:"code_version_id"`
+	ChangeType        string    `json:"change_type"`
 	Patch             *string   `json:"patch"`
 	Instruction       *string   `json:"instruction"`
-	ExpectedFilePath  *string   `json:"expectedFilePath"`
-	ExpectedFileHash  *string   `json:"expectedFileHash"`
-	ExpectedStartLine *int      `json:"expectedStartLine"`
-	ExpectedEndLine   *int      `json:"expectedEndLine"`
-	ExpectedLines     *string   `json:"expectedLines"`
-	CreatedBy         string    `json:"createdBy"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
+	ExpectedFilePath  *string   `json:"expected_file_path"`
+	ExpectedFileHash  *string   `json:"expected_file_hash"`
+	ExpectedStartLine *int      `json:"expected_start_line"`
+	ExpectedEndLine   *int      `json:"expected_end_line"`
+	ExpectedLines     *string   `json:"expected_lines"`
+	CreatedBy         string    `json:"created_by"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // TrailReviewOutgoingLink relates two review comments.
 type TrailReviewOutgoingLink struct {
-	SourceCommentID string `json:"sourceCommentId"`
-	TargetCommentID string `json:"targetCommentId"`
-	LinkType        string `json:"linkType"`
+	SourceCommentID string `json:"source_comment_id"`
+	TargetCommentID string `json:"target_comment_id"`
+	LinkType        string `json:"link_type"`
 }
 
 // TrailReviewCommentPatchRequest updates a review finding.
@@ -238,5 +237,5 @@ type TrailReviewCommentPatchRequest struct {
 	Severity     *string  `json:"severity,omitempty"`
 	Confidence   *float64 `json:"confidence,omitempty"`
 	Status       string   `json:"status,omitempty"`
-	StatusReason *string  `json:"statusReason,omitempty"`
+	StatusReason *string  `json:"status_reason,omitempty"`
 }

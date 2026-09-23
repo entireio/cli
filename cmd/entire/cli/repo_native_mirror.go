@@ -418,10 +418,11 @@ func regionHosts(regions []regionChoice) []string {
 // is resolved there instead (coreRunnerFor).
 func runNativeRepoView(cmd *cobra.Command, ref, project, clusterHost string, authoritative bool) error {
 	return coreRunnerFor(clusterHost)(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		repoID, err := resolveRepoRef(ctx, c, ref, project)
+		resolved, err := resolveRepoRefResolved(ctx, c, ref, project)
 		if err != nil {
 			return err
 		}
+		repoID := resolved.ID
 		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
 		if err != nil {
 			return err
@@ -435,13 +436,24 @@ func runNativeRepoView(cmd *cobra.Command, ref, project, clusterHost string, aut
 		if err != nil {
 			return err
 		}
-		// The server's own path is the repo's name here, rather than a ref
-		// rebuilt from what the user typed: `repo view` also takes a ULID and a
-		// bare name, neither of which spells the /et/<project>/<repo> form the
-		// other verbs want back.
+		// The name is the server's, never a ref rebuilt from what the user
+		// typed: `repo view` also takes a ULID and a bare name, neither of which
+		// spells the /et/<project>/<repo> form the other verbs want back, and
+		// echoing the typed path beside whatever ULID resolved reads as success
+		// even when the two disagree (COR-1892).
+		//
+		// Two server answers, most specific first. The repo's own path is
+		// absent in the seconds after create, before the coordinates the create
+		// response already carried reach the registry; the resolution that
+		// found this repo carries the server's full name for it and covers that
+		// window. A ULID ref looked nothing up, so neither exists and the bare
+		// name is all there is.
 		name := strings.TrimSpace(repo.Path.Or(""))
 		if name == "" {
-			name = nativeRefFallback(ref, repo.Name)
+			name = resolved.Name
+		}
+		if name == "" {
+			name = repo.Name
 		}
 		// A plain repo read leaves `state` unset, which would dash the one cell
 		// in this table that says whether the primary is usable — and a dashed
@@ -499,26 +511,6 @@ func runNativeRepoView(cmd *cobra.Command, ref, project, clusterHost string, aut
 		reportNativeMirrorNotes(cmd.ErrOrStderr(), repo, mirrors, clusterHostBySlug(clusters))
 		return nil
 	})
-}
-
-// nativeRefFallback names a repo the server has not minted a path for yet. That
-// read lands in the seconds between create returning clone coordinates and the
-// registry carrying them, and it is the only time this is reached.
-//
-// The caller's own ref is the fallback, and only when it is already the
-// /et/<project>/<repo> path: the resolver has just proved it names THIS repo,
-// so it is the same answer the server will give, and it is the only other place
-// the project's NAME appears — the repo record carries the project's ULID and
-// nothing else. A ULID or bare-name ref supplies no project, and the repo's own
-// name is then all there is to print. A path is never assembled from parts the
-// server did not supply: a ref that resolves to nothing is worse than a short
-// one.
-func nativeRefFallback(ref, repoName string) string {
-	project, name, err := parseNativeCloneRef(ref)
-	if err != nil {
-		return repoName
-	}
-	return mirrorRepoRef{forge: nativeCloneForge, owner: project, repo: name}.qualified()
 }
 
 // primaryPlacementStatus renders a repo's own lifecycle state in the vocabulary

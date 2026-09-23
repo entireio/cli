@@ -336,9 +336,7 @@ comments at each site say which case applies:
   entries**, which may have been fetched from a remote. The removed rewind
   implementation demonstrated this boundary: its restore writes were rooted
   before its reads were. There is no current worktree restore path.
-- An agent's session store is where a hook payload's session ID becomes a path,
-  via the agent's own `ResolveSessionFile`. `SessionStore.SessionFile` converts
-  the result back to a name inside the store and **rejects** an ID that left it.
+- An agent's session store is where a hook payload's session ID becomes a path, via the agent's own `ResolveSessionFile`. `SessionStore.SessionFile` is two checks, not one: it **validates the ID** (`validation.ValidateSessionID`) before the resolver ever sees it, then converts the result back to a name inside the store and **rejects** an ID that left it. The order is the point — several agents use the ID as a *directory* component (Copilot: `<dir>/<id>/events.jsonl`) or return it verbatim when absolute (Codex, Pi), so a containment check on the resolver's output is not a substitute for refusing the input. `agent.Agent.ResolveSessionFile` documents that it must not be called with unvalidated input, and `TestResolveSessionFileCallersAreSanctioned` enforces it: the sanctioned callers are `SessionFile` itself, `external`'s pure delegation, and the e2e harness helper that resolves an ID it generated. Two agents violated the contract for as long as it existed — a new integration copies the nearest existing one rather than re-deriving whether the ID was checked — which is why the rule is a guard test rather than a comment. A malformed ID reports `ErrUnsafeSessionName`; one that resolved out of the store reports `ErrOutsideSessionStore`. Distinct sentinels because "path is outside the agent's session directory" names the wrong problem for an ID that never resolved anywhere.
 - The git hooks directory holds no untrusted *name* — the five hook filenames are
   compile-time constants — so it is anchored for the opposite reason: what is at
   those names arrived from somewhere else. It was the last tree Entire wrote to
@@ -523,6 +521,11 @@ comments at each site say which case applies:
   `.claude`, landing files outside the repository and reporting Created. It now
   takes a worktree root rather than an assembled absolute path, and its callers
   no longer fall back to `os.Getwd()` when `WorktreeRoot` fails.
+- **An agent's session DIRECTORY is the exception, and is followed.** The store refuses a symlink for every name *inside* it — nested directories go through `MkdirAllNoSymlink`, the leaf through `LstatNoSymlinks` — but `openRoot` is a plain `os.OpenRoot(s.dir)` and `openRootForWrite` a plain `os.MkdirAll`, both of which follow a link at the store directory itself or above it.
+
+  That is deliberate and was reverted back into place once. The store's location comes from the agent's own `GetSessionDir`, not from checkpoint metadata or a hook payload, so it is not the untrusted input the rest of this section is about; and `~/.claude` or `~/.codex` managed by chezmoi/stow/yadm is an ordinary setup among exactly the people who run coding agents. Refusing it broke reads as well as writes, whenever the link was the deepest component that existed yet, with no opt-out — `allow_symlinked_agent_dirs` covers worktree-relative agent *config* directories, never the home session store. Anyone who can plant a symlink in that directory can write the transcripts directly and does not need Entire to follow it.
+
+  The store and every directory created beneath it are `0700`, not `0750`: they hold session transcripts, and with the usual umask the difference is group-readable. Copilot, Cursor and Codex all write into nested directories, so the root alone was not enough.
 - **Call `Reset()` before deleting a rooted directory** (see
   `removeEntireDirectory`). A root that outlives its directory is a handle to an
   unlinked inode: writes succeed and land nowhere.

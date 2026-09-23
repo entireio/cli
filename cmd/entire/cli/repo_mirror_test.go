@@ -1092,11 +1092,17 @@ func TestParseEntireCloneURL(t *testing.T) {
 		// it has to parse: a URL read out of the table is pasted back in.
 		{name: "native clone URL", raw: "entire://aws-us-east-2.entire.io/et/acme/web",
 			wantCluster: "aws-us-east-2.entire.io", wantForge: nativeCloneForge, wantOwner: "acme", wantRepo: "web"},
-		{name: "native clone URL keeps its .git off", raw: "entire://c.entire.io/et/acme/web.git",
-			wantCluster: "c.entire.io", wantForge: nativeCloneForge, wantOwner: "acme", wantRepo: "web"},
+		// On a native ref the suffix is part of the NAME — trimming it made
+		// /et/audit1/victim.git address the repo called victim (5c0fce6434).
+		// Delegating to parseNativeCloneRef is what keeps this URL honest
+		// without the URL parser knowing the rule.
+		{name: "native clone URL keeps .git as part of the name", raw: "entire://c.entire.io/et/acme/web.git",
+			wantCluster: "c.entire.io", wantForge: nativeCloneForge, wantOwner: "acme", wantRepo: "web.git"},
 		{name: "owner and repo lowercased", raw: "entire://c.entire.io/gh/OctoCat/Hello-World",
 			wantCluster: "c.entire.io", wantForge: mirrorCloneForge, wantOwner: "octocat", wantRepo: "hello-world"},
-		{name: "trailing .git is trimmed", raw: "entire://c.entire.io/gh/entireio/cli.git",
+		// Still trimmed on the /gh/ side, where GitHub's own naming rules make
+		// the suffix decoration rather than a name.
+		{name: "trailing .git is trimmed on a GitHub URL", raw: "entire://c.entire.io/gh/entireio/cli.git",
 			wantCluster: "c.entire.io", wantForge: mirrorCloneForge, wantOwner: "entireio", wantRepo: "cli"},
 		{name: "interior dots in repo name are kept", raw: "entire://c.entire.io/gh/entirehq/entire-trails.el",
 			wantCluster: "c.entire.io", wantForge: mirrorCloneForge, wantOwner: "entirehq", wantRepo: "entire-trails.el"},
@@ -1328,19 +1334,10 @@ func TestRepoView_NativeCloneURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.URL.Path == "/api/v1/projects":
-			assert.Equal(t, "acme", r.URL.Query().Get("name"))
-			assert.NoError(t, printJSON(w, &coreapi.ListProjectsOutputBody{
-				Project: coreapi.NewOptProject(coreapi.Project{
-					ID: testProjectULID, Name: "acme", OwnerId: "01OWNER",
-					OwnerType: coreapi.ProjectOwnerTypeOrg, Region: "us",
-				}),
-			}))
-		case r.URL.Path == "/api/v1/projects/"+testProjectULID+"/repos":
-			assert.Equal(t, "web", r.URL.Query().Get("name"))
-			assert.NoError(t, printJSON(w, &coreapi.ListProjectReposOutputBody{
-				Repo: coreapi.NewOptRepo(coreapi.Repo{ID: repoID, Name: "web", OwningProjectId: testProjectULID}),
-			}))
+		// A name pair resolves through repos/resolve, which needs repo#pull
+		// alone; the project-scoped routes would need project#inspect.
+		case r.URL.Path == "/api/v1/repos/resolve":
+			assert.NoError(t, printJSON(w, nativeResolution("acme/web", repoID)))
 		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
 			fmt.Fprint(w, `{"nativeMirrors":[]}`)
 		case r.URL.Path == testClustersPath:

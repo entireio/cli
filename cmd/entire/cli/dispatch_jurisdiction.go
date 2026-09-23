@@ -64,17 +64,22 @@ const placementHintTimeout = 3 * time.Second
 // lookupRepoJurisdictions returns, per repo, the sorted jurisdictions of its
 // READY placements — the only ones a cell can answer for, so the hint never
 // points at a jurisdiction that would 404 again. A repo the control plane does
-// not know is absent from the map. Lookups run concurrently, each under its
-// own placementHintTimeout, and failures are dropped silently.
+// not know is absent from the map, and so is a native (et/) repo: the index
+// is keyed by GitHub owner/repo. Lookups run concurrently, each under its own
+// placementHintTimeout, and failures are dropped silently.
 func lookupRepoJurisdictions(ctx context.Context, client cellCoreClient, repos []string) map[string][]string {
 	results := make([][]string, len(repos))
 	found := make([]bool, len(repos))
 	var wg sync.WaitGroup
 	for i, repo := range repos {
+		githubName, ok := dispatchpkg.GitHubRepoName(repo)
+		if !ok {
+			continue
+		}
 		wg.Go(func() {
 			lookupCtx, cancel := context.WithTimeout(ctx, placementHintTimeout)
 			defer cancel()
-			entry, err := lookupRepoIndexEntry(lookupCtx, client, repo)
+			entry, err := lookupRepoIndexEntry(lookupCtx, client, githubName)
 			if err != nil {
 				logging.Debug(lookupCtx, "dispatch: placement hint lookup failed", "error", err)
 				return

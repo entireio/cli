@@ -74,10 +74,6 @@ func (e *Agent) Description() string {
 	return e.info.Description
 }
 
-func (e *Agent) IsPreview() bool {
-	return e.info.IsPreview
-}
-
 func (e *Agent) DetectPresence(ctx context.Context) (bool, error) {
 	stdout, err := e.run(ctx, nil, "detect")
 	if err != nil {
@@ -161,7 +157,11 @@ func (e *Agent) GetSessionID(input *agent.HookInput) string {
 }
 
 func (e *Agent) GetSessionDir(repoPath string) (string, error) {
-	stdout, err := e.run(context.Background(), nil, "get-session-dir", "--repo-path", repoPath)
+	return e.getSessionDir(context.Background(), repoPath)
+}
+
+func (e *Agent) getSessionDir(ctx context.Context, repoPath string) (string, error) {
+	stdout, err := e.run(ctx, nil, "get-session-dir", "--repo-path", repoPath)
 	if err != nil {
 		return "", fmt.Errorf("get-session-dir: %w", err)
 	}
@@ -202,6 +202,30 @@ func (e *Agent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error)
 }
 
 func (e *Agent) WriteSession(ctx context.Context, session *agent.AgentSession) error {
+	// Preflight before marshalling: a ref that is going to be refused should not
+	// first be serialized into the payload it will never be sent in.
+	needsStoreCheck, err := agent.ValidateExternalSessionRef(session.SessionRef)
+	if err != nil {
+		return fmt.Errorf("write-session: validate session reference: %w", err)
+	}
+	if needsStoreCheck && session.RepoPath != "" {
+		// Fails closed: a filesystem-shaped reference cannot be checked for
+		// containment without the directory it is supposed to be inside, and
+		// this is the preflight's whole job. A plugin that cannot report its
+		// session directory is told which subprocess failed.
+		sessionDir, dirErr := e.getSessionDir(ctx, session.RepoPath)
+		if dirErr != nil {
+			return fmt.Errorf("write-session: get-session-dir: %w", dirErr)
+		}
+		store, storeErr := agent.OpenSessionStoreAt(e, sessionDir)
+		if storeErr != nil {
+			return fmt.Errorf("write-session: open session store: %w", storeErr)
+		}
+		if err := store.ValidateExternalWriteRef(session.SessionRef); err != nil {
+			return fmt.Errorf("write-session: validate session reference: %w", err)
+		}
+	}
+
 	data, err := marshalAgentSession(session)
 	if err != nil {
 		return fmt.Errorf("write-session: marshal: %w", err)

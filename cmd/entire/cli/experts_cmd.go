@@ -395,16 +395,28 @@ func resolveExpertsRepo(ctx context.Context, override string) (string, error) {
 	return owner + "/" + repo, nil
 }
 
+// parseExpertsRepo normalizes --repo into the owner/repo pair the placement
+// lookup takes, from either spelling the flag accepts: the bare pair, or a
+// gh/<owner>/<repo> triple.
+//
+// Only the triple names a forge, and only it may drop a trailing `.git`: the
+// suffix is decoration on a mirror and part of the name on a native repo. The
+// bare pair carries no forge token, so it goes through verbatim — which is also
+// the spelling resolveExpertsRepo derives from a native origin, so `--repo` and
+// the flagless run name one repository instead of two.
 func parseExpertsRepo(value string) (string, error) {
 	trimmed := strings.Trim(strings.TrimSpace(value), "/")
 	parts := strings.Split(trimmed, "/")
-	if len(parts) == 3 && parts[0] == "gh" {
+	if len(parts) == 3 && parts[0] == gitremote.ForgeGitHub {
 		parts = parts[1:]
+		// Trimmed before the emptiness check below, so a name that was nothing
+		// but the suffix is refused rather than sent on as an empty repo.
+		parts[1] = strings.TrimSuffix(parts[1], mirrorGitDirSuffix)
 	}
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", fmt.Errorf("invalid --repo %q (use owner/repo)", value)
 	}
-	return parts[0] + "/" + strings.TrimSuffix(parts[1], gitDirSuffix), nil
+	return parts[0] + "/" + parts[1], nil
 }
 
 func expertsAPIPath(repoID string) string {

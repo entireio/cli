@@ -247,8 +247,9 @@ func (c *CloudClient) CreateDispatch(ctx context.Context, reqBody CreateDispatch
 // parseNotFoundRepos pulls the slugs out of a "repository not found: a/b, c/d"
 // message, keeping only the repos this request asked for (in the request's
 // spelling) so downstream lookups are bounded by CloudRepoLimit and never fan
-// out over arbitrary prose. Best-effort: an unexpected format yields nil and
-// the caller still has the message.
+// out over arbitrary prose. The gateway may echo a slug bare or forge-prefixed;
+// both match. Best-effort: an unexpected format yields nil and the caller
+// still has the message.
 func parseNotFoundRepos(message string, requested []string) []string {
 	_, rest, ok := strings.Cut(message, ":")
 	if !ok {
@@ -258,7 +259,7 @@ func parseNotFoundRepos(message string, requested []string) []string {
 	var repos []string
 	for _, repo := range requested {
 		for _, candidate := range named {
-			if strings.EqualFold(candidate, repo) {
+			if echoedSlugMatches(candidate, repo) {
 				repos = append(repos, repo)
 				break
 			}

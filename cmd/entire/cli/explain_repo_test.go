@@ -34,6 +34,10 @@ func TestParseExplainRepoFlag(t *testing.T) {
 		{name: "native leading slash", in: "/et/acme/widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "native clone url", in: "entire://aws-us-east-2.entire.io/et/Acme/Widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "mirror clone url", in: "entire://aws-us-east-2.entire.io/gh/Acme/Widgets", forge: "gh", owner: "acme", repo: "widgets"},
+		// `.git` is part of a native repo's name, not decoration, so it must
+		// survive parsing on both the bare-ref and clone-URL spellings.
+		{name: "native git suffix", in: "et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets.git"},
+		{name: "native clone url git suffix", in: "entire://aws-us-east-2.entire.io/et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets.git"},
 		{name: "empty", in: "", wantErr: "--repo requires a value"},
 		{name: "missing forge", in: "acme/widgets", wantErr: "forge prefix is required"},
 		{name: "bare word", in: "widgets", wantErr: "forge prefix is required"},
@@ -106,6 +110,13 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 	setOrigin(t, "entire://aws-us-east-2.entire.io/et/acme/widgets")
 	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"))
 	assert.False(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"), "same-named GitHub repo is distinct")
+
+	// `.git` is part of a native repo's name, not decoration: an origin named
+	// "widgets.git" must not match a --repo naming "widgets", and must match one
+	// that spells the suffix out.
+	setOrigin(t, "entire://aws-us-east-2.entire.io/et/acme/widgets.git")
+	assert.False(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"), "the suffix is part of the name, not decoration to strip")
+	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets.git"))
 
 	// A non-GitHub origin with a coincidentally matching owner/name must not
 	// count as the current GitHub repo.

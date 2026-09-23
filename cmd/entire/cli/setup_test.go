@@ -192,7 +192,7 @@ func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled b
 [ -n "$ENTIRE_TEST_EXEC_LOG" ] && echo "$1" >> "$ENTIRE_TEST_EXEC_LOG"
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","is_preview":false,"protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
     ;;
   detect)
     if [ "$ENTIRE_TEST_EXTERNAL_PRESENT" = "1" ]; then
@@ -240,7 +240,7 @@ func writeExternalSummaryAgentBinary(t *testing.T, dir, name string) {
 	script := `#!/bin/sh
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
     ;;
   detect)
     echo '{"present": true}'

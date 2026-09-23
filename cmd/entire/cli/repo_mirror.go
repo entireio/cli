@@ -1390,7 +1390,7 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 // neither part right, the repository half is the more useful one to report.
 //
 // A failure says only what is wrong INSIDE the URL. The accepted forms are the
-// caller's to list (badMirrorRefErr), so repeating a shape here would print two
+// caller's to list (badRepoRefErr), so repeating a shape here would print two
 // grammars at a reader who already typed one.
 func parseEntireCloneURL(raw string) (clusterHost string, ref mirrorRepoRef, err error) {
 	u, perr := url.Parse(raw)

@@ -48,10 +48,10 @@ func TestReviewEventsPath(t *testing.T) {
 
 func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"trailId\":\"trl_1\",\"cursor\":0}\n\n",
-		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"trailId\":\"trl_1\",\"reviewId\":\"ses_123\",\"actorId\":\"agent:reviewer\",\"eventType\":\"session.started\",\"targetType\":\"review_session\",\"targetId\":\"ses_123\",\"payload\":{\"codeVersionId\":\"cv_1\"},\"createdAt\":\"2026-01-01T00:00:00Z\"}\n\n",
-		"id: 2\nevent: comment.created\ndata: {\"id\":\"2\",\"trailId\":\"trl_1\",\"reviewId\":\"ses_123\",\"actorId\":\"agent:reviewer\",\"eventType\":\"comment.created\",\"targetType\":\"review_comment\",\"targetId\":\"c1\",\"payload\":{\"severity\":\"high\",\"filePath\":\"src/foo.ts\",\"granularity\":\"line\"},\"createdAt\":\"2026-01-01T00:00:01Z\"}\n\n",
-		"id: 3\nevent: session.ended\ndata: {\"id\":\"3\",\"trailId\":\"trl_1\",\"reviewId\":\"ses_123\",\"actorId\":\"agent:reviewer\",\"eventType\":\"session.ended\",\"targetType\":\"review_session\",\"targetId\":\"ses_123\",\"payload\":{\"reason\":\"done\"},\"createdAt\":\"2026-01-01T00:00:02Z\"}\n\n",
+		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
+		"id: 1\nevent: review.started\ndata: {\"id\":\"1\",\"trail_id\":\"trl_1\",\"review_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"review.started\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"payload\":{\"code_version_id\":\"cv_1\"},\"created_at\":\"2026-01-01T00:00:00Z\"}\n\n",
+		"id: 2\nevent: comment.created\ndata: {\"id\":\"2\",\"trail_id\":\"trl_1\",\"review_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"comment.created\",\"target_type\":\"review_comment\",\"target_id\":\"c1\",\"payload\":{\"severity\":\"high\",\"file_path\":\"src/foo.ts\",\"granularity\":\"line\"},\"created_at\":\"2026-01-01T00:00:01Z\"}\n\n",
+		"id: 3\nevent: runner.done\ndata: {\"id\":\"3\",\"trail_id\":\"trl_1\",\"review_id\":\"ses_123\",\"actor_id\":\"agent:reviewer\",\"event_type\":\"runner.done\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"payload\":{\"reason\":\"done\"},\"created_at\":\"2026-01-01T00:00:02Z\"}\n\n",
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
@@ -75,7 +75,7 @@ func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 		t.Errorf("lastID = %q, want %q", lastID, "3")
 	}
 	out := stdout.String()
-	for _, want := range []string{"trail trl_1", "session started", "finding created", "src/foo.ts", "session ended"} {
+	for _, want := range []string{"trail trl_1", "session started", "finding created", "src/foo.ts", "runner.done"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in output, got: %q", want, out)
 		}
@@ -87,7 +87,7 @@ func TestStreamOnce_PrintsReadyAndReviewEvents(t *testing.T) {
 
 func TestStreamOnce_JSONOutputEnvelope(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"trailId\":\"trl_1\",\"cursor\":0}\n\n",
+		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
@@ -142,8 +142,8 @@ func TestStreamOnce_ShowPingsTrimsSSECommentWhitespace(t *testing.T) {
 
 func TestStreamOnce_ReconnectEvent(t *testing.T) {
 	frames := []string{
-		"event: ready\ndata: {\"trailId\":\"trl_1\",\"cursor\":0}\n\n",
-		"id: 1\nevent: session.started\ndata: {\"id\":\"1\",\"eventType\":\"session.started\",\"targetType\":\"review_session\",\"targetId\":\"ses_123\",\"actorId\":\"agent\",\"payload\":{}}\n\n",
+		"event: ready\ndata: {\"trail_id\":\"trl_1\",\"cursor\":0}\n\n",
+		"id: 1\nevent: review.started\ndata: {\"id\":\"1\",\"event_type\":\"review.started\",\"target_type\":\"review_session\",\"target_id\":\"ses_123\",\"actor_id\":\"agent\",\"payload\":{}}\n\n",
 		"event: reconnect\ndata: {\"reason\":\"max_duration\"}\n\n",
 	}
 	srv, _ := fakeSSEServer(t, frames)
@@ -253,52 +253,47 @@ func TestStreamOnce_TooManyRequestsIsRecoverable(t *testing.T) {
 	}
 }
 
-func TestPrintReviewStreamEventReadsEntireAPICamelCasePayload(t *testing.T) {
+func TestPrintReviewStreamEventReadsSnakeCasePayload(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	printReviewStreamEvent(&out, reviewStreamEvent{
 		EventType: "code_version.created",
 		TargetID:  "cv_1",
-		Payload:   map[string]any{"headSha": "abc123"},
+		Payload:   map[string]any{"head_sha": "abc123"},
 	})
 	if got := out.String(); !strings.Contains(got, "head abc123") {
-		t.Fatalf("output = %q, want camelCase headSha", got)
+		t.Fatalf("output = %q, want head_sha", got)
 	}
 }
 
-func TestPayloadStringReadsImportedSnakeCasePayload(t *testing.T) {
+func TestPrintReviewStreamEventRendersDiscussionEvents(t *testing.T) {
 	t.Parallel()
-	payload := map[string]any{
-		"head_sha":            "head",
-		"base_sha":            "base",
-		"code_version_id":     "version",
-		"file_path":           "main.go",
-		"review_comment_id":   "comment",
-		"change_type":         "replace",
-		"suggested_change_id": "change",
-		"source_comment_id":   "source",
-		"target_comment_id":   "target",
-	}
-	want := map[string]string{
-		"headSha":           "head",
-		"baseSha":           "base",
-		"codeVersionId":     "version",
-		"filePath":          "main.go",
-		"reviewCommentId":   "comment",
-		"changeType":        "replace",
-		"suggestedChangeId": "change",
-		"sourceCommentId":   "source",
-		"targetCommentId":   "target",
-	}
-	for key, expected := range want {
-		if got := payloadString(payload, key); got != expected {
-			t.Errorf("payloadString(payload, %q) = %q, want %q", key, got, expected)
-		}
-	}
-
-	payload["headSha"] = "current"
-	if got := payloadString(payload, "headSha"); got != "current" {
-		t.Errorf("canonical key must win: got %q, want current", got)
+	for _, tc := range []struct {
+		eventType string
+		payload   map[string]any
+		want      string
+	}{
+		{"discussion.created", map[string]any{"review_comment_id": "rc_1"}, "discussion d_1 created for finding rc_1"},
+		{"discussion.message_added", nil, "discussion message d_1 added by alice"},
+		{"discussion.message_edited", nil, "discussion message d_1 edited by alice"},
+	} {
+		t.Run(tc.eventType, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			printReviewStreamEvent(&out, reviewStreamEvent{
+				EventType: tc.eventType,
+				TargetID:  "d_1",
+				ActorID:   "alice",
+				Payload:   tc.payload,
+			})
+			got := out.String()
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("output = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "discussion/") {
+				t.Fatalf("output = %q fell through to the default branch", got)
+			}
+		})
 	}
 }
 

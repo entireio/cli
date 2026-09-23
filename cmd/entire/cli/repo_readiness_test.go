@@ -33,23 +33,13 @@ func serveRepoView(t *testing.T, repoJSON string, authoritative func(w http.Resp
 	var authReads atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		// The by-name halves of a /et/<project>/<repo> lookup, so this harness
-		// serves the path spelling as well as the ULID one.
-		case r.URL.Path == "/api/v1/projects":
+		// A /et/<project>/<repo> ref resolves through repos/resolve, so this
+		// harness serves the path spelling as well as the ULID one. The
+		// resolution carries the server's own full name, which is what names a
+		// repo whose own path has not been minted yet.
+		case r.URL.Path == "/api/v1/repos/resolve":
 			w.Header().Set("Content-Type", "application/json")
-			assert.NoError(t, printJSON(w, &coreapi.ListProjectsOutputBody{
-				Project: coreapi.NewOptProject(coreapi.Project{
-					ID: testProjectULID, Name: r.URL.Query().Get("name"),
-					OwnerId: "01OWNER", OwnerType: coreapi.ProjectOwnerTypeOrg, Region: "us",
-				}),
-			}))
-		case r.URL.Path == "/api/v1/projects/"+testProjectULID+"/repos":
-			w.Header().Set("Content-Type", "application/json")
-			assert.NoError(t, printJSON(w, &coreapi.ListProjectReposOutputBody{
-				Repo: coreapi.NewOptRepo(coreapi.Repo{
-					ID: testDeleteULID, Name: r.URL.Query().Get("name"), OwningProjectId: testProjectULID,
-				}),
-			}))
+			assert.NoError(t, printJSON(w, nativeResolution("acme/web", testDeleteULID)))
 		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"nativeMirrors":[]}`)
@@ -167,6 +157,10 @@ func TestRepoView_ReasonFollowsTheAuthoritativeState(t *testing.T) {
 // and the empty table says the READ was early rather than that the repo is
 // mirrored nowhere.
 //
+// Both names come from the server — the repo's own path when it has one, and
+// otherwise the full name the resolution carried. The path the user typed is
+// never promoted to a canonical one the server has not confirmed (COR-1892).
+//
 // Not parallel: runCoreCmd replaces the shared client constructor.
 func TestRepoView_BeforeThePrimaryIsPlaced(t *testing.T) {
 	// No clusterSlug, no path: only what the schema makes required, plus the
@@ -174,7 +168,7 @@ func TestRepoView_BeforeThePrimaryIsPlaced(t *testing.T) {
 	body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":"provisioning","visibility":"private"}`,
 		testDeleteULID, testProjectULID)
 
-	t.Run("the caller's path names the repo until the server mints its own", func(t *testing.T) {
+	t.Run("the resolution's full name stands in until the repo has a path", func(t *testing.T) {
 		srv, _ := serveRepoView(t, body, nil)
 		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, "/et/acme/web")
 		require.NoError(t, err)
@@ -184,22 +178,22 @@ func TestRepoView_BeforeThePrimaryIsPlaced(t *testing.T) {
 			"a repo Entire holds a record for has a primary; the read was merely early")
 	})
 
-	t.Run("a ULID ref supplies no project, so the repo's own name is all there is", func(t *testing.T) {
+	t.Run("a ULID ref looks nothing up, so the repo's own name is all there is", func(t *testing.T) {
 		srv, _ := serveRepoView(t, body, nil)
 		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
 		require.NoError(t, err)
 		requireOrder(t, out, "Name:", "web")
-		require.NotContains(t, out, "/et/", "no project name is known, and one is never invented")
+		require.NotContains(t, out, "/et/", "nothing was resolved, and a path is never invented")
 	})
 
-	t.Run("--json carries the project the caller's path named", func(t *testing.T) {
+	t.Run("--json carries the project the resolved name spells", func(t *testing.T) {
 		srv, _ := serveRepoView(t, body, nil)
 		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, "/et/acme/web", "--json")
 		require.NoError(t, err)
 		var row repoDirRow
 		require.NoError(t, json.Unmarshal([]byte(out), &row))
 		require.Equal(t, "/et/acme/web", row.Repo)
-		require.Equal(t, "acme", row.Project, "the caller's path is the only place the project NAME appears")
+		require.Equal(t, "acme", row.Project, "the resolved full name is the only place the project NAME appears")
 		require.Empty(t, row.Placements)
 	})
 }

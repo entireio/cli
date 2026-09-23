@@ -234,23 +234,28 @@ the commands are always runnable in every build.
   `--project`, no bare name, no ULID — through `resolveRepoPath`, which parses
   with `parseNativeCloneRef` and resolves both segments by name only (a project
   or repo can be *named* like a ULID, so path segments never touch the
-  `looksLikeULID` passthrough; `resolveRepoPathRef` and `resolveNativeRepo`
-  still do, pending the removal of repo-ULID addressing). The other two
-  clone shapes are not: a `/gh/` mirror ref is refused there (the by-name
-  lookup resolves a project and then a repo inside it, and a mirror is in no
-  project — so a mirror is addressed by ULID), and an `entire://` URL is not
-  parsed at all. `repo view` serves both anyway, by routing on the ref before
-  the resolver is reached: a `/gh/` ref goes to the mirror directory, and an
-  `entire://` URL to the core fronting the cluster it names — in **either**
-  forge, since the CLONE URL column prints the native
-  `entire://<host>/et/<project>/<repo>` form and a URL a view prints has to be
-  one it takes back. `parseEntireCloneURL` reads the path with
+  `looksLikeULID` passthrough). The other two clone shapes are not: a `/gh/`
+  mirror ref is refused there (a mirror is in no project, so it is addressed by
+  ULID), and an `entire://` URL is not parsed at all. `repo view` serves both
+  anyway, by routing on the ref before the resolver is reached: a `/gh/` ref
+  goes to the mirror directory, and an `entire://` URL to the core fronting the
+  cluster it names — in **either** forge, since the CLONE URL column prints the
+  native `entire://<host>/et/<project>/<repo>` form and a URL a view prints has
+  to be one it takes back. `parseEntireCloneURL` reads the path with
   `parseMirrorRepoRef`, the same grammar the bare refs take, so a URL and the
-  ref it was built from can never disagree about what a name may contain. `--project` serves the **bare-name** spelling alone, because
-  the control plane has no by-name repo route that is not project-scoped; the
-  path form is checked against it for agreement, and a ULID warns that it is
-  ignored rather than validating, which would cost a `GetRepo` on every command
-  but `repo view`.
+  ref it was built from can never disagree about what a name may contain —
+  a trailing `.git` included, which is part of a native name and decoration on
+  a `/gh/` one.
+  Every `<project>/<repo>` name pair resolves through **one** call,
+  `POST /repos/resolve` (`resolveNativeRepoByPath`), because that route needs
+  `repo#pull` alone. The project-scoped routes (`GET /projects?name=`,
+  `GET /projects/{id}/repos?name=`) need `project#inspect`, which a direct
+  repo grant does not confer, so a repo shared with one person must never
+  resolve through them. Only a `--project` **ULID** with a bare name takes the
+  project-scoped listing, since there is no ULID→name route. Alongside the
+  path form, `--project` is checked for agreement: a name compares
+  case-insensitively before any request, a ULID against the resolved repo's
+  owning project at the cost of one `GetRepo`.
   Native names are validated client-side against the server's own rules
   (`nativeProjectRe`/`nativeRepoRe`, mirroring `normalizeName` in entiredb
   `core/resource/project_name.go`); those bounds are server parity only and buy
@@ -262,7 +267,7 @@ the commands are always runnable in every build.
   that declared a forge token keeps its own parser's reason, a bare pair is
   offered the forge-qualified readings that would actually parse
   (`bareRefSuggestions`), and anything left lists the accepted shapes.
-  A native ref resolves project → repo ULID → `GetRepo`, whose response is the
+  A native ref resolves name → repo ULID → `GetRepo`, whose response is the
   only one carrying both `clusterHost` and `path`, then picks among the repo's
   readable placements — the home cluster plus ready native mirrors
   (`nativePlacements`, joining mirror slugs against the cluster catalog) —
@@ -272,19 +277,25 @@ the commands are always runnable in every build.
   are best-effort without `--cluster`: if either fails (a core that 404s or
   503s the listing, a catalog hiccup), resolution degrades to the home cluster
   instead of failing a clone that has always worked.
-  A trailing `.git` is never part of a repo name, on **either** backend
-  (`gitDirSuffix` documents the mechanics): every ref parser drops it and `repo
-  create` refuses a name ending in it. This is a deliberate client-side
-  narrowing — GitHub rejects such a name outright, but the server accepts a
-  native `foo.git` (interior dot, same rule that makes `entire-trails.el` legal)
-  and strips the suffix for `/gh/` paths only. `gitremote.splitOwnerRepo` trims
-  unconditionally when reading a remote back, so such a repo is unaddressable by
-  name once cloned regardless; dropping it everywhere makes the CLI agree with
-  itself instead of leaving `repo clone` the one path that keeps it. Escape
-  hatches: the repo's ULID, or a full `entire://` URL. Two consequences worth
-  knowing — a `foo.git` created through the API or web UI *aliases* onto `foo`
-  in `resolveRepoRef`, and the durable fix is a server-side rule in
-  `normalizeName`, not this check.
+  A trailing `.git` is decoration on a `/gh/` mirror ref and **part of the name**
+  on a native `/et/` one (`mirrorGitDirSuffix` documents the mechanics). GitHub
+  rejects a repository name ending in `.git` outright, so on a mirror path the
+  suffix can only ever be decoration and dropping it is what lets a pasted
+  `git clone` URL resolve. The server is the opposite case: entiredb permits an
+  interior dot (the same rule that makes `entire-trails.el` legal), `POST
+  /api/v1/repos {"name":"foo.git"}` returns 201, and the data plane resolves
+  `/et/` paths verbatim — so `parseNativeCloneRef` keeps the suffix, `repo
+  create` forwards such a name, and a native lookup asks for `foo.git`. Trimming
+  it there resolved a *different* repository — sibling repos `foo` and `foo.git`
+  both exist, so `repo delete /et/p/foo.git` destroyed the neighbour and printed
+  the path the user typed beside the survivor's ULID, reading as success. Every
+  remaining trim is therefore a `/gh/` grammar, and
+  `gitremote.splitOwnerRepo` skips the trim for `ForgeNative` so a native remote
+  reads back the name it was cloned under. Two consequences worth knowing — a
+  trim can *manufacture* a dot-only segment (`..git` → `.`), which both the
+  `/gh/` grammar and `splitOwnerRepo` refuse; and `resolveRepoRef`'s
+  project-scoped miss names the suffix in its hint rather than stripping it,
+  since a bare name in that position is a name, not a path.
 - The three `grant` subtrees (`org grant`, `project grant`, `repo grant`) are one
   generic builder plus three target descriptions in `grant.go`; a new target is
   a `grantTarget` value, not a fourth copy of the leaves.

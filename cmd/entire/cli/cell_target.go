@@ -43,7 +43,7 @@ type cellCoreClient interface {
 }
 
 type nativeRepoCellCoreClient interface {
-	nativeRepoResolverClient
+	repoRefClient
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
@@ -314,9 +314,9 @@ func resolveForgeRepoCellPlacement(ctx context.Context, forge, owner, repo strin
 }
 
 // resolveNativeRepoCellPlacement resolves /et/<project>/<repo> through the
-// native project-scoped repo lookup, then maps the repo's home cluster to its
-// entire-api cell. It deliberately never consults the forge-blind repos index:
-// that index can select a same-named /gh/ mirror instead.
+// native path lookup, then maps the repo's home cluster to its entire-api
+// cell. It deliberately never consults the forge-blind repos index: that index
+// can select a same-named /gh/ mirror instead.
 func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName string) (repoCellPlacement, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
 	defer cancel()

@@ -219,8 +219,9 @@ precedence:
 The two overrides exist because `auth switch` is the wrong tool for a one-off: it
 mutates state shared by every shell, worktree, and background git hook on the
 machine, so forgetting to switch back silently retargets the next `git push`. And
-a flag alone is not enough — git invokes `git-remote-entire` itself, so
-`ENTIRE_CONTEXT=staging git push` is the *only* way to scope a git operation.
+a flag reaches only what `entire` itself spawns (it exports the flag as
+`ENTIRE_CONTEXT`, below) — a `git push` you run yourself parses no `entire`
+flag, so `ENTIRE_CONTEXT=staging git push` is how that one is scoped.
 
 An override naming no saved context is a hard error
 (`contexts.UnknownContextError`), never a fall-through to `current_context`:
@@ -259,7 +260,30 @@ apply only when the identity came from `current_context` (or there is none):
   gates only the choice made *for* the user, never one they made.
 - several are eligible → an ambiguity error naming them, sorted
   (`clusterdiscovery.ambiguousContextError`). Picking one would make the acting
-  identity depend on what else happens to be stored.
+  identity depend on what else happens to be stored. The error names both
+  remedies — `--context <name>` / `ENTIRE_CONTEXT=<name>` for one command,
+  `entire auth switch <name>` for the machine-wide default — because a
+  cluster that trusts several cores (a `us` cluster advertising both the `us`
+  and `eu` cores, so a cross-jurisdiction login can reach it) makes this the
+  ordinary case for anyone holding a login per jurisdiction, and switching the
+  default to clone once is the wrong lever.
+
+`--context` has to cross a process boundary whenever a built-in command spawns
+git against an `entire://` remote — `repo clone` execs `git clone`, and
+`resume`, `explain`, `trail create` and checkpoint-policy fetch or push —
+because git runs `git-remote-entire` itself and the helper selects a login from
+the saved contexts on its own. The flag is therefore exported into the CLI's own
+environment as `ENTIRE_CONTEXT` the moment it is parsed
+(`exportContextToChildren`, `context_flag.go`), so every process the command
+spawns inherits it through the same channel `ENTIRE_CONTEXT=… git push` already
+uses; that includes agents launched by `review` and `investigate`, whose hooks
+and pushes act as the flag's login while they run. Before the export the helper
+saw only the active context and hit the ambiguity error the flag was passed to
+avoid (COR-1630). A flag naming no saved login is refused in the root pre-run
+(`validateContextFlag`) so the error blames `--context`, not a variable the
+user never set. External plugins (`entire <plugin>`) are dispatched before
+cobra parses flags and never see `--context`; scope one with
+`ENTIRE_CONTEXT=… entire <plugin>`.
 
 An **explicit** `--context`/`$ENTIRE_CONTEXT` never falls through to either: the
 user asked for that identity by name, so acting as another behind their back is

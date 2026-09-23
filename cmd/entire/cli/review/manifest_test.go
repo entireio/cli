@@ -1014,7 +1014,6 @@ type manifestTokenTestAgent struct{}
 func (manifestTokenTestAgent) Name() agenttypes.AgentName { return manifestTokenTestAgentName }
 func (manifestTokenTestAgent) Type() agenttypes.AgentType { return manifestTokenTestAgentType }
 func (manifestTokenTestAgent) Description() string        { return "review token test agent" }
-func (manifestTokenTestAgent) IsPreview() bool            { return false }
 func (manifestTokenTestAgent) DetectPresence(context.Context) (bool, error) {
 	return false, nil
 }

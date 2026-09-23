@@ -65,7 +65,6 @@ type stubTextAgent struct {
 func (s *stubTextAgent) Name() types.AgentName                        { return s.name }
 func (s *stubTextAgent) Type() types.AgentType                        { return s.kind }
 func (s *stubTextAgent) Description() string                          { return "stub" }
-func (s *stubTextAgent) IsPreview() bool                              { return false }
 func (s *stubTextAgent) DetectPresence(context.Context) (bool, error) { return true, nil }
 func (s *stubTextAgent) ProtectedDirs() []string                      { return nil }
 func (s *stubTextAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
