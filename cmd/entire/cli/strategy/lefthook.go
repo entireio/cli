@@ -36,6 +36,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
+	"golang.org/x/sync/singleflight"
 	"gopkg.in/yaml.v3"
 )
 
@@ -306,6 +307,10 @@ func openGitCommonDir(ctx context.Context, repoRoot string) (*os.Root, error) {
 var (
 	gitCommonDirMu    sync.RWMutex
 	gitCommonDirCache = map[string]string{}
+	gitCommonDirCalls singleflight.Group
+
+	// Test seam for proving that concurrent misses share one subprocess.
+	gitCommonDirResolve = gitdir.CommonDirForWorktree
 )
 
 func gitCommonDirFor(ctx context.Context, repoRoot string) (string, error) {
@@ -315,13 +320,32 @@ func gitCommonDirFor(ctx context.Context, repoRoot string) (string, error) {
 	if ok {
 		return cached, nil
 	}
-	commonDir, err := gitdir.CommonDirForWorktree(ctx, repoRoot)
+	value, err, _ := gitCommonDirCalls.Do(repoRoot, func() (any, error) {
+		// A preceding call may have populated the cache before this keyed call
+		// acquired single-flight ownership.
+		gitCommonDirMu.RLock()
+		cached, ok := gitCommonDirCache[repoRoot]
+		gitCommonDirMu.RUnlock()
+		if ok {
+			return cached, nil
+		}
+
+		commonDir, err := gitCommonDirResolve(ctx, repoRoot)
+		if err != nil {
+			return "", fmt.Errorf("resolve git common dir: %w", err)
+		}
+		gitCommonDirMu.Lock()
+		gitCommonDirCache[repoRoot] = commonDir
+		gitCommonDirMu.Unlock()
+		return commonDir, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("resolve git common dir: %w", err)
+		return "", fmt.Errorf("coalesce git common dir lookup: %w", err)
 	}
-	gitCommonDirMu.Lock()
-	gitCommonDirCache[repoRoot] = commonDir
-	gitCommonDirMu.Unlock()
+	commonDir, ok := value.(string)
+	if !ok {
+		return "", errors.New("coalesced git common dir lookup returned a non-string value")
+	}
 	return commonDir, nil
 }
 

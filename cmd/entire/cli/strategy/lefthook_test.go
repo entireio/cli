@@ -1,11 +1,13 @@
 package strategy
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -59,6 +61,53 @@ func TestNewLefthookRepo_IgnoresInheritedGitConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(".git", "hooks"), hooksDir,
 		"test repositories must not inherit the developer's core.hooksPath")
+}
+
+func TestGitCommonDirFor_CoalescesConcurrentMisses(t *testing.T) {
+	clearGitCommonDirCache()
+	originalResolve := gitCommonDirResolve
+	t.Cleanup(func() {
+		gitCommonDirResolve = originalResolve
+		clearGitCommonDirCache()
+	})
+
+	const callers = 16
+	entered := make(chan struct{}, callers)
+	release := make(chan struct{})
+	gitCommonDirResolve = func(_ context.Context, repoRoot string) (string, error) {
+		entered <- struct{}{}
+		<-release
+		return filepath.Join(repoRoot, ".git"), nil
+	}
+
+	start := make(chan struct{})
+	ready := make(chan struct{}, callers)
+	results := make(chan error, callers)
+	for range callers {
+		go func() {
+			ready <- struct{}{}
+			<-start
+			_, err := gitCommonDirFor(t.Context(), "/repo")
+			results <- err
+		}()
+	}
+	for range callers {
+		<-ready
+	}
+	close(start)
+	<-entered
+
+	duplicate := false
+	select {
+	case <-entered:
+		duplicate = true
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	for range callers {
+		require.NoError(t, <-results)
+	}
+	require.False(t, duplicate, "concurrent misses must share one git common-dir lookup")
 }
 
 // Install writes Entire's own config, one extends entry, and a script per
