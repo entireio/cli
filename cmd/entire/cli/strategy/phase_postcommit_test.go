@@ -72,6 +72,41 @@ func TestPostCommit_ActiveSession_CondensesImmediately(t *testing.T) {
 		"StepCount should be reset after immediate condensation")
 }
 
+func TestPostCommit_IndentedCheckpointDoesNotAuthorizeCondensation(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-indented-trailer"
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+	originalStepCount := state.StepCount
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("agent modified content"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("test.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("test commit\n\n  Entire-Checkpoint: a1b2c3d4e5f6\n", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.PostCommit(context.Background()))
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, originalStepCount, state.StepCount,
+		"an indented checkpoint-shaped line must not authorize condensation")
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.Error(t, err, "no persistent checkpoint should be written")
+}
+
 // TestPostCommit_ReviewSession_PinnedToSingleCheckpoint verifies that a
 // read-only review session is marked terminal once it has been condensed into a
 // checkpoint, so PostCommit stops re-attaching it to every later commit in the

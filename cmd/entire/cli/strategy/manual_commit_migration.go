@@ -56,8 +56,8 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 	// Cherry-picking a checkpoint commit creates a new SHA with the same
 	// message; firing reconcile in that case would drop the pinned
 	// AttributionBaseCommit and corrupt attribution for uncondensed work.
-	// Legacy state files without LastCheckpointCommitHash fall back to
-	// trailer-only matching for backward compatibility.
+	// Legacy state files without LastCheckpointCommitHash require the same
+	// final-block evidence as every other mutation path.
 	if !state.LastCheckpointID.IsEmpty() {
 		shaMismatch := state.LastCheckpointCommitHash != "" && state.LastCheckpointCommitHash != currentHead
 		if shaMismatch {
@@ -69,7 +69,7 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 		} else {
 			headCommit, commitErr := repo.CommitObject(head.Hash())
 			if commitErr == nil {
-				for _, cpID := range trailers.ParseAllCheckpoints(headCommit.Message) {
+				for _, cpID := range trailers.ParseAllCheckpointsFromFinalTrailerBlock(headCommit.Message) {
 					if cpID.String() == state.LastCheckpointID.String() {
 						state.BaseCommit = currentHead
 						state.RealignAttributionBase(currentHead)
