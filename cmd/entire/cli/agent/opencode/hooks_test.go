@@ -1,10 +1,14 @@
 package opencode
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -227,7 +231,7 @@ func TestInstallHooks_MessageUpdatedFallsBackToSessionStart(t *testing.T) {
 	}
 }
 
-func TestInstallHooks_MessageUpdatedFallsBackToTurnStart(t *testing.T) {
+func TestInstallHooks_MessageUpdatedFallsBackToPromptUpdate(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	ag := &OpenCodeAgent{}
@@ -248,6 +252,279 @@ func TestInstallHooks_MessageUpdatedFallsBackToTurnStart(t *testing.T) {
 	}
 	if !strings.Contains(content, `prompt: "",`) {
 		t.Fatal("plugin file should send an empty prompt for fallback turn-start")
+	}
+	if !strings.Contains(content, `promptlessTurnStarts.has(msg.id) && part.text`) {
+		t.Fatal("plugin file should repair the prompt once the text part arrives")
+	}
+	if !strings.Contains(content, `callHookSync("prompt-update", {`) {
+		t.Fatal("plugin file should use the prompt-only update hook for late text")
+	}
+	if !strings.Contains(content, `clearSessionMessages(session.id)`) {
+		t.Fatal("plugin file should clear only the deleted session's message tracking")
+	}
+	if got := strings.Count(content, `promptlessTurnStarts.clear()`); got != 1 {
+		t.Fatalf("plugin file should clear all promptless tracking only at server shutdown, got %d", got)
+	}
+}
+
+func TestGeneratedPlugin_PreservesPromptAfterMessageUpdatedFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the generated plugin invokes hooks through sh")
+	}
+	bunPath, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("bun is required to execute the generated OpenCode plugin")
+	}
+
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, "entire.ts")
+	if err := os.WriteFile(pluginPath, []byte(renderPlugin()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hookLog := filepath.Join(dir, "prompt-hooks.log")
+	fakeEntire := `#!/bin/sh
+if [ "$3" = "turn-start" ] || [ "$3" = "prompt-update" ]; then
+  printf '%s\t' "$3" >> "$HOOK_LOG"
+  cat >> "$HOOK_LOG"
+fi
+`
+	if err := os.WriteFile(filepath.Join(binDir, "entire"), []byte(fakeEntire), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	harness := `
+import { EntirePlugin } from "./entire.ts"
+
+const plugin = await EntirePlugin({ directory: process.cwd() } as any)
+await plugin.event!({
+  event: {
+    type: "message.updated",
+    properties: { info: { id: "message-1", role: "user", sessionID: "session-1" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+	properties: { part: { messageID: "message-1", type: "text", text: "" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "message-1", type: "text", text: "preserve this prompt" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "message-1", type: "text", text: "duplicate update" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.updated",
+    properties: { info: { id: "unrelated-delete-message", role: "user", sessionID: "session-1" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "session.deleted",
+    properties: { info: { id: "unrelated-session" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "unrelated-delete-message", type: "text", text: "survives unrelated deletion" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.updated",
+    properties: { info: { id: "removed-message", role: "user", sessionID: "session-1" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.removed",
+    properties: { sessionID: "session-1", messageID: "removed-message" },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "removed-message", type: "text", text: "stale removed prompt" } },
+  },
+} as any)
+for (const id of ["message-2", "message-3"]) {
+  await plugin.event!({
+    event: {
+      type: "message.updated",
+      properties: { info: { id, role: "user", sessionID: "session-1" } },
+    },
+  } as any)
+}
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "message-2", type: "text", text: "" } },
+  },
+} as any)
+for (const [messageID, text] of [["message-3", "third prompt"], ["message-2", "second prompt"], ["message-3", "duplicate third prompt"]]) {
+  await plugin.event!({
+    event: {
+      type: "message.part.updated",
+      properties: { part: { messageID, type: "text", text } },
+    },
+  } as any)
+}
+await plugin.event!({
+  event: {
+    type: "message.updated",
+    properties: { info: { id: "deleted-message", role: "user", sessionID: "session-1" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "session.deleted",
+    properties: { info: { id: "session-1" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "deleted-message", type: "text", text: "stale deleted prompt" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.updated",
+    properties: { info: { id: "interleaved-message", role: "user", sessionID: "session-1" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "session.created",
+    properties: { info: { id: "session-2" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "interleaved-message", type: "text", text: "survives session interleaving" } },
+  },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.updated",
+    properties: { info: { id: "disposed-message", role: "user", sessionID: "session-2" } },
+  },
+} as any)
+await plugin.event!({
+  event: { type: "server.instance.disposed", properties: {} },
+} as any)
+await plugin.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "disposed-message", type: "text", text: "stale disposed prompt" } },
+  },
+} as any)
+
+const pluginWithoutCurrentSession = await EntirePlugin({ directory: process.cwd() } as any)
+await pluginWithoutCurrentSession.event!({
+  event: {
+    type: "message.updated",
+    properties: { info: { id: "retained-message", role: "user", sessionID: "session-3" } },
+  },
+} as any)
+await pluginWithoutCurrentSession.event!({
+  event: {
+    type: "session.created",
+    properties: { info: { id: "session-4" } },
+  },
+} as any)
+await pluginWithoutCurrentSession.event!({
+  event: {
+    type: "session.deleted",
+    properties: { info: { id: "session-4" } },
+  },
+} as any)
+await pluginWithoutCurrentSession.event!({
+  event: { type: "server.instance.disposed", properties: {} },
+} as any)
+await pluginWithoutCurrentSession.event!({
+  event: {
+    type: "message.part.updated",
+    properties: { part: { messageID: "retained-message", type: "text", text: "stale shutdown prompt" } },
+  },
+} as any)
+`
+	harnessPath := filepath.Join(dir, "harness.ts")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOOK_LOG", hookLog)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd := exec.CommandContext(context.Background(), bunPath, "run", harnessPath)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute generated plugin: %v\n%s", err, output)
+	}
+
+	logFile, err := os.Open(hookLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+
+	type hookCall struct {
+		Name   string
+		Prompt string
+	}
+	var calls []hookCall
+	scanner := bufio.NewScanner(logFile)
+	for scanner.Scan() {
+		hookName, payloadJSON, found := strings.Cut(scanner.Text(), "\t")
+		if !found {
+			t.Fatalf("decode hook log line %q", scanner.Text())
+		}
+		var payload struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			t.Fatalf("decode %s payload %q: %v", hookName, payloadJSON, err)
+		}
+		calls = append(calls, hookCall{Name: hookName, Prompt: payload.Prompt})
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []hookCall{
+		{Name: "turn-start", Prompt: ""},
+		{Name: "prompt-update", Prompt: "preserve this prompt"},
+		{Name: "turn-start", Prompt: ""},
+		{Name: "prompt-update", Prompt: "survives unrelated deletion"},
+		{Name: "turn-start", Prompt: ""},
+		{Name: "turn-start", Prompt: ""},
+		{Name: "turn-start", Prompt: ""},
+		{Name: "prompt-update", Prompt: "third prompt"},
+		{Name: "prompt-update", Prompt: "second prompt"},
+		{Name: "turn-start", Prompt: ""},
+		{Name: "turn-start", Prompt: ""},
+		{Name: "prompt-update", Prompt: "survives session interleaving"},
+		{Name: "turn-start", Prompt: ""},
+		{Name: "turn-start", Prompt: ""},
+	}
+	t.Logf("captured prompt hooks: %+v", calls)
+	if !slices.Equal(calls, want) {
+		t.Fatalf("prompt hooks = %+v, want %+v", calls, want)
 	}
 }
 
