@@ -460,11 +460,15 @@ func renderLefthookScript(spec hookSpec) string {
 func renderOwnedConfig() (string, error) {
 	hooks := map[string]any{}
 	for _, hook := range gitHookNames {
-		hooks[hook] = map[string]any{
-			"commands": map[string]any{"entire": map[string]any{
-				"run": "bash " + lefthookScriptPath(hook) + " {0}",
-			}},
+		command := map[string]any{"run": "bash " + lefthookScriptPath(hook) + " {0}"}
+		if hook == postRewriteHook {
+			// git passes post-rewrite's old/new pairs on stdin, and Lefthook
+			// gives a job an empty stdin unless it asks. Without this the hook
+			// runs, reads no pairs, and silently remaps nothing after every
+			// amend and rebase.
+			command["use_stdin"] = true
 		}
+		hooks[hook] = map[string]any{"commands": map[string]any{"entire": command}}
 	}
 	out, err := yaml.Marshal(hooks)
 	if err != nil {

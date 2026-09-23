@@ -146,4 +146,12 @@ func TestLefthookDeliversEntireOnWindows(t *testing.T) {
 	_, err = os.Stat(userRan)
 	require.NoError(t, err, "the user's own Lefthook script must still run beside Entire's")
 
+	// Amend fires post-rewrite, whose old/new pairs arrive on stdin. Without
+	// them Entire has nothing to remap and silently does nothing.
+	run("git", "commit", "--amend", "--no-edit")
+	got, err = os.ReadFile(record)
+	require.NoError(t, err)
+	require.Contains(t, string(got), "hooks git post-rewrite amend", "post-rewrite was not dispatched")
+	require.Regexp(t, `(?m)^stdin: [0-9a-f]{40,64} [0-9a-f]{40,64}`, string(got),
+		"post-rewrite must receive git's rewrite pairs on stdin")
 }
