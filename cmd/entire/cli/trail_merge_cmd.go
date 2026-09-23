@@ -20,6 +20,7 @@ const (
 	trailConflictConflicting = "conflicting"
 	trailChecksNone          = "none"
 	trailMergeUnknown        = "unknown"
+	trailBypassPolicyNobody  = "nobody"
 
 	trailChecksAvailable     = "available"
 	trailChecksNotApplicable = "not_applicable"
@@ -103,51 +104,102 @@ func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, re
 		gates := trailMergeBlockingGates(m)
 		bypassable := len(gates)
 		if !m.Mergeable {
-			blockers := describeTrailMergeBlockers(m, gates)
 			fmt.Fprintln(w, "Blocked by:")
-			for _, b := range blockers {
+			for _, b := range describeTrailMergeBlockers(m, gates) {
 				fmt.Fprintf(w, "  - %s\n", b)
 			}
-			if !opts.Force {
-				return trailMergeBlockedError(found.Number, m, bypassable)
+		}
+		// Checked before --force and --dry-run: a conflict is not a gate, so
+		// no bypass can get past it and no hint may suggest one.
+		if m.ConflictStatus == trailConflictConflicting {
+			return trailMergeConflictError(found)
+		}
+		bypass := !m.Mergeable
+		if bypass {
+			if !opts.Force || bypassable == 0 {
+				return trailMergeBlockedError(found.Number, m, gates)
+			}
+			if !trailBypassAllowed(m.BypassPolicy) {
+				return trailBypassNotAllowedError(found.Number, m.BypassPolicy)
+			}
+			if trailMergeHead(m) == "" {
+				return fmt.Errorf("cannot merge trail #%d with --force: the server did not report its head commit, so the bypass cannot be pinned to the commit whose gates were checked", found.Number)
 			}
 		}
 
 		if opts.DryRun {
-			if m.Mergeable {
-				fmt.Fprintf(w, "Trail #%d is mergeable (dry run; no merge performed).\n", found.Number)
+			if bypass {
+				fmt.Fprintf(w, "Trail #%d is blocked; --force would bypass %d blocking %s, subject to the repo's bypass policy (%s) (dry run; no merge performed).\n",
+					found.Number, bypassable, pluralize("gate", bypassable), trailBypassPolicyDisplay(m.BypassPolicy))
 			} else {
-				fmt.Fprintf(w, "Trail #%d is blocked; --force would bypass %d blocking %s (dry run; no merge performed).\n",
-					found.Number, bypassable, pluralize("gate", bypassable))
+				fmt.Fprintf(w, "Trail #%d is mergeable (dry run; no merge performed).\n", found.Number)
 			}
 			return nil
 		}
 
-		req := api.TrailMergeRequest{Bypass: opts.Force}
-		if m.HeadSHA != nil {
-			req.ExpectedHeadSha = strings.TrimSpace(*m.HeadSHA)
-		}
+		// Bypass only what was shown: a trail that was mergeable when read
+		// merges without bypass, so a gate failing in between is refused
+		// rather than bypassed unseen.
+		req := api.TrailMergeRequest{Bypass: bypass, ExpectedHeadSha: trailMergeHead(m)}
 		res, err := postTrailMerge(ctx, client, mergePath, found.Number, req, m.BypassPolicy)
 		if err != nil {
 			return err
 		}
 
-		commit := "fast-forward"
-		if res.MergeCommitSha != "" {
-			commit = res.MergeCommitSha
+		// The server sends no SHA both for a fast-forward and when the base
+		// already had the head, and does not say which.
+		commit := "no merge commit"
+		if sha := tuiutil.SanitizeDisplayText(strings.TrimSpace(res.MergeCommitSha)); sha != "" {
+			commit = sha
 		}
-		base := strings.TrimSpace(found.Base)
+		base := tuiutil.SanitizeDisplayText(strings.TrimSpace(found.Base))
 		if base == "" {
 			base = "its base"
 		}
-		if m.Mergeable {
-			fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
-		} else {
+		if bypass {
 			fmt.Fprintf(w, "Merged trail #%d into %s (%s), bypassing %d blocking %s\n",
 				found.Number, base, commit, bypassable, pluralize("gate", bypassable))
+		} else {
+			fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
 		}
 		return nil
 	})
+}
+
+func trailMergeHead(m *api.TrailMergeabilityResponse) string {
+	if m.HeadSHA == nil {
+		return ""
+	}
+	return strings.TrimSpace(*m.HeadSHA)
+}
+
+// trailBypassAllowed reports whether the repo's bypass policy could let anyone
+// bypass gates. Mergeability carries no per-caller eligibility, so for the
+// other policies the server decides at merge time.
+func trailBypassAllowed(policy string) bool {
+	return strings.TrimSpace(policy) != trailBypassPolicyNobody
+}
+
+func trailBypassPolicyDisplay(policy string) string {
+	policy = tuiutil.SanitizeDisplayText(strings.TrimSpace(policy))
+	if policy == "" {
+		return trailMergeUnknown
+	}
+	return policy
+}
+
+func trailBypassNotAllowedError(number int, policy string) error {
+	return fmt.Errorf("cannot merge trail #%d with --force: this repo's bypass policy (%s) does not allow bypassing gates", number, trailBypassPolicyDisplay(policy))
+}
+
+func trailMergeConflictError(t *api.TrailResource) error {
+	base := tuiutil.SanitizeDisplayText(strings.TrimSpace(t.Base))
+	if base == "" {
+		base = "its base branch"
+	} else {
+		base = "its base branch " + base
+	}
+	return fmt.Errorf("trail #%d conflicts with %s; resolve the conflicts and push before merging (--force cannot bypass a merge conflict)", t.Number, base)
 }
 
 func trailRepoIDNumberPath(repoID string, number int) (string, error) {
@@ -209,40 +261,67 @@ func trailMergeRefusal(e *api.HTTPError, number int, bypassPolicy string) error 
 	if code == "" {
 		code = strings.TrimSpace(e.Message)
 	}
+	forceHint := ""
+	if trailBypassAllowed(bypassPolicy) {
+		forceHint = ", or rerun with --force to bypass"
+	}
 	switch {
 	case e.StatusCode == http.StatusForbidden && code == "merge_gates_bypass_forbidden":
-		policy := strings.TrimSpace(bypassPolicy)
-		if policy == "" {
-			policy = trailMergeUnknown
-		}
-		return fmt.Errorf("cannot merge trail #%d with --force: this repo's bypass policy (%s) does not allow you to bypass failing gates", number, policy)
+		return fmt.Errorf("cannot merge trail #%d with --force: this repo's bypass policy (%s) does not allow you to bypass failing gates", number, trailBypassPolicyDisplay(bypassPolicy))
 	case e.StatusCode == http.StatusUnprocessableEntity && code == "merge_gates_failed":
-		return fmt.Errorf("trail #%d is not mergeable: a blocking gate failed when the merge was attempted\nhint: run 'entire trail merge --dry-run' to see why, or rerun with --force to bypass", number)
+		return fmt.Errorf("trail #%d is not mergeable: a blocking gate failed when the merge was attempted\nhint: run 'entire trail merge --dry-run' to see why%s", number, forceHint)
 	case e.StatusCode == http.StatusUnprocessableEntity && code == "merge_gates_pending":
-		return fmt.Errorf("trail #%d is not mergeable yet: a blocking gate is still pending\nhint: wait for it to finish, or rerun with --force to bypass", number)
+		return fmt.Errorf("trail #%d is not mergeable yet: a blocking gate is still pending\nhint: wait for it to finish%s", number, forceHint)
 	case e.StatusCode == http.StatusConflict && strings.HasPrefix(code, "merge_head_mismatch"):
-		return fmt.Errorf("trail #%d changed while it was being merged (%s)\nhint: rerun 'entire trail merge' to merge the new head", number, code)
+		return fmt.Errorf("trail #%d changed while it was being merged (%s)\nhint: rerun 'entire trail merge' to merge the new head", number, tuiutil.SanitizeDisplayText(code))
 	case e.StatusCode == http.StatusConflict && code == "merge_in_progress":
 		return fmt.Errorf("trail #%d is already being merged; try again shortly", number)
 	}
 	return nil
 }
 
-func trailMergeBlockedError(number int, m *api.TrailMergeabilityResponse, bypassable int) error {
-	msg := fmt.Sprintf("trail #%d is not mergeable", number)
+// trailMergeBlockedError explains why the merge stopped. It says "pending"
+// rather than "failing" when nothing has failed, and suggests --force only
+// when there are gates to bypass and the bypass policy is not nobody.
+func trailMergeBlockedError(number int, m *api.TrailMergeabilityResponse, gates []api.TrailGateResult) error {
+	if len(gates) == 0 {
+		return fmt.Errorf("trail #%d is not mergeable\nhint: run 'entire trail show' for details", number)
+	}
+	pending := 0
+	for _, g := range gates {
+		if g.Status == trailGatePending {
+			pending++
+		}
+	}
+	failing := len(gates) - pending
+	var msg string
 	switch {
-	case bypassable == 0:
-		// A conflict is not a gate; --force cannot get past it.
-		return errors.New(msg)
-	case m.BypassPolicy == "nobody":
-		return fmt.Errorf("%s\nhint: this repo's bypass policy (nobody) does not allow bypassing gates, so --force will be refused", msg)
+	case failing == 0:
+		msg = fmt.Sprintf("trail #%d is not mergeable yet: %d blocking %s pending", number, pending, pluralize("gate", pending))
+	case pending == 0:
+		msg = fmt.Sprintf("trail #%d is not mergeable: %d blocking %s failing", number, failing, pluralize("gate", failing))
 	default:
-		return fmt.Errorf("%s\nhint: rerun with --force to merge anyway, bypassing the failing gates", msg)
+		msg = fmt.Sprintf("trail #%d is not mergeable: %d blocking %s failing, %d pending", number, failing, pluralize("gate", failing), pending)
+	}
+	wait := ""
+	if failing == 0 {
+		wait = "wait for the pending gates to finish"
+	}
+	switch {
+	case !trailBypassAllowed(m.BypassPolicy) && wait != "":
+		return fmt.Errorf("%s\nhint: %s; this repo's bypass policy (%s) does not allow bypassing gates", msg, wait, trailBypassPolicyDisplay(m.BypassPolicy))
+	case !trailBypassAllowed(m.BypassPolicy):
+		return fmt.Errorf("%s\nhint: this repo's bypass policy (%s) does not allow bypassing gates", msg, trailBypassPolicyDisplay(m.BypassPolicy))
+	case wait != "":
+		return fmt.Errorf("%s\nhint: %s, or rerun with --force to bypass them", msg, wait)
+	default:
+		return fmt.Errorf("%s\nhint: rerun with --force to merge anyway, bypassing the blocking gates", msg)
 	}
 }
 
 func printTrailMergeability(w io.Writer, t *api.TrailResource, m *api.TrailMergeabilityResponse) {
-	fmt.Fprintf(w, "Trail #%d (%s → %s)\n", t.Number, t.Branch, t.Base)
+	fmt.Fprintf(w, "Trail #%d (%s → %s)\n", t.Number,
+		tuiutil.SanitizeDisplayText(t.Branch), tuiutil.SanitizeDisplayText(t.Base))
 	fmt.Fprintf(w, "  Approvals:  %s\n", checkmark(m.ApprovalGatePassed))
 	fmt.Fprintf(w, "  Checks:     %s\n", trailChecksDisplay(m))
 	fmt.Fprintf(w, "  Up to date: %s\n", trailUpToDateDisplay(m))
