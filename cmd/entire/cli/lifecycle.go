@@ -169,16 +169,17 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 			slog.String("cwd", event.CWD))
 		return ctx
 	}
+	// The launch worktree passed the enablement gate; the target must too, or
+	// the hook would set Entire up in a worktree the user never enabled.
+	// Checked before moving, so there is nothing to roll back.
+	if !settings.IsSetUpAndEnabledAt(ctx, target) {
+		logging.Debug(logCtx, "payload cwd is a worktree where entire is not enabled; staying put",
+			slog.String("cwd", target))
+		return ctx
+	}
 	if err := os.Chdir(target); err != nil {
 		logging.Warn(logCtx, "could not follow the agent's working directory",
 			slog.String("cwd", target), slog.String("error", err.Error()))
-		return ctx
-	}
-	// The launch worktree passed the enablement gate; the target must too, or
-	// the hook would set Entire up in a worktree the user never enabled.
-	if !targetWorktreeEnabled(ctx, current) {
-		logging.Debug(logCtx, "payload cwd is a worktree where entire is not enabled; staying put",
-			slog.String("cwd", target))
 		return ctx
 	}
 	clearWorktreeCaches()
@@ -214,20 +215,6 @@ func sameDir(a, b string) bool {
 // worktreeRootOf finds the worktree containing dir — nearest root first, so a
 // cwd inside a subdirectory still resolves — through the canonical metadata
 // resolver rather than a git query.
-// targetWorktreeEnabled runs the hooks' enablement gate against the worktree
-// the process has just moved into. When it fails, the process moves back to
-// launchDir, so callers can simply stay put.
-func targetWorktreeEnabled(ctx context.Context, launchDir string) bool {
-	clearWorktreeCaches()
-	if settings.IsSetUpAndEnabled(ctx) {
-		return true
-	}
-	if err := os.Chdir(launchDir); err == nil {
-		clearWorktreeCaches()
-	}
-	return false
-}
-
 // clearWorktreeCaches drops everything resolved from the process directory.
 func clearWorktreeCaches() {
 	paths.ClearWorktreeRootCache()

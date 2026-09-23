@@ -1816,6 +1816,25 @@ func IsSetUpAndEnabled(ctx context.Context) bool {
 	return s.Enabled
 }
 
+// IsSetUpAndEnabledAt is IsSetUpAndEnabled for an explicit worktree root, for
+// a hook deciding whether to move into another worktree before it has moved.
+func IsSetUpAndEnabledAt(ctx context.Context, worktreeRoot string) bool {
+	root, err := entiredir.OpenAtForRead(worktreeRoot)
+	if err != nil {
+		return false
+	}
+	_, baseErr := root.Lstat(SettingsName)
+	_, localErr := root.Lstat(SettingsLocalName)
+	if baseErr != nil && localErr != nil {
+		return false
+	}
+	s, err := loadForWorktreeRoot(ctx, worktreeRoot)
+	if err != nil {
+		return false
+	}
+	return s.Enabled
+}
+
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.
 // When enabled, filtered fetches always resolve remote names to URLs first so
 // git does not persist promisor settings onto named remotes in local config.
