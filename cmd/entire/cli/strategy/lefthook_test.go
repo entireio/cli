@@ -61,7 +61,9 @@ func TestEnsureLefthookIntegration(t *testing.T) {
 	owned, err := os.ReadFile(filepath.Join(dir, entireLefthookConfig))
 	require.NoError(t, err)
 	require.Contains(t, string(owned), lefthookOwnedMarker)
-	require.Contains(t, string(owned), "source_dir_local: "+lefthookScriptDir)
+	require.NotContains(t, string(owned), "source_dir_local",
+		"an extended config's source_dir_local overrides the user's own")
+	require.Contains(t, string(owned), "bash "+lefthookScriptPath("pre-push")+" {0}")
 
 	local, err := os.ReadFile(filepath.Join(dir, "lefthook-local.yml"))
 	require.NoError(t, err)

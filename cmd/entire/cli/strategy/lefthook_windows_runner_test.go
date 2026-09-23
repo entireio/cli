@@ -98,8 +98,20 @@ func TestLefthookDeliversEntireOnWindows(t *testing.T) {
 	require.NoError(t, os.MkdirAll(binDir, 0o755))
 	record := filepath.Join(binDir, "args.txt")
 	// hookCmdPrefix resolves to a bare "entire", so a stub on PATH stands in.
+	// post-rewrite also records its stdin: git passes the old/new pairs there,
+	// and Lefthook withholds stdin from a job unless it asks for it.
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
-		[]byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(filepath.ToSlash(record))+"\n"), 0o755))
+		[]byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(filepath.ToSlash(record))+"\n"+
+			"if [ \"$3\" = post-rewrite ]; then sed 's/^/stdin: /' >> "+shellQuote(filepath.ToSlash(record))+"; fi\n"), 0o755))
+
+	// The user's own Lefthook setup, with a script directory of their choosing.
+	// Entire's config merges into theirs, so it must not override it.
+	userRan := filepath.Join(binDir, "user-ran.txt")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook.yml"),
+		[]byte("source_dir_local: .custom-local\npre-commit:\n  scripts:\n    user.sh:\n      runner: bash\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".custom-local", "pre-commit"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".custom-local", "pre-commit", "user.sh"),
+		[]byte("#!/bin/sh\necho ran > "+shellQuote(filepath.ToSlash(userRan))+"\n"), 0o755))
 
 	env := append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	run := func(name string, args ...string) {
@@ -131,4 +143,7 @@ func TestLefthookDeliversEntireOnWindows(t *testing.T) {
 	for _, hook := range []string{"prepare-commit-msg", "commit-msg", "post-commit"} {
 		require.Containsf(t, lines, hook, "Lefthook did not dispatch %s to Entire: %q", hook, got)
 	}
+	_, err = os.Stat(userRan)
+	require.NoError(t, err, "the user's own Lefthook script must still run beside Entire's")
+
 }

@@ -16,9 +16,10 @@ package strategy
 // user action — and Lefthook's own config is never touched.
 //
 // Verified against lefthook 2.1.10: a config reached via `extends` can declare
-// `scripts`, those scripts receive git's hook arguments (pre-push gets the
-// remote and its URL), and the whole arrangement survives both
-// `lefthook install -f` and a config edit.
+// commands, a command receives git's hook arguments through `{0}` (pre-push
+// gets the remote and its URL), and the whole arrangement survives both
+// `lefthook install -f` and a config edit. See renderOwnedConfig for why these
+// are commands and not `scripts:` entries.
 
 import (
 	"context"
@@ -42,8 +43,9 @@ const (
 	// entireLefthookConfig is Entire's own Lefthook config. Entire owns this
 	// file outright, which is what keeps it out of the user's.
 	entireLefthookConfig = "entire-lefthook.yml"
-	// lefthookScriptDir is Lefthook's clone-local script directory, its
-	// default for source_dir_local.
+	// lefthookScriptDir holds Entire's hook scripts. It shares the name of
+	// Lefthook's default source_dir_local, but nothing depends on that: each
+	// command names its script by path. Kept for existing installs.
 	lefthookScriptDir = ".lefthook-local"
 	lefthookScript    = "entire.sh"
 	// lefthookOwnedMarker identifies a file as Entire's. Removal and
@@ -439,14 +441,31 @@ func renderLefthookScript(spec hookSpec) string {
 		"# "+entireHookMarker+"\n", "# "+lefthookOwnedMarker+"\n", 1)
 }
 
+// renderOwnedConfig declares one Lefthook command per hook that runs Entire's
+// script by its path.
+//
+// A command rather than a `scripts:` entry, because scripts are looked up under
+// source_dir_local, and a config reached through `extends` merges into the
+// user's: setting that key here overrode the user's own, so their local scripts
+// stopped resolving and Lefthook failed every commit with "script does not
+// exist". Leaving it unset breaks Entire's scripts instead whenever the user has
+// chosen another directory. A command names its script outright and depends on
+// neither.
+//
+// `{0}` is the hook's arguments joined by spaces, unescaped — exactly what
+// Lefthook appends to a script's command line, so the script sees the same
+// "$@" it did as a `scripts:` entry. Individual `{1}`/`{2}` placeholders are
+// not used: an absent argument (prepare-commit-msg's source, for a plain
+// commit) is left as literal text rather than dropped.
 func renderOwnedConfig() (string, error) {
 	hooks := map[string]any{}
 	for _, hook := range gitHookNames {
 		hooks[hook] = map[string]any{
-			"scripts": map[string]any{lefthookScript: map[string]any{"runner": "bash"}},
+			"commands": map[string]any{"entire": map[string]any{
+				"run": "bash " + lefthookScriptPath(hook) + " {0}",
+			}},
 		}
 	}
-	hooks["source_dir_local"] = lefthookScriptDir
 	out, err := yaml.Marshal(hooks)
 	if err != nil {
 		return "", fmt.Errorf("render %s: %w", entireLefthookConfig, err)
