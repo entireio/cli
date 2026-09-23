@@ -155,19 +155,43 @@ const (
 // availability. Placements/Access are omitted from JSON when empty so a
 // candidate row and a mirror row are distinguishable.
 type repoDirRow struct {
-	Repo    string `json:"repo"`
-	Private bool   `json:"private"`
+	Repo string `json:"repo"`
+	// Private is a pointer because "the server did not say" is a third answer,
+	// and it is not the permissive one. This view is read to confirm a repo is
+	// restricted before widening access, so rendering an absent visibility as
+	// Public would be the one guess that can cause harm. nil prints "-" and
+	// omits the JSON key; `repo visibility get` stays authoritative.
+	Private *bool  `json:"private,omitempty"`
 	Status  string `json:"status"`           // shared placement status, "mixed", or candidate availability
 	Access  string `json:"access,omitempty"` // candidate only
-	// ID, Project and ProvisionReason are --json only: the ULID other verbs
-	// address the repo by, its owning project by NAME, and why provisioning
-	// stopped when it did. They are absent for a GitHub upstream, which Entire
-	// holds no repo record for, and so never widen the `mirror list` rows this
-	// shape is shared with.
+	// ID, Project, State and ProvisionReason are --json only: the ULID other
+	// verbs address the repo by, its owning project by NAME, the repo's own
+	// lifecycle value, and why provisioning stopped when it did. They are
+	// absent for a GitHub upstream, which Entire holds no repo record for, and
+	// so never widen the `mirror list` rows this shape is shared with.
+	//
+	// State is the server's own word (active/provisioning/failed), NOT the
+	// placement vocabulary Status speaks. Both are kept because they answer
+	// different questions and neither survives the other: a repo with no
+	// placement yet has a state and no status, and `--status ready` must keep
+	// matching the placement word. A script that polled `.state` before this
+	// view became placement-shaped still finds it here.
 	ID              string             `json:"id,omitempty"`
 	Project         string             `json:"project,omitempty"`
+	State           string             `json:"state,omitempty"`
 	ProvisionReason string             `json:"provisionReason,omitempty"`
 	Placements      []repoDirPlacement `json:"placements,omitempty"`
+}
+
+// visibilityOf renders a wire visibility string as the tri-state Private field:
+// nil when the server stated nothing. The GitHub index makes `visibility`
+// required, so only a native repo read can be missing it.
+func visibilityOf(visibility string) *bool {
+	if strings.TrimSpace(visibility) == "" {
+		return nil
+	}
+	private := strings.EqualFold(visibility, "private")
+	return &private
 }
 
 // sharedPlacementStatus folds a row's placements into the one STATUS cell the
@@ -270,8 +294,11 @@ func styledHeaders(st statusStyles, headers []string) []string {
 
 // visibilityDisplay renders the VISIBILITY cell (and the `get` record's
 // Visibility section): the repo's audience in GitHub's terms, not a yes/no.
-func visibilityDisplay(private bool) string {
-	if private {
+func visibilityDisplay(private *bool) string {
+	switch {
+	case private == nil:
+		return "-"
+	case *private:
 		return "Private"
 	}
 	return "Public"
@@ -281,8 +308,11 @@ func visibilityDisplay(private bool) string {
 // reachable), Private magenta (restricted — the accent, distinct from every
 // status color that shares a row with it). Shared by the list column and the
 // `get` record so the same value always looks the same.
-func visibilityColor(st statusStyles, private bool) lipgloss.Style {
-	if private {
+func visibilityColor(st statusStyles, private *bool) lipgloss.Style {
+	switch {
+	case private == nil:
+		return lipgloss.Style{} // unknown is not a claim, so it gets no color
+	case *private:
 		return st.magenta
 	}
 	return st.green
@@ -337,7 +367,7 @@ func buildRepoDir(entries []coreapi.RepoIndexEntry, hostBySlug map[string]string
 			name = e.Name
 		}
 		entryForge, forgeFromProvider := forgeOfEntry(e)
-		private := strings.EqualFold(e.Visibility, "private")
+		private := visibilityOf(e.Visibility)
 		if cand, ok := e.Candidate.Get(); ok {
 			status := "owner-only"
 			if cand.Onboardable {
@@ -916,14 +946,40 @@ func applyRepoDirLocal(f repoDirLocalFilters, rows []repoDirRow) ([]repoDirRow, 
 		})
 	}
 	if f.privateSet {
+		// A row whose visibility the server never stated matches neither
+		// --private nor --private=false: it is not evidence either way, and
+		// letting it fall into the public bucket is the failure this filter
+		// would be used to catch.
 		rows = slices.DeleteFunc(rows, func(r repoDirRow) bool {
-			return r.Private != f.private
+			return r.Private == nil || *r.Private != f.private
 		})
 	}
 	if err := sortRepoDir(rows, f.sortSpec); err != nil {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// validateClusterFilter refuses a --cluster the catalog cannot name, instead of
+// letting the local filter match zero rows and exit 0 with "No repos found".
+//
+// The filter compares against the CLUSTER column, which prints the public host.
+// A slug is the likely mistake and gets its own message, because `entire
+// cluster list` still heads its own column CLUSTER while printing slugs, so
+// copy-pasting from the catalog is the natural way to get here.
+func validateClusterFilter(cluster string, hostBySlug map[string]string) error {
+	if cluster == "" {
+		return nil
+	}
+	for slug, host := range hostBySlug {
+		if strings.EqualFold(host, cluster) {
+			return nil
+		}
+		if strings.EqualFold(slug, cluster) {
+			return fmt.Errorf("--cluster %q is a cluster slug; this filter takes the public host, so pass --cluster %s (the HOST column of `entire cluster list`)", cluster, host)
+		}
+	}
+	return fmt.Errorf("--cluster %q names no cluster in the catalog; pass a public host as the HOST column of `entire cluster list` prints it", cluster)
 }
 
 // fetchRepoDirCatalog resolves the slug→host catalog the directory needs for
@@ -1035,6 +1091,9 @@ func runRepoMirrorListPage(cmd *cobra.Command, o repoMirrorListOpts, headers []s
 		if err != nil {
 			return err
 		}
+		if err := validateClusterFilter(o.filters.cluster, hostBySlug); err != nil {
+			return err
+		}
 		params := coreapi.ListReposParams{Scope: coreapi.NewOptListReposScope(coreapi.ListReposScopeAll)}
 		if o.pageToken != "" {
 			params.PageToken = coreapi.NewOptString(o.pageToken)
@@ -1068,6 +1127,9 @@ func runRepoMirrorListWalk(cmd *cobra.Command, o repoMirrorListOpts, headers []s
 	return runCoreList(cmd, "No repos found.", headers, cells, func(ctx context.Context, c *coreapi.Client) ([]repoDirRow, error) {
 		hostBySlug, err := fetchRepoDirCatalog(ctx, cmd, c)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateClusterFilter(o.filters.cluster, hostBySlug); err != nil {
 			return nil, err
 		}
 		// The server cannot filter or sort this directory, so the whole
@@ -1267,7 +1329,7 @@ func mirrorRepoDetailRow(e coreapi.RepoIndexEntry, hostBySlug map[string]string)
 		if name == "" {
 			name = e.Name
 		}
-		return repoDirRow{Repo: qualifyRepoRef(mirrorCloneForge, name), Private: strings.EqualFold(e.Visibility, "private")}
+		return repoDirRow{Repo: qualifyRepoRef(mirrorCloneForge, name), Private: visibilityOf(e.Visibility)}
 	}
 	row := rows[0]
 	slices.SortFunc(row.Placements, func(a, b repoDirPlacement) int {
@@ -1310,14 +1372,19 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 
 	if len(row.Placements) == 0 {
 		switch {
+		case row.ID != "" && row.State != "" && row.State != repoStateProvisioning:
+			// Entire holds a record and the repo's own lifecycle has already
+			// answered. Say what it answered: a repo whose provisioning FAILED
+			// has no placement either, and explaining that away as a read that
+			// arrived early sends the reader back to wait for something that is
+			// never coming. reportNativeMirrorNotes carries the reason.
+			fmt.Fprintf(w, "Not placed on any cluster; the repository is %s.\n", row.State)
 		case row.ID != "":
-			// Entire holds a repo record here, and such a repo always has
-			// exactly one primary placement. So no placements says something
-			// about the READ, not about the repo: it landed in the seconds
+			// A record, and a lifecycle still in progress or unread. Such a
+			// repo always gets exactly one primary, so an empty table here is
+			// about the READ rather than the repo: it landed in the seconds
 			// between create returning coordinates and the registry carrying
-			// them (the window waitForRepoClonable polls through). Saying "not
-			// mirrored" there would report a GitHub fact about a repo that
-			// demonstrably has a home.
+			// them (the window waitForRepoClonable polls through).
 			fmt.Fprintln(w, "Not placed yet: this read caught the repo before its primary was assigned.")
 		case row.Status != "":
 			fmt.Fprintf(w, "Not mirrored on any cluster (%s).\n", row.Status)
@@ -1337,12 +1404,17 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 	headers := styledHeaders(st, cols)
 	rows := make([][]string, len(row.Placements))
 	for i, p := range row.Placements {
-		cluster, status, role := p.Cluster, p.Status, p.Role
+		// orDash is the ONLY place a missing status becomes a dash: the Status
+		// FIELD stays the server's own value, so --json is machine-readable and
+		// only the rendering is prose. Baking the dash into the field instead
+		// shipped "-" to jq, and made sharedPlacementStatus fold a healthy
+		// repo whose state merely could not be read into "mixed", which the
+		// table then paints as part-degraded.
+		cluster, status, role := p.Cluster, orDash(p.Status), p.Role
 		// Stage and the teardown marker qualify the status cell rather than
 		// taking columns of their own: each is set only in one transient state,
 		// and an always-empty column costs every reader something one reader
-		// wants. The Status FIELD stays the server's own value, so --json is
-		// machine-readable and only the rendering is prose.
+		// wants.
 		if p.Stage != "" {
 			status += " (" + p.Stage + ")"
 		}

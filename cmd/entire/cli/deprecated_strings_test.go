@@ -36,6 +36,7 @@ func TestNoDeprecatedCommandFormsInUserFacingStrings(t *testing.T) {
 		"entire auth use",                  // → entire auth switch
 		"entire repo get",                  // → entire repo view
 		"entire repo mirror create",        // → entire repo mirror add
+		"entire repo mirror get",           // → entire repo view
 		"entire repo mirror use",           // → entire repo remote use
 		"entire repo mirror collaborators", // → entire repo access
 		"entire repo visibility set",       // → entire repo edit --visibility

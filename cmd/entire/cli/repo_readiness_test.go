@@ -198,6 +198,63 @@ func TestRepoView_BeforeThePrimaryIsPlaced(t *testing.T) {
 	})
 }
 
+// TestRepoView_UnplacedRepoStatesItsLifecycle pins the two answers an empty
+// placements table can have, and that they are told apart by the repo's own
+// lifecycle rather than by the mere existence of a record.
+//
+// A failed repo has no placement either, so explaining that away as a read that
+// arrived early sends the reader back to wait for something never coming — and
+// `repo create`'s own recovery hint sends them to this very command.
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_UnplacedRepoStatesItsLifecycle(t *testing.T) {
+	body := func(state, extra string) string {
+		return fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":%q%s}`,
+			testDeleteULID, testProjectULID, state, extra)
+	}
+
+	t.Run("a failed repo says so, with the reason, not that the read was early", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("failed", `,"provisionReason":"cluster quota exceeded"`), nil)
+		out, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		require.Contains(t, out, "failed")
+		require.NotContains(t, out, "Not placed yet",
+			"the lifecycle already answered; the read was not early")
+		// The reason has no cluster to name, so it stands alone rather than
+		// arriving behind an empty prefix.
+		require.Contains(t, stderr, "cluster quota exceeded")
+		require.NotContains(t, stderr, ": cluster quota exceeded")
+	})
+
+	t.Run("a provisioning repo is still the early read", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("provisioning", ""), nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		require.Contains(t, out, "Not placed yet")
+	})
+
+	// Visibility is a security assertion, so the absent case is not the
+	// permissive one: an operator reads this to confirm a repo is restricted.
+	t.Run("an unstated visibility is dashed, never rendered Public", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("provisioning", ""), nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		requireOrder(t, out, "Visibility:", "-")
+		require.NotContains(t, out, "Public")
+	})
+
+	t.Run("--json omits private when unstated and carries the raw state", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("failed", `,"provisionReason":"cluster quota exceeded"`), nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--json")
+		require.NoError(t, err)
+		require.NotContains(t, out, `"private"`, "an absent visibility is absent, not false")
+		var row repoDirRow
+		require.NoError(t, json.Unmarshal([]byte(out), &row))
+		require.Nil(t, row.Private)
+		require.Equal(t, "failed", row.State, "the server's own lifecycle word survives the placement shape")
+	})
+}
+
 func TestRepoCreateReadinessFlags(t *testing.T) {
 	// Not parallel: shared client seam.
 	for _, tc := range []struct {
@@ -695,13 +752,18 @@ func TestRepoViewAuthoritativeFlag(t *testing.T) {
 				return true
 			}
 
-			// Without the flag the readiness failure is swallowed: the STATUS
-			// cell dashes and the rest of the view is still worth printing.
+			// Without the flag the view still prints — losing it costs more
+			// than a dashed STATUS — but the failure is DISCLOSED. Silence let
+			// a core outage downgrade every `repo view` to a table asserting
+			// nothing was wrong, at exit 0.
 			srv, _ := serveRepoView(t, repoBody, fail)
 			out, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
 			require.NoError(t, err, "a failed readiness read must not sink the view")
 			require.Contains(t, out, "/et/acme/web")
-			require.NotContains(t, stderr, "readiness check")
+			require.Contains(t, stderr, "could not confirm provisioning state")
+			// The --authoritative recovery hint stays out of the flagless path:
+			// it tells the reader to drop a flag they never passed.
+			require.NotContains(t, stderr, "to inspect repository details")
 
 			srv, _ = serveRepoView(t, repoBody, fail)
 			_, stderr, err = runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--authoritative")

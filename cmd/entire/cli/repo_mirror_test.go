@@ -1270,7 +1270,7 @@ func TestRepoView_Routing(t *testing.T) {
 		require.NoError(t, err)
 		var row repoDirRow
 		require.NoError(t, json.Unmarshal([]byte(out), &row))
-		require.Equal(t, repoDirRow{Repo: "/gh/entirehq/entiredb", Private: true, Status: "ready", Placements: []repoDirPlacement{
+		require.Equal(t, repoDirRow{Repo: "/gh/entirehq/entiredb", Private: visibilityOf("private"), Status: "ready", Placements: []repoDirPlacement{
 			{Cluster: "aws-us-east-2.entire.io", ClusterSlug: "us", Jurisdiction: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/entirehq/entiredb"},
 		}}, row)
 	})
@@ -1373,6 +1373,27 @@ func TestRepoView_NativeCloneURL(t *testing.T) {
 	)
 }
 
+// TestValidateClusterFilter pins that --cluster names a cluster or fails. The
+// filter is client-side over the printed rows, so an unknown value matched
+// nothing and exited 0 with "No repos found" — indistinguishable from a repo
+// that genuinely has no mirror there.
+func TestValidateClusterFilter(t *testing.T) {
+	t.Parallel()
+	hosts := map[string]string{"us": "aws-us-east-2.entire.io", "eu": "eu-west-1.entire.io"}
+
+	require.NoError(t, validateClusterFilter("", hosts), "no filter is not a bad filter")
+	require.NoError(t, validateClusterFilter("aws-us-east-2.entire.io", hosts))
+	require.NoError(t, validateClusterFilter("AWS-US-EAST-2.entire.io", hosts), "hosts compare case-insensitively")
+
+	// A slug is the likely mistake, because `entire cluster list` still heads
+	// its own column CLUSTER while printing slugs.
+	err := validateClusterFilter("us", hosts)
+	require.ErrorContains(t, err, "is a cluster slug")
+	require.ErrorContains(t, err, "aws-us-east-2.entire.io", "the message names the spelling that works")
+
+	require.ErrorContains(t, validateClusterFilter("nope.entire.io", hosts), "names no cluster in the catalog")
+}
+
 // TestMirrorRefOwner pins the owner extraction the --owner filter uses, now
 // that a directory row carries the forge-qualified name.
 func TestMirrorRefOwner(t *testing.T) {
@@ -1391,14 +1412,14 @@ func TestRepoDirCells(t *testing.T) {
 	}{
 		{
 			name: "mirror row: clusters + status, access dashed",
-			row: repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+			row: repoDirRow{Repo: "acme/web", Private: visibilityOf("private"), Status: "ready", Placements: []repoDirPlacement{
 				{Cluster: "us", Status: "ready", CloneURL: "entire://h/gh/acme/web"},
 			}},
 			want: []string{"acme/web", "us", "Private", "ready", "-"},
 		},
 		{
 			name: "multi-cluster mirror row joins its clusters in one cell",
-			row: repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+			row: repoDirRow{Repo: "acme/web", Private: visibilityOf("private"), Status: "ready", Placements: []repoDirPlacement{
 				{Cluster: "us", Status: "ready"},
 				{Cluster: "eu", Status: "ready"},
 			}},
@@ -1406,7 +1427,7 @@ func TestRepoDirCells(t *testing.T) {
 		},
 		{
 			name: "candidate row: access + availability, clusters dashed",
-			row:  repoDirRow{Repo: "acme/mkt", Private: false, Status: "available", Access: "admin"},
+			row:  repoDirRow{Repo: "acme/mkt", Private: visibilityOf("public"), Status: "available", Access: "admin"},
 			want: []string{"acme/mkt", "-", "Public", "available", "admin"},
 		},
 	}
@@ -1445,7 +1466,7 @@ func TestStyledCellsDisabledGate(t *testing.T) {
 	st := newStatusStyles(io.Discard) // never a TTY → color disabled
 	require.False(t, st.colorEnabled)
 
-	row := repoDirRow{Repo: "acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+	row := repoDirRow{Repo: "acme/web", Private: visibilityOf("private"), Status: "ready", Placements: []repoDirPlacement{
 		{Cluster: "us", Status: "ready", CloneURL: "entire://h/gh/acme/web"},
 	}}
 	require.Equal(t, repoDirCells(row), repoDirCellsStyled(st)(row))
@@ -1484,11 +1505,11 @@ func TestBuildRepoDir(t *testing.T) {
 			candidateEntry("alice/x", "private", coreapi.RepoCandidateAccessRead, false),
 		}, hosts, mirrorCloneForge)
 		require.Equal(t, []repoDirRow{
-			{Repo: "/gh/acme/web", Private: true, Status: "ready", Placements: []repoDirPlacement{
+			{Repo: "/gh/acme/web", Private: visibilityOf("private"), Status: "ready", Placements: []repoDirPlacement{
 				{Cluster: "aws-us-east-2.entire.io", ClusterSlug: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
 			}},
-			{Repo: "/gh/acme/mkt", Private: false, Status: "available", Access: "admin"},
-			{Repo: "/gh/alice/x", Private: true, Status: "owner-only", Access: "read"},
+			{Repo: "/gh/acme/mkt", Private: visibilityOf("public"), Status: "available", Access: "admin"},
+			{Repo: "/gh/alice/x", Private: visibilityOf("private"), Status: "owner-only", Access: "read"},
 		}, rows)
 	})
 
@@ -1538,7 +1559,7 @@ func TestBuildRepoDir(t *testing.T) {
 			onboardedEntry("acme/web", "public", "us"),
 		}, hosts, mirrorCloneForge)
 		require.Equal(t, []repoDirRow{
-			{Repo: "/gh/acme/web", Private: false, Status: "ready", Placements: []repoDirPlacement{
+			{Repo: "/gh/acme/web", Private: visibilityOf("public"), Status: "ready", Placements: []repoDirPlacement{
 				{Cluster: "aws-us-east-2.entire.io", ClusterSlug: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
 			}},
 		}, rows, "only the mirror row survives; the native repo is dropped")
@@ -1553,7 +1574,7 @@ func TestBuildRepoDir(t *testing.T) {
 			}},
 		}, hosts, mirrorCloneForge)
 		require.Equal(t, []repoDirRow{
-			{Repo: "/gh/acme/web", Private: false, Status: "ready", Placements: []repoDirPlacement{
+			{Repo: "/gh/acme/web", Private: visibilityOf("public"), Status: "ready", Placements: []repoDirPlacement{
 				{Cluster: "aws-us-east-2.entire.io", ClusterSlug: "us", Status: "ready", CloneURL: "entire://aws-us-east-2.entire.io/gh/acme/web"},
 			}},
 		}, rows)
@@ -1793,9 +1814,9 @@ func TestSortRepoDir(t *testing.T) {
 	// are observable.
 	base := func() []repoDirRow {
 		return []repoDirRow{
-			{Repo: "acme/web", Private: true, Status: "ready", Placements: placedOn("us", "eu")},
-			{Repo: "beta/api", Private: false, Status: "ready", Placements: placedOn("eu")},
-			{Repo: "acme/api", Private: false, Status: "ready", Placements: placedOn("us")},
+			{Repo: "acme/web", Private: visibilityOf("private"), Status: "ready", Placements: placedOn("us", "eu")},
+			{Repo: "beta/api", Private: visibilityOf("public"), Status: "ready", Placements: placedOn("eu")},
+			{Repo: "acme/api", Private: visibilityOf("public"), Status: "ready", Placements: placedOn("us")},
 		}
 	}
 
