@@ -66,8 +66,8 @@ func resolveOPFDecision(env, promptDefault string, hasTTY, misconfigured bool, p
 	}
 	if !hasTTY {
 		// Non-interactive context: run OPF (matches the user's "if
-		// enabled, just run" preference). The caller emits a progress
-		// line at run time so scripted output isn't silent.
+		// enabled, just run" preference). The caller emits a decision
+		// line so scripted output isn't silent.
 		return failClosedOr(OPFRun)
 	}
 	if misconfigured {
@@ -78,8 +78,8 @@ func resolveOPFDecision(env, promptDefault string, hasTTY, misconfigured bool, p
 
 // resolveOPFDecisionForPrePush is the production wiring: reads env +
 // settings + TTY, calls askOPFPrompt when interactive, emits a stderr
-// progress line on the non-TTY auto-run path. errOut receives the
-// progress line (only printed when we'll actually run + the caller is
+// decision line on the non-TTY auto-run path. errOut receives the
+// line (only printed when we'll actually run + the caller is
 // non-interactive).
 func resolveOPFDecisionForPrePush(ctx context.Context, opf *settings.OPFSettings, errOut io.Writer) (OPFDecision, error) {
 	hasTTY := interactive.CanPromptInteractively()
@@ -98,7 +98,7 @@ func resolveOPFDecisionForPrePush(ctx context.Context, opf *settings.OPFSettings
 		return OPFAbort, err
 	}
 	if d == OPFRun && !hasTTY {
-		fmt.Fprintln(errOut, "→ OpenAI Privacy Filter: scanning checkpoints before push (at least ~30s, longer for large sessions)…")
+		fmt.Fprintln(errOut, "→ OpenAI Privacy Filter: enabled for checkpoint processing")
 	}
 	return d, nil
 }

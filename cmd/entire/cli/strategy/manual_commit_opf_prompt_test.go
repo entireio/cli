@@ -167,10 +167,10 @@ func TestPersistOPFPromptDefaultAlways_CreatesFileFromScratch(t *testing.T) {
 	require.Equal(t, settings.OPFPromptAlways, parsed.Redaction.OPF.PromptDefault)
 }
 
-// TestPrePush_OPFProgressUsesConfiguredWriter pins the test-noise escape hatch:
-// PrePush still emits the non-interactive OPF progress notice in production,
-// but tests can redirect it away from process stderr.
-func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
+// TestPrePush_OPFDecisionUsesConfiguredWriter pins the test-noise escape hatch:
+// PrePush emits the non-interactive OPF decision notice in production, but
+// tests can redirect it away from process stderr.
+func TestPrePush_OPFDecisionUsesConfiguredWriter(t *testing.T) {
 	tmpDir := t.TempDir()
 	testutil.InitRepo(t, tmpDir)
 	testutil.WriteFile(t, tmpDir, "f.txt", "init")
@@ -200,7 +200,8 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
 	withOPFPrePushProgressWriterForTest(t, &out)
 
 	require.NoError(t, (&ManualCommitStrategy{}).PrePush(t.Context(), "origin"))
-	require.Contains(t, out.String(), "OpenAI Privacy Filter: scanning checkpoints before push")
+	require.Contains(t, out.String(), "OpenAI Privacy Filter: enabled for checkpoint processing")
+	require.NotContains(t, out.String(), "scanning checkpoints before push")
 }
 
 func withOPFPrePushProgressWriterForTest(t testing.TB, w io.Writer) {
