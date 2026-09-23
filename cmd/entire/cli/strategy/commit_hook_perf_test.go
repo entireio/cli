@@ -336,7 +336,7 @@ var perfFileSets = [][]string{
 	{"cmd/entire/cli/session/state.go", "cmd/entire/cli/session/phase.go"},
 	{"cmd/entire/cli/paths/paths.go", "cmd/entire/cli/paths/worktree.go", "go.mod"},
 	{"cmd/entire/cli/agent/claude.go"},
-	{"docs/architecture/README.md", "CLAUDE.md"},
+	{"docs/architecture/README.md", "AGENTS.md"},
 }
 
 // perfLargeFileSets provides realistic file path lists matching production

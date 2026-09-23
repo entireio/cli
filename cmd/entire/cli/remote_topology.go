@@ -37,7 +37,7 @@ type remoteDestination struct {
 	// PushURL falls back to the push remote on an owner mismatch, an
 	// unparseable URL, or a protocol it cannot map. Reading settings directly
 	// would report "pinned" while pushes really went elsewhere, the same class
-	// of bug the CoreOrigin() rule in CLAUDE.md exists to prevent.
+	// of bug the CoreOrigin() rule in AGENTS.md exists to prevent.
 	pinned bool
 }
 

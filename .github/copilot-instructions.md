@@ -111,7 +111,7 @@ cmd/entire/
 - `.golangci.yaml` - Linting rules (forbidigo patterns for unsafe operations)
 - `go.mod` - Module dependencies
 
-Use the [task-specific reference map](../CLAUDE.md#read-when-relevant) to find detailed architecture and development documentation.
+Use the [task-specific reference map](../AGENTS.md#read-when-relevant) to find detailed architecture and development documentation.
 
 ## Testing Guidelines
 

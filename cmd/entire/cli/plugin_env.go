@@ -49,7 +49,7 @@ var pluginEnvAllowed = map[string]struct{}{
 	"PROGRAMFILES": {}, "PROGRAMFILES(X86)": {},
 	"USERPROFILE": {}, "USERNAME": {}, "HOMEDRIVE": {}, "HOMEPATH": {},
 
-	// Documented in CLAUDE.md as the toggle for accessibility mode.
+	// Documented in AGENTS.md as the toggle for accessibility mode.
 	"ACCESSIBLE": {},
 }
 

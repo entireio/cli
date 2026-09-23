@@ -691,7 +691,7 @@ func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot strin
 // worktreeRootOfSettingsFile recovers the worktree root a settings path was
 // built from: settingsAbsPaths joins <root>/.entire/<file>, so the root is two
 // levels up. Used only as the KEY the vouched-symlink policy is scoped by, never
-// as a base for I/O, so the derived-path rule in CLAUDE.md does not apply -- an
+// as a base for I/O, so the derived-path rule in AGENTS.md does not apply -- an
 // inconsistent key costs a refused symlink, which is the safe direction.
 func worktreeRootOfSettingsFile(settingsFileAbs string) string {
 	if settingsFileAbs == "" {
@@ -789,7 +789,7 @@ func LoadFromFile(filePath string) (*EntireSettings, error) {
 // Pair with SaveProjectRaw for read-modify-write flows that need to preserve
 // unrelated keys. Owning the path resolution and raw IO here keeps callers
 // from duplicating settings parsing in violation of the "Settings access must
-// go through the settings package" rule in CLAUDE.md.
+// go through the settings package" rule in AGENTS.md.
 func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
 	return loadRaw(ctx, EntireSettingsFile, "project")
 }

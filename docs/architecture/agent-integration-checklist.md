@@ -93,7 +93,7 @@ See Guide: [Step 6 - InstallHooks](agent-guide.md)
       could opt its cloners into it. This is why `local_dev` was removed.
 - [ ] **The config file is opened through `agent.OpenHookConfig`**, never a
       `filepath.Join` handed to `os.ReadFile`/`os.WriteFile`. An agent's hook
-      config is one of the trees CLAUDE.md's "Root Anchors" gives an owner: a
+      config is one of the trees AGENTS.md's "Root Anchors" gives an owner: a
       symlinked `.youragent` arriving with the checkout is otherwise resolved
       before any boundary exists, and this is the file naming the command Entire
       runs every turn. Implement `HookConfigLocator.HookConfigRelPath` for it —

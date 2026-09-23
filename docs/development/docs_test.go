@@ -23,13 +23,13 @@ func TestInstructionDocs(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join("..", "..") // go test runs in this package's directory.
-	data, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
+	data, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	const budget = 20 * 1024
 	if len(data) > budget {
-		t.Errorf("CLAUDE.md is %d bytes (budget %d); move specialized guidance to a reference", len(data), budget)
+		t.Errorf("AGENTS.md is %d bytes (budget %d); move specialized guidance to a reference", len(data), budget)
 	}
 
 	references, err := filepath.Glob("*.md") // Includes new, unstaged references.
@@ -39,7 +39,7 @@ func TestInstructionDocs(t *testing.T) {
 	if len(references) == 0 {
 		t.Fatal("no development references found")
 	}
-	references = append(references, filepath.Join(root, "CLAUDE.md"), filepath.Join(root, "CONTRIBUTING.md"))
+	references = append(references, filepath.Join(root, "AGENTS.md"), filepath.Join(root, "CONTRIBUTING.md"))
 	for _, file := range references {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
@@ -53,7 +53,7 @@ func TestInstructionDocs(t *testing.T) {
 					t.Error(err)
 				}
 			}
-			if file == filepath.Join(root, "CLAUDE.md") && len(links) == 0 {
+			if file == filepath.Join(root, "AGENTS.md") && len(links) == 0 {
 				t.Fatal("instruction routing table has no links")
 			}
 		})
