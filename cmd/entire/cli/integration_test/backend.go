@@ -67,6 +67,25 @@ func checkpointRefName(checkpointID string) string {
 	return checkpointRefPrefix + id.CheckpointID(checkpointID).ShardFor() + "/" + checkpointID
 }
 
+// checkpointBlob reads a path inside a stored checkpoint, resolving the storage
+// topology per backend: a subtree of the shared v1 branch (git-branch) or the
+// root tree of the checkpoint's own ref (git-refs).
+func checkpointBlob(env *TestEnv, checkpointID, relPath string) (string, bool) {
+	env.T.Helper()
+	spec := paths.MetadataBranchName + ":" + id.CheckpointID(checkpointID).Path() + "/" + relPath
+	if env.usingGitRefs() {
+		spec = checkpointRefName(checkpointID) + ":" + relPath
+	}
+	cmd := exec.CommandContext(env.T.Context(), "git", "show", spec)
+	cmd.Dir = env.RepoDir
+	cmd.Env = testutil.GitIsolatedEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
 // CheckpointsPresentLocally reports whether any committed checkpoint exists in the
 // repo: the v1 branch (git-branch) or at least one per-checkpoint ref (git-refs).
 func (env *TestEnv) CheckpointsPresentLocally() bool {

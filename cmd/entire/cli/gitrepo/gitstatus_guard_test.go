@@ -137,7 +137,7 @@ var safeGitDiffCalls = []safeGitDiffCall{
 		reason:   "compares two commits and never reads the worktree",
 	},
 	{
-		path:     "cmd/entire/cli/strategy/manual_commit_hooks.go",
+		path:     "cmd/entire/cli/strategy/staged_changes.go",
 		fragment: `"--cached"`,
 		reason:   "compares the index to HEAD and never reads the worktree",
 	},

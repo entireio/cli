@@ -17,7 +17,7 @@ import (
 //
 // Setup: N files in a git repo, M active sessions with shadow branch checkpoints,
 // modified files staged for commit, and a temporary commit message file.
-// PrepareCommitMsg reads session states, checks for new content (getStagedFiles,
+// PrepareCommitMsg reads session states, checks for new content (getStagedChanges,
 // transcript comparison, content overlap), extracts the last prompt, and writes
 // the checkpoint trailer to the message file.
 func BenchmarkPrepareCommitMsg(b *testing.B) {
@@ -52,10 +52,8 @@ func benchPrepareCommitMsg(fileCount, sessionCount int) func(*testing.B) {
 	}
 }
 
-// BenchmarkGetStagedFiles measures the isolated cost of getStagedFiles at different
-// repo sizes. This is the primary bottleneck: go-git's worktree.Status() scans the
-// entire working tree.
-func BenchmarkGetStagedFiles(b *testing.B) {
+// BenchmarkGetStagedChanges measures the commit-index query at different repo sizes.
+func BenchmarkGetStagedChanges(b *testing.B) {
 	for _, fileCount := range []int{10, 100, 500} {
 		b.Run(fmt.Sprintf("Files_%d", fileCount), func(b *testing.B) {
 			// Setup once before the loop — repo creation + staging is expensive.
@@ -80,8 +78,8 @@ func BenchmarkGetStagedFiles(b *testing.B) {
 			for range b.N {
 				paths.ClearWorktreeRootCache()
 
-				if _, err := getStagedFiles(context.Background()); err != nil {
-					b.Fatalf("getStagedFiles: %v", err)
+				if _, err := getStagedChanges(context.Background()); err != nil {
+					b.Fatalf("getStagedChanges: %v", err)
 				}
 			}
 		})
@@ -96,7 +94,7 @@ func benchSetupPrepareCommitMsgRepo(b *testing.B, fileCount, sessionCount int) (
 
 	br := benchutil.NewBenchRepo(b, benchutil.RepoOpts{FileCount: fileCount})
 
-	// Modify and stage files so getStagedFiles returns non-empty
+	// Modify and stage files so getStagedChanges returns non-empty
 	modifiedFiles := make([]string, 0, min(5, fileCount))
 	for i := range min(5, fileCount) {
 		modifiedFiles = append(modifiedFiles, fmt.Sprintf("src/file_%03d.go", i))

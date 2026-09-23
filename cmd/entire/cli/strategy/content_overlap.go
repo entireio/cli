@@ -192,15 +192,10 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 // is editing the session's work. For new files (don't exist in HEAD), we require
 // content match to detect the "reverted and replaced" scenario.
 //
-// This is used in PrepareCommitMsg for carry-forward scenarios.
-func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowTree *object.Tree, stagedFiles, filesTouched []string) bool {
+// PrepareCommitMsg uses the same snapshot for fresh and carry-forward sessions.
+func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowTree *object.Tree, staged stagedChanges, filesTouched []string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-
-	// Build set of filesTouched for quick lookup
-	touchedSet := make(map[string]bool)
-	for _, f := range filesTouched {
-		touchedSet[f] = true
-	}
+	stagedFiles := staged.paths
 
 	// Get HEAD tree to determine if files are being modified or newly created
 	head, err := repo.Head()
@@ -225,28 +220,11 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		return hasOverlappingFiles(stagedFiles, filesTouched)
 	}
 
-	// Get the git index to access staged file hashes
-	idx, err := repo.Storer.Index()
-	if err != nil {
-		logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to get index, falling back to filename check",
-			slog.String("error", err.Error()),
-		)
-		return hasOverlappingFiles(stagedFiles, filesTouched)
-	}
-
-	// Build a map of index entries for O(1) lookup (avoid O(n*m) nested loop)
-	indexEntries := make(map[string]plumbing.Hash, len(idx.Entries))
-	for _, entry := range idx.Entries {
-		indexEntries[entry.Name] = entry.Hash
-	}
-
-	// Check each staged file
-	for _, stagedPath := range stagedFiles {
-		if !touchedSet[stagedPath] {
-			logging.Debug(logCtx, "stagedFilesOverlapWithContent: staged file not in files_touched, skipping",
-				slog.String("staged_file", stagedPath),
-			)
-			continue // Not in filesTouched, skip
+	// Check only session-touched files that are present in the staged snapshot.
+	for _, stagedPath := range filesTouched {
+		stagedHash, found := staged.hashes[stagedPath]
+		if !found {
+			continue
 		}
 
 		// Check if this is a modified file (exists in HEAD) or new file
@@ -264,11 +242,6 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		}
 
 		// For new files, check content against shadow branch
-		stagedHash, found := indexEntries[stagedPath]
-		if !found {
-			continue // Not in index (shouldn't happen but be safe)
-		}
-
 		// Get file from shadow branch tree
 		shadowFile, err := shadowTree.File(stagedPath)
 		if err != nil {
