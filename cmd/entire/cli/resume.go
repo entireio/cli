@@ -82,50 +82,58 @@ func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	proceed, err := switchToBranchForResume(ctx, w, errW, branchName, force)
+	proceed, resolvedBranch, err := switchToBranchForResume(ctx, w, errW, branchName, force)
 	if err != nil || !proceed {
 		return err
 	}
 
-	return resumeFromCurrentBranch(ctx, w, errW, branchName, force)
+	return resumeFromCurrentBranch(ctx, w, errW, resolvedBranch, force)
 }
 
 // switchToBranchForResume ensures the working tree is on branchName, checking it
 // out (or fetching it from origin) as needed. It returns proceed=false with a nil
 // error when the user declined to fetch a remote-only branch, so callers should
 // stop without treating that as a failure.
-func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName string, force bool) (bool, error) {
-	// Check if we're already on this branch
+//
+// It returns the canonical local branch name that callers should use for the
+// rest of the resume: a name supplied to `entire resume` (or carried on a synced
+// session state) can differ from the on-disk ref only by Unicode normalization
+// (NFC vs NFD), which git treats as the same branch but entire's byte-exact
+// lookups do not. Resolving to the stored ref name here keeps the checkout and
+// the downstream checkpoint lookup pointed at the real branch.
+func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName string, force bool) (bool, string, error) {
+	// Check if we're already on this branch (normalization-insensitively, so
+	// standing on an NFD-named branch and resuming its NFC spelling still counts).
 	currentBranch, err := GetCurrentBranch(ctx)
-	if err == nil && currentBranch == branchName {
-		return true, nil
+	if err == nil && branchNamesEquivalent(currentBranch, branchName) {
+		return true, currentBranch, nil
 	}
 
-	// Check if branch exists locally
-	exists, err := BranchExistsLocally(ctx, branchName)
+	// Check if the branch exists locally, resolving to its canonical ref name.
+	resolvedBranch, exists, err := ResolveLocalBranchName(ctx, branchName)
 	if err != nil {
-		return false, fmt.Errorf("failed to check branch: %w", err)
+		return false, "", fmt.Errorf("failed to check branch: %w", err)
 	}
 
 	if !exists {
 		// Branch doesn't exist locally, check if it exists on remote
 		remoteExists, err := BranchExistsOnRemote(ctx, branchName)
 		if err != nil {
-			return false, fmt.Errorf("failed to check remote branch: %w", err)
+			return false, "", fmt.Errorf("failed to check remote branch: %w", err)
 		}
 
 		if !remoteExists {
-			return false, fmt.Errorf("branch '%s' not found locally or on origin", branchName)
+			return false, "", fmt.Errorf("branch '%s' not found locally or on origin", branchName)
 		}
 
 		// Ask user if they want to fetch from remote (--force skips the prompt)
 		if !force {
 			shouldFetch, err := promptFetchFromRemote(branchName)
 			if err != nil {
-				return false, err
+				return false, "", err
 			}
 			if !shouldFetch {
-				return false, nil
+				return false, "", nil
 			}
 		}
 
@@ -133,28 +141,28 @@ func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName 
 		fmt.Fprintf(w, "Fetching branch '%s' from origin...\n", branchName)
 		if err := FetchAndCheckoutRemoteBranch(ctx, branchName); err != nil {
 			fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
-			return false, NewSilentError(errors.New("failed to checkout branch"))
+			return false, "", NewSilentError(errors.New("failed to checkout branch"))
 		}
 		fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
-		return true, nil
+		return true, branchName, nil
 	}
 
 	// Branch exists locally, check for uncommitted changes before checkout
 	hasChanges, err := HasUncommittedChanges(ctx)
 	if err != nil {
-		return false, fmt.Errorf("failed to check for uncommitted changes: %w", err)
+		return false, "", fmt.Errorf("failed to check for uncommitted changes: %w", err)
 	}
 	if hasChanges {
-		return false, errors.New("you have uncommitted changes. Please commit or stash them first")
+		return false, "", errors.New("you have uncommitted changes. Please commit or stash them first")
 	}
 
-	// Checkout the branch
-	if err := CheckoutBranch(ctx, branchName); err != nil {
+	// Checkout the branch under its canonical (on-disk) name.
+	if err := CheckoutBranch(ctx, resolvedBranch); err != nil {
 		fmt.Fprintf(errW, "Error: failed to checkout branch: %v\n", err)
-		return false, NewSilentError(errors.New("failed to checkout branch"))
+		return false, "", NewSilentError(errors.New("failed to checkout branch"))
 	}
-	fmt.Fprintf(w, "✓ Switched to branch %s\n", branchName)
-	return true, nil
+	fmt.Fprintf(w, "✓ Switched to branch %s\n", resolvedBranch)
+	return true, resolvedBranch, nil
 }
 
 // resumeSessionOnBranch switches to branchName and resumes the specific session
@@ -165,7 +173,7 @@ func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName s
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
-	proceed, err := switchToBranchForResume(ctx, w, errW, branchName, force)
+	proceed, _, err := switchToBranchForResume(ctx, w, errW, branchName, force)
 	if err != nil || !proceed {
 		return err
 	}

@@ -1826,7 +1826,7 @@ func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool,
 		// switchToBranchForResume handles local vs. remote-only branches, the
 		// uncommitted-changes guard, and the fetch prompt; reuse it rather than
 		// re-deriving that logic here.
-		proceed, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
+		proceed, _, err := switchToBranchForResume(ctx, w, errW, branch, opts.Force)
 		if err != nil {
 			return err
 		}

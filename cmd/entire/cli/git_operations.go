@@ -19,6 +19,8 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/storer"
+	"golang.org/x/text/unicode/norm"
 )
 
 func formatFilteredFetchError(prefix, fetchTarget string, output []byte, fetchErr error) error {
@@ -291,6 +293,72 @@ func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// branchNamesEquivalent reports whether two branch names denote the same branch
+// under Unicode normalization. Git normalizes ref names (core.precomposeUnicode
+// on macOS/Windows) and treats a precomposed (NFC) and decomposed (NFD) spelling
+// of the same accented name as one branch; a byte-exact comparison does not, so
+// entire would otherwise disagree with git about branch identity. Folding both
+// sides to NFC restores agreement. The ASCII fast-path keeps the common case free.
+func branchNamesEquivalent(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return norm.NFC.String(a) == norm.NFC.String(b)
+}
+
+// ResolveLocalBranchName resolves branchName to the name of the local branch it
+// denotes, returning the canonical on-disk ref name and whether it was found. An
+// exact ref match wins; otherwise it matches Unicode-normalization-insensitively
+// (NFC vs NFD) against the existing local branches, so a name whose normalization
+// differs from the stored ref — e.g. an NFD branch synced from Linux resolved on
+// a macOS checkout, especially once refs are packed and go-git's byte-exact
+// packed-refs lookup no longer matches — still resolves, matching git's own
+// precomposeUnicode branch identity. The returned canonical name is what callers
+// must hand to CheckoutBranch, since that is the name the ref is stored under.
+func ResolveLocalBranchName(ctx context.Context, branchName string) (string, bool, error) {
+	if err := ValidateBranchName(ctx, branchName); err != nil {
+		return "", false, err
+	}
+
+	repo, err := openRepository(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+
+	// Fast path: an exact ref exists (loose or packed, byte-identical name).
+	if _, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true); err == nil {
+		return branchName, true, nil
+	} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return "", false, fmt.Errorf("failed to check branch: %w", err)
+	}
+
+	// Fallback: normalization-insensitive scan of existing local branches.
+	want := norm.NFC.String(branchName)
+	iter, err := repo.Branches()
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list branches: %w", err)
+	}
+	defer iter.Close()
+
+	canonical := ""
+	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		name := ref.Name().Short()
+		if norm.NFC.String(name) == want {
+			canonical = name
+			return storer.ErrStop
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("failed to scan local branches: %w", err)
+	}
+	if canonical != "" {
+		return canonical, true, nil
+	}
+	return "", false, nil
 }
 
 // CheckoutBranch switches to the specified local branch.
