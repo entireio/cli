@@ -645,6 +645,10 @@ func requireSafeExchangeURL(label, raw string) error {
 // Returns "" (no error) when the claim is absent so each caller can phrase
 // its own missing-claim error. Shared with git-remote-entire's jurisdiction
 // git auth.
+//
+// Unverified is not unchecked: decodeLoginJWTClaims refuses a token that is not
+// a well-formed JWT naming a real algorithm, so an alg:none token errors here
+// rather than routing. Every login token a core mints is signed.
 func HomeJurisdictionFromLoginJWT(loginJWT string) (string, error) {
 	var claims struct {
 		HomeJurisdiction string `json:"home_jurisdiction"`

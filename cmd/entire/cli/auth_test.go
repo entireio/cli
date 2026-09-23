@@ -1337,6 +1337,21 @@ func TestBuildAuthStatusJSON_EnvTokenSurvivesAnInvalidBearer(t *testing.T) {
 	}
 }
 
+// Reporting where a bearer came from must not become asserting one exists.
+// With no token there is no source to name, and naming the keychain would tell
+// a script a token is filed there.
+func TestBuildAuthStatusJSON_NoBearerNamesNoTokenSource(t *testing.T) {
+	t.Parallel()
+
+	got := buildAuthStatusJSON(authStatusData{target: statusTarget{totalContexts: 0}, current: -1}, authStatusOptions{})
+	if got.TokenSource != "" {
+		t.Errorf("token_source = %q, want it absent when there is no token", got.TokenSource)
+	}
+	if got.EnvToken {
+		t.Error("env_token = true, want false with no bearer at all")
+	}
+}
+
 // A caller that asked for JSON gets an object naming the failure, not empty
 // stdout: `--json | jq .logged_in` must parse.
 func TestRunAuthStatus_JSONOnAHardFetchFailure(t *testing.T) {

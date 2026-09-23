@@ -779,16 +779,21 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 		total := t.totalContexts
 		out.AvailableContexts = &total
 	}
-	// Where the bearer came from is settled before /me is consulted, so it is
-	// reported whatever /me said. A script told only `{"logged_in":false}` has
-	// no way to see that ENTIRE_TOKEN supplied the rejected token and is still
-	// winning over every stored context — which is also why the text view's
-	// "run entire login" cannot help there.
-	if t.envToken {
-		out.EnvToken = true
-		out.TokenSource = auth.EnvTokenVar + " environment variable"
-	} else {
-		out.TokenSource = tokenstore.BackendDescription()
+	// Where a bearer came from is settled before /me is consulted, so it is
+	// reported whatever /me said of it. A script told only
+	// `{"logged_in":false}` has no way to see that ENTIRE_TOKEN supplied the
+	// rejected token and is still winning over every stored context — which is
+	// also why the text view's "run entire login" cannot help there.
+	//
+	// Gated on a bearer actually existing: with no token there is no source to
+	// name, and naming the keychain would assert a token is filed there.
+	if t.token != "" {
+		if t.envToken {
+			out.EnvToken = true
+			out.TokenSource = auth.EnvTokenVar + " environment variable"
+		} else {
+			out.TokenSource = tokenstore.BackendDescription()
+		}
 	}
 	if d.invalid {
 		out.Error = "login is no longer valid; run 'entire login' to re-authenticate"
@@ -844,19 +849,6 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	return out
 }
 
-// authProfileRows renders the user identity from GET /me, omitting any field
-// the server didn't populate.
-//
-// The handle is provider-qualified ("github:alice") because that is the
-// grantee spelling every `entire grant` command accepts and `grant … list`
-// prints — so what status shows is a value the user can paste into the next
-// command, rather than a display form unique to this one.
-//
-// A foreign-region login gets no note here. The note this replaces existed
-// mostly to explain a display name and email that a foreign core withholds,
-// and neither is rendered any more; what was left restated the `jurisdiction`
-// and `context` rows it sat between. The condition still reaches machine
-// readers as the JSON `foreign_region` flag.
 // authIdentityLabel names the account the way `entire grant` takes it —
 // "github:alice" — falling back to the provider's own user id when the account
 // carries no handle.
@@ -875,6 +867,19 @@ func authIdentityLabel(p *authProfile) string {
 	return ""
 }
 
+// authProfileRows renders the user identity from GET /me, omitting any field
+// the server didn't populate.
+//
+// The handle is provider-qualified ("github:alice") because that is the
+// grantee spelling every `entire grant` command accepts and `grant … list`
+// prints — so what status shows is a value the user can paste into the next
+// command, rather than a display form unique to this one.
+//
+// A foreign-region login gets no note here. The note this replaces existed
+// mostly to explain a display name and email that a foreign core withholds,
+// and neither is rendered any more; what was left restated the `jurisdiction`
+// and `context` rows it sat between. The condition still reaches machine
+// readers as the JSON `foreign_region` flag.
 func authProfileRows(p *authProfile) []explainRow {
 	var rows []explainRow
 	if user := authIdentityLabel(p); user != "" {

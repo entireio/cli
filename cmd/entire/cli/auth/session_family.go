@@ -38,8 +38,9 @@ func LoginTokenExpiry(loginJWT string) (time.Time, error) {
 // be a well-formed three-segment JWT naming a real algorithm; an alg:none token
 // is refused here exactly as CoreURLFromEnvToken refuses one, keeping every
 // reader in this package on a single policy. Having passed, the payload segment
-// is known present and decodable, so the second pass only has to reach the
-// claim ParseClaims has no field for.
+// is known present, decodable and valid JSON, so the second pass only has to
+// reach the claim ParseClaims has no field for; its own error paths are there
+// because the compiler requires them, not because they are expected.
 func decodeLoginJWTClaims(loginJWT string, out any) error {
 	if _, err := tokens.ParseClaims(loginJWT); err != nil {
 		return fmt.Errorf("login token: %w", err)
