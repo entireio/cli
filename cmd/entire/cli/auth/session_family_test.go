@@ -51,6 +51,15 @@ func TestSessionFamilyIDFromLoginJWT(t *testing.T) {
 		}
 	})
 
+	// A claim of the wrong JSON type is the failure that reaches this decoder
+	// rather than ParseClaims, which type-checks only its own fields.
+	t.Run("wrong-typed claim is an error", func(t *testing.T) {
+		t.Parallel()
+		if _, err := SessionFamilyIDFromLoginJWT(signedShapeJWT(t, map[string]any{"fid": 123})); err == nil {
+			t.Error("err = nil, want a numeric fid refused rather than read as empty")
+		}
+	})
+
 	for name, tok := range map[string]string{
 		"not a JWT":           "opaque-token",
 		"undecodable payload": "aGVhZGVy.!!!not-base64!!!.sig",

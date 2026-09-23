@@ -37,20 +37,24 @@ func LoginTokenExpiry(loginJWT string) (time.Time, error) {
 // Unverified is not unchecked. tokens.ParseClaims runs first, so the token must
 // be a well-formed three-segment JWT naming a real algorithm; an alg:none token
 // is refused here exactly as CoreURLFromEnvToken refuses one, keeping every
-// reader in this package on a single policy. Having passed, the payload segment
-// is known present, decodable and valid JSON, so the second pass only has to
-// reach the claim ParseClaims has no field for; its own error paths are there
-// because the compiler requires them, not because they are expected.
+// reader in this package on a single policy.
+//
+// It then reads the payload again, because ParseClaims keeps no raw copy and
+// has no field for the claims wanted here. Decoding and unmarshalling share one
+// error path: the segment is known to decode once ParseClaims has passed, while
+// a claim of the wrong JSON type still fails here (ParseClaims type-checks only
+// its own fields), and splitting the two would put a reachable failure beside
+// an unreachable one as though they were equals.
 func decodeLoginJWTClaims(loginJWT string, out any) error {
 	if _, err := tokens.ParseClaims(loginJWT); err != nil {
 		return fmt.Errorf("login token: %w", err)
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(strings.Split(loginJWT, ".")[1])
-	if err != nil {
-		return fmt.Errorf("decode login token payload: %w", err)
+	if err == nil {
+		err = json.Unmarshal(payload, out)
 	}
-	if err := json.Unmarshal(payload, out); err != nil {
-		return fmt.Errorf("parse login token payload: %w", err)
+	if err != nil {
+		return fmt.Errorf("read login token claims: %w", err)
 	}
 	return nil
 }
