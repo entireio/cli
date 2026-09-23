@@ -17,11 +17,13 @@ import (
 // addressing someone else.
 //
 // The token is a bearer credential: whoever holds it can join the org as the
-// invitee. Nothing this command writes may contain it. The accept response
-// carries no token, so the success and --json paths are safe by construction.
-// Two paths could reintroduce it: a flag parse error, which echoes the
-// offending argument, and a server problem detail that quotes what it rejected.
-// The FlagErrorFunc and redactToken below close those.
+// invitee. Nothing this command writes may contain it. The accept response's
+// modeled fields carry no token, but generated response types round-trip any
+// property the schema doesn't declare, so the success and --json paths blank
+// that bag rather than assume the server never sends one. Two other paths
+// could reintroduce the token: a flag parse error, which echoes the offending
+// argument, and a server problem detail that quotes what it rejected. The
+// FlagErrorFunc and redactToken below close those.
 
 func newOrgJoinCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -39,10 +41,18 @@ func newOrgJoinCmd() *cobra.Command {
 				}
 				switch out := res.(type) {
 				case *coreapi.AcceptedInvitation:
+					// ogen round-trips any response property this schema doesn't
+					// declare, verbatim, into --json output. The endpoint's
+					// contract carries no token, but blank the bag rather than
+					// trust that a future server response never adds one.
+					out.AdditionalProps = nil
+					out.Membership.AdditionalProps = nil
 					return fmt.Sprintf("✓ Joined org %s as %s", out.OrgName, out.Membership.Role), out, nil
 				case *coreapi.AcceptInvitationOK:
 					// The server reports an already-active membership as 200
 					// rather than an error, so accepting twice is a no-op.
+					out.AdditionalProps = nil
+					out.Membership.AdditionalProps = nil
 					return fmt.Sprintf("Already a member of org %s as %s", out.OrgName, out.Membership.Role), out, nil
 				default:
 					return "", nil, fmt.Errorf("join: unexpected response %T from the control plane", res)
@@ -64,15 +74,20 @@ func newOrgJoinCmd() *cobra.Command {
 // control plane should not quote a credential back, but this enforces the
 // guarantee here rather than assume it of the server. It renders the error
 // first, because the rendered message is the string the token can hide in.
+//
+// The token is deleted outright rather than replaced with a placeholder like
+// "<redacted>". The token schema requires only a non-empty string, so a
+// caller can supply that placeholder text as their actual token; replacing a
+// token with text equal to itself is a no-op, which would leave the token in
+// the message despite looking redacted.
 func redactToken(err error, token string) error {
 	rendered := renderCoreError(err)
 	if rendered == nil || token == "" {
 		return rendered
 	}
 	msg := rendered.Error()
-	redacted := strings.ReplaceAll(msg, token, "<redacted>")
-	if redacted == msg {
+	if !strings.Contains(msg, token) {
 		return rendered
 	}
-	return errors.New(redacted)
+	return errors.New(strings.ReplaceAll(msg, token, ""))
 }

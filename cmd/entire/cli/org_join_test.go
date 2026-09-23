@@ -161,6 +161,53 @@ func TestOrgJoin_NeverPrintsTheToken(t *testing.T) {
 	}
 }
 
+// The generated response types round-trip any property the schema doesn't
+// declare, so a server that ever sent one under an unmodeled key would
+// otherwise reach --json output verbatim. This pins that the command blanks
+// it instead of trusting the endpoint's contract never grows one.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgJoin_JSONDropsUnmodeledResponseProperties(t *testing.T) {
+	const leakedValue = "SHOULD-NEVER-REACH-JSON-OUTPUT"
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "201 AcceptedInvitation",
+			status: http.StatusCreated,
+			body: `{"membership":{"accountId":"` + testDeleteULID + `","createdAt":"2024-01-01T00:00:00Z",` +
+				`"id":"` + testDeleteULID + `","orgId":"` + testOrgULID + `","role":"member","status":"active"},` +
+				`"orgId":"` + testOrgULID + `","orgName":"acme","unexpectedField":"` + leakedValue + `"}`,
+		},
+		{
+			name:   "200 AcceptInvitationOK",
+			status: http.StatusOK,
+			body: `{"membership":{"accountId":"` + testDeleteULID + `","createdAt":"2024-01-01T00:00:00Z",` +
+				`"id":"` + testDeleteULID + `","orgId":"` + testOrgULID + `","role":"admin","status":"active"},` +
+				`"orgId":"` + testOrgULID + `","orgName":"acme","unexpectedField":"` + leakedValue + `"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, err := fmt.Fprint(w, tc.body)
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(srv.Close)
+
+			out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "join", testInviteToken, "--json")
+			require.NoError(t, err)
+			assert.NotContains(t, out, leakedValue, "an unmodeled response property reached --json output")
+			assert.NotContains(t, out, "unexpectedField")
+		})
+	}
+}
+
 // A token beginning with a dash parses as a flag, and cobra's own error quotes
 // the offending argument. The replacement message must explain the problem
 // without reproducing the credential.
@@ -204,12 +251,35 @@ func TestRedactToken(t *testing.T) {
 	t.Parallel()
 	err := errors.New("no invitation matches token " + testInviteToken + ", try again")
 	redacted := redactToken(err, testInviteToken)
-	require.EqualError(t, redacted, "no invitation matches token <redacted>, try again")
+	require.EqualError(t, redacted, "no invitation matches token , try again")
+	assert.NotContains(t, redacted.Error(), testInviteToken)
 
 	untouched := errors.New("this invitation has expired")
 	require.EqualError(t, redactToken(untouched, testInviteToken), "this invitation has expired")
 
 	require.NoError(t, redactToken(nil, testInviteToken))
+}
+
+// The token schema only requires a non-empty string, so a caller can supply
+// the exact words a naive placeholder would use. Replacing a token with text
+// equal to itself is a no-op, so a fixed "<redacted>" placeholder would leave
+// these two values sitting unredacted in the message; deletion must not.
+func TestRedactToken_TokenEqualToThePlaceholderWords(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, token string
+	}{
+		{name: "bare word", token: "redacted"},
+		{name: "bracketed placeholder", token: "<redacted>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := errors.New("no invitation matches token " + tc.token + ", try again")
+			redacted := redactToken(err, tc.token)
+			assert.NotContains(t, redacted.Error(), tc.token, "the token must not survive redaction just because it matches placeholder text")
+		})
+	}
 }
 
 // The token travels in the request body, so a URL the transport logs or an
