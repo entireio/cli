@@ -212,10 +212,9 @@ func maybeSpawnOPFFlush(ctx context.Context, repo *git.Repository) {
 // the inline pre-push attempt could not finish. It retries until a pass makes
 // no further progress — either every queued ref now carries the OPF trailer, or
 // the refs that remain fail identically every time and nothing will change
-// without new input — and records a per-ref consecutive-failure count so a
-// later visibility surface can tell "the worker hasn't got here yet" apart from
-// "this will never succeed without a human" (see
-// checkpoint.StuckOPFFailureThreshold).
+// without new input. A ref that never clears simply stays in the backlog
+// `entire status` reports (RefsAwaitingOPF); nothing here persists per-ref
+// outcomes.
 //
 // Best-effort by construction: every internal error is logged and swallowed,
 // never returned as a process failure. Nothing watches this child's exit code,
@@ -259,31 +258,18 @@ func RunOPFFlush(ctx context.Context) error {
 	}
 	defer repo.Close()
 
-	failures, err := checkpoint.OPFFailureLogForRepo(ctx, repo)
-	if err != nil {
-		// Bookkeeping only: carry on rewriting without it rather than leave the
-		// backlog unprocessed because a counter file could not be resolved.
-		logging.Warn(logCtx, "opf flush: failure log unavailable; continuing without it",
-			slog.String("error", err.Error()))
-		failures = nil
-	}
-
-	initial, err := RefsAwaitingOPF(ctx, repo)
+	// Progress is measured against the previous pass's backlog: the loop exists
+	// only to keep going while each pass is still clearing refs.
+	before, err := RefsAwaitingOPF(ctx, repo)
 	if err != nil {
 		logging.Warn(logCtx, "opf flush: could not read push queue",
 			slog.String("error", err.Error()))
 		return nil
 	}
-	if len(initial) == 0 {
+	if len(before) == 0 {
 		return nil
 	}
 
-	// The backlog is compared against where this RUN started, not against the
-	// previous pass, so the failure count means "worker runs in a row that left
-	// this ref unrewritten". Counting per pass instead would charge a ref two or
-	// three failures for one run, and the threshold would stop meaning what its
-	// name says.
-	before := initial
 	for range opfFlushMaxPasses {
 		if rewriteErr := RewriteQueuedCheckpointRefsWithOPF(ctx, repo); rewriteErr != nil {
 			logging.Warn(logCtx, "opf flush: git-refs pass failed",
@@ -291,9 +277,8 @@ func RunOPFFlush(ctx context.Context) error {
 		}
 		after, afterErr := RefsAwaitingOPF(ctx, repo)
 		if afterErr != nil {
-			// The outcome is unknown, so record nothing: a count that cannot be
-			// trusted is worse than no count, because the visibility surface
-			// would report a ref stuck on the strength of a failed read.
+			// Whether the pass achieved anything is now unknown, so there is
+			// nothing to base another attempt on.
 			logging.Warn(logCtx, "opf flush: could not re-read push queue",
 				slog.String("error", afterErr.Error()))
 			return nil
@@ -301,40 +286,11 @@ func RunOPFFlush(ctx context.Context) error {
 		if len(after) == 0 || len(after) >= len(before) {
 			// Fully rewritten, or this pass moved nothing further: every ref
 			// left fails on its own terms and a retry would fail identically.
-			recordOPFFlushOutcome(logCtx, failures, initial, after)
 			return nil
 		}
 		before = after
 	}
-	recordOPFFlushOutcome(logCtx, failures, initial, before)
 	logging.Warn(logCtx, "opf flush: stopping after the maximum number of passes",
 		slog.Int("passes", opfFlushMaxPasses))
 	return nil
-}
-
-// recordOPFFlushOutcome folds one RUN's before/after backlog into the per-ref
-// consecutive-failure log: a ref still awaiting OPF when the run finished
-// failed, and a ref that was awaiting it and no longer is succeeded. Both
-// halves go in one call so the count can only ever mean "in a row".
-func recordOPFFlushOutcome(ctx context.Context, failures *checkpoint.OPFFailureLog, before, after []plumbing.ReferenceName) {
-	if failures == nil {
-		return
-	}
-	stillAwaiting := make(map[plumbing.ReferenceName]struct{}, len(after))
-	for _, ref := range after {
-		stillAwaiting[ref] = struct{}{}
-	}
-	failed := make([]plumbing.ReferenceName, 0, len(after))
-	succeeded := make([]plumbing.ReferenceName, 0, len(before))
-	for _, ref := range before {
-		if _, stuck := stillAwaiting[ref]; stuck {
-			failed = append(failed, ref)
-		} else {
-			succeeded = append(succeeded, ref)
-		}
-	}
-	if err := failures.Record(failed, succeeded, time.Now()); err != nil {
-		logging.Warn(ctx, "opf flush: could not record per-ref failure counts",
-			slog.String("error", err.Error()))
-	}
 }

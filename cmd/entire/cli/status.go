@@ -25,7 +25,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
 
@@ -394,23 +393,16 @@ type checkpointSyncInfo struct {
 	IgnoredRemote string
 	IgnoredReason string
 	// OPFPending counts queued checkpoint refs the OpenAI Privacy Filter has
-	// not rewritten yet, and OPFStuck names the ones whose rewrite has failed
-	// StuckOPFFailureThreshold times running. Both are 0/empty when the filter
-	// is off (the default), when there is no backlog, and when the local read
-	// failed — status never fails over this.
+	// not rewritten yet. It is 0 when the filter is off (the default), when
+	// there is no backlog, and when the local read failed — status never fails
+	// over this. A ref the worker can never rewrite simply stays counted here
+	// for as long as it exists; there is no separate escalation.
 	//
-	// The two sets are DISJOINT: a stuck ref is subtracted from OPFPending, so
-	// the informational counter means "waiting its turn" and the warning means
-	// "will not clear on its own". Reporting a ref in both would make the two
-	// lines add up to more checkpoints than exist, and would bury the one ref
-	// that needs a human inside a count that says everything is in hand.
-	//
-	// Unlike Unpushed, neither is scoped to a sync destination: OPF is a local
-	// rewrite that runs before anything is pushed, so these hold identically
-	// whatever the elected remote turns out to be — which is why they are
-	// computed before the election rather than on any one of its branches.
+	// Unlike Unpushed, it is not scoped to a sync destination: OPF is a local
+	// rewrite that runs before anything is pushed, so it holds identically
+	// whatever the elected remote turns out to be — which is why it is computed
+	// before the election rather than on any one of its branches.
 	OPFPending int
-	OPFStuck   []string
 }
 
 // resolveDedicatedReadSource records where checkpoint READS land when the
@@ -461,7 +453,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// a repo with no remotes or a fail-closed checkpoint_push_remote as in a
 	// healthy one. Computing it on one branch of the election would hide it
 	// from exactly the repos most likely to have accumulated one.
-	info.OPFPending, info.OPFStuck = opfBacklogForStatus(ctx, s)
+	info.OPFPending = opfBacklogForStatus(ctx, s)
 
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
@@ -588,56 +580,35 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 }
 
 // opfBacklogForStatus reads the local OpenAI Privacy Filter backlog: how many
-// queued checkpoint refs still need the model rewrite, and which ones have
-// failed it often enough that retrying will not help.
+// queued checkpoint refs still need the model rewrite.
 //
 // Best-effort and local-only, on the same contract as
 // countUnpushedCheckpointsForStatus: status must never fail because a backlog
-// read failed, so every error logs at debug and reads as "no backlog". The two
-// reads are independent — a failed queue read says nothing about the failure
-// log, and each answer is worth printing without the other.
+// read failed, so every error logs at debug and reads as "no backlog".
 //
 // Gated on the setting first so the default (filter off) opens no repository
 // and touches no files: this runs on every `entire status` in an enabled repo.
 // The settings answer is the right one here even though the gate that runs OPF
 // consults redact.OPFEnabled — see settings.EntireSettings.OPFEnabled.
-func opfBacklogForStatus(ctx context.Context, s *EntireSettings) (pending int, stuck []string) {
+func opfBacklogForStatus(ctx context.Context, s *EntireSettings) int {
 	if !s.OPFEnabled() {
-		return 0, nil
+		return 0
 	}
 	repo, err := gitrepo.OpenCurrent(ctx)
 	if err != nil {
 		logging.Debug(ctx, "OPF backlog read failed to open the repository; omitting from status",
 			slog.String("error", err.Error()))
-		return 0, nil
+		return 0
 	}
 	defer repo.Close()
-
-	stuckNames := make(map[plumbing.ReferenceName]struct{})
-	if stuckRefs, stuckErr := checkpoint.StuckOPFRefs(ctx, repo); stuckErr != nil {
-		logging.Debug(ctx, "stuck OPF ref read failed; omitting from status",
-			slog.String("error", stuckErr.Error()))
-	} else {
-		for _, ref := range stuckRefs {
-			stuckNames[ref] = struct{}{}
-			stuck = append(stuck, ref.String())
-		}
-	}
 
 	awaiting, err := strategy.RefsAwaitingOPF(ctx, repo)
 	if err != nil {
 		logging.Debug(ctx, "pending OPF ref count failed; omitting from status",
 			slog.String("error", err.Error()))
-		return 0, stuck
+		return 0
 	}
-	// Stuck refs are still awaiting OPF, so they are in this list too; they are
-	// reported once, by the warning, and never also as pending work in hand.
-	for _, ref := range awaiting {
-		if _, isStuck := stuckNames[ref]; !isStuck {
-			pending++
-		}
-	}
-	return pending, stuck
+	return len(awaiting)
 }
 
 // writeCheckpointSyncLines reports the checkpoint sync destination (and the
@@ -718,13 +689,6 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString("\n  ")
 		b.WriteString(sty.render(sty.dim, formatPendingOPFLine(info.OPFPending)))
 	}
-	// Yellow and "! "-marked, like the warnings above: this one does not
-	// resolve itself, and a reader skimming dim lines has to be able to see the
-	// difference at a glance.
-	if len(info.OPFStuck) > 0 {
-		b.WriteString("\n")
-		b.WriteString(sty.render(sty.yellow, "  ! "+formatStuckOPFLine(len(info.OPFStuck))))
-	}
 }
 
 // formatPendingOPFLine phrases the pending-redaction counter: checkpoints whose
@@ -742,30 +706,6 @@ func formatPendingOPFLine(pending int) string {
 		noun = nounCheckpoint
 	}
 	return fmt.Sprintf("%d %s pending OpenAI Privacy Filter redaction (runs in the background)", pending, noun)
-}
-
-// formatStuckOPFLine phrases the stuck-ref warning: checkpoints whose OPF
-// rewrite has failed StuckOPFFailureThreshold times running, which is the count
-// that cannot be explained by one unlucky pass plus a retry.
-//
-// The log is the only place the real reason exists: the failure tally records
-// how often a ref failed and never why — a broken OPF runtime, the un-OPF'd
-// commit cap, and an oversized batch all land here identically — so asserting
-// any one of them would be a guess presented as a diagnosis. So the primary
-// guidance is "read the log". The size cap is named after it, and hedged,
-// because it is now a backstop against implausible content that no real session
-// should reach (see batchDefaultLimit): a ref stuck on the cap is the rare case,
-// a runtime failure the ordinary one, and leading with the override would send
-// people to raise a number that is almost certainly not what stopped them.
-func formatStuckOPFLine(stuck int) string {
-	noun := nounCheckpoints
-	if stuck == 1 {
-		noun = nounCheckpoint
-	}
-	return fmt.Sprintf("%d %s cannot be privacy-filtered: OPF redaction has failed at least %d times in a row. "+
-		"See .entire/logs for the actual failure — most often the OPF runtime itself. "+
-		"Rarely it is the inference size cap, which ENTIRE_OPF_BATCH_LIMIT overrides.",
-		stuck, noun, checkpoint.StuckOPFFailureThreshold)
 }
 
 // formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL
@@ -1207,17 +1147,11 @@ type statusJSON struct {
 	// fall back to the elected remote). Mirrors the text path's warning line.
 	CheckpointRemoteIgnored       string `json:"checkpoint_remote_ignored,omitempty"`
 	CheckpointRemoteIgnoredReason string `json:"checkpoint_remote_ignored_reason,omitempty"`
-	// CheckpointOPFPending and CheckpointOPFStuckRefs mirror the text path's
-	// two OPF lines, and are disjoint the same way: a ref counted in the first
-	// is waiting its turn, a ref named in the second will not clear without a
-	// human. Both are absent when the OpenAI Privacy Filter is off, which is
-	// the default, so their absence is not evidence that a backlog is clear.
-	//
-	// The stuck set is refs rather than a count because the ref name is what
-	// makes it actionable — it is what `git log` and the logs identify the
-	// failing checkpoint by.
-	CheckpointOPFPending   int      `json:"checkpoint_opf_pending,omitempty"`
-	CheckpointOPFStuckRefs []string `json:"checkpoint_opf_stuck_refs,omitempty"`
+	// CheckpointOPFPending mirrors the text path's OPF line: queued checkpoint
+	// refs the privacy filter has not rewritten yet. Absent when the OpenAI
+	// Privacy Filter is off, which is the default, so its absence is not
+	// evidence that a backlog is clear.
+	CheckpointOPFPending int `json:"checkpoint_opf_pending,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -1319,7 +1253,6 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
 		result.CheckpointOPFPending = syncInfo.OPFPending
-		result.CheckpointOPFStuckRefs = syncInfo.OPFStuck
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			// Read-only, and one entry per session. Collapsing by agent hid a

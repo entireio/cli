@@ -11,8 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -164,56 +162,4 @@ func TestRunOPFFlush_RewritesTheBacklogButNeverPushes(t *testing.T) {
 	out, lsErr := lsCmd.CombinedOutput()
 	require.NoError(t, lsErr, "ls-remote failed: %s", out)
 	assert.NotContains(t, string(out), refs[0].String(), "a background process must not deliver anything")
-}
-
-// The visibility surface's input: a ref that fails every pass is counted, and
-// only once it has failed StuckOPFFailureThreshold times running does it become
-// something worth telling a human about. Below the threshold it is
-// indistinguishable from "the worker has not got to it yet", which is the whole
-// distinction the count exists to draw.
-func TestRunOPFFlush_CountsConsecutiveFailuresUntilStuck(t *testing.T) {
-	configureFakeOPF(t, &fakeOPFForRewrite{})
-	_, repo, _ := setupGitRefsOPFRepo(t, flushFitsID, flushOversizedID)
-	addOversizedRef(t, repo)
-	resetRedactionConfiguredForTest()
-	t.Cleanup(resetRedactionConfiguredForTest)
-	oversizedRef := mustRefName(t, id.MustCheckpointID(flushOversizedID))
-
-	for pass := 1; pass < checkpoint.StuckOPFFailureThreshold; pass++ {
-		require.NoError(t, RunOPFFlush(t.Context()))
-		stuck, err := checkpoint.StuckOPFRefs(t.Context(), repo)
-		require.NoError(t, err)
-		assert.Empty(t, stuck, "pass %d is still within retry range, not stuck", pass)
-	}
-
-	require.NoError(t, RunOPFFlush(t.Context()))
-	stuck, err := checkpoint.StuckOPFRefs(t.Context(), repo)
-	require.NoError(t, err)
-	assert.Equal(t, []plumbing.ReferenceName{oversizedRef}, stuck,
-		"a ref that has failed the threshold number of passes in a row is stuck")
-}
-
-// "Consecutive" has to mean consecutive: a ref that finally succeeds must leave
-// the stuck list, or a transient failure would brand it forever.
-func TestRunOPFFlush_SuccessClearsAPreviouslyFailingRef(t *testing.T) {
-	configureFakeOPF(t, &fakeOPFForRewrite{})
-	_, repo, _ := setupGitRefsOPFRepo(t, flushFitsID, flushOversizedID)
-	addOversizedRef(t, repo)
-	resetRedactionConfiguredForTest()
-	t.Cleanup(resetRedactionConfiguredForTest)
-
-	for range checkpoint.StuckOPFFailureThreshold {
-		require.NoError(t, RunOPFFlush(t.Context()))
-	}
-	stuck, err := checkpoint.StuckOPFRefs(t.Context(), repo)
-	require.NoError(t, err)
-	require.Len(t, stuck, 1, "fixture must reach the stuck state first")
-
-	// Lift the cap the ref was tripping and let the worker try again.
-	t.Setenv(batchEnvVar, "unlimited")
-	require.NoError(t, RunOPFFlush(t.Context()))
-
-	stuck, err = checkpoint.StuckOPFRefs(t.Context(), repo)
-	require.NoError(t, err)
-	assert.Empty(t, stuck, "a successful rewrite resets the ref's consecutive-failure count")
 }

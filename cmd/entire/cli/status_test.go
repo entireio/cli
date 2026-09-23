@@ -3292,7 +3292,7 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 // OPF backlog visibility: with the OpenAI Privacy Filter enabled on the
 // git-refs backend, the model rewrite runs in a detached worker rather than on
 // the push path, so `entire status` is the only place a user can see that
-// redaction work is outstanding — or that it has stopped making progress.
+// redaction work is outstanding.
 
 // opfBacklogSettingsOn is the only configuration in which an OPF backlog can
 // exist: Entire enabled, the git-refs checkpoint backend, and the filter on.
@@ -3312,19 +3312,6 @@ func queueCheckpointRefAwaitingOPF(t *testing.T, refName, commit string) {
 	queue := checkpoint.NewPushQueue(filepath.Join(testWorkingDir(t), ".git"))
 	if err := queue.Enqueue(plumbing.ReferenceName(refName)); err != nil {
 		t.Fatalf("Enqueue(%s): %v", refName, err)
-	}
-}
-
-// recordStuckOPFRef drives refName's consecutive-failure tally to
-// checkpoint.StuckOPFFailureThreshold, the state RunOPFFlush leaves behind for
-// a ref that fails every pass.
-func recordStuckOPFRef(t *testing.T, refName string) {
-	t.Helper()
-	log := checkpoint.NewOPFFailureLog(filepath.Join(testWorkingDir(t), ".git"))
-	for range checkpoint.StuckOPFFailureThreshold {
-		if err := log.Record([]plumbing.ReferenceName{plumbing.ReferenceName(refName)}, nil, time.Now()); err != nil {
-			t.Fatalf("Record(%s): %v", refName, err)
-		}
 	}
 }
 
@@ -3355,9 +3342,6 @@ func TestRunStatus_OPFPendingCounter(t *testing.T) {
 	if !strings.Contains(out, "2 checkpoints pending OpenAI Privacy Filter redaction") {
 		t.Errorf("expected the pending-redaction counter, got:\n%s", out)
 	}
-	if strings.Contains(out, "cannot be privacy-filtered") {
-		t.Errorf("nothing has failed yet; the stuck warning must stay silent, got:\n%s", out)
-	}
 }
 
 // A ref whose tip already carries the trailer is not awaiting anything, so a
@@ -3382,82 +3366,17 @@ func TestRunStatus_OPFPendingOmittedWhenTrailered(t *testing.T) {
 	}
 }
 
-// The two lines answer different questions — "not got to it yet" versus "this
-// needs you" — so a stuck ref is reported once, as a warning, and never also
-// counted in the informational pending total.
-func TestRunStatus_OPFStuckRefWarning(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	setupTestRepo(t)
-	writeSettings(t, opfBacklogSettingsOn)
-	testutil.AddRemote(t, ".", originRemoteName, "https://example.com/origin.git")
-	head := checkpointSyncTestCommit(t, "a.txt", "one")
-	const stuckRef = "refs/entire/checkpoints/aa/bb0000000002"
-	queueCheckpointRefAwaitingOPF(t, "refs/entire/checkpoints/aa/bb0000000001", head)
-	queueCheckpointRefAwaitingOPF(t, stuckRef, head)
-	recordStuckOPFRef(t, stuckRef)
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	out := stdout.String()
-	if !strings.Contains(out, "! 1 checkpoint cannot be privacy-filtered") {
-		t.Errorf("expected the stuck-ref warning, marked like other status warnings, got:\n%s", out)
-	}
-	// The warning must send people to the log first — a runtime failure is the
-	// ordinary cause of "stuck" — and name the batch-limit override only as the
-	// rare secondary case, since the cap is a backstop no real session reaches.
-	logsAt := strings.Index(out, ".entire/logs")
-	capAt := strings.Index(out, "ENTIRE_OPF_BATCH_LIMIT")
-	if logsAt < 0 {
-		t.Errorf("stuck warning must point at the log that records the actual failure, got:\n%s", out)
-	}
-	if capAt < 0 {
-		t.Errorf("stuck warning must still name the override for the rare size-cap case, got:\n%s", out)
-	}
-	if logsAt >= 0 && capAt >= 0 && logsAt > capAt {
-		t.Errorf("the log must be the primary guidance, ahead of the batch-limit override, got:\n%s", out)
-	}
-	if !strings.Contains(out, "1 checkpoint pending OpenAI Privacy Filter redaction") {
-		t.Errorf("the other queued ref is still merely pending, got:\n%s", out)
-	}
-	if strings.Contains(out, "2 checkpoints pending") {
-		t.Errorf("a stuck ref must not also be counted as pending, got:\n%s", out)
-	}
-}
-
-// A ref recorded stuck and then deleted out-of-band is not a checkpoint anyone
-// can act on. StuckOPFRefs filters it; status must not resurrect it.
-func TestRunStatus_OPFStuckRefOmittedWhenRefGone(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	setupTestRepo(t)
-	writeSettings(t, opfBacklogSettingsOn)
-	testutil.AddRemote(t, ".", originRemoteName, "https://example.com/origin.git")
-	checkpointSyncTestCommit(t, "a.txt", "one")
-	recordStuckOPFRef(t, "refs/entire/checkpoints/aa/bb0000000009")
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	if out := stdout.String(); strings.Contains(out, "cannot be privacy-filtered") {
-		t.Errorf("a deleted ref is nobody's problem; warning must be omitted, got:\n%s", out)
-	}
-}
-
 // OPF is off by default, and the default must print exactly what it printed
 // before this surface existed — not "similar output minus a line".
 //
-// Both halves build the identical repo, down to the queued refs and the failure
-// log, and differ only in whether the filter is enabled. Comparing the off
-// output against the on output with the two OPF lines deleted is what makes the
-// claim byte-for-byte: every remaining line comes from code this task did not
-// touch, so if the disabled path perturbed anything at all — a counter the
-// queue read moved, a stray blank line, a reordered section — the two would not
-// match. A repo with no backlog at all would not prove that, because it also
-// differs in the unpushed counter, which is not ours.
+// Both halves build the identical repo, down to the queued refs, and differ
+// only in whether the filter is enabled. Comparing the off output against the
+// on output with the OPF line deleted is what makes the claim byte-for-byte:
+// every remaining line comes from code this task did not touch, so if the
+// disabled path perturbed anything at all — a counter the queue read moved, a
+// stray blank line, a reordered section — the two would not match. A repo with
+// no backlog at all would not prove that, because it also differs in the
+// unpushed counter, which is not ours.
 func TestRunStatus_OPFBacklogSilentWhenOPFDisabled(t *testing.T) {
 	statusWithOPFSetting := func(t *testing.T, opfSettings string) string {
 		t.Helper()
@@ -3466,10 +3385,8 @@ func TestRunStatus_OPFBacklogSilentWhenOPFDisabled(t *testing.T) {
 		writeSettings(t, opfSettings)
 		testutil.AddRemote(t, ".", originRemoteName, "https://example.com/origin.git")
 		head := checkpointSyncTestCommit(t, "a.txt", "one")
-		const stuckRef = "refs/entire/checkpoints/aa/bb0000000002"
 		queueCheckpointRefAwaitingOPF(t, "refs/entire/checkpoints/aa/bb0000000001", head)
-		queueCheckpointRefAwaitingOPF(t, stuckRef, head)
-		recordStuckOPFRef(t, stuckRef)
+		queueCheckpointRefAwaitingOPF(t, "refs/entire/checkpoints/aa/bb0000000002", head)
 
 		var stdout bytes.Buffer
 		if err := runStatus(context.Background(), &stdout, false, false); err != nil {
@@ -3482,24 +3399,23 @@ func TestRunStatus_OPFBacklogSilentWhenOPFDisabled(t *testing.T) {
 	t.Run("opf disabled", func(t *testing.T) { disabled = statusWithOPFSetting(t, opfBacklogSettingsOff) })
 	t.Run("opf enabled", func(t *testing.T) { enabled = statusWithOPFSetting(t, opfBacklogSettingsOn) })
 
-	for _, phrase := range []string{"OpenAI Privacy Filter", "privacy-filtered"} {
-		if strings.Contains(disabled, phrase) {
-			t.Errorf("OPF off must not mention %q, got:\n%s", phrase, disabled)
-		}
-		if !strings.Contains(enabled, phrase) {
-			t.Fatalf("test is not exercising the OPF lines: %q missing from:\n%s", phrase, enabled)
-		}
+	const phrase = "OpenAI Privacy Filter"
+	if strings.Contains(disabled, phrase) {
+		t.Errorf("OPF off must not mention %q, got:\n%s", phrase, disabled)
+	}
+	if !strings.Contains(enabled, phrase) {
+		t.Fatalf("test is not exercising the OPF line: %q missing from:\n%s", phrase, enabled)
 	}
 
 	var kept []string
 	for _, line := range strings.Split(enabled, "\n") {
-		if strings.Contains(line, "OpenAI Privacy Filter") || strings.Contains(line, "privacy-filtered") {
+		if strings.Contains(line, phrase) {
 			continue
 		}
 		kept = append(kept, line)
 	}
 	if got := strings.Join(kept, "\n"); got != disabled {
-		t.Errorf("OPF off must be byte-identical to OPF on minus the OPF lines:\ndisabled:\n%q\nenabled minus OPF lines:\n%q",
+		t.Errorf("OPF off must be byte-identical to OPF on minus the OPF line:\ndisabled:\n%q\nenabled minus OPF line:\n%q",
 			disabled, got)
 	}
 }
@@ -3510,10 +3426,8 @@ func TestRunStatusJSON_OPFBacklog(t *testing.T) {
 	writeSettings(t, opfBacklogSettingsOn)
 	testutil.AddRemote(t, ".", originRemoteName, "https://example.com/origin.git")
 	head := checkpointSyncTestCommit(t, "a.txt", "one")
-	const stuckRef = "refs/entire/checkpoints/aa/bb0000000002"
 	queueCheckpointRefAwaitingOPF(t, "refs/entire/checkpoints/aa/bb0000000001", head)
-	queueCheckpointRefAwaitingOPF(t, stuckRef, head)
-	recordStuckOPFRef(t, stuckRef)
+	queueCheckpointRefAwaitingOPF(t, "refs/entire/checkpoints/aa/bb0000000002", head)
 
 	var stdout bytes.Buffer
 	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
@@ -3524,11 +3438,8 @@ func TestRunStatusJSON_OPFBacklog(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if result.CheckpointOPFPending != 1 {
-		t.Errorf("checkpoint_opf_pending = %d, want 1", result.CheckpointOPFPending)
-	}
-	if !slices.Equal(result.CheckpointOPFStuckRefs, []string{stuckRef}) {
-		t.Errorf("checkpoint_opf_stuck_refs = %v, want [%s]", result.CheckpointOPFStuckRefs, stuckRef)
+	if result.CheckpointOPFPending != 2 {
+		t.Errorf("checkpoint_opf_pending = %d, want 2", result.CheckpointOPFPending)
 	}
 }
 
@@ -3538,10 +3449,8 @@ func TestRunStatusJSON_OPFBacklogAbsentWhenOPFDisabled(t *testing.T) {
 	writeSettings(t, opfBacklogSettingsOff)
 	testutil.AddRemote(t, ".", originRemoteName, "https://example.com/origin.git")
 	head := checkpointSyncTestCommit(t, "a.txt", "one")
-	const stuckRef = "refs/entire/checkpoints/aa/bb0000000002"
 	queueCheckpointRefAwaitingOPF(t, "refs/entire/checkpoints/aa/bb0000000001", head)
-	queueCheckpointRefAwaitingOPF(t, stuckRef, head)
-	recordStuckOPFRef(t, stuckRef)
+	queueCheckpointRefAwaitingOPF(t, "refs/entire/checkpoints/aa/bb0000000002", head)
 
 	var stdout bytes.Buffer
 	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
@@ -3552,11 +3461,10 @@ func TestRunStatusJSON_OPFBacklogAbsentWhenOPFDisabled(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if result.CheckpointOPFPending != 0 || len(result.CheckpointOPFStuckRefs) != 0 {
-		t.Errorf("OPF off: fields must be absent, got pending=%d stuck=%v",
-			result.CheckpointOPFPending, result.CheckpointOPFStuckRefs)
+	if result.CheckpointOPFPending != 0 {
+		t.Errorf("OPF off: field must be absent, got pending=%d", result.CheckpointOPFPending)
 	}
 	if strings.Contains(stdout.String(), "checkpoint_opf") {
-		t.Errorf("omitempty should drop the OPF fields entirely, got: %s", stdout.String())
+		t.Errorf("omitempty should drop the OPF field entirely, got: %s", stdout.String())
 	}
 }
