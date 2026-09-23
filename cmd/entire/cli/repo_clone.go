@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -13,7 +15,9 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -114,9 +118,10 @@ func forgeCloneURL(forge, host, owner, repo string) string {
 	return fmt.Sprintf("%s%s/%s/%s/%s", entireCloneURLScheme, host, forge, owner, repo)
 }
 
-// nativeCloneForge is the path token of Entire-native repos in entire:// clone
-// URLs (`/et/<project>/<repo>`), mirroring the server's repourls.URLPathPrefix.
-const nativeCloneForge = "et"
+// nativeCloneForge is the `et/` token in a native ref. It is the same token
+// gitremote reads out of an entire:// URL path, so it is bound to that
+// definition rather than spelled twice.
+const nativeCloneForge = gitremote.ForgeNative
 
 // nativeProjectRe / nativeRepoRe are the server's project- and repo-name shape,
 // as enforced by entiredb `core/resource/project_name.go` (normalizeName, behind
@@ -173,32 +178,28 @@ func parseNativeCloneRef(ref string) (project, repo string, err error) {
 		return "", "", fmt.Errorf("expected /%s/<project>/<repo> (2 names after the %s token, got %d)", nativeCloneForge, nativeCloneForge, len(names))
 	}
 	project, repo = names[0], names[1]
-	// Drop `.git` before the name is validated, not after: `.git` alone then
-	// fails the shape check as an empty name rather than passing as a dotted
-	// one. See gitDirSuffix for why the suffix is never part of a name.
-	repo = strings.TrimSuffix(repo, gitDirSuffix)
 	if !nativeProjectRe.MatchString(project) {
 		return "", "", fmt.Errorf("project %q is not a name the server accepts: 3-32 characters of letters, digits and '-', not starting or ending with '-'", project)
 	}
+	// No `.git` trim: on a native ref the suffix is part of the name. A bare
+	// ".git" is still refused, by nativeRepoRe's leading-dot rule rather than
+	// by trimming it to an empty name first.
 	if !nativeRepoRe.MatchString(repo) || strings.Contains(repo, "..") {
 		return "", "", fmt.Errorf("repo %q is not a name the server accepts: 1-64 characters of letters, digits, '.' and '-', not starting or ending with '.' or '-', and with no consecutive dots", repo)
 	}
 	return project, repo, nil
 }
 
-type nativeRepoResolverClient interface {
-	repoRefClient
-	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
-}
-
 // resolveNativeRepo performs the canonical /et/<project>/<repo> identity
-// lookup shared by clone and repo-scoped data commands.
-func resolveNativeRepo(ctx context.Context, c nativeRepoResolverClient, project, repoName string) (*coreapi.Repo, error) {
-	repoID, err := resolveRepoRef(ctx, c, repoName, project)
+// lookup shared by clone and repo-scoped data commands. It bypasses
+// resolveRepoRef: both segments are names, and a ULID-shaped project name
+// must not be read as an id.
+func resolveNativeRepo(ctx context.Context, c repoRefClient, project, repoName string) (*coreapi.Repo, error) {
+	resolved, err := resolveNativeRepoByPath(ctx, c, project, repoName)
 	if err != nil {
 		return nil, err
 	}
-	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: resolved.ID})
 	if err != nil {
 		return nil, fmt.Errorf("get repo: %w", err)
 	}
@@ -206,12 +207,18 @@ func resolveNativeRepo(ctx context.Context, c nativeRepoResolverClient, project,
 }
 
 // resolveNativeCloneURL resolves an Entire-native repo (by project and repo
-// name) to its entire:// clone URL: name → ULID via the project-scoped lookup,
+// name) to its entire:// clone URL: name → ULID via the pull-gated path lookup,
 // then GetRepo — the one call that returns both clusterHost and path. The URL
-// is the server's own coordinates via repoRemoteURL, never synthesized from the
-// user's ref. repoName arrives with any `.git` suffix already dropped by the
-// parser (see gitDirSuffix).
-func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repoName string) (string, error) {
+// is the server's own coordinates, never synthesized from the user's ref: the
+// path is the repo's, and the host is one of its readable placements — the
+// home cluster or a ready native mirror, chosen through the same
+// selectPlacement flow as the /gh/ mirror path (clusterSel honors --cluster;
+// with several placements and no selector it prompts). A native mirror serves
+// the same public path as its data primary (that is the placement's routing
+// path on the target cluster), so only the host varies. repoName arrives
+// exactly as the parser found it: on a native ref `.git` is part of the name,
+// so no suffix is dropped here either.
+func resolveNativeCloneURL(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, project, repoName, clusterSel string, picker placementPicker) (string, error) {
 	repo, err := resolveNativeRepo(ctx, c, project, repoName)
 	if err != nil {
 		return "", err
@@ -226,32 +233,116 @@ func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repo
 			return "", fmt.Errorf("repo has an invalid cluster host %q: %w", host, err)
 		}
 	}
-	cloneURL := repoRemoteURL(*repo)
-	if cloneURL == "" {
+	// The home-cluster URL doubles as the readiness probe: empty means the repo
+	// has no host or path yet, and a placement listing would only obscure that.
+	if repoRemoteURL(*repo) == "" {
 		return "", fmt.Errorf("repo %s/%s has no clone URL yet (still provisioning?)", project, repoName)
 	}
-	return cloneURL, nil
+	placements, err := nativePlacements(ctx, c, repo, clusterSel != "")
+	if err != nil {
+		return "", err
+	}
+	// The home cluster is the repo's data primary, so it is what a run with no
+	// terminal resolves to.
+	chosen, err := selectPlacement(cmd, placements, clusterSel, strings.TrimSpace(repo.ClusterHost.Or("")), picker)
+	if err != nil {
+		return "", err
+	}
+	// Defense-in-depth, as on the /gh/ branch: every host here already passed
+	// the guard (home above, mirrors via hostFromPublicURL), but the value is
+	// about to be interpolated into the URL git dials.
+	if err := validateClusterHost(chosen.ClusterHost); err != nil {
+		return "", fmt.Errorf("placement has an invalid cluster host %q: %w", chosen.ClusterHost, err)
+	}
+	path := strings.TrimSpace(repo.Path.Or(""))
+	return entireCloneURLScheme + chosen.ClusterHost + "/" + strings.TrimPrefix(path, "/"), nil
 }
 
-// gitDirSuffix is the suffix git tools habitually append to a repo path, and
-// Entire treats it as never part of a repo name — on either backend. Every ref
-// parser in this package drops it before the name is used; `gitremote` trims
-// the same suffix independently, because it cannot import this package, so a
-// change here has to be mirrored at gitremote.splitOwnerRepo.
+// nativePlacements lists the clusters a native repo is readable from: its home
+// cluster plus every native-mirror placement that is ready and still meant to
+// exist. Mirror rows carry only a cluster slug, so hosts (and the picker's
+// jurisdiction labels) are joined against the cluster catalog, the same
+// slug→host reconstruction the mirror table does (clusterHostBySlug); a slug
+// the catalog can't resolve to a safe host is omitted rather than guessed.
 //
-// It is unsupported rather than merely unusual. GitHub rejects a name ending in
-// `.git` outright, so for a mirror the suffix can only ever be decoration. A
-// native repo genuinely CAN be named "foo.git" server-side (an interior dot,
-// which is also what makes `entire-trails.el` legal), but the CLI reads every
-// remote back through gitremote.splitOwnerRepo, which trims the suffix
-// unconditionally — so such a repo is unaddressable by name after cloning it
-// anyway, in trails, `api`, experts, recap and explain alike. Rather than have
-// `repo clone` be the one path that keeps the suffix, the whole CLI drops it,
-// and `repo create` refuses to mint a name that ends in it.
+// Both lookups behind the extra placements — the mirror listing and the
+// cluster catalog — are best-effort unless the caller passed a cluster
+// selector: the mirror endpoint 404s on older cores and 503s where native
+// mirroring is not configured, the catalog can be transiently down, and
+// failing the whole resolution on either would regress the home-cluster clone
+// that has always worked. With a selector the placement list IS the answer, so
+// the error surfaces. A done context also surfaces: a cancelled command must
+// fail, not quietly resolve the home cluster and exit 0 (`repo remote url`'s
+// stdout is captured by `$(…)`, so a URL printed after Ctrl+C is acted on).
+func nativePlacements(ctx context.Context, c *coreapi.Client, repo *coreapi.Repo, explicitCluster bool) ([]coreapi.ResolvedPlacement, error) {
+	home := coreapi.ResolvedPlacement{
+		ClusterHost:  strings.TrimSpace(repo.ClusterHost.Or("")),
+		Cell:         repo.ClusterSlug,
+		Jurisdiction: repo.Jurisdiction,
+	}
+	mirrors, err := c.ListNativeMirrors(ctx, coreapi.ListNativeMirrorsParams{RepoId: repo.ID})
+	if err != nil {
+		if explicitCluster || ctx.Err() != nil {
+			return nil, fmt.Errorf("list native mirrors: %w", err)
+		}
+		logging.Debug(ctx, "native-mirror listing failed; resolving the home cluster only", "error", err)
+		return []coreapi.ResolvedPlacement{home}, nil
+	}
+	var ready []coreapi.NativeMirrorPlacement
+	for _, m := range mirrors.NativeMirrors {
+		if m.Status == coreapi.NativeMirrorPlacementStatusReady && m.DesiredState == coreapi.NativeMirrorPlacementDesiredStateActive {
+			ready = append(ready, m)
+		}
+	}
+	placements := []coreapi.ResolvedPlacement{home}
+	if len(ready) == 0 {
+		return placements, nil
+	}
+	clusters, err := c.ListClusters(ctx)
+	if err != nil {
+		if explicitCluster || ctx.Err() != nil {
+			return nil, fmt.Errorf("list clusters: %w", err)
+		}
+		logging.Debug(ctx, "cluster catalog fetch failed; resolving the home cluster only", "error", err)
+		return placements, nil
+	}
+	bySlug := make(map[string]coreapi.Cluster, len(clusters.Clusters))
+	for _, cl := range clusters.Clusters {
+		bySlug[cl.Slug] = cl
+	}
+	for _, m := range ready {
+		cl, ok := bySlug[m.ClusterSlug]
+		if !ok {
+			continue
+		}
+		host, err := hostFromPublicURL(cl.PublicUrl)
+		if err != nil {
+			continue // unsafe/malformed publicUrl: omit the placement, never a spoofable host
+		}
+		p := coreapi.ResolvedPlacement{ClusterHost: host, Cell: coreapi.NewOptString(m.ClusterSlug)}
+		if cl.Jurisdiction != "" {
+			p.Jurisdiction = coreapi.NewOptString(cl.Jurisdiction)
+		}
+		placements = append(placements, p)
+	}
+	return placements, nil
+}
+
+// mirrorGitDirSuffix is the suffix git tools habitually append to a repo path.
+// It is decoration on a GitHub mirror and nowhere else, so every parser that
+// trims it is a /gh/ grammar.
 //
-// The escape hatches for a native "foo.git" that already exists are its ULID
-// and the full `entire://` URL, which `repo clone` forwards to git verbatim.
-const gitDirSuffix = ".git"
+// GitHub rejects a repository name ending in `.git`, so on a mirror path the
+// suffix can only be decoration, and dropping it is what lets a pasted
+// `git clone` URL resolve. A native repo is the opposite case: entiredb permits
+// an interior dot and the data plane resolves /et/ paths verbatim, so trimming
+// there names a different repository. See COR-1892.
+//
+// gitremote keeps its own copy of the suffix and its own forge check, since it
+// cannot import this package. Both encode one rule — trim for every forge
+// except the native one — so a change here belongs at gitremote.splitOwnerRepo
+// as well.
+const mirrorGitDirSuffix = ".git"
 
 // trimRefPrefix normalizes a ref for segment work: surrounding space gone, one
 // optional leading slash gone. Every place that reads a ref's leading token
@@ -366,11 +457,11 @@ func parseMirrorCloneRef(ref string) (provider, owner, repo string, err error) {
 		return "", "", "", fmt.Errorf("expected gh/<owner>/<repo> (leading slash optional; owner: letters, digits, '-'; repo: letters, digits, '.', '_', '-'), got %q", ref)
 	}
 	owner, repo = strings.ToLower(m[1]), strings.ToLower(m[2])
-	// Drop `.git` (see gitDirSuffix) BEFORE the dot-only guard, which is what
-	// keeps `..git` — not dot-only as typed — from resolving to a "." repo.
-	repo = strings.TrimSuffix(repo, gitDirSuffix)
+	// Drop `.git` (see mirrorGitDirSuffix) BEFORE the dot-only guard, which is
+	// what keeps `..git` — not dot-only as typed — from resolving to a "." repo.
+	repo = strings.TrimSuffix(repo, mirrorGitDirSuffix)
 	if repo == "" {
-		return "", "", "", fmt.Errorf("repo name is empty once the %s suffix is dropped: %s", gitDirSuffix, ref)
+		return "", "", "", fmt.Errorf("repo name is empty once the %s suffix is dropped: %s", mirrorGitDirSuffix, ref)
 	}
 	if gitHubDotOnlyRe.MatchString(repo) {
 		return "", "", "", fmt.Errorf("repo cannot be dot-only: %s", ref)
@@ -386,12 +477,11 @@ func newRepoCloneCmd() *cobra.Command {
 		Long: "Clone an Entire-native repo by its `/et/<project>/<repo>` ref, a " +
 			"GitHub mirror by its `/gh/<owner>/<repo>` ref, or a full `entire://` " +
 			"clone URL.\n\n" +
-			"A native ref resolves the repo's home cluster and clones from there " +
-			"(--cluster doesn't apply).\n\n" +
-			"With a `/gh/<owner>/<repo>` ref, looks up where the repo is mirrored: if " +
-			"it's on a single cluster, clones it directly; if it's mirrored on more " +
-			"than one, prompts you to pick which to clone from (or pass --cluster to " +
-			"choose non-interactively).\n\n" +
+			"Either ref looks up where the repo is readable — a native repo's home " +
+			"cluster and its ready native mirrors, or a GitHub repo's mirror " +
+			"clusters. On a single cluster it clones directly; on more than one, it " +
+			"prompts you to pick which to clone from, and without a terminal it " +
+			"uses the repo's primary cluster. Pass --cluster to choose either way.\n\n" +
 			"A full `entire://` URL already names the cluster, so it's passed straight " +
 			"through to `git clone` with no lookup (and --cluster is ignored). The " +
 			"optional [target-dir] is passed through to `git clone` either way.",
@@ -416,7 +506,7 @@ func newRepoCloneCmd() *cobra.Command {
 			return runGitClone(cmd.Context(), cmd, cloneURL, targetDir)
 		},
 	}
-	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is readable on more than one (for /gh/ refs it may belong to another auth context)")
 	return cmd
 }
 
@@ -461,17 +551,22 @@ func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, picker placem
 		return ref, nil
 	}
 
-	// Native ref: resolve the repo's home cluster via the active-context
-	// control plane. A native repo lives on exactly one home cluster, so
-	// --cluster has nothing to choose between.
+	// Native ref: resolve the repo via the active-context control plane, then
+	// pick among its readable placements — the home cluster plus any ready
+	// native mirrors — with the same --cluster/prompt flow as the /gh/ branch.
+	// Unlike that branch, the lookup itself always runs on the active context:
+	// a native name resolves within its own federation, and --cluster only
+	// selects which placement of the resolved repo to use.
 	project, repoName, nativeErr := parseNativeCloneRef(ref)
 	if nativeErr == nil {
 		if cluster != "" {
-			return "", fmt.Errorf("--cluster applies to /gh/ mirror refs; %s/%s resolves to its home cluster", project, repoName)
+			if err := validateClusterHost(cluster); err != nil {
+				return "", fmt.Errorf("invalid --cluster: %w", err)
+			}
 		}
 		var cloneURL string
 		if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-			url, err := resolveNativeCloneURL(ctx, c, project, repoName)
+			url, err := resolveNativeCloneURL(ctx, cmd, c, project, repoName, cluster, picker)
 			if err != nil {
 				return err
 			}
@@ -507,16 +602,40 @@ func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, picker placem
 	// authenticated with the matching local context, the same path
 	// `mirror add <repo> --cluster <host>` uses — so the lookup resolves against
 	// the right federation. With no --cluster, list from the active context.
-	runWithCore := runCore
 	if cluster != "" {
 		if err := validateClusterHost(cluster); err != nil {
 			return "", fmt.Errorf("invalid --cluster: %w", err)
 		}
-		runWithCore = func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
-			return runCoreForCluster(cmd, cluster, fn)
+		if err := runCoreForCluster(cmd, cluster, lister); err != nil {
+			// A name that does not resolve, and nothing else. DNS answering
+			// "no such host" is the one failure that says the host is not a
+			// cluster at all, so the active context can be asked instead and
+			// selectPlacement can name the clusters the repo IS on — the
+			// answer the /et/ path gives for the same typo.
+			//
+			// Deliberately narrower than ErrUnreachable, which also covers a
+			// timeout, a refused connection and a TLS failure; its own doc
+			// says the client cannot tell a typo from a real-but-down cluster.
+			// Treating those as typos would let a momentary blip on a cluster
+			// in another federation answer "not mirrored" — or, with nothing
+			// mirrored here, tell the user to onboard a repo that is already
+			// mirrored there. That is the exact bug the cluster-addressed dial
+			// above exists to fix, so every other failure surfaces unchanged.
+			if !hostDoesNotResolve(err) {
+				return "", err
+			}
+			logging.Debug(cmd.Context(), "cluster host does not resolve; listing placements from the active context", "cluster", cluster, "error", err)
+			if fallbackErr := runCore(cmd, lister); fallbackErr != nil {
+				// Both routes to a placement list are gone. Each half names a
+				// different thing the user may have to fix — a mistyped host,
+				// and whatever stopped the active context from standing in
+				// (an expired login, say) — and they would otherwise learn the
+				// second only after fixing the first. Nothing is joined on the
+				// path that matters, where the fallback answers.
+				return "", errors.Join(err, fallbackErr)
+			}
 		}
-	}
-	if err := runWithCore(cmd, lister); err != nil {
+	} else if err := runCore(cmd, lister); err != nil {
 		return "", err
 	}
 
@@ -524,7 +643,10 @@ func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, picker placem
 		return "", fmt.Errorf("no mirror found for /gh/%s/%s; run 'entire repo mirror add /gh/%s/%s' to onboard it", owner, repo, owner, repo)
 	}
 
-	chosen, err := selectPlacement(cmd, placements, cluster, picker)
+	// Onboarding a GitHub repo always places it on defaultClusterHost, so it is
+	// the one placement every mirror set has in common and the run with no
+	// terminal resolves it.
+	chosen, err := selectPlacement(cmd, placements, cluster, defaultClusterHost, picker)
 	if err != nil {
 		return "", err
 	}
@@ -538,6 +660,19 @@ func resolveRepoRemoteURL(cmd *cobra.Command, ref, cluster string, picker placem
 	}
 	cloneURL := forgeCloneURL(mirrorCloneForge, chosen.ClusterHost, owner, repo)
 	return cloneURL, nil
+}
+
+// hostDoesNotResolve reports whether err bottoms out in DNS answering "no such
+// host" for the name that was dialled.
+//
+// This is the only transport failure that is evidence about the HOST rather
+// than about the network between here and it: a name that does not resolve
+// cannot be a cluster, whereas a timeout or a refused connection says nothing
+// about whether the cluster exists. Callers use it to decide when they may
+// speak about a host they never reached.
+func hostDoesNotResolve(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
 }
 
 // mirrorLister is the subset of the control-plane client listMirrorsForRepo
@@ -660,9 +795,14 @@ var openPlacementPromptTerminal = func() (placementPromptTerminal, error) {
 // selectPlacement resolves which mirror placement a verb should act on. With one
 // placement it returns it directly. With an explicit clusterSel it picks the
 // matching one (or errors listing the available hosts). With more than one and no
-// selector it prompts interactively, failing fast with a p.selector pointer when
-// there's no terminal.
-func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterSel string, p placementPicker) (coreapi.ResolvedPlacement, error) {
+// selector it prompts interactively, and where there is no terminal it resolves
+// defaultHost — the repo's primary cluster, which the caller names because the
+// two forges hold it in different places (a native repo's home cluster comes
+// back on the repo itself; a GitHub repo's mirror set always includes
+// defaultClusterHost). A script therefore gets the primary rather than a
+// refusal, and only a repo whose placements don't include it has to be told to
+// pass p.selector.
+func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterSel, defaultHost string, p placementPicker) (coreapi.ResolvedPlacement, error) {
 	// Dedupe by cluster host: one placement per cluster is what a caller acts on,
 	// and the same host appearing twice would only confuse the picker. Key on the
 	// case-folded host — DNS is case-insensitive, so a selector value differing
@@ -693,7 +833,20 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 	}
 
 	if !interactive.CanPromptInteractively() {
-		return coreapi.ResolvedPlacement{}, fmt.Errorf("repo is mirrored on %d clusters; pass %s to choose one of: %s", len(hosts), p.selector, strings.Join(hosts, ", "))
+		wanted := strings.TrimSpace(defaultHost)
+		if match, ok := byHost[strings.ToLower(wanted)]; ok {
+			return match, nil
+		}
+		// No default at all is the caller saying it could not determine a
+		// primary — a native repo whose response omitted its cluster, say —
+		// which is a different thing from a primary missing from the list, and
+		// naming it would print an empty host. Then the selector is all there
+		// is to ask for.
+		missing := ""
+		if wanted != "" {
+			missing = " and none of them is " + wanted
+		}
+		return coreapi.ResolvedPlacement{}, fmt.Errorf("repo is on %d clusters%s; pass %s to choose one of: %s", len(hosts), missing, p.selector, strings.Join(hosts, ", "))
 	}
 
 	options := make([]huh.Option[string], len(hosts))

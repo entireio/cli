@@ -10,12 +10,13 @@ import (
 // EnvContextVar selects the acting login context for one process — the
 // environment counterpart to `--context`.
 //
-// Both exist because they reach different entry points. A flag can't reach git
-// operations at all: git invokes the `git-remote-entire` helper itself, so
-// `ENTIRE_CONTEXT=staging git push` is the only way to scope a push or fetch to
-// a login other than the active one. The env var also survives into hooks and
-// subprocesses, which is what makes a whole shell session scopable without
-// mutating shared state.
+// Both exist because they reach different entry points. The flag is parsed by
+// the `entire` CLI, which exports it under this name so the git and
+// `git-remote-entire` processes it spawns act as the same login; a git
+// operation the user runs directly (`git push`) parses no `entire` flag, so
+// `ENTIRE_CONTEXT=staging git push` is how that one is scoped. The env var also
+// survives into hooks and subprocesses, which is what makes a whole shell
+// session scopable without mutating shared state.
 const EnvContextVar = "ENTIRE_CONTEXT"
 
 // flagOverride records an explicit `--context` selection for this process. It is

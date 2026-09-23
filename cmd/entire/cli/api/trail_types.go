@@ -10,20 +10,20 @@ import (
 
 // TrailListResponse is the response from entire-api's trail list endpoint.
 type TrailListResponse struct {
-	Trails        []TrailResource `json:"items"`
-	Total         int             `json:"totalCount"`
-	NextPageToken *string         `json:"nextPageToken"`
+	Trails     []TrailResource `json:"items"`
+	Total      int             `json:"total_count"`
+	NextCursor *string         `json:"next_cursor"`
 }
 
 // TrailResource represents a trail returned by entire-api. The backend uses
-// camelCase and nullable branch fields. Branch is empty when the trail is
+// snake_case and nullable branch fields. Branch is empty when the trail is
 // currently unlinked; OriginalBranch separately preserves its last link.
 type TrailResource struct {
 	ID                 string             `json:"id,omitempty"`
 	Number             int                `json:"number,omitempty"`
 	URL                string             `json:"url,omitempty"`
 	Branch             string             `json:"branch"`
-	OriginalBranch     string             `json:"originalBranch,omitempty"`
+	OriginalBranch     string             `json:"original_branch,omitempty"`
 	Base               string             `json:"base"`
 	Title              string             `json:"title"`
 	Body               string             `json:"body,omitempty"`
@@ -35,26 +35,26 @@ type TrailResource struct {
 	Priority           string             `json:"priority,omitempty"`
 	Type               string             `json:"type,omitempty"`
 	Reviewers          []trail.Reviewer   `json:"reviewers,omitempty"`
-	RequestedReviewers []string           `json:"requestedReviewers,omitempty"`
-	CreatedAt          time.Time          `json:"createdAt"`
-	UpdatedAt          time.Time          `json:"updatedAt"`
-	MergedAt           *time.Time         `json:"mergedAt,omitempty"`
-	CommentCount       int                `json:"commentCount,omitempty"`
-	UnresolvedCount    int                `json:"unresolvedCount,omitempty"`
-	CheckpointCount    int                `json:"checkpointCount,omitempty"`
-	CommitsAhead       int                `json:"commitsAhead,omitempty"`
-	BodyDocument       *TrailBodyDocument `json:"bodyDocument,omitempty"`
+	RequestedReviewers []string           `json:"requested_reviewers,omitempty"`
+	CreatedAt          time.Time          `json:"created_at"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+	MergedAt           *time.Time         `json:"merged_at,omitempty"`
+	CommentCount       int                `json:"comment_count,omitempty"`
+	UnresolvedCount    int                `json:"unresolved_count,omitempty"`
+	CheckpointCount    int                `json:"checkpoint_count,omitempty"`
+	CommitsAhead       int                `json:"commits_ahead,omitempty"`
+	BodyDocument       *TrailBodyDocument `json:"body_document,omitempty"`
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
 // is the rendered plain text displayed by the CLI. The document is also what a
 // body write returns (see TrailBodyRequest), so both directions decode into this
-// type; the fields the CLI does not use (id, documentKey, schemaVersion,
-// contentJson, updatedAt) are simply left out of it. ETag is populated on a
+// type; the fields the CLI does not use (id, document_key, schema_version,
+// content_json, updated_at) are simply left out of it. ETag is populated on a
 // read as well as on a write response, and is what makes If-Match viable on
 // the next write (see sendTrailBody).
 type TrailBodyDocument struct {
-	TextSnapshot string `json:"textSnapshot"`
+	TextSnapshot string `json:"text_snapshot"`
 	ETag         string `json:"etag,omitempty"`
 }
 
@@ -81,8 +81,8 @@ func (r *TrailResource) ToMetadata() *trail.Metadata {
 type TrailCreateRequest struct {
 	Title        string   `json:"title"`
 	Body         string   `json:"body,omitempty"`
-	BranchName   string   `json:"branchName,omitempty"`
-	BranchAction string   `json:"branchAction,omitempty"`
+	BranchName   string   `json:"branch_name,omitempty"`
+	BranchAction string   `json:"branch_action,omitempty"`
 	Base         string   `json:"base,omitempty"`
 	Status       string   `json:"status,omitempty"`
 	Assignees    []string `json:"assignees,omitempty"`
@@ -110,7 +110,7 @@ type TrailUpdateRequest struct {
 	Status             *string   `json:"status,omitempty"`
 	Title              *string   `json:"title,omitempty"`
 	Assignees          *[]string `json:"assignees,omitempty"`
-	RequestedReviewers *[]string `json:"requestedReviewers,omitempty"`
+	RequestedReviewers *[]string `json:"requested_reviewers,omitempty"`
 	Type               *string   `json:"type,omitempty"`
 	Priority           *string   `json:"priority,omitempty"`
 }
@@ -128,10 +128,10 @@ type TrailUpdateResponse struct {
 // Markdown carries no omitempty: an empty string is how a description is
 // cleared, and the server distinguishes present-and-empty from absent — with
 // omitempty the field would vanish from the JSON and the request would be
-// rejected as "exactly one of markdown/contentJson is required".
+// rejected as "exactly one of markdown/content_json is required".
 //
-// The route also accepts contentJson (ProseMirror JSON, written as-is) in place
-// of markdown; the CLI only ever writes Markdown, so contentJson is not
+// The route also accepts content_json (ProseMirror JSON, written as-is) in place
+// of markdown; the CLI only ever writes Markdown, so content_json is not
 // modeled here. The route also accepts an If-Match header for optimistic
 // concurrency, populated from a prior read of TrailBodyDocument.ETag — see
 // sendTrailBody for the dispatch between If-Match and Overwrite.
@@ -149,8 +149,8 @@ type TrailApproval struct {
 	Author    string    `json:"author"`
 	Event     string    `json:"event"`
 	Body      string    `json:"body,omitempty"`
-	CommitSHA string    `json:"commitSha,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	CommitSHA string    `json:"commit_sha,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (a *TrailApproval) UnmarshalJSON(data []byte) error {
@@ -159,8 +159,8 @@ func (a *TrailApproval) UnmarshalJSON(data []byte) error {
 		Author    json.RawMessage `json:"author"`
 		Event     string          `json:"event"`
 		Body      *string         `json:"body"`
-		CommitSHA string          `json:"commitSha"`
-		CreatedAt time.Time       `json:"createdAt"`
+		CommitSHA string          `json:"commit_sha"`
+		CreatedAt time.Time       `json:"created_at"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return fmt.Errorf("decode trail approval: %w", err)

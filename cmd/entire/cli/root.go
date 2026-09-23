@@ -109,14 +109,20 @@ func NewRootCmd() *cobra.Command {
 			HiddenDefaultCmd: true,
 		},
 		// PersistentPreRunE, not PersistentPreRun, so the `.entire` check can
-		// stop the command. Every check below it reads or writes through
+		// stop the command. Everything below that check reads or writes through
 		// `.entire` — IsSetUpAny stats .entire/settings.json and ensureLogger
-		// opens .entire/logs/entire.log — so the guard has to come first.
+		// opens .entire/logs/entire.log — so it has to precede them. Only
+		// validateContextFlag is allowed above it, because it touches nothing
+		// under `.entire`: it reads the flag and the saved logins in the user's
+		// config dir.
 		// cobra.EnableTraverseRunHooks (set in init) runs parent hooks before
 		// child ones, so this fires ahead of the group pre-runs and every RunE.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if isShellCompletion(cmd) {
 				return nil
+			}
+			if err := validateContextFlag(cmd); err != nil {
+				return err
 			}
 			safe, err := checkEntireDirBeforeRun(cmd)
 			if err != nil {
@@ -146,9 +152,7 @@ func NewRootCmd() *cobra.Command {
 				telemetryEnabled = settings.Telemetry
 			}
 
-			// Check if telemetry is enabled
 			if telemetryEnabled != nil && *telemetryEnabled {
-				// Use detached tracking (non-blocking)
 				installedAgents := GetAgentsWithHooksInstalled(cmd.Context())
 				agentStr := JoinAgentNames(installedAgents)
 				telemetry.TrackCommandDetached(cmd, agentStr, settings.Enabled, versioninfo.Version)

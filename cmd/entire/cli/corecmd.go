@@ -89,16 +89,16 @@ func forceRequested(cmd *cobra.Command) bool {
 func runControlPlaneDelete(
 	cmd *cobra.Command,
 	noun, ref string,
-	resolve func(context.Context, *coreapi.Client) (string, error),
+	resolve func(context.Context, *coreapi.Client) (resolvedRef, error),
 	del func(context.Context, *coreapi.Client, string) error,
 ) error {
 	force := forceRequested(cmd)
 	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		id, err := resolve(ctx, c)
+		resolved, err := resolve(ctx, c)
 		if err != nil {
 			return err
 		}
-		label := noun + " " + resolvedRefLabel(ref, id)
+		label := noun + " " + resolvedRefLabel(ref, resolved)
 		proceed, err := confirmControlPlaneDeletion(ctx, cmd.OutOrStdout(), label, force, interactive.CanPromptInteractively())
 		if err != nil {
 			return err
@@ -106,7 +106,7 @@ func runControlPlaneDelete(
 		if !proceed {
 			return nil
 		}
-		if err := del(ctx, c, id); err != nil {
+		if err := del(ctx, c, resolved.ID); err != nil {
 			// Idempotent delete: a resource that's already gone (a 404 from the
 			// delete call — e.g. a ULID passed straight through, or a concurrent
 			// delete) is the desired end state, not an error.

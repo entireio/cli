@@ -183,6 +183,25 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		require.Equal(t, cloneURL, mirror.CloneURL)
 	})
 
+	// Two placements and no terminal — the state every script and CI job is in,
+	// and the one the unit tests can only simulate. What matters is that a
+	// mirror appearing server-side does not change what an unflagged run
+	// resolves to: the answer stays the repo's own primary, and is neither the
+	// mirror nor a refusal demanding --cluster.
+	phase("with no terminal a second placement still resolves the primary", func(t *testing.T) {
+		stdout, _ := mustRunEntire(t, dir, "repo", "remote", "url", ref)
+		require.Equal(t, "entire://"+home.Host+ref, strings.TrimSpace(stdout),
+			"an unflagged run resolves the primary, not the mirror placed above")
+
+		// A cluster the repo is not on reads the same here as on a /gh/ ref:
+		// the clusters it IS on, rather than the failed dial to the named one.
+		_, stderr, err := runEntire(t, dir, "repo", "remote", "url", ref, "--cluster", "no-such-cluster.entire.io")
+		require.Error(t, err)
+		require.Contains(t, stderr, "not mirrored on")
+		require.Contains(t, stderr, home.Host)
+		require.Contains(t, stderr, target.Host)
+	})
+
 	// Anchored on the STATUS token rather than a sentence: the status vocabulary
 	// ("exists", "registered", "ready", "removed") is what the summary table and
 	// the progress lines both carry, while prose moves whenever the reporting is

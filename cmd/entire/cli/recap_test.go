@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
@@ -173,10 +172,7 @@ func TestRunRecap_PrerequisiteErrorsUseErrorWriter(t *testing.T) {
 //
 // Not parallel: it sets ENTIRE_API_BASE_URL and swaps the discovery seam.
 func TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
-	if v, ok := os.LookupEnv(auth.EnvTokenVar); ok {
-		os.Unsetenv(auth.EnvTokenVar)
-		t.Cleanup(func() { os.Setenv(auth.EnvTokenVar, v) }) //nolint:usetesting // restoring a captured value; no t.Unsetenv equivalent
-	}
+	unsetEnv(t, auth.EnvTokenVar)
 	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
 	t.Setenv(api.BaseURLEnvVar, "http://recap.invalid")
@@ -198,10 +194,7 @@ func TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
 //
 // Not parallel: it sets ENTIRE_API_BASE_URL and chdirs into a scratch repo.
 func TestRunRecap_InsecureOverrideMessageNamesTheVariable(t *testing.T) {
-	if v, ok := os.LookupEnv(auth.EnvTokenVar); ok {
-		os.Unsetenv(auth.EnvTokenVar)
-		t.Cleanup(func() { os.Setenv(auth.EnvTokenVar, v) }) //nolint:usetesting // restoring a captured value; no t.Unsetenv equivalent
-	}
+	unsetEnv(t, auth.EnvTokenVar)
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	t.Chdir(repoDir)

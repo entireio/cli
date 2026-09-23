@@ -167,6 +167,31 @@ func TestNativeRepoDetailRow(t *testing.T) {
 	})
 }
 
+// TestNativeUsePlacementsPrimaryIsReachableByCatalogHost pins the invariant
+// `repo remote use` rests on when there is no terminal: the host it offers as
+// the default has to be the one the placement list spells, and the list spells
+// every host through the cluster catalog. Repo.ClusterHost names the same
+// cluster by a second derivation, so a default taken from there is only ever
+// right by coincidence — and when it is not, the command reports the repo is
+// on no cluster it is plainly on.
+func TestNativeUsePlacementsPrimaryIsReachableByCatalogHost(t *testing.T) {
+	t.Parallel()
+	repo := nativeTestRepo()
+	repo.ClusterHost = coreapi.NewOptString("aws-us-east-2.entire.io:8443")
+	placements := nativeUsePlacements(repo, []coreapi.NativeMirrorPlacement{
+		{ClusterSlug: "aws-eu-central-1", Status: coreapi.NativeMirrorPlacementStatusReady},
+	}, nativeTestClusters)
+	require.Len(t, placements, 2, "two placements is what makes the default load-bearing")
+
+	fromCatalog := clusterHostBySlug(nativeTestClusters)[repo.ClusterSlug.Or("")]
+	got, err := selectPlacement(newCloneTestCmd(), placements, "", fromCatalog, clonePlacementPicker())
+	require.NoError(t, err)
+	require.Equal(t, "aws-us-east-2.entire.io", got.ClusterHost, "the primary, not the mirror")
+
+	_, err = selectPlacement(newCloneTestCmd(), placements, "", repo.ClusterHost.Or(""), clonePlacementPicker())
+	require.Error(t, err, "the repo field is a separate derivation and need not match a catalog host")
+}
+
 // TestNativeUsePlacements pins which clusters `repo remote use` will point a
 // remote at: the primary always, and only mirrors that can actually serve a
 // fetch.

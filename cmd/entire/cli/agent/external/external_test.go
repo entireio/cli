@@ -3,6 +3,7 @@ package external
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // testBinaryDir creates a temp directory with a mock entire-agent-test binary.
@@ -131,7 +133,6 @@ const validInfoJSON = `{
   "name": "test",
   "type": "Test Agent",
   "description": "A test agent",
-  "is_preview": true,
   "protected_dirs": [".test"],
   "hook_names": ["session-start", "stop"],
   "capabilities": {
@@ -145,6 +146,43 @@ const validInfoJSON = `{
     "subagent_aware_extractor": false
   }
 }`
+
+func newWriteRecordingAgent(t *testing.T) (*Agent, string, string) {
+	t.Helper()
+	var script string
+	if runtime.GOOS == osWindows {
+		script = strings.ReplaceAll(`@echo off
+if "%1"=="info" goto info
+if "%1"=="get-session-dir" goto sessiondir
+if "%1"=="write-session" goto writesession
+exit /b 1
+:info
+echo {"protocol_version":1,"name":"test","type":"Test Agent","description":"A test agent"}
+exit /b 0
+:sessiondir
+set "session_dir=%~dp0sessions"
+set "session_dir=%session_dir:\=\\%"
+echo {"session_dir":"%session_dir%"}
+exit /b 0
+:writesession
+more > "%~dp0write-session-input"
+exit /b 0
+`, "\n", "\r\n")
+	} else {
+		script = strings.Replace(mockInfoScript(validInfoJSON),
+			`echo '{"session_dir": "/tmp/sessions"}'`,
+			`printf '{"session_dir":"%s/sessions"}\n' "$(dirname "$0")"`, 1)
+		script = strings.Replace(script,
+			"  write-session)\n    exit 0\n    ;;",
+			"  write-session)\n    cat > \"$(dirname \"$0\")/write-session-input\"\n    ;;", 1)
+	}
+	binPath := testBinaryDir(t, script)
+	sessionDir := filepath.Join(filepath.Dir(binPath), "sessions")
+	if err := os.Mkdir(sessionDir, 0o750); err != nil {
+		t.Fatalf("create session directory: %v", err)
+	}
+	return newExternalAgent(t, binPath), sessionDir, filepath.Join(filepath.Dir(binPath), "write-session-input")
+}
 
 func TestRun_AppliesTimeoutWhenNoDeadline(t *testing.T) {
 	// Not parallel: mutates package-level defaultRunTimeout.
@@ -237,6 +275,168 @@ func TestNew_Valid(t *testing.T) {
 	}
 }
 
+func TestWriteSession_RejectsUnsafeReferenceBeforeSubprocess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		wantErr    error
+		sessionRef func(t *testing.T, sessionDir, outsideDir string) string
+	}{
+		{
+			name:    "absolute outside store",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(_ *testing.T, _, outsideDir string) string {
+				return filepath.Join(outsideDir, "session.jsonl")
+			},
+		},
+		{
+			name:    "rooted path",
+			wantErr: agent.ErrOutsideSessionStore,
+			sessionRef: func(_ *testing.T, _, _ string) string {
+				return string(os.PathSeparator) + "outside.jsonl"
+			},
+		},
+		{
+			name:    "relative parent traversal",
+			wantErr: agent.ErrUnsafeSessionName,
+			sessionRef: func(_ *testing.T, _, _ string) string {
+				return filepath.Join("..", "outside.jsonl")
+			},
+		},
+		{
+			name:    "relative nested traversal",
+			wantErr: agent.ErrUnsafeSessionName,
+			sessionRef: func(_ *testing.T, _, _ string) string {
+				return filepath.FromSlash("nested/../../outside.jsonl")
+			},
+		},
+		{
+			name:    "symlinked leaf",
+			wantErr: osroot.ErrSymlinkedPath,
+			sessionRef: func(t *testing.T, sessionDir, outsideDir string) string {
+				t.Helper()
+				ref := filepath.Join(sessionDir, "session.jsonl")
+				if err := os.Symlink(filepath.Join(outsideDir, "session.jsonl"), ref); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+				return ref
+			},
+		},
+		{
+			name:    "symlinked parent",
+			wantErr: osroot.ErrSymlinkedPath,
+			sessionRef: func(t *testing.T, sessionDir, outsideDir string) string {
+				t.Helper()
+				if err := os.Symlink(outsideDir, filepath.Join(sessionDir, "linked")); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+				return filepath.Join(sessionDir, "linked", "session.jsonl")
+			},
+		},
+		{
+			name:    "symlink plus parent traversal",
+			wantErr: agent.ErrUnsafeSessionName,
+			sessionRef: func(t *testing.T, sessionDir, outsideDir string) string {
+				t.Helper()
+				targetDir := filepath.Join(outsideDir, "child")
+				if err := os.Mkdir(targetDir, 0o750); err != nil {
+					t.Fatalf("create symlink target: %v", err)
+				}
+				linked := filepath.Join(sessionDir, "linked")
+				if err := os.Symlink(targetDir, linked); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+				return linked + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "session.jsonl"
+			},
+		},
+		{
+			name:    "alternate data stream",
+			wantErr: agent.ErrUnsafeSessionName,
+			sessionRef: func(_ *testing.T, sessionDir, _ string) string {
+				return filepath.Join(sessionDir, "session.jsonl:stream")
+			},
+		},
+		{
+			name:    "missing store with Windows-normalized traversal",
+			wantErr: agent.ErrUnsafeSessionName,
+			sessionRef: func(t *testing.T, sessionDir, _ string) string {
+				t.Helper()
+				if err := os.Remove(sessionDir); err != nil {
+					t.Fatalf("remove session directory: %v", err)
+				}
+				return filepath.Join(sessionDir, ".. ", "session.jsonl")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ea, sessionDir, marker := newWriteRecordingAgent(t)
+			outsideDir := t.TempDir()
+			sessionRef := tt.sessionRef(t, sessionDir, outsideDir)
+
+			err := ea.WriteSession(t.Context(), &agent.AgentSession{
+				RepoPath:   t.TempDir(),
+				SessionRef: sessionRef,
+			})
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("WriteSession() error = %v, want %v", err, tt.wantErr)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("write-session subprocess was invoked; marker stat error = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(outsideDir, "session.jsonl")); !os.IsNotExist(err) {
+				t.Fatalf("outside file was created; stat error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWriteSession_PreservesOpaqueRelativeReferenceWithMissingStore(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sessionRef string
+	}{
+		{name: "path-like key", sessionRef: "database/session-key"},
+		{name: "dot component", sessionRef: "tenant/../session-key"},
+		{name: "Windows device basename", sessionRef: "CON"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sessionRef := tt.sessionRef
+
+			ea, sessionDir, marker := newWriteRecordingAgent(t)
+			if err := os.Remove(sessionDir); err != nil {
+				t.Fatalf("remove session directory: %v", err)
+			}
+
+			if err := ea.WriteSession(t.Context(), &agent.AgentSession{
+				RepoPath:   t.TempDir(),
+				SessionRef: sessionRef,
+			}); err != nil {
+				t.Fatalf("WriteSession() error = %v", err)
+			}
+
+			data, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatalf("read write-session input: %v", err)
+			}
+			var got AgentSessionJSON
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("decode write-session input: %v", err)
+			}
+			if got.SessionRef != sessionRef {
+				t.Errorf("session_ref = %q, want %q", got.SessionRef, sessionRef)
+			}
+		})
+	}
+}
+
 func TestNew_WrongProtocolVersion(t *testing.T) {
 	t.Parallel()
 
@@ -299,9 +499,6 @@ func TestExternalAgent_Identity(t *testing.T) {
 	if ea.Description() != "A test agent" {
 		t.Errorf("Description() = %q, want %q", ea.Description(), "A test agent")
 	}
-	if !ea.IsPreview() {
-		t.Error("IsPreview() = false, want true")
-	}
 	dirs := ea.ProtectedDirs()
 	if len(dirs) != 1 || dirs[0] != ".test" {
 		t.Errorf("ProtectedDirs() = %v, want [.test]", dirs)
@@ -320,7 +517,6 @@ func TestIsExternal_WithProtectedFilesWrapper(t *testing.T) {
   "name": "test",
   "type": "Test Agent",
   "description": "A test agent",
-  "is_preview": false,
   "protected_dirs": [".test"],
   "protected_files": [".test/config.json"],
   "hook_names": [],
@@ -503,7 +699,6 @@ func TestExternalAgent_CompactTranscript(t *testing.T) {
   "name": "compact-capable",
   "type": "Compact Capable",
   "description": "Agent with transcript compaction",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"compact_transcript": true}
@@ -559,7 +754,6 @@ func TestExternalAgent_CompactTranscript_InvalidBase64(t *testing.T) {
   "name": "compact-capable",
   "type": "Compact Capable",
   "description": "Agent with transcript compaction",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"compact_transcript": true}
@@ -641,7 +835,6 @@ func TestWrap_NoCapabilities(t *testing.T) {
   "name": "minimal",
   "type": "Minimal",
   "description": "Minimal agent",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}
@@ -678,7 +871,6 @@ func TestWrap_HooksOnly(t *testing.T) {
   "name": "hooks-only",
   "type": "Hooks Only",
   "description": "Agent with hooks only",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": ["stop"],
   "capabilities": {"hooks": true}
@@ -712,7 +904,6 @@ func TestWrap_PreparerOnly(t *testing.T) {
   "name": "preparer-only",
   "type": "Preparer Only",
   "description": "Agent with preparer only",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"transcript_preparer": true}
@@ -749,7 +940,6 @@ func TestWrap_AnalyzerAndPreparer(t *testing.T) {
   "name": "analyzer-preparer",
   "type": "Analyzer Preparer",
   "description": "Agent with analyzer and preparer",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"transcript_analyzer": true, "transcript_preparer": true}
@@ -786,7 +976,6 @@ func TestWrap_HooksAnalyzerPreparer(t *testing.T) {
   "name": "hooks-analyzer-preparer",
   "type": "Hooks Analyzer Preparer",
   "description": "Agent with hooks, analyzer and preparer",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": ["stop"],
   "capabilities": {"hooks": true, "transcript_analyzer": true, "transcript_preparer": true}
@@ -826,7 +1015,6 @@ func TestWrap_CompactTranscriptOnly(t *testing.T) {
   "name": "compact-only",
   "type": "Compact Only",
   "description": "Agent with compact transcript only",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {"compact_transcript": true}

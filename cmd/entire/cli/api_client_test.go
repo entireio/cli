@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 
@@ -22,10 +21,7 @@ import (
 //
 // Not parallel: it sets ENTIRE_API_BASE_URL and swaps the discovery seam.
 func TestNewAuthenticatedAPIClient_RejectsInsecureOverrideBeforeResolving(t *testing.T) {
-	if v, ok := os.LookupEnv(auth.EnvTokenVar); ok {
-		os.Unsetenv(auth.EnvTokenVar)
-		t.Cleanup(func() { os.Setenv(auth.EnvTokenVar, v) }) //nolint:usetesting // restoring a captured value; no t.Unsetenv equivalent
-	}
+	unsetEnv(t, auth.EnvTokenVar)
 	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
 	t.Setenv(api.BaseURLEnvVar, "http://data.invalid")
@@ -74,10 +70,7 @@ func TestInsecureDataOverrideNote_NeverEchoesCredentials(t *testing.T) {
 // --insecure-http-auth is the documented opt-in, so the same override must get
 // through it — otherwise local dev against an http data host is unreachable.
 func TestNewAuthenticatedAPIClient_InsecureFlagAllowsHTTPOverride(t *testing.T) {
-	if v, ok := os.LookupEnv(auth.EnvTokenVar); ok {
-		os.Unsetenv(auth.EnvTokenVar)
-		t.Cleanup(func() { os.Setenv(auth.EnvTokenVar, v) }) //nolint:usetesting // restoring a captured value; no t.Unsetenv equivalent
-	}
+	unsetEnv(t, auth.EnvTokenVar)
 	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
 	t.Setenv(api.BaseURLEnvVar, "http://data.invalid")

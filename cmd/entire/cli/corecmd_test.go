@@ -278,3 +278,47 @@ func TestPrintFields(t *testing.T) {
 		t.Errorf("printFields output:\n%q\nwant:\n%q", got, want)
 	}
 }
+
+// TestResolvedRefLabel pins the delete confirmation line: whenever a lookup
+// happened, the line names what the server resolved rather than what the user
+// typed.
+func TestResolvedRefLabel(t *testing.T) {
+	t.Parallel()
+	const id = "01M3427PK3T21NMN3N7Q1EHBG1"
+	for _, tc := range []struct {
+		name string
+		ref  string
+		r    resolvedRef
+		want string
+	}{
+		{
+			name: "path ref names the resolved repo",
+			ref:  "/et/audit1/victim.git",
+			r:    resolvedRef{ID: id, Name: "/et/audit1/victim.git"},
+			want: "/et/audit1/victim.git (" + id + ")",
+		},
+		{
+			name: "bare name ref names the resolved repo",
+			ref:  "victim.git",
+			r:    resolvedRef{ID: id, Name: "/et/audit1/victim.git"},
+			want: "/et/audit1/victim.git (" + id + ")",
+		},
+		{
+			name: "ulid ref stands alone",
+			ref:  id,
+			r:    resolvedRef{ID: id},
+			want: id,
+		},
+		{
+			name: "no server name falls back to the typed ref",
+			ref:  "acme",
+			r:    resolvedRef{ID: id},
+			want: "acme (" + id + ")",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, resolvedRefLabel(tc.ref, tc.r))
+		})
+	}
+}

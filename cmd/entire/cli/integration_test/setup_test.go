@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 )
 
 // TestMain builds the CLI binary once before running all tests.
@@ -86,6 +87,15 @@ func TestMain(m *testing.M) {
 			os.RemoveAll(tmpDir)
 			os.Exit(1)
 		}
+	}
+	// The developer's shell-scoped login selection must not reach the spawned
+	// binary either: ENTIRE_CONFIG_DIR above is an empty directory, so an
+	// inherited ENTIRE_CONTEXT names a login that is not saved there and every
+	// child fails with UnknownContextError before it does anything.
+	if err := os.Unsetenv(contexts.EnvContextVar); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", contexts.EnvContextVar, err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
 	}
 
 	// Same shape, same reason: absence, not a redirected path. ENTIRE_TOKEN

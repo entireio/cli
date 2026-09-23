@@ -172,6 +172,27 @@ func EmptyConfigOverrides() []string {
 	}
 }
 
+// UnsetGlobalConfig removes GIT_CONFIG_GLOBAL for the duration of t so that git
+// and go-git resolve global config from the caller's $HOME (then XDG) again.
+//
+// Use it in a helper that points HOME at a fixture and then expects
+// ~/.gitconfig to be read. GIT_CONFIG_GLOBAL, when set, replaces every standard
+// path with the one file it names, so any inherited value — including the
+// isolation file IsolateProcess and IsolateMain install — makes the fixture
+// unreachable and the helper a no-op.
+//
+// The variable must end up ABSENT, not empty: git and go-git both read an empty
+// GIT_CONFIG_GLOBAL as "no global config at all". t.Setenv registers the
+// restore for the end of the test; os.Unsetenv then clears it for the test's
+// own duration.
+func UnsetGlobalConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+		t.Fatalf("failed to unset GIT_CONFIG_GLOBAL: %v", err)
+	}
+}
+
 func isGitConfigEnv(e string) bool {
 	return strings.HasPrefix(e, "GIT_CONFIG_")
 }

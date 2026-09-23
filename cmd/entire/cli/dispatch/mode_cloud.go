@@ -75,7 +75,9 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		if err != nil {
 			return nil, err
 		}
-		repos = []string{repoFullName}
+		// The origin remote is GitHub by construction; name the forge so a
+		// same-named native repo cannot answer.
+		repos = []string{GitHubForge + "/" + repoFullName}
 	}
 
 	cloud := NewCloudClient(CloudConfig{BaseURL: baseURL, Token: token})

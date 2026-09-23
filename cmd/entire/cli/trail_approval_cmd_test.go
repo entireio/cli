@@ -2,35 +2,129 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildApprovalRequestRequiresMessageForRequestChanges(t *testing.T) {
 	t.Parallel()
-	if _, err := buildApprovalRequest("REQUEST_CHANGES", "  "); err == nil {
-		t.Error("REQUEST_CHANGES without message should be rejected")
+	if _, err := buildApprovalRequest("request_changes", "  "); err == nil {
+		t.Error("request_changes without message should be rejected")
 	}
-	req, err := buildApprovalRequest("REQUEST_CHANGES", "please fix")
+	req, err := buildApprovalRequest("request_changes", "please fix")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Event != "REQUEST_CHANGES" || req.Body != "please fix" {
+	if req.Event != "request_changes" || req.Body != "please fix" {
 		t.Fatalf("req = %#v", req)
 	}
 }
 
 func TestBuildApprovalRequestApproveAllowsEmptyMessage(t *testing.T) {
 	t.Parallel()
-	req, err := buildApprovalRequest("APPROVE", "")
+	req, err := buildApprovalRequest("approve", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Event != "APPROVE" || req.Body != "" {
+	if req.Event != "approve" || req.Body != "" {
 		t.Fatalf("req = %#v", req)
+	}
+}
+
+func TestTrailApprovalCommandsUseCellEvents(t *testing.T) {
+	// Not parallel: replaces the existing client-construction seam.
+	for _, target := range []struct{ repo, base string }{
+		{"gh/acme/widget", "/api/v1/trails/gh/acme/widget"},
+		{"et/acme/widget", "/api/v1/repos/repo_example/trails"},
+	} {
+		for _, tc := range []struct {
+			name, command, message, request, responseEvent, output string
+			wantError                                              bool
+		}{
+			{name: "approve without message", command: "approve", request: `{"event":"approve"}`, responseEvent: "approved", output: "Approved trail #7"},
+			{name: "approve with message", command: "approve", message: "  Looks good  ", request: `{"event":"approve","body":"Looks good"}`, responseEvent: "approved", output: "Approved trail #7"},
+			{name: "request changes", command: "request-changes", message: "  Please fix  ", request: `{"event":"request_changes","body":"Please fix"}`, responseEvent: "changes_requested", output: "Requested changes on trail #7"},
+			{name: "missing reason", command: "request-changes", wantError: true},
+			{name: "blank reason", command: "request-changes", message: " \t\n ", wantError: true},
+		} {
+			t.Run(target.repo+"/"+tc.name, func(t *testing.T) {
+				var posts []string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch r.Method + " " + r.URL.Path {
+					case "GET " + target.base + "/7":
+						_, _ = fmt.Fprint(w, `{"id":"trail-example","number":7,"status":"open","branch":"feature/example"}`)
+					case "POST " + target.base + "/7/approvals":
+						body, err := io.ReadAll(r.Body)
+						if err != nil {
+							t.Error(err)
+							w.WriteHeader(http.StatusBadRequest)
+							return
+						}
+						posts = append(posts, string(body))
+						_, _ = fmt.Fprintf(w, `{"ok":true,"approval":{"id":"approval-example","event":%q,"author":"reviewer-example","commit_sha":"head-example","created_at":"2026-09-01T00:00:00Z"}}`, tc.responseEvent)
+					case "GET " + target.base + "/7/approvals":
+						_, _ = fmt.Fprintf(w, `{"approvals":[{"id":"approval-example","event":%q,"author":"reviewer-example","commit_sha":"head-example","created_at":"2026-09-01T00:00:00Z"}]}`, tc.responseEvent)
+					default:
+						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				defer srv.Close()
+				previous := newTrailAPIClient
+				clientCalls := 0
+				newTrailAPIClient = func(context.Context, bool, string, string, string) (*api.Client, string, error) {
+					clientCalls++
+					return api.NewClientWithBaseURL("token", srv.URL), "repo_example", nil
+				}
+				t.Cleanup(func() { newTrailAPIClient = previous })
+				cmd := newTrailCmd()
+				cmd.SetContext(t.Context())
+				args := []string{tc.command, "7", "--repo", target.repo}
+				if tc.message != "" {
+					args = append(args, "--message", tc.message)
+				}
+				cmd.SetArgs(args)
+				var out, errOut bytes.Buffer
+				cmd.SetOut(&out)
+				cmd.SetErr(&errOut)
+				err := cmd.Execute()
+				if tc.wantError {
+					require.EqualError(t, err, "--message is required when requesting changes")
+					require.Zero(t, clientCalls)
+					return
+				}
+				require.NoError(t, err)
+				require.Len(t, posts, 1)
+				require.JSONEq(t, tc.request, posts[0])
+				require.Equal(t, tc.output+"\n", out.String())
+				out.Reset()
+				cmd = newTrailCmd()
+				cmd.SetContext(t.Context())
+				cmd.SetOut(&out)
+				cmd.SetErr(&errOut)
+				cmd.SetArgs([]string{"approvals", "7", "--repo", target.repo, "--json"})
+				require.NoError(t, cmd.Execute())
+				var got struct {
+					Approvals []struct {
+						Event string `json:"event"`
+					} `json:"approvals"`
+				}
+				require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+				require.Len(t, got.Approvals, 1)
+				require.Equal(t, tc.responseEvent, got.Approvals[0].Event)
+			})
+		}
 	}
 }
 

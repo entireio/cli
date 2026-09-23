@@ -754,14 +754,19 @@ func newCoreServer(t *testing.T) (*httptest.Server, *coreRecorder) {
 	return srv, rec
 }
 
-// isolateLogoutState points config and keyring at temp dirs. ENTIRE_TOKEN is
-// not neutralised here: TestMain isolates it by absence, and setting it blank
-// instead means "set but blank", which ParseEnvToken rejects for every command
-// a seeded context is handed to.
+// isolateLogoutState points config and keyring at temp dirs.
+//
+// ENTIRE_TOKEN goes through unsetEnv rather than t.Setenv(..., ""): blanking it
+// is what ParseEnvToken rejects, so the seeded contexts below would never be
+// reached. #2542 fixed that by leaning on TestMain's process-wide unset; doing
+// it here too keeps the helper true to its name. ENTIRE_CONTEXT is blanked on
+// purpose and is not the same trap — contexts.Active reads it as
+// TrimSpace(...) != "".
 func isolateLogoutState(t *testing.T) {
 	t.Helper()
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	t.Setenv(contexts.EnvContextVar, "")
+	unsetEnv(t, auth.EnvTokenVar)
 	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
 }
 

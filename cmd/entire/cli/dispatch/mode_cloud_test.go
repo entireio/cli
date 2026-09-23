@@ -53,8 +53,9 @@ func TestServerMode_HappyPath(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+		// The origin-derived default names its forge.
 		repos, ok := body["repos"].([]any)
-		if !ok || len(repos) != 1 || repos[0] != testRepoFullName {
+		if !ok || len(repos) != 1 || repos[0] != testRepoSlug {
 			t.Fatalf("unexpected repos payload: %v", body)
 		}
 		if _, ok := body["repo"]; ok {
@@ -197,16 +198,24 @@ func TestAPIToDispatch_DerivesRepoURLs(t *testing.T) {
 		Repos: []APIRepo{
 			{FullName: testRepoFullName},
 			{FullName: "bad/repo)"},
+			{FullName: testRepoSlug},
+			{FullName: "et/myproject/service"},
 		},
 	})
-	if len(got.Repos) != 2 {
-		t.Fatalf("expected two repos, got %+v", got.Repos)
+	if len(got.Repos) != 4 {
+		t.Fatalf("expected four repos, got %+v", got.Repos)
 	}
 	if got.Repos[0].URL != testRepoURL {
 		t.Fatalf("unexpected valid repo URL: %q", got.Repos[0].URL)
 	}
 	if got.Repos[1].URL != "" {
 		t.Fatalf("expected unsafe repo URL to be omitted, got %q", got.Repos[1].URL)
+	}
+	if got.Repos[2].FullName != testRepoSlug || got.Repos[2].URL != testRepoURL {
+		t.Fatalf("a gh/-prefixed echo keeps its name and links to github.com, got %+v", got.Repos[2])
+	}
+	if got.Repos[3].FullName != "et/myproject/service" || got.Repos[3].URL != "" {
+		t.Fatalf("a native repo keeps its name and gets no github.com link, got %+v", got.Repos[3])
 	}
 }
 

@@ -121,7 +121,6 @@ var (
 func (fakePluginAgent) Name() types.AgentName                { return "terminalhire-plugin" }
 func (fakePluginAgent) Type() types.AgentType                { return "TerminalHire" }
 func (fakePluginAgent) Description() string                  { return "fake external plugin for tests" }
-func (fakePluginAgent) IsPreview() bool                      { return true }
 func (fakePluginAgent) ProtectedDirs() []string              { return []string{".terminalhire"} }
 func (fakePluginAgent) ProtectedFiles() []string             { return []string{".terminalhirerc"} }
 func (fakePluginAgent) GetSessionID(*agent.HookInput) string { return "" }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,8 +31,8 @@ func TestParseMirrorCloneRef(t *testing.T) {
 		{name: "missing repo", ref: "/gh/entirehq", wantErr: true},
 		{name: "extra segment", ref: "/gh/entirehq/entire-api/extra", wantErr: true},
 		{name: "dot-only repo", ref: "/gh/entirehq/..", wantErr: true},
-		// Same policy as the native side (see gitDirSuffix): GitHub cannot hold
-		// a name ending in .git, so the suffix is only ever decoration.
+		// GitHub cannot hold a name ending in .git, so here the suffix is only
+		// ever decoration. Contrast the native table below.
 		{name: "git suffix is dropped", ref: "/gh/entirehq/entire-api.git", wantOwner: "entirehq", wantRepo: "entire-api"},
 		{name: "git suffix dropped from a dotted name", ref: "/gh/entirehq/trails.el.git", wantOwner: "entirehq", wantRepo: "trails.el"},
 		// `..git` is not dot-only as typed; it becomes so once the suffix goes,
@@ -78,11 +79,13 @@ func TestParseNativeCloneRef(t *testing.T) {
 		{name: "no leading slash", ref: "et/paul/dogbark", wantProject: "paul", wantRepo: "dogbark"},
 		{name: "uppercase folds server-side", ref: "/et/Paul/DogBark", wantProject: "Paul", wantRepo: "DogBark"},
 		{name: "dotted repo", ref: "/et/paul/entire-trails.el", wantProject: "paul", wantRepo: "entire-trails.el"},
-		// `.git` is never part of a name on either backend (see gitDirSuffix),
-		// so it is dropped before the name is validated.
-		{name: "git suffix is dropped", ref: "/et/paul/dogbark.git", wantProject: "paul", wantRepo: "dogbark"},
-		{name: "git suffix dropped from a dotted name", ref: "/et/paul/entire-trails.el.git", wantProject: "paul", wantRepo: "entire-trails.el"},
-		{name: "only the last git suffix is dropped", ref: "/et/paul/dogbark.git.git", wantProject: "paul", wantRepo: "dogbark.git"},
+		// `.git` is part of a native repo name: entiredb permits an interior
+		// dot and the data plane resolves /et/ paths verbatim, so a repo can be
+		// named "dogbark.git" and trimming names a different one. Contrast the
+		// /gh/ table above.
+		{name: "git suffix is part of the name", ref: "/et/paul/dogbark.git", wantProject: "paul", wantRepo: "dogbark.git"},
+		{name: "git suffix on a dotted name", ref: "/et/paul/entire-trails.el.git", wantProject: "paul", wantRepo: "entire-trails.el.git"},
+		{name: "a doubled suffix is verbatim too", ref: "/et/paul/dogbark.git.git", wantProject: "paul", wantRepo: "dogbark.git.git"},
 		{name: "single-char repo", ref: "/et/paul/x", wantProject: "paul", wantRepo: "x"},
 		{name: "shortest project", ref: "/et/abc/dogbark", wantProject: "abc", wantRepo: "dogbark"},
 		{name: "longest project", ref: "/et/" + maxProject + "/dogbark", wantProject: maxProject, wantRepo: "dogbark"},
@@ -337,25 +340,78 @@ func TestInvalidCloneRefError(t *testing.T) {
 
 const testNativeRepoULID = "01ARZ3NDEKTSV4RRFFQ69G5FBB"
 
-// serveNativeRepo fakes the three-call native resolution chain: project by
-// name, repo by name within the project, then the single-repo GET (the one
-// response that carries clusterHost + path).
+// nativeRepoFixture configures serveNativeRepo's fake control plane beyond the
+// identity chain: the repo's native-mirror placements, the cluster catalog
+// their slugs resolve against, and an optional non-200 status for the mirror
+// listing (a legacy or unconfigured core).
+type nativeRepoFixture struct {
+	repo           coreapi.Repo
+	mirrors        []coreapi.NativeMirrorPlacement
+	clusters       []coreapi.Cluster
+	mirrorsStatus  int
+	clustersStatus int
+	// queriedFullName, when non-nil, is set to the <project>/<repo> full name
+	// the native path lookup was actually asked to resolve. The response below
+	// is canned, so a test that wants to assert the ref it parsed (not just the
+	// fixture it wired up) reaches the request needs this rather than the reply.
+	queriedFullName *string
+}
+
+// serveNativeRepo fakes the two-call native resolution chain: POST
+// /repos/resolve, then the single-repo GET (the one response that carries
+// clusterHost + path). No /projects route is served: a native ref must resolve
+// with repo#pull alone. The mirror listing answers empty, so resolution sees
+// exactly one placement: the home cluster.
 func serveNativeRepo(t *testing.T, repo coreapi.Repo) *coreapi.Client {
+	t.Helper()
+	return serveNativeRepoFixture(t, nativeRepoFixture{repo: repo})
+}
+
+func serveNativeRepoFixture(t *testing.T, fx nativeRepoFixture) *coreapi.Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		var body any
 		switch r.URL.Path {
-		case "/api/v1/projects":
-			body = &coreapi.ListProjectsOutputBody{Project: coreapi.NewOptProject(coreapi.Project{
-				ID: testProjectULID, Name: "paul", OwnerId: testProjectULID, OwnerType: coreapi.ProjectOwnerTypeOrg,
-			})}
-		case "/api/v1/projects/" + testProjectULID + "/repos":
-			body = &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{
-				ID: testNativeRepoULID, Name: repo.Name, OwningProjectId: testProjectULID,
-			})}
+		case "/api/v1/repos/resolve":
+			if fx.queriedFullName != nil {
+				var in coreapi.ResolveReposInputBody
+				if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+					t.Errorf("decode resolve body: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if len(in.Repositories) != 1 {
+					t.Errorf("resolve body = %+v, want one reference", in.Repositories)
+				}
+				if len(in.Repositories) > 0 {
+					*fx.queriedFullName = in.Repositories[0].FullName
+				}
+			}
+			body = nativeResolution("paul/"+fx.repo.Name, testNativeRepoULID)
 		case "/api/v1/repos/" + testNativeRepoULID:
-			body = &repo
+			body = &fx.repo
+		case "/api/v1/repos/" + testNativeRepoULID + "/native-mirrors":
+			if fx.mirrorsStatus != 0 {
+				w.WriteHeader(fx.mirrorsStatus)
+				return
+			}
+			mirrors := fx.mirrors
+			if mirrors == nil {
+				mirrors = []coreapi.NativeMirrorPlacement{}
+			}
+			body = &coreapi.ListNativeMirrorsOutputBody{NativeMirrors: mirrors}
+		case "/api/v1/clusters":
+			if fx.clustersStatus != 0 {
+				w.WriteHeader(fx.clustersStatus)
+				return
+			}
+			if fx.clusters == nil {
+				t.Errorf("unexpected cluster catalog fetch: fixture has no clusters")
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			body = &coreapi.ListClustersOutputBody{Clusters: fx.clusters}
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -369,6 +425,18 @@ func serveNativeRepo(t *testing.T, repo coreapi.Repo) *coreapi.Client {
 	c, err := coreapi.NewWithBearer(srv.URL, "tok")
 	require.NoError(t, err)
 	return c
+}
+
+// readyNativeMirror is a native-mirror placement in the one state the clone
+// path offers as a placement: fully announced and still meant to exist.
+func readyNativeMirror(slug string) coreapi.NativeMirrorPlacement {
+	return coreapi.NativeMirrorPlacement{
+		PlacementId:  "01ARZ3NDEKTSV4RRFFQ69G5FCC",
+		ClusterSlug:  slug,
+		Status:       coreapi.NativeMirrorPlacementStatusReady,
+		DesiredState: coreapi.NativeMirrorPlacementDesiredStateActive,
+		Stage:        coreapi.NativeMirrorPlacementStageAnnounced,
+	}
 }
 
 func TestResolveNativeCloneURL(t *testing.T) {
@@ -385,10 +453,15 @@ func TestResolveNativeCloneURL(t *testing.T) {
 		return r
 	}
 
+	resolve := func(t *testing.T, c *coreapi.Client, clusterSel string) (string, error) {
+		t.Helper()
+		return resolveNativeCloneURL(t.Context(), newCloneTestCmd(), c, "paul", "dogbark", clusterSel, clonePlacementPicker())
+	}
+
 	t.Run("builds the URL from the server's clusterHost and path", func(t *testing.T) {
 		t.Parallel()
 		c := serveNativeRepo(t, native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"))
-		got, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		got, err := resolve(t, c, "")
 		require.NoError(t, err)
 		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
 	})
@@ -396,7 +469,7 @@ func TestResolveNativeCloneURL(t *testing.T) {
 	t.Run("missing path means not ready, not a half-formed URL", func(t *testing.T) {
 		t.Parallel()
 		c := serveNativeRepo(t, native("aws-ap-southeast-2.entire.io", ""))
-		_, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		_, err := resolve(t, c, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no clone URL")
 	})
@@ -404,7 +477,7 @@ func TestResolveNativeCloneURL(t *testing.T) {
 	t.Run("missing cluster host means not ready", func(t *testing.T) {
 		t.Parallel()
 		c := serveNativeRepo(t, native("", "/et/paul/dogbark"))
-		_, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		_, err := resolve(t, c, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no clone URL")
 	})
@@ -412,23 +485,157 @@ func TestResolveNativeCloneURL(t *testing.T) {
 	t.Run("malformed server host is rejected before it reaches git", func(t *testing.T) {
 		t.Parallel()
 		c := serveNativeRepo(t, native("aws-ap-southeast-2.entire.io@evil.com", "/et/paul/dogbark"))
-		_, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		_, err := resolve(t, c, "")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid cluster host")
 	})
+
+	usEast := coreapi.Cluster{Slug: "aws-us-east-2", Jurisdiction: "us", PublicUrl: "https://aws-us-east-2.entire.io"}
+
+	t.Run("--cluster picks a ready native mirror", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:     native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrors:  []coreapi.NativeMirrorPlacement{readyNativeMirror("aws-us-east-2")},
+			clusters: []coreapi.Cluster{usEast},
+		})
+		got, err := resolve(t, c, "aws-us-east-2.entire.io")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-us-east-2.entire.io/et/paul/dogbark", got)
+	})
+
+	t.Run("--cluster still selects the home cluster", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:     native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrors:  []coreapi.NativeMirrorPlacement{readyNativeMirror("aws-us-east-2")},
+			clusters: []coreapi.Cluster{usEast},
+		})
+		got, err := resolve(t, c, "aws-ap-southeast-2.entire.io")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
+	})
+
+	t.Run("several placements and no terminal resolve the home cluster", func(t *testing.T) {
+		t.Parallel()
+		// A native repo's home cluster is its data primary, so it is the answer
+		// a script gets when there is no terminal to pick a mirror on.
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:     native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrors:  []coreapi.NativeMirrorPlacement{readyNativeMirror("aws-us-east-2")},
+			clusters: []coreapi.Cluster{usEast},
+		})
+		got, err := resolve(t, c, "")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
+	})
+
+	t.Run("a mirror that is not ready or marked deleted is not a placement", func(t *testing.T) {
+		t.Parallel()
+		processing := readyNativeMirror("aws-us-east-2")
+		processing.Status = coreapi.NativeMirrorPlacementStatusProcessing
+		deleted := readyNativeMirror("aws-eu-central-1")
+		deleted.DesiredState = coreapi.NativeMirrorPlacementDesiredStateDeleted
+		// No clusters in the fixture: with no ready mirror the catalog must not
+		// be fetched at all, and serveNativeRepoFixture fails the test if it is.
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:    native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrors: []coreapi.NativeMirrorPlacement{processing, deleted},
+		})
+		got, err := resolve(t, c, "")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
+	})
+
+	t.Run("a failed mirror listing degrades to the home cluster", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:          native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrorsStatus: http.StatusNotFound,
+		})
+		got, err := resolve(t, c, "")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
+	})
+
+	t.Run("a failed mirror listing surfaces when --cluster asked for a placement", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:          native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrorsStatus: http.StatusNotFound,
+		})
+		_, err := resolve(t, c, "aws-us-east-2.entire.io")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "list native mirrors")
+	})
+
+	t.Run("a failed catalog fetch degrades to the home cluster", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:           native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrors:        []coreapi.NativeMirrorPlacement{readyNativeMirror("aws-us-east-2")},
+			clustersStatus: http.StatusServiceUnavailable,
+		})
+		got, err := resolve(t, c, "")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
+	})
+
+	t.Run("a failed catalog fetch surfaces when --cluster asked for a placement", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:           native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrors:        []coreapi.NativeMirrorPlacement{readyNativeMirror("aws-us-east-2")},
+			clustersStatus: http.StatusServiceUnavailable,
+		})
+		_, err := resolve(t, c, "aws-us-east-2.entire.io")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "list clusters")
+	})
+
+	t.Run("a cancelled context surfaces instead of degrading to the home cluster", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo: native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		repo := coreapi.Repo{
+			ID:          testNativeRepoULID,
+			ClusterHost: coreapi.NewOptString("aws-ap-southeast-2.entire.io"),
+			Path:        coreapi.NewOptString("/et/paul/dogbark"),
+		}
+		_, err := nativePlacements(ctx, c, &repo, false)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("a mirror slug the catalog cannot resolve safely is omitted", func(t *testing.T) {
+		t.Parallel()
+		evil := coreapi.Cluster{Slug: "aws-us-east-2", Jurisdiction: "us", PublicUrl: "https://aws-us-east-2.entire.io@evil.com"}
+		c := serveNativeRepoFixture(t, nativeRepoFixture{
+			repo:     native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"),
+			mirrors:  []coreapi.NativeMirrorPlacement{readyNativeMirror("aws-us-east-2")},
+			clusters: []coreapi.Cluster{evil},
+		})
+		got, err := resolve(t, c, "")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
+	})
 }
 
-// TestRepoClone_NativeRefRejectsClusterFlag locks in that --cluster (a mirror
-// placement selector) fails fast on a native ref instead of being ignored.
-func TestRepoClone_NativeRefRejectsClusterFlag(t *testing.T) {
+// TestRepoClone_NativeInvalidClusterFlag locks in that a malformed --cluster on
+// a native ref is rejected up front (before any core is dialled), same as the
+// /gh/ branch: the anti-token-leak guard validateClusterHost applies to the
+// user-supplied cluster the clone routes to.
+func TestRepoClone_NativeInvalidClusterFlag(t *testing.T) {
 	t.Parallel()
 	cmd := newRepoCloneCmd()
 	cmd.SetOut(&nopWriter{})
 	cmd.SetErr(&nopWriter{})
-	cmd.SetArgs([]string{"/et/paul/dogbark", "--cluster", "aws-us-east-2.entire.io"})
+	cmd.SetArgs([]string{"/et/paul/dogbark", "--cluster", "aws-us-east-2.entire.io@evil.com"})
 	err := cmd.ExecuteContext(t.Context())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "--cluster applies to /gh/ mirror refs")
+	require.Contains(t, err.Error(), "invalid --cluster")
 }
 
 func TestIsEntireCloneURL(t *testing.T) {
@@ -529,21 +736,21 @@ func TestSelectCloneTarget(t *testing.T) {
 
 	t.Run("single placement returns directly", func(t *testing.T) {
 		t.Parallel()
-		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast}, "", clonePlacementPicker())
+		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast}, "", "", clonePlacementPicker())
 		require.NoError(t, err)
 		require.Equal(t, "aws-us-east-2.entire.io", got.ClusterHost)
 	})
 
 	t.Run("dedupes repeated host to a single placement", func(t *testing.T) {
 		t.Parallel()
-		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, usEast}, "", clonePlacementPicker())
+		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, usEast}, "", "", clonePlacementPicker())
 		require.NoError(t, err)
 		require.Equal(t, "aws-us-east-2.entire.io", got.ClusterHost)
 	})
 
 	t.Run("--cluster picks the matching placement", func(t *testing.T) {
 		t.Parallel()
-		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "aws-eu-west-1.entire.io", clonePlacementPicker())
+		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "aws-eu-west-1.entire.io", "", clonePlacementPicker())
 		require.NoError(t, err)
 		require.Equal(t, "aws-eu-west-1.entire.io", got.ClusterHost)
 	})
@@ -552,25 +759,51 @@ func TestSelectCloneTarget(t *testing.T) {
 		t.Parallel()
 		// DNS hosts are case-insensitive: a mixed-case --cluster must still match
 		// the API's lowercase ClusterHost rather than falsely "not mirrored".
-		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "AWS-EU-West-1.Entire.IO", clonePlacementPicker())
+		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "AWS-EU-West-1.Entire.IO", "", clonePlacementPicker())
 		require.NoError(t, err)
 		require.Equal(t, "aws-eu-west-1.entire.io", got.ClusterHost)
 	})
 
 	t.Run("--cluster with no match errors and lists hosts", func(t *testing.T) {
 		t.Parallel()
-		_, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "aws-ap-south-1.entire.io", clonePlacementPicker())
+		_, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "aws-ap-south-1.entire.io", "", clonePlacementPicker())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "aws-us-east-2.entire.io")
 		require.Contains(t, err.Error(), "aws-eu-west-1.entire.io")
 	})
 
-	t.Run("multiple placements with no terminal errors with a --cluster pointer", func(t *testing.T) {
+	t.Run("--cluster loses to nothing: an explicit miss errors even when a default would match", func(t *testing.T) {
 		t.Parallel()
-		// go test is non-interactive, so the picker path is unreachable here.
-		_, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "", clonePlacementPicker())
-		require.Error(t, err)
+		// The default only stands in for an absent selector. A --cluster the repo
+		// is not on is a typo the user must see, not a reason to clone elsewhere.
+		_, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "aws-ap-south-1.entire.io", "aws-us-east-2.entire.io", clonePlacementPicker())
+		require.ErrorContains(t, err, "aws-ap-south-1.entire.io")
+	})
+
+	t.Run("no terminal resolves the default placement", func(t *testing.T) {
+		t.Parallel()
+		// go test is non-interactive, so this is the path a script or CI run takes.
+		got, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{euWest, usEast}, "", "aws-us-east-2.entire.io", clonePlacementPicker())
+		require.NoError(t, err)
+		require.Equal(t, "aws-us-east-2.entire.io", got.ClusterHost)
+	})
+
+	t.Run("no terminal and the default is not one of the placements errors", func(t *testing.T) {
+		t.Parallel()
+		_, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "", "aws-ap-south-1.entire.io", clonePlacementPicker())
+		require.ErrorContains(t, err, "none of them is aws-ap-south-1.entire.io")
 		require.Contains(t, err.Error(), "--cluster")
+		require.Contains(t, err.Error(), "aws-us-east-2.entire.io")
+		require.Contains(t, err.Error(), "aws-eu-west-1.entire.io")
+	})
+
+	t.Run("no terminal and no known primary asks only for the selector", func(t *testing.T) {
+		t.Parallel()
+		// A caller that could not determine a primary passes none. Phrasing that
+		// as a primary the repo lacks would name an empty host.
+		_, err := selectPlacement(newCloneTestCmd(), []coreapi.ResolvedPlacement{usEast, euWest}, "", "", clonePlacementPicker())
+		require.ErrorContains(t, err, "repo is on 2 clusters; pass --cluster")
+		require.NotContains(t, err.Error(), "none of them is")
 	})
 }
 
