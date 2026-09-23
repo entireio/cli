@@ -180,6 +180,17 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 		slog.String("event", event.Type.String()),
 		slog.String("from", current),
 		slog.String("to", target))
+	// The log sink was bound to the launch worktree; rebind it so the rest of
+	// this hook logs where the work happens.
+	if logging.LoggerFromContext(ctx) != nil {
+		if l, err := newLogger(ctx); err == nil {
+			ctx = logging.WithLogger(ctx, l)
+			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
+				"hook arrived from another worktree",
+				slog.String("event", event.Type.String()),
+				slog.String("from", current))
+		}
+	}
 	return strategy.WithAgentWorkingTree(ctx)
 }
 

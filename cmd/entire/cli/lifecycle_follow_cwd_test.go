@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -55,9 +56,19 @@ func TestFollowAgentWorkingDirectory(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Chdir(parent)
 			paths.ClearWorktreeRootCache()
-			ctx := followAgentWorkingDirectory(context.Background(), ag, &agent.Event{Type: agent.TurnStart, CWD: tc.cwd})
+			launchLogger, err := newLogger(context.Background())
+			require.NoError(t, err)
+			defer launchLogger.Close()
+			ctx := followAgentWorkingDirectory(logging.WithLogger(context.Background(), launchLogger), ag, &agent.Event{Type: agent.TurnStart, CWD: tc.cwd})
 			require.Equal(t, tc.confirmed, strategy.AgentWorkingTreeConfirmed(ctx),
 				"only a payload naming the current tree lets a hook re-home a session")
+			moved := tc.want != parent
+			require.Equal(t, moved, logging.LoggerFromContext(ctx) != launchLogger, "the log sink follows only when the hook moved")
+			if moved {
+				logging.Info(ctx, "probe")
+				require.FileExists(t, filepath.Join(tc.want, ".entire", logging.LogsName, logging.LogFileName),
+					"after the move the hook logs in the worktree it works in")
+			}
 			got, err := os.Getwd()
 			require.NoError(t, err)
 			require.Equal(t, tc.want, resolved(got))
