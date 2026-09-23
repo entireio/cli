@@ -36,46 +36,103 @@ const (
 
 type trailMergeOptions struct {
 	Selector string
+	Branch   string
 	DryRun   bool
 	Force    bool
+	JSON     bool
 }
 
 func newTrailMergeCmd() *cobra.Command {
 	var opts trailMergeOptions
 
 	cmd := &cobra.Command{
-		Use:   "merge",
+		Use:   "merge [<trail>]",
 		Short: "Merge a trail's branch into its base",
 		Long: `Merge a trail's branch into its base branch.
 
-The trail's gates (approvals, CI checks, the base branch's CI, being up to date,
-and any other configured gates) are checked first. When a blocking gate fails,
-the failing gates are listed and nothing is merged.
+If <trail> (a number, id, or branch) is omitted, merges the trail for the
+current branch (or --branch).
 
-Pass --force to merge anyway. This bypasses the failing gates and is recorded
+The trail's gates (approvals, CI checks, the base branch's CI, being up to date,
+and any other configured gates) are checked first. When a blocking gate fails
+or is still pending, the blocking gates are listed and nothing is merged. A
+trail that conflicts with its base is never merged; resolve the conflicts first.
+
+Pass --force to merge anyway. This bypasses the blocking gates and is recorded
 on the trail; the repo's bypass policy decides who may do it.
 
-With --trail, the trail may be given as a number, id, or branch. Without it, the
-trail for the current branch is used. Pass --dry-run to only report whether the
-trail can be merged; it exits non-zero when a gate blocks the merge and --force
-is not given, so it can gate CI.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureTrailRepoHasTarget(cmd, strings.TrimSpace(opts.Selector) != "", "pass --trail"); err != nil {
+Pass --dry-run to only report whether the trail can be merged; it exits
+non-zero when the merge would be refused, so it can gate CI.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.Selector = selectorFromArgs(args)
+			if err := ensureTrailRepoHasTarget(cmd, opts.Selector != "" || strings.TrimSpace(opts.Branch) != "", "pass a trail selector or --branch"); err != nil {
 				return err
 			}
 			return runTrailMerge(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), opts)
 		},
 	}
 
-	cmd.Flags().StringVar(&opts.Selector, "trail", "", "Trail to merge (number, id, or branch; defaults to the current branch's trail)")
+	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Branch of the trail (defaults to current); cannot be combined with a trail selector")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Only check whether the trail can be merged; do not merge")
 	cmd.Flags().BoolVar(&opts.Force, "force", false, "Merge even when blocking gates fail (requires bypass permission)")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output as JSON")
 
 	return cmd
 }
 
-func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, repoOverride string, opts trailMergeOptions) error {
+// trailMergeResultJSON is `trail merge --json`. It is written for every
+// outcome once mergeability has been read, including refusals, which still
+// exit non-zero.
+type trailMergeResultJSON struct {
+	Number         int                     `json:"number"`
+	Branch         string                  `json:"branch"`
+	Base           string                  `json:"base"`
+	HeadSha        *string                 `json:"headSha"`
+	Mergeable      bool                    `json:"mergeable"`
+	ConflictStatus string                  `json:"conflictStatus"`
+	BypassPolicy   string                  `json:"bypassPolicy"`
+	Blockers       []trailMergeBlockerJSON `json:"blockers"`
+	DryRun         bool                    `json:"dryRun"`
+	Merged         bool                    `json:"merged"`
+	Bypassed       bool                    `json:"bypassed"`
+	MergeCommitSha string                  `json:"mergeCommitSha,omitempty"`
+}
+
+type trailMergeBlockerJSON struct {
+	GateKey   string `json:"gateKey"`
+	GateType  string `json:"gateType"`
+	Status    string `json:"status"`
+	Rationale string `json:"rationale,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+func newTrailMergeResultJSON(t *api.TrailResource, m *api.TrailMergeabilityResponse, gates []api.TrailGateResult, dryRun bool) *trailMergeResultJSON {
+	out := &trailMergeResultJSON{
+		Number: t.Number, Branch: t.Branch, Base: t.Base, HeadSha: m.HeadSHA,
+		Mergeable: m.Mergeable, ConflictStatus: m.ConflictStatus, BypassPolicy: m.BypassPolicy,
+		Blockers: make([]trailMergeBlockerJSON, 0, len(gates)), DryRun: dryRun,
+	}
+	for _, g := range gates {
+		b := trailMergeBlockerJSON{GateKey: g.GateKey, GateType: g.GateType, Status: g.Status, URL: trailGateWebURL(g)}
+		if g.Rationale != nil {
+			b.Rationale = strings.TrimSpace(*g.Rationale)
+		}
+		out.Blockers = append(out.Blockers, b)
+	}
+	return out
+}
+
+func runTrailMerge(ctx context.Context, out, errW io.Writer, insecureHTTP bool, repoOverride string, opts trailMergeOptions) error {
+	if opts.Selector != "" && strings.TrimSpace(opts.Branch) != "" {
+		return errors.New("pass a trail selector or --branch, not both")
+	}
+	// With --json the human-readable report is dropped and stdout carries
+	// only the JSON result.
+	w := out
+	if opts.JSON {
+		w = io.Discard
+	}
 	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 		if err != nil {
@@ -85,7 +142,7 @@ func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, re
 		if err != nil {
 			return err
 		}
-		found, err := resolveNumberedTrailAtPath(ctx, client, basePath, forge, owner, repoName, opts.Selector, "")
+		found, err := resolveNumberedTrailAtPath(ctx, client, basePath, forge, owner, repoName, opts.Selector, opts.Branch)
 		if err != nil {
 			return err
 		}
@@ -102,68 +159,91 @@ func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, re
 		printTrailMergeability(w, found, m)
 
 		gates := trailMergeBlockingGates(m)
-		bypassable := len(gates)
-		if !m.Mergeable {
-			fmt.Fprintln(w, "Blocked by:")
-			for _, b := range describeTrailMergeBlockers(m, gates) {
-				fmt.Fprintf(w, "  - %s\n", b)
-			}
+		result := newTrailMergeResultJSON(found, m, gates, opts.DryRun)
+		err = trailMergeAfterRead(ctx, w, client, mergePath, found, m, gates, opts, result)
+		return finishTrailMerge(out, opts.JSON, result, err)
+	})
+}
+
+func finishTrailMerge(out io.Writer, jsonOut bool, result *trailMergeResultJSON, err error) error {
+	if !jsonOut {
+		return err
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if encErr := enc.Encode(result); encErr != nil {
+		return errors.Join(err, encErr)
+	}
+	return err
+}
+
+// trailMergeAfterRead decides and performs the merge once mergeability is in
+// hand, recording the outcome on result for --json.
+func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, mergePath string, found *api.TrailResource,
+	m *api.TrailMergeabilityResponse, gates []api.TrailGateResult, opts trailMergeOptions, result *trailMergeResultJSON,
+) error {
+	bypassable := len(gates)
+	if !m.Mergeable {
+		fmt.Fprintln(w, "Blocked by:")
+		for _, b := range describeTrailMergeBlockers(m, gates) {
+			fmt.Fprintf(w, "  - %s\n", b)
 		}
-		// Checked before --force and --dry-run: a conflict is not a gate, so
-		// no bypass can get past it and no hint may suggest one.
-		if m.ConflictStatus == trailConflictConflicting {
-			return trailMergeConflictError(found)
+	}
+	// Checked before --force and --dry-run: a conflict is not a gate, so
+	// no bypass can get past it and no hint may suggest one.
+	if m.ConflictStatus == trailConflictConflicting {
+		return trailMergeConflictError(found)
+	}
+	bypass := !m.Mergeable
+	if bypass {
+		if !opts.Force || bypassable == 0 {
+			return trailMergeBlockedError(found.Number, m, gates)
 		}
-		bypass := !m.Mergeable
+		if !trailBypassAllowed(m.BypassPolicy) {
+			return trailBypassNotAllowedError(found.Number, m.BypassPolicy)
+		}
+		if trailMergeHead(m) == "" {
+			return fmt.Errorf("cannot merge trail #%d with --force: the server did not report its head commit, so the bypass cannot be pinned to the commit whose gates were checked", found.Number)
+		}
+	}
+
+	if opts.DryRun {
 		if bypass {
-			if !opts.Force || bypassable == 0 {
-				return trailMergeBlockedError(found.Number, m, gates)
-			}
-			if !trailBypassAllowed(m.BypassPolicy) {
-				return trailBypassNotAllowedError(found.Number, m.BypassPolicy)
-			}
-			if trailMergeHead(m) == "" {
-				return fmt.Errorf("cannot merge trail #%d with --force: the server did not report its head commit, so the bypass cannot be pinned to the commit whose gates were checked", found.Number)
-			}
-		}
-
-		if opts.DryRun {
-			if bypass {
-				fmt.Fprintf(w, "Trail #%d is blocked; --force would bypass %d blocking %s, subject to the repo's bypass policy (%s) (dry run; no merge performed).\n",
-					found.Number, bypassable, pluralize("gate", bypassable), trailBypassPolicyDisplay(m.BypassPolicy))
-			} else {
-				fmt.Fprintf(w, "Trail #%d is mergeable (dry run; no merge performed).\n", found.Number)
-			}
-			return nil
-		}
-
-		// Bypass only what was shown: a trail that was mergeable when read
-		// merges without bypass, so a gate failing in between is refused
-		// rather than bypassed unseen.
-		req := api.TrailMergeRequest{Bypass: bypass, ExpectedHeadSha: trailMergeHead(m)}
-		res, err := postTrailMerge(ctx, client, mergePath, found.Number, req, m.BypassPolicy)
-		if err != nil {
-			return err
-		}
-
-		// The server sends no SHA both for a fast-forward and when the base
-		// already had the head, and does not say which.
-		commit := "no merge commit"
-		if sha := tuiutil.SanitizeDisplayText(strings.TrimSpace(res.MergeCommitSha)); sha != "" {
-			commit = sha
-		}
-		base := tuiutil.SanitizeDisplayText(strings.TrimSpace(found.Base))
-		if base == "" {
-			base = "its base"
-		}
-		if bypass {
-			fmt.Fprintf(w, "Merged trail #%d into %s (%s), bypassing %d blocking %s\n",
-				found.Number, base, commit, bypassable, pluralize("gate", bypassable))
+			fmt.Fprintf(w, "Trail #%d is blocked; --force would bypass %d blocking %s, subject to the repo's bypass policy (%s) (dry run; no merge performed).\n",
+				found.Number, bypassable, pluralize("gate", bypassable), trailBypassPolicyDisplay(m.BypassPolicy))
 		} else {
-			fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
+			fmt.Fprintf(w, "Trail #%d is mergeable (dry run; no merge performed).\n", found.Number)
 		}
 		return nil
-	})
+	}
+
+	// Bypass only what was shown: a trail that was mergeable when read
+	// merges without bypass, so a gate failing in between is refused
+	// rather than bypassed unseen.
+	req := api.TrailMergeRequest{Bypass: bypass, ExpectedHeadSha: trailMergeHead(m)}
+	res, err := postTrailMerge(ctx, client, mergePath, found.Number, req, m.BypassPolicy)
+	if err != nil {
+		return err
+	}
+	result.Merged, result.Bypassed, result.MergeCommitSha = true, bypass, res.MergeCommitSha
+
+	// The server sends no SHA both for a fast-forward and when the base
+	// already had the head, and does not say which.
+	commit := "no merge commit"
+	if sha := tuiutil.SanitizeDisplayText(strings.TrimSpace(res.MergeCommitSha)); sha != "" {
+		commit = sha
+	}
+	base := tuiutil.SanitizeDisplayText(strings.TrimSpace(found.Base))
+	if base == "" {
+		base = "its base"
+	}
+	if bypass {
+		fmt.Fprintf(w, "Merged trail #%d into %s (%s), bypassing %d blocking %s\n",
+			found.Number, base, commit, bypassable, pluralize("gate", bypassable))
+	} else {
+		fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
+	}
+	return nil
 }
 
 func trailMergeHead(m *api.TrailMergeabilityResponse) string {
@@ -497,13 +577,22 @@ func describeGateFailure(g api.TrailGateResult) string {
 		reason = strings.TrimSpace(g.Status)
 	}
 	line := name + ": " + reason
+	if u := trailGateWebURL(g); u != "" {
+		line += " (" + u + ")"
+	}
+	return tuiutil.SanitizeDisplayText(line)
+}
+
+// trailGateWebURL is the link a gate's value carries (e.g. the base branch's
+// CI build), or "".
+func trailGateWebURL(g api.TrailGateResult) string {
 	var value struct {
 		WebURL string `json:"web_url"`
 	}
-	if len(g.Value) > 0 && json.Unmarshal(g.Value, &value) == nil && strings.TrimSpace(value.WebURL) != "" {
-		line += " (" + strings.TrimSpace(value.WebURL) + ")"
+	if len(g.Value) == 0 || json.Unmarshal(g.Value, &value) != nil {
+		return ""
 	}
-	return tuiutil.SanitizeDisplayText(line)
+	return strings.TrimSpace(value.WebURL)
 }
 
 func describeMergeabilityBlockers(m *api.TrailMergeabilityResponse) []string {

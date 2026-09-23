@@ -84,6 +84,8 @@ func (s *trailMergeStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			body = `{"id":"trail-example","number":7,"status":"open","branch":"feature/example","base":"trunk","title":"Example"}`
 		}
 		_, _ = fmt.Fprint(w, body)
+	case "GET " + s.lookupBase:
+		_, _ = fmt.Fprint(w, `{"items":[{"id":"trail-example","number":7,"status":"open","branch":"feature/example","base":"trunk","title":"Example"}]}`)
 	case "GET " + trailMergeRepoPath + "/mergeability":
 		_, _ = fmt.Fprint(w, s.mergeability)
 	case "POST " + trailMergeRepoPath + "/merge":
@@ -113,6 +115,11 @@ func (s *trailMergeStub) mergePosts() []string {
 // Tests using this are not parallel: it replaces the newTrailAPIClient seam.
 func runTrailMergeTest(t *testing.T, stub *trailMergeStub, repo string, args ...string) (string, error) {
 	t.Helper()
+	return runTrailMergeTestArgs(t, stub, append([]string{"merge", "7", "--repo", repo}, args...)...)
+}
+
+func runTrailMergeTestArgs(t *testing.T, stub *trailMergeStub, args ...string) (string, error) {
+	t.Helper()
 	srv := httptest.NewServer(stub)
 	t.Cleanup(srv.Close)
 	previous := newTrailAPIClient
@@ -123,7 +130,9 @@ func runTrailMergeTest(t *testing.T, stub *trailMergeStub, repo string, args ...
 
 	cmd := newTrailCmd()
 	cmd.SetContext(t.Context())
-	cmd.SetArgs(append([]string{"merge", "--trail", "7", "--repo", repo}, args...))
+	cmd.SetArgs(args)
+	cmd.SilenceUsage = true // as the root command does
+	cmd.SilenceErrors = true
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
@@ -403,4 +412,56 @@ func TestTrailMerge_EmptyMergeCommitIsNeutral(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, out, "Merged trail #7 into trunk (no merge commit)")
 	require.NotContains(t, out, "fast-forward")
+}
+
+func TestTrailMerge_Selectors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "positional number", args: []string{"merge", "7", "--repo", "et/acme/widget"}},
+		{name: "branch flag", args: []string{"merge", "--branch", "feature/example", "--repo", "et/acme/widget"}},
+		{name: "selector and branch", args: []string{"merge", "7", "--branch", "feature/example", "--repo", "et/acme/widget"}, wantErr: "pass a trail selector or --branch, not both"},
+		{name: "repo without target", args: []string{"merge", "--repo", "et/acme/widget"}, wantErr: "--repo requires an explicit target"},
+		{name: "too many args", args: []string{"merge", "7", "8", "--repo", "et/acme/widget"}, wantErr: "accepts at most 1 arg"},
+		{name: "trail flag is gone", args: []string{"merge", "--trail", "7", "--repo", "et/acme/widget"}, wantErr: "unknown flag: --trail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t), mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`}
+			out, err := runTrailMergeTestArgs(t, stub, tc.args...)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				require.Empty(t, stub.mergePosts())
+				return
+			}
+			require.NoError(t, err)
+			require.Contains(t, out, "Merged trail #7 into trunk (merge-example)")
+			require.Len(t, stub.mergePosts(), 1)
+		})
+	}
+}
+
+func TestTrailMerge_JSON(t *testing.T) {
+	t.Run("merged", func(t *testing.T) {
+		stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t), mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`}
+		out, err := runTrailMergeTest(t, stub, "et/acme/widget", "--json")
+
+		require.NoError(t, err)
+		require.JSONEq(t, `{"number":7,"branch":"feature/example","base":"trunk","headSha":"head-example",
+			"mergeable":true,"conflictStatus":"clean","bypassPolicy":"admins","blockers":[],
+			"dryRun":false,"merged":true,"bypassed":false,"mergeCommitSha":"merge-example"}`, out)
+	})
+	t.Run("blocked dry run", func(t *testing.T) {
+		stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, blocked, baseChecksRed)}
+		out, err := runTrailMergeTest(t, stub, "et/acme/widget", "--json", "--dry-run")
+
+		require.Error(t, err, "a blocked trail still exits non-zero with --json")
+		require.JSONEq(t, `{"number":7,"branch":"feature/example","base":"trunk","headSha":"head-example",
+			"mergeable":false,"conflictStatus":"clean","bypassPolicy":"admins",
+			"blockers":[{"gateKey":"base_checks","gateType":"base_checks","status":"failed",
+				"rationale":"trunk is red: acme/entire-api build #1234 failed","url":"https://buildkite.com/acme/entire-api/builds/1234"}],
+			"dryRun":true,"merged":false,"bypassed":false}`, out)
+		require.Empty(t, stub.mergePosts())
+	})
 }
