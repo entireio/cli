@@ -121,10 +121,21 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
-		if step.TokenUsage != nil {
-			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
-			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
-			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
+		tokenUsage := step.TokenUsage
+		if step.TurnTokenUsage != nil {
+			turnUsage := *step.TurnTokenUsage
+			turnUsage.SubagentTokens = nil
+			tokenUsage = types.SubtractTokenUsage(&turnUsage, state.TurnTokenUsage)
+			// A smaller snapshot must not lower the credited baseline and let a
+			// later recovery count the same tokens again.
+			state.TurnTokenUsage = types.AddTokenUsage(state.TurnTokenUsage, tokenUsage)
+			// Subagents remain session-cumulative snapshots, independent of the turn.
+			tokenUsage.SubagentTokens = step.TurnTokenUsage.SubagentTokens
+		}
+		if tokenUsage != nil {
+			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, tokenUsage)
+			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, tokenUsage)
+			// tokenUsage.SubagentTokens is a cumulative-since-session-start
 			// snapshot (agent IDs are discovered from the full transcript and each
 			// subagent's own transcript is re-read from its start on every call —
 			// see CalculateTotalTokenUsage in the claudecode/factoryaidroid
@@ -140,7 +151,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			// Derive the checkpoint delta FRESH each call from the session-wide
 			// cumulative (state.TokenUsage.SubagentTokens) minus the baseline —
 			// do NOT mutate CheckpointTokenUsage.SubagentTokens in place. A later
-			// step in the same window can carry step.TokenUsage != nil but
+			// step in the same window can carry tokenUsage != nil but
 			// SubagentTokens == nil (the subagent transcript was cleaned up, so
 			// CalculateTotalTokenUsage returned APICallCount==0 and left it nil);
 			// accumulateTokenUsage then leaves CheckpointTokenUsage.SubagentTokens
