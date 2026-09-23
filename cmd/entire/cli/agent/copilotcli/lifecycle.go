@@ -133,6 +133,7 @@ func (c *CopilotCLIAgent) buildUserPromptSubmitted(ctx context.Context, env *hoo
 	return &agent.Event{
 		Type:       agent.TurnStart,
 		SessionID:  env.SessionID,
+		CWD:        env.CWD,
 		SessionRef: transcriptRef,
 		Prompt:     env.Prompt,
 		Timestamp:  env.Timestamp,
@@ -143,6 +144,7 @@ func (c *CopilotCLIAgent) buildSessionStart(env *hookEnvelope) *agent.Event {
 	return &agent.Event{
 		Type:      agent.SessionStart,
 		SessionID: env.SessionID,
+		CWD:       env.CWD,
 		Timestamp: env.Timestamp,
 	}
 }
@@ -156,6 +158,7 @@ func (c *CopilotCLIAgent) buildAgentStop(ctx context.Context, env *hookEnvelope)
 		return &agent.Event{
 			Type:      agent.SessionEnd,
 			SessionID: env.SessionID,
+			CWD:       env.CWD,
 			Timestamp: env.Timestamp,
 		}
 	}
@@ -168,6 +171,7 @@ func (c *CopilotCLIAgent) buildAgentStop(ctx context.Context, env *hookEnvelope)
 	return &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  env.SessionID,
+		CWD:        env.CWD,
 		SessionRef: env.TranscriptPath,
 		Model:      model,
 		Timestamp:  env.Timestamp,
@@ -194,6 +198,7 @@ func (c *CopilotCLIAgent) buildSessionEnd(env *hookEnvelope) *agent.Event {
 	return &agent.Event{
 		Type:      agent.SessionEnd,
 		SessionID: env.SessionID,
+		CWD:       env.CWD,
 		Timestamp: env.Timestamp,
 	}
 }
@@ -217,6 +222,7 @@ func (c *CopilotCLIAgent) buildSubagentStop(ctx context.Context, env *hookEnvelo
 	return &agent.Event{
 		Type:                          agent.SubagentEnd,
 		SessionID:                     env.SessionID,
+		CWD:                           env.CWD,
 		SessionRef:                    env.TranscriptPath,
 		Timestamp:                     env.Timestamp,
 		ToolUseID:                     evidence.ToolUseID,
