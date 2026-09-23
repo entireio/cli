@@ -1,7 +1,9 @@
 // Package transport implements the HTTP layer the helper protocol
 // speaks against: a Proxy that talks to one or more Entire data-plane
 // replicas, applies failover on connection errors and 5xx responses,
-// and bridges the warm/cold paths driven by X-Entire-Replicas.
+// and bridges the warm/cold paths driven by X-Entire-Replicas. A
+// receive-pack POST fails over only when its earlier attempt cannot have
+// applied (see push_outcome.go).
 //
 // The Proxy is decoupled from authentication via a SetAuthFunc — the
 // caller (cmd/entire's runRemoteHelper) wires the scoped-token mint in
@@ -193,6 +195,12 @@ func (p *Proxy) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) == 0 {
 		return nil
 	}
+	// A push goes only to a node the helper chose. Following a redirect
+	// would send it to a host the server chose; doWithFailover reports the
+	// redirect instead.
+	if isReceivePackPost(via[0].Method, via[0].URL.Path) {
+		return http.ErrUseLastResponse
+	}
 	if p.clusterHost != "" && !discovery.HostInCluster(req.URL.Hostname(), p.clusterHost) {
 		debuglog.Printf("redirect to %s is out-of-cluster (cluster=%s); stripping Authorization", req.URL.Host, p.clusterHost)
 		req.Header.Del("Authorization")
@@ -368,10 +376,21 @@ func (p *Proxy) retryOn401(client *http.Client, resp *http.Response, build func(
 // the replica list). Connection errors and 5xx responses trigger
 // failover to the next node. The failed node is removed from the list
 // and OnNodeFailed is called.
+//
+// A receive-pack POST fails over only when the earlier attempt cannot have
+// applied; see push_outcome.go. Otherwise it returns a
+// PushOutcomeUnknownError and sends nothing more.
 func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method string, body io.ReadSeeker, setHeaders func(*http.Request)) (*http.Response, error) {
 	nodes := slices.Clone(p.nodes)
 	if len(nodes) == 0 {
 		return nil, errors.New("no healthy nodes available")
+	}
+	var upload *uploadTracker
+	if isReceivePackPost(method, makeSuffix) {
+		var err error
+		if upload, err = newUploadTracker(body); err != nil {
+			return nil, err
+		}
 	}
 	start := rand.IntN(len(nodes)) //nolint:gosec // load-spreading, not security
 	if p.stickyNode != "" {
@@ -395,7 +414,7 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		// rather than a replayed stale header.
 		build := func() (*http.Request, error) {
 			var bodyReader io.Reader
-			if body != nil {
+			if body != nil && upload == nil {
 				if _, err := body.Seek(0, io.SeekStart); err != nil {
 					return nil, fmt.Errorf("resetting request body: %w", err)
 				}
@@ -404,6 +423,9 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 			if err != nil {
 				return nil, fmt.Errorf("creating request: %w", err)
+			}
+			if upload != nil {
+				upload.attach(req)
 			}
 			if err := p.setAuthOrError(req); err != nil {
 				return nil, err
@@ -422,12 +444,19 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 		resp, err := p.client.Do(req)
 		if err != nil {
 			debuglog.Printf("node %s unreachable: %v", node, err)
+			if upload != nil {
+				if unknown := writeTransportError(node, upload, err); unknown != nil {
+					return nil, unknown
+				}
+			}
 			lastErr = err
 			p.markNodeFailed(node)
 			continue
 		}
 
-		if resp.StatusCode == http.StatusUnauthorized && !authRetried {
+		// A 401 is the node's final answer, so a push that drew one did not
+		// apply and may be resent.
+		if resp.StatusCode == http.StatusUnauthorized && !authRetried && !outcomeIndeterminate(resp) {
 			authRetried = true
 			debuglog.Printf("node %s returned HTTP 401; retrying once with a freshly minted token", node)
 			// The retry hits the same node it 401'd on. Surface any error
@@ -437,7 +466,23 @@ func (p *Proxy) doWithFailover(ctx context.Context, makeSuffix string, method st
 			// auth-provider outage, and the 401 already told us the node is up.
 			resp, err = p.retryOn401(p.client, resp, build)
 			if err != nil {
+				if upload != nil {
+					if unknown := writeTransportError(node, upload, err); unknown != nil {
+						return nil, unknown
+					}
+				}
 				return nil, err
+			}
+		}
+
+		if upload != nil {
+			failover, err := writeResponseError(node, resp, upload.complete())
+			if err != nil {
+				debuglog.Printf("node %s: push not resent: %v", node, err)
+				return nil, err
+			}
+			if failover {
+				debuglog.Printf("node %s returned HTTP %d before the push could apply; failing over", node, resp.StatusCode)
 			}
 		}
 

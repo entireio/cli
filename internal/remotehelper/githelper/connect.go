@@ -68,7 +68,9 @@ func handleConnect(ctx context.Context, t Transport, service string, stdin io.Re
 	defer resp.Close()
 
 	if _, err := io.Copy(stdout, resp); err != nil {
-		return fmt.Errorf("streaming response: %w", err)
+		// Git parses report-status from this stream. A break in it leaves
+		// the server's result unknown.
+		return pushOutcomeUnknown(fmt.Errorf("streaming response: %w", err))
 	}
 
 	return nil

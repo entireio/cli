@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
 	"github.com/entireio/cli/internal/remotehelper/gitproto"
+	"github.com/entireio/cli/internal/remotehelper/transport"
 )
 
 // handlePush implements the git-remote-helpers "push" / "push for-push"
@@ -169,12 +170,15 @@ func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine st
 		// resp is closed by the feeder goroutine (above), not here — closing
 		// while io.Copy is mid-read aborts the body Read with "use of closed
 		// network connection" and turns successful pushes into fatal errors.
+		//
+		// send-pack writes this flush only after it parsed the whole
+		// report-status. Without it the server's result is unknown.
 		flushBuf := make([]byte, 4)
 		if _, err := io.ReadFull(spOutReader, flushBuf); err != nil {
-			return fmt.Errorf("reading send-pack trailing flush: %w", err)
+			return pushOutcomeUnknown(fmt.Errorf("reading send-pack trailing flush: %w", err))
 		}
 		if string(flushBuf) != "0000" {
-			return fmt.Errorf("expected trailing flush from send-pack, got %q", flushBuf)
+			return pushOutcomeUnknown(fmt.Errorf("expected trailing flush from send-pack, got %q", flushBuf))
 		}
 	}
 
@@ -213,7 +217,18 @@ func handlePush(ctx context.Context, t Transport, adv *refAdvCache, firstLine st
 		return nil
 	}
 	if feedRes != nil {
-		return errors.Join(feedRes, fmt.Errorf("send-pack exited after feeder error: %w", spErr))
+		err := errors.Join(feedRes, fmt.Errorf("send-pack exited after feeder error: %w", spErr))
+		if requestBody.Len() > 0 {
+			// The response broke off before send-pack read a complete
+			// report-status, so the server's result is unknown.
+			return pushOutcomeUnknown(err)
+		}
+		return err
+	}
+	if requestBody.Len() > 0 && len(bytes.TrimSpace(helperStatus)) == 0 {
+		// send-pack reports every ref it parsed from report-status. No
+		// status after a POST means it read no complete report.
+		return pushOutcomeUnknown(fmt.Errorf("send-pack exited without a ref status: %w", spErr))
 	}
 	return fmt.Errorf("send-pack exited with error: %w", spErr)
 }
@@ -245,6 +260,12 @@ func readPushBatch(firstLine string, stdin *bufio.Reader) ([]string, error) {
 			return refspecs, nil
 		}
 	}
+}
+
+// pushOutcomeUnknown marks a receive-pack whose report-status never arrived
+// in full, so git prints the recovery guidance instead of a bare error.
+func pushOutcomeUnknown(cause error) error {
+	return transport.PushOutcomeUnknown(cause) //nolint:wrapcheck // the constructor wraps cause itself
 }
 
 func killAndWaitSendPack(sp *exec.Cmd, reason string) {
