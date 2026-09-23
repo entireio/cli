@@ -12,6 +12,7 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/internal/coreapi"
 )
@@ -213,8 +214,10 @@ func defaultListDispatchWizardPlacements(ctx context.Context) (map[string][]stri
 	}
 	out := make(map[string][]string, len(entries))
 	for _, entry := range entries {
-		if slug := strings.ToLower(strings.TrimSpace(entry.FullName)); slug != "" {
-			out[slug] = readyPlacementJurisdictions(entry.Placements)
+		// The index names GitHub mirrors bare; key by the gh/ slug the
+		// picker offers so the join in newDispatchWizardScope holds.
+		if name := strings.ToLower(strings.TrimSpace(entry.FullName)); name != "" {
+			out[dispatchpkg.GitHubForge+"/"+name] = readyPlacementJurisdictions(entry.Placements)
 		}
 	}
 	return out, nil

@@ -157,8 +157,9 @@ func Contexts() ([]*contexts.Context, string, error) {
 	return f.Contexts, sel.Context.Name, nil
 }
 
-// ActiveContext returns the login about to act, or ok=false when there is
-// none, and announces it when several logins are saved.
+// ActiveContext returns the selected login, or ok=false when there is none. It
+// is a plain accessor: it reads, it does not announce. Callers that go on to
+// *act* as the login want ActingContext instead.
 //
 // A context with no CoreURL is reported as ok=false rather than returned: it is
 // an unusable pointer, and treating it as active means dialing an empty host
@@ -169,17 +170,23 @@ func Contexts() ([]*contexts.Context, string, error) {
 // saved context is a hard error, not ok=false: "you asked for a context that
 // doesn't exist" must not degrade into the `entire login` hint.
 func ActiveContext() (c *contexts.Context, ok bool, err error) {
+	_, c, ok, err = activeContextIn()
+	return c, ok, err
+}
+
+// ActingContext is ActiveContext for a caller that is about to act as the
+// login: same resolution, plus the notice naming it when several are saved.
+//
+// The two are separate so the side effect is visible at the call site. A caller
+// that only *describes* the login — setup_identity's git-identity probe,
+// DataBaseURL building a printed link — reads it with ActiveContext and stays
+// silent, and a reader of either call can tell which it is without opening this
+// file.
+func ActingContext() (c *contexts.Context, ok bool, err error) {
 	f, c, ok, err := activeContextIn()
 	if ok {
 		announceContext(len(f.Contexts), c)
 	}
-	return c, ok, err
-}
-
-// activeContext is ActiveContext without the notice, for callers that only
-// describe the login rather than act as it.
-func activeContext() (c *contexts.Context, ok bool, err error) {
-	_, c, ok, err = activeContextIn()
 	return c, ok, err
 }
 

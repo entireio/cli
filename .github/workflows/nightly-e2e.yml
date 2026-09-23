@@ -121,6 +121,33 @@ jobs:
           "NIGHTLY_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "E2E_ENTIRE_BIN=$((Get-Command entire).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # Windows reads the version from the binary's PE resource section, not
+      # from the ldflags stamp `entire version` prints (#2218). Compared against
+      # the tag this nightly was built from, so resources generated for the
+      # wrong version fail here too, not only missing ones.
+      - name: Verify Windows PE version metadata
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Stop is what makes the Write-Error calls below terminating.
+          $ErrorActionPreference = "Stop"
+          # goreleaser passes {{.Version}}, which is the tag without its "v".
+          $expected = $env:NIGHTLY_TAG -replace '^v', ''
+          # The numeric tuple carries major.minor.patch only; the prerelease
+          # suffix lives in the string fields.
+          $expectedNumeric = [version]"$($expected -replace '-.*', '').0"
+          foreach ($name in "entire", "git-remote-entire") {
+            $command = Get-Command $name
+            $product = (Get-Item $command.Source).VersionInfo.ProductVersion
+            Write-Host "$name  $($command.Version)  $product"
+            if ($command.Version -ne $expectedNumeric) {
+              Write-Error "$name PE version is $($command.Version), expected $expectedNumeric from $env:NIGHTLY_TAG"
+            }
+            if ($product -ne $expected) {
+              Write-Error "$name PE product version is '$product', expected '$expected'"
+            }
+          }
+
       - name: Checkout the nightly tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -253,7 +280,7 @@ jobs:
         env:
           AGENT: codex
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          E2E_CODEX_MODEL: gpt-5.6-luna
+          E2E_CODEX_MODEL: gpt-6-luna
         run: |
           set +e
           set -uo pipefail

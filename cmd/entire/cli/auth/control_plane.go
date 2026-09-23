@@ -46,7 +46,7 @@ type ControlPlaneTarget struct {
 // callers render the `entire login` hint. There is no fallback host — a
 // control-plane command without a login has no identity to act as.
 func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
-	c, ok, err := ActiveContext()
+	c, ok, err := ActingContext()
 	if err != nil {
 		return ControlPlaneTarget{}, err
 	}

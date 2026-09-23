@@ -105,6 +105,11 @@ func TestResolve_SeveralEligibleLoginsAreAmbiguous(t *testing.T) {
 	assert.Contains(t, err.Error(), "multiple login contexts can authenticate against cluster cluster1.entire.io")
 	assert.Contains(t, err.Error(), "admin@core-us, alice@core-us", "candidates must be listed in sorted order")
 	assert.Contains(t, err.Error(), "entire auth switch")
+	// The per-command remedy must be named too: `auth switch` mutates the
+	// machine-wide default, and a user holding logins across jurisdictions
+	// should not have to retarget every shell to clone once (COR-1630).
+	assert.Contains(t, err.Error(), "--context <context>")
+	assert.Contains(t, err.Error(), "ENTIRE_CONTEXT=<context>")
 }
 
 // TestResolve_ActiveContextIneligibleAndNothingElseFits: an active context that

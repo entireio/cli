@@ -158,7 +158,6 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
   "name": "` + string(agentName) + `",
   "type": "Hook Test Agent",
   "description": "Agent for hook discovery test",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}

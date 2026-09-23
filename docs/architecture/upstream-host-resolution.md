@@ -186,10 +186,18 @@ host, so the login can follow it; every other API follows the selected login
 instead, and a host that rejects it names the login that would work.
 
 Whenever several logins are saved, every CLI command that acts as one says
-which on stderr, once per process: `Using context 'x'.`
-(`auth.announceContext`, reached through `auth.ActiveContext`). With a single
-saved login nothing is printed. `git-remote-entire` is outside this and keeps
-its own auto-select notice below.
+which on stderr, once per process: `Using context 'x'.` (`auth.AnnounceContext`,
+reached through `auth.ActingContext`). Nothing is printed when only one login is
+saved, nor when the user named the identity for this invocation with
+`--context`/`$ENTIRE_CONTEXT` — echoing back what they just typed is noise, and
+an explicit selection is the only identity the resolvers may act as, so the
+silence cannot hide a different one. `auth.ActiveContext` is the same resolution
+*without* the notice, for callers that only describe the login (a printed link,
+a cache key) rather than act as it, and `auth.SilenceContextNotice` suppresses
+it for a whole process — `entire agent-help` uses that, because its output is
+read by an agent and the login it resolves there authenticates a background
+trail-enablement probe rather than requested work. `git-remote-entire` is
+outside all of this and keeps its own auto-select notice below.
 
 Cell routing with **no** `ENTIRE_API_BASE_URL` matches no host: there is no
 configured data host to match against, and the production default is not a
@@ -211,8 +219,9 @@ precedence:
 The two overrides exist because `auth switch` is the wrong tool for a one-off: it
 mutates state shared by every shell, worktree, and background git hook on the
 machine, so forgetting to switch back silently retargets the next `git push`. And
-a flag alone is not enough — git invokes `git-remote-entire` itself, so
-`ENTIRE_CONTEXT=staging git push` is the *only* way to scope a git operation.
+a flag reaches only what `entire` itself spawns (it exports the flag as
+`ENTIRE_CONTEXT`, below) — a `git push` you run yourself parses no `entire`
+flag, so `ENTIRE_CONTEXT=staging git push` is how that one is scoped.
 
 An override naming no saved context is a hard error
 (`contexts.UnknownContextError`), never a fall-through to `current_context`:
@@ -223,8 +232,11 @@ doesn't exist" and "that context isn't trusted here" are different mistakes.
 Every consumer resolves through `Active`, so the selection is coherent: `auth
 status` reports it and `auth contexts` marks it. `logout` is the one exception:
 it sweeps every stored login (`auth.StoredContexts`), revoking each on its own
-login server with its own bearer, so the override neither narrows it nor fails
-it by naming a context that is gone.
+login server with its own bearer, so an inherited `$ENTIRE_CONTEXT` neither
+narrows it nor fails it by naming a context that is gone. An explicit
+`--context` is refused there instead of ignored: it asks for one identity on a
+command that ends all of them, and honouring the ambient variable the same way
+would make `logout` unrunnable in a shell that exports it.
 
 Two tiers sit underneath, in `clusterdiscovery.selectLoginContext`, and they
 apply only when the identity came from `current_context` (or there is none):
@@ -248,7 +260,30 @@ apply only when the identity came from `current_context` (or there is none):
   gates only the choice made *for* the user, never one they made.
 - several are eligible → an ambiguity error naming them, sorted
   (`clusterdiscovery.ambiguousContextError`). Picking one would make the acting
-  identity depend on what else happens to be stored.
+  identity depend on what else happens to be stored. The error names both
+  remedies — `--context <name>` / `ENTIRE_CONTEXT=<name>` for one command,
+  `entire auth switch <name>` for the machine-wide default — because a
+  cluster that trusts several cores (a `us` cluster advertising both the `us`
+  and `eu` cores, so a cross-jurisdiction login can reach it) makes this the
+  ordinary case for anyone holding a login per jurisdiction, and switching the
+  default to clone once is the wrong lever.
+
+`--context` has to cross a process boundary whenever a built-in command spawns
+git against an `entire://` remote — `repo clone` execs `git clone`, and
+`resume`, `explain`, `trail create` and checkpoint-policy fetch or push —
+because git runs `git-remote-entire` itself and the helper selects a login from
+the saved contexts on its own. The flag is therefore exported into the CLI's own
+environment as `ENTIRE_CONTEXT` the moment it is parsed
+(`exportContextToChildren`, `context_flag.go`), so every process the command
+spawns inherits it through the same channel `ENTIRE_CONTEXT=… git push` already
+uses; that includes agents launched by `review` and `investigate`, whose hooks
+and pushes act as the flag's login while they run. Before the export the helper
+saw only the active context and hit the ambiguity error the flag was passed to
+avoid (COR-1630). A flag naming no saved login is refused in the root pre-run
+(`validateContextFlag`) so the error blames `--context`, not a variable the
+user never set. External plugins (`entire <plugin>`) are dispatched before
+cobra parses flags and never see `--context`; scope one with
+`ENTIRE_CONTEXT=… entire <plugin>`.
 
 An **explicit** `--context`/`$ENTIRE_CONTEXT` never falls through to either: the
 user asked for that identity by name, so acting as another behind their back is

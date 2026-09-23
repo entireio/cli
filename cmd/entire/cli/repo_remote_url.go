@@ -15,12 +15,13 @@ func newRepoRemoteURLCmd() *cobra.Command {
 			"/gh/<owner>/<repo> ref to its entire:// URL. A full entire:// URL is " +
 			"passed through without a lookup.\n\n" +
 			"Prints only the URL and a newline to stdout, suitable for shell substitution. " +
-			"Works from any directory. Native repos resolve to their home cluster; " +
-			"--cluster is accepted only for /gh/ mirror refs — it is rejected on a " +
-			"native ref, which has exactly one home cluster, and ignored for a full " +
-			"entire:// URL, which already names its cluster. " +
-			"For mirrors on multiple clusters, prompts for a placement interactively; " +
-			"pass --cluster to choose non-interactively.",
+			"Works from any directory. Either ref resolves every cluster the repo is " +
+			"readable from — a native repo's home cluster and its ready native mirrors, " +
+			"or a GitHub repo's mirror clusters. On more than one, prompts for a " +
+			"placement interactively, and without a terminal prints the repo's " +
+			"primary cluster; pass --cluster to choose either way. " +
+			"--cluster is ignored for a full entire:// URL, which already names its " +
+			"cluster.",
 		Example: "  entire repo remote url /et/project/example\n" +
 			"  git remote add entire \"$(entire repo remote url /et/project/example)\"\n" +
 			"  entire repo remote url /gh/entirehq/entire-api --cluster aws-us-east-2.entire.io",
@@ -43,7 +44,7 @@ func newRepoRemoteURLCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to use when the repo is mirrored on more than one (may belong to another auth context)")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to use when the repo is readable on more than one (for /gh/ refs it may belong to another auth context)")
 	return cmd
 }
 

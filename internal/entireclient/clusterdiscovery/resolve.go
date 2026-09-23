@@ -17,8 +17,8 @@ import (
 // ResolveContextForCluster picks the local login context to authenticate
 // git operations against clusterHost.
 //
-// It separates two concerns that used to be conflated in a single
-// cluster→context binding:
+// It keeps two concerns separate rather than binding cluster→context
+// directly:
 //
 //   - Which control plane(s) front the cluster — an objective infra fact.
 //     Discovered from the cluster's /.well-known/entire-cluster.json and
@@ -364,9 +364,17 @@ var autoSelectNoticeW io.Writer = os.Stderr
 // chosen. Auto-selection settles a single candidate only: picking among several
 // would make the acting identity depend on what else happens to be stored, so
 // the user picks. Names are sorted, so the message is stable across saves.
+// Both remedies are named, in the same words renderUnusableActiveContext uses
+// for its switchHint: the per-command one first, because a cluster that trusts
+// several cores makes ambiguity the ordinary case for anyone holding a login
+// per jurisdiction, and retargeting every shell to clone once is the wrong
+// lever. `--context` is named as a bare flag rather than inside an `entire …`
+// invocation because git-remote-entire reaches this too (ResolveClusterAuth),
+// so the same sentence prints as `fatal:` during a plain `git push`, where
+// there is no `entire` command to hang the flag on.
 func ambiguousContextError(subject string, eligible []*contexts.Context) error {
-	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); choose one with `entire auth switch <context>` and re-run",
-		subject, strings.Join(contextNames(eligible), ", "))
+	return fmt.Errorf("multiple login contexts can authenticate against %s (%s); name one with `--context <context>` (or %s=<context>) for a single command, or switch the default with `entire auth switch <context>`, then re-run",
+		subject, strings.Join(contextNames(eligible), ", "), contexts.EnvContextVar)
 }
 
 // describeSelection labels a resolved identity for debug output, naming the

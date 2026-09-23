@@ -27,7 +27,7 @@ func TestParseMirrorRepoRef_GitHub(t *testing.T) {
 // and the project/repo pair is passed on as the user spelled it.
 func TestParseMirrorRepoRef_Native(t *testing.T) {
 	t.Parallel()
-	for _, ref := range []string{"/et/my-project/my-repo", "et/my-project/my-repo", "/et/my-project/my-repo.git"} {
+	for _, ref := range []string{"/et/my-project/my-repo", "et/my-project/my-repo"} {
 		t.Run(ref, func(t *testing.T) {
 			t.Parallel()
 			got, err := parseMirrorRepoRef(ref, nativeCloneForge)
@@ -35,6 +35,17 @@ func TestParseMirrorRepoRef_Native(t *testing.T) {
 			require.Equal(t, mirrorRepoRef{forge: nativeCloneForge, owner: "my-project", repo: "my-repo"}, got)
 		})
 	}
+}
+
+// TestParseMirrorRepoRef_NativeKeepsGitSuffix pins that `.git` on a native ref
+// is part of the repo name, not decoration: the data plane resolves /et/ paths
+// verbatim, so trimming here would point at a different repository. Contrast
+// TestParseMirrorRepoRef_GitHub, where the suffix is dropped.
+func TestParseMirrorRepoRef_NativeKeepsGitSuffix(t *testing.T) {
+	t.Parallel()
+	got, err := parseMirrorRepoRef("/et/my-project/my-repo.git", nativeCloneForge)
+	require.NoError(t, err)
+	require.Equal(t, mirrorRepoRef{forge: nativeCloneForge, owner: "my-project", repo: "my-repo.git"}, got)
 }
 
 // TestParseMirrorRepoRef_ServingBothForges pins that one call site can take

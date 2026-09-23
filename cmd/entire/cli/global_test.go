@@ -3,10 +3,12 @@ package cli
 import (
 	"fmt"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/go-git/v6/x/plugin/config"
 	"github.com/zalando/go-keyring"
@@ -38,6 +40,25 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TEST_AUTH_STORE_FILE", filepath.Join(isolationDir, "auth-tokens.json"))
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
+	// A developer running `go test` inside `ENTIRE_CONTEXT=… ` would otherwise
+	// have every File.Active() in the package resolve their shell's selection
+	// (and fail with UnknownContextError against the empty isolated config).
+	// contextFlagValue.Set also writes this variable process-wide; the tests
+	// that call it restore it with t.Setenv, and this keeps a future one that
+	// forgets from poisoning the rest of the run.
+	os.Unsetenv(contexts.EnvContextVar)
+
+	// The ConfigLoader plugin below only isolates go-git's IN-PROCESS config
+	// reads. Production code under test also shells out to git (checkpoint
+	// remote fetches, hooks), and those children read the developer's
+	// ~/.gitconfig unless the whole process is isolated. That is not cosmetic:
+	// a host with transfer.fsckObjects set makes `git fetch` hand the objects
+	// to index-pack instead of unpack-objects, so the fetched commit lands in
+	// a new packfile that the already-open go-git repository never indexes —
+	// the checkpoint-remote heal then reports "object not found" and silently
+	// keeps the empty orphan (ENCLI-378). Set process-wide (not per-test) so
+	// it covers spawned binaries and git hooks. Mirrors the e2e TestMains.
+	gitenv.IsolateMain()
 
 	// ENTIRE_TOKEN is isolated by ABSENCE, not by a redirected path, so it is
 	// not in the block above. Left set, it outranks every stored context in
@@ -65,4 +86,64 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(isolationDir)
 	os.Exit(code)
+}
+
+// unsetEnv makes key absent for the duration of the test, restoring whatever it
+// held — including its absence — afterwards.
+//
+// There is no t.Unsetenv: golang/go#52817 proposed one and it was declined as
+// trivially expressible, and this pair is the workaround from that thread. The
+// t.Setenv does the bookkeeping, taking the parallel guard and registering the
+// restore; os.Unsetenv then makes the variable absent rather than blank.
+//
+// Absent and blank are not interchangeable for every reader, which is why this
+// is a helper and not a t.Setenv(key, "") call. auth.ParseEnvToken is
+// fail-closed and rejects a set-but-blank ENTIRE_TOKEN, so blanking it does not
+// neutralise it, it makes every command that reads it fail before the test's
+// own fixtures are consulted. contexts.Active reads $ENTIRE_CONTEXT as
+// TrimSpace(...) != "", where blank and absent genuinely do coincide.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	os.Unsetenv(key)
+}
+
+// unsetEnv's contract is the reason six call sites could drop a hand-rolled
+// LookupEnv/Cleanup restore, so pin both halves of it: the key is absent rather
+// than blank while the test runs, and whatever was there — a value, or nothing
+// — is back afterwards.
+//
+// Not parallel: t.Setenv.
+func TestUnsetEnv(t *testing.T) {
+	const key = "ENTIRE_TEST_UNSETENV_PROBE"
+
+	t.Run("absent during the test, prior value restored after", func(t *testing.T) {
+		t.Setenv(key, "before")
+		t.Run("inner", func(t *testing.T) {
+			unsetEnv(t, key)
+			if v, ok := os.LookupEnv(key); ok {
+				t.Fatalf("%s = %q, want absent (blank is not absent)", key, v)
+			}
+		})
+		if v, ok := os.LookupEnv(key); !ok || v != "before" {
+			t.Fatalf("%s = (%q, %v) after restore, want (%q, true)", key, v, ok, "before")
+		}
+	})
+
+	t.Run("an already-absent key stays absent after restore", func(t *testing.T) {
+		// Establish the absent prior state rather than assuming it. Without
+		// this the subtest asserts nothing when the key happens to be exported:
+		// the inner restore correctly puts the ambient value back, and this
+		// subtest fails having never exercised an absent prior state at all.
+		unsetEnv(t, key)
+		t.Run("inner", func(t *testing.T) {
+			unsetEnv(t, key)
+			if v, ok := os.LookupEnv(key); ok {
+				t.Fatalf("%s = %q, want absent", key, v)
+			}
+		})
+		if v, ok := os.LookupEnv(key); ok {
+			t.Fatalf("%s = %q after restore, want still absent", key, v)
+		}
+	})
 }

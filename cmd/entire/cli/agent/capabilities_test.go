@@ -16,7 +16,6 @@ type mockBaseAgent struct{}
 func (m *mockBaseAgent) Name() types.AgentName                        { return "mock" }
 func (m *mockBaseAgent) Type() types.AgentType                        { return "Mock" }
 func (m *mockBaseAgent) Description() string                          { return "mock agent" }
-func (m *mockBaseAgent) IsPreview() bool                              { return false }
 func (m *mockBaseAgent) DetectPresence(context.Context) (bool, error) { return false, nil }
 func (m *mockBaseAgent) ProtectedDirs() []string                      { return nil }
 func (m *mockBaseAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }

@@ -2075,7 +2075,6 @@ func TestAttach_DiscoversExternalAgents(t *testing.T) {
   "name": "` + string(agentName) + `",
   "type": "Attach Test Agent",
   "description": "Agent for attach discovery test",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}

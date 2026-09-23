@@ -545,9 +545,6 @@ func (c *CodexAgent) Description() string {
 	return "Codex - OpenAI's CLI coding agent"
 }
 
-// IsPreview returns true because this is a new integration.
-func (c *CodexAgent) IsPreview() bool { return true }
-
 // DetectPresence checks if Codex is configured in the repository.
 func (c *CodexAgent) DetectPresence(ctx context.Context) (bool, error) {
 	return c.AreHooksInstalled(ctx)

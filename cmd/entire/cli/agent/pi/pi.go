@@ -55,7 +55,6 @@ func NewPiAgent() agent.Agent {
 func (a *PiAgent) Name() types.AgentName    { return agent.AgentNamePi }
 func (a *PiAgent) Type() types.AgentType    { return agent.AgentTypePi }
 func (a *PiAgent) Description() string      { return "Pi coding agent integration for Entire" }
-func (a *PiAgent) IsPreview() bool          { return true }
 func (a *PiAgent) ProtectedDirs() []string  { return []string{".pi"} }
 func (a *PiAgent) ProtectedFiles() []string { return nil }
 

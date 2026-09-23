@@ -33,9 +33,6 @@ type Agent interface {
 	// Description returns a human-readable description for UI
 	Description() string
 
-	// IsPreview returns whether the agent integration is in preview or stable
-	IsPreview() bool
-
 	// DetectPresence checks if this agent is configured in the repository
 	DetectPresence(ctx context.Context) (bool, error)
 
@@ -73,9 +70,9 @@ type Agent interface {
 	// it verbatim when absolute. Callers that source agentSessionID from
 	// untrusted data (e.g. checkpoint metadata on the shared
 	// entire/checkpoints/v1 branch, hook input) MUST validate it with
-	// validation.ValidateSessionID first. The resume/log-restore paths do
-	// this at their choke points (transcript.resolveTranscriptPath and
-	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
+	// validation.ValidateSessionID or resolve it through SessionStore.SessionFile,
+	// which applies that validation centrally. Do not call this method directly
+	// with unvalidated input.
 	ResolveSessionFile(sessionDir, agentSessionID string) string
 
 	// ReadSession reads session data from agent's storage.

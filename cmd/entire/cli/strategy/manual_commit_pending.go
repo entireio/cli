@@ -391,14 +391,16 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			continue
 		}
 
-		// Resolve per-session agent from metadata — skip if agent is unknown
-		if content.Metadata.Agent == "" {
+		// Per-session metadata only — point.Agent is deliberately not a fallback
+		// here; see classifySessionsForRestore for why.
+		sessionAgentName := content.Metadata.Agent
+		if sessionAgentName == "" {
 			fmt.Fprintf(errW, "  Warning: session %d (%s) has no agent metadata, skipping (cannot determine target directory)\n", i, sessionID)
 			continue
 		}
-		sessionAgent, agErr := ResolveAgentForResume(content.Metadata.Agent)
+		sessionAgent, agErr := ResolveAgentForResume(sessionAgentName)
 		if agErr != nil {
-			fmt.Fprintf(errW, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, content.Metadata.Agent)
+			fmt.Fprintf(errW, "  Warning: session %d (%s) has unknown agent %q, skipping\n", i, sessionID, sessionAgentName)
 			continue
 		}
 
@@ -419,11 +421,8 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			continue
 		}
 		if resolver, ok := sessionAgent.(agent.RestoredSessionPathResolver); ok {
-			resolvedFile, resolveErr := resolver.ResolveRestoredSessionFile(sessionAgentDir, sessionID, content.Transcript)
-			if resolveErr != nil {
-				fmt.Fprintf(errW, "  Warning: failed to resolve restored session path for session %d (%s): %v (using fallback path)\n", i, sessionID, resolveErr)
-			} else {
-				sessionFile = resolvedFile
+			if resolved, ok := restoredSessionFile(errW, resolver, restoreStore, sessionAgentDir, sessionID, content.Transcript, i); ok {
+				sessionFile = resolved
 			}
 		}
 
@@ -615,10 +614,51 @@ type SessionRestoreInfo struct {
 	CheckpointTime time.Time
 }
 
+// restoredSessionFile applies an agent's RestoredSessionPathResolver, reporting
+// false when the caller should keep the path SessionFile already produced.
+//
+// The result goes back through SessionStore.Name before it is accepted. It
+// replaces a path the store has already validated with one the agent derived
+// from the checkpoint's own transcript bytes — the same sink shape as
+// ResolveSessionFile — so it earns the same containment check rather than
+// inheriting the confidence of the value it overwrites.
+func restoredSessionFile(
+	errW io.Writer,
+	resolver agent.RestoredSessionPathResolver,
+	store *agent.SessionStore,
+	sessionAgentDir, sessionID string,
+	transcript []byte,
+	index int,
+) (string, bool) {
+	resolved, err := resolver.ResolveRestoredSessionFile(sessionAgentDir, sessionID, transcript)
+	if err != nil {
+		fmt.Fprintf(errW, "  Warning: failed to resolve restored session path for session %d (%s): %v (using fallback path)\n", index, sessionID, err)
+		return "", false
+	}
+	if _, err := store.Name(resolved); err != nil {
+		fmt.Fprintf(errW, "  Warning: session %d (%s) restored path resolves outside its session directory, using fallback path: %v\n", index, sessionID, err)
+		return "", false
+	}
+	return resolved, true
+}
+
 // classifySessionsForRestore checks all sessions in a checkpoint and returns info
 // about each session, including whether local logs have newer timestamps.
 // repoRoot is used to compute per-session agent directories.
 // Sessions without agent metadata are skipped (cannot determine target directory).
+//
+// That skip is why RestoreLogsOnly must skip the same sessions rather than fall
+// back to point.Agent, which looks like the obvious fix and was briefly made.
+// This function is what populates skipExisting, so a session it skipped and
+// RestoreLogsOnly restored would be written without --force over a newer local
+// transcript holding uncheckpointed work: existence checking and writing have to
+// resolve the same destination, and a fallback applied to one of them guarantees
+// they do not. Independently, the checkpoint-level agent is one session's rather
+// than checkpoint-wide provenance — both stores set it as `info.Agent =
+// sessionMetadata.Agent` from the last session read — so on a multi-agent
+// checkpoint that fallback writes an untyped session into another agent's store.
+// The symptom it was reaching for, a restore that did nothing and said nothing,
+// is fixed in restoreResumeSessions instead.
 func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, repoRoot string, store cpkg.SessionReader, checkpointID id.CheckpointID, summary *cpkg.CheckpointSummary) []SessionRestoreInfo {
 	var sessions []SessionRestoreInfo
 

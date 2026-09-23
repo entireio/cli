@@ -250,7 +250,7 @@ func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (ce
 	if insecureHTTP {
 		EnableInsecureHTTP()
 	}
-	c, ok, err := ActiveContext()
+	c, ok, err := ActingContext()
 	if err != nil {
 		return cellSubject{}, err
 	}

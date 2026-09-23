@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,11 +37,31 @@ const (
 // disk (`entire upgrade` → entire-upgrade).
 const selfUpdatePluginName = "upgrade"
 
-// onDemandInstallPluginName is the one missing plugin the dispatcher offers to
-// install rather than falling through to Cobra's unknown-command path. Kept as
-// a named constant beside the other plugin names the dispatcher special-cases,
-// so the set is readable in one place.
-const onDemandInstallPluginName = "graph"
+// onDemandInstallPluginNames are the missing plugins the dispatcher offers to
+// install rather than falling through to Cobra's unknown-command path. Kept
+// beside the other plugin names the dispatcher special-cases, so the set is
+// readable in one place.
+//
+// Membership is deliberately narrow. The offer is a prompt that defaults to
+// Yes and ends in a downloaded binary linked onto $PATH, so it belongs only to
+// names this CLI previously answered itself — a user typing them has every
+// reason to expect the command to exist. `graph` is the on-demand semantic
+// index; `investigate` was a built-in until it moved to the
+// entire-investigate plugin, and without the offer `entire investigate` would
+// answer an established command with "unknown command for entire".
+//
+// A name here must be resolvable through the plugin index: the install path
+// looks it up there and nowhere else, so an unlisted name turns the prompt
+// into a failure that the fall-through would have reported more plainly.
+//
+//nolint:gochecknoglobals // package-level set; a slice because there is no const slice in Go.
+var onDemandInstallPluginNames = []string{"graph", "investigate"}
+
+// offersOnDemandInstall reports whether a missing plugin by this name should
+// be offered for installation.
+func offersOnDemandInstall(name string) bool {
+	return slices.Contains(onDemandInstallPluginNames, name)
+}
 
 // ExitPluginSignalled reports that a plugin was terminated by a signal, or
 // that a signal interrupted an on-demand install before the plugin ran. It is
@@ -154,8 +175,8 @@ func maybeTrackPluginInvocation(ctx context.Context, pluginName string) {
 	telemetry.TrackPluginDetached(pluginName, s.Enabled, versioninfo.Version)
 }
 
-// resolvePlugin returns an empty binary path for a missing
-// onDemandInstallPluginName so the dispatcher can offer installation. Other
+// resolvePlugin returns an empty binary path for a missing plugin named by
+// onDemandInstallPluginNames so the dispatcher can offer installation. Other
 // missing names fall through.
 func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, pluginArgs []string, ok bool) {
 	if len(args) == 0 {
@@ -186,7 +207,7 @@ func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, plugi
 		if p, found := findInaccessiblePlugin(binName); found {
 			return p, args[1:], true
 		}
-		if name == onDemandInstallPluginName && errors.Is(err, exec.ErrNotFound) {
+		if offersOnDemandInstall(name) && errors.Is(err, exec.ErrNotFound) {
 			return "", args[1:], true
 		}
 		return "", nil, false
