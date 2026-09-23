@@ -56,9 +56,16 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo protection add":    true,
 		"repo protection remove": true,
 		// grant subtrees: add/list render a payload, remove only reports
-		"org grant add":        true,
-		"org grant list":       true,
-		"org grant remove":     false,
+		"org grant add":    true,
+		"org grant list":   true,
+		"org grant remove": false,
+		// invite renders the invitation it created or resent, invites the
+		// listing; uninvite only reports, like remove.
+		"org grant invite":   true,
+		"org grant invites":  true,
+		"org grant uninvite": false,
+		// join renders the membership it created.
+		"org join":             true,
 		"project grant add":    true,
 		"project grant list":   true,
 		"project grant remove": false,

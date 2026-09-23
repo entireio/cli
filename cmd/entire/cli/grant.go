@@ -46,6 +46,9 @@ type grantTarget[Row any] struct {
 	// the target has none (org), so a ULID grantee falls through to
 	// resolveGranteeProvider and is refused with the handle form named.
 	revokeByID func(ctx context.Context, c *coreapi.Client, id, granteeID string) error
+	// extraCmds are verbs only this target has, added beside the shared three.
+	// nil for targets with none.
+	extraCmds func() []*cobra.Command
 }
 
 func newOrgGrantCmd() *cobra.Command     { return newGrantSubtreeCmd(orgGrantTarget) }
@@ -58,6 +61,9 @@ func newGrantSubtreeCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Short: "Manage " + t.noun + " access",
 	}
 	cmd.AddCommand(newGrantAddCmd(t), newGrantListCmd(t), newGrantRemoveCmd(t))
+	if t.extraCmds != nil {
+		cmd.AddCommand(t.extraCmds()...)
+	}
 	return requireSubcommand(cmd)
 }
 
@@ -85,7 +91,7 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 			// Only an omitted --role means the server default, which exists
 			// only where required is false.
 			if cmd.Flags().Changed("role") {
-				if err := validateRole(role, t.roles); err != nil {
+				if err := validateChoice("role", role, t.roles); err != nil {
 					cmd.SilenceUsage = true
 					return err
 				}
@@ -175,15 +181,15 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 	}
 }
 
-// validateRole rejects a --role outside the target's set at the CLI boundary
-// so the user gets a clear message instead of a server 422. The generated
-// bodies type their role field as an enum, so the targets cast the validated
-// string to whichever type they need.
-func validateRole(role string, allowed []string) error {
-	if slices.Contains(allowed, role) {
+// validateChoice rejects a value outside an enum flag's set at the CLI
+// boundary so the user gets a clear message instead of a server 422. The
+// generated bodies type these fields as enums, so callers cast the validated
+// string to whichever type they need. flag is the flag name without dashes.
+func validateChoice(flag, value string, allowed []string) error {
+	if slices.Contains(allowed, value) {
 		return nil
 	}
-	return fmt.Errorf("invalid --role %q: must be one of %s", role, strings.Join(allowed, ", "))
+	return fmt.Errorf("invalid --%s %q: must be one of %s", flag, value, strings.Join(allowed, ", "))
 }
 
 // revokeGrant runs a grant-removal API call idempotently. A 404 means the
@@ -245,6 +251,16 @@ const granteeTypeAccount = "account"
 // set because the server's SpiceDB relations are the same for both.
 var accessRoles = []string{"reader", "writer", "admin"}
 
+// orgRoles are the org membership roles, in help order. Invitations share the
+// set: accepting one creates a membership.
+var orgRoles = []string{roleOwner, roleAdmin, roleMember}
+
+const (
+	roleOwner  = "owner"
+	roleAdmin  = "admin"
+	roleMember = "member"
+)
+
 // grantAccessBody builds the request body the project and repo grant routes
 // share. Provider and providerUserId are optional on the wire because the
 // route also accepts an accountId; the CLI always addresses a grantee by
@@ -264,8 +280,8 @@ var orgGrantTarget = grantTarget[coreapi.Membership]{
 	noun:        cmdOrg,
 	refUsage:    "name or ULID",
 	exampleRef:  "acme",
-	roles:       []string{"owner", "admin", "member"},
-	defaultRole: "member",
+	roles:       orgRoles,
+	defaultRole: roleMember,
 	columns:     orgMemberColumns,
 	row:         orgMemberRow,
 	resolve:     resolveOrgRef,
@@ -289,6 +305,11 @@ var orgGrantTarget = grantTarget[coreapi.Membership]{
 	},
 	revokeByProvider: func(ctx context.Context, c *coreapi.Client, id, provider, providerUserID string) error {
 		return c.RemoveOrgMember(ctx, coreapi.RemoveOrgMemberParams{OrgId: id, Provider: provider, ProviderUserId: providerUserID})
+	},
+	// Invitations grant membership, which only an org has; the API offers no
+	// project or repo equivalent.
+	extraCmds: func() []*cobra.Command {
+		return []*cobra.Command{newOrgInviteCmd(), newOrgInvitesCmd(), newOrgUninviteCmd()}
 	},
 }
 
