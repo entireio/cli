@@ -199,15 +199,34 @@ type TrailApprovalsResponse struct {
 	Approvals []TrailApproval `json:"approvals"`
 }
 
+// TrailMergeabilityResponse is GET .../trails/{number}/mergeability. Gates
+// and Checks come from the same server-side read, so the blocking gates listed
+// here are the current readiness for HeadSHA (unlike the persisted /gates).
 type TrailMergeabilityResponse struct {
-	BypassPolicy       string  `json:"bypass_policy"`
-	Mergeable          bool    `json:"mergeable"`
-	ApprovalGatePassed bool    `json:"approval_gate_passed"`
-	ChecksStatus       string  `json:"checks_status"`
-	BehindBy           int     `json:"behind_by"`
-	ComparisonStatus   string  `json:"comparison_status"`
-	ConflictStatus     string  `json:"conflict_status"`
-	HeadSHA            *string `json:"head_sha"`
+	BypassPolicy       string                  `json:"bypass_policy"`
+	Mergeable          bool                    `json:"mergeable"`
+	ApprovalGatePassed bool                    `json:"approval_gate_passed"`
+	BehindBy           int                     `json:"behind_by"`
+	ComparisonStatus   string                  `json:"comparison_status"`
+	ConflictStatus     string                  `json:"conflict_status"`
+	HeadSHA            *string                 `json:"head_sha"`
+	Gates              []TrailGateResult       `json:"gates"`
+	Checks             TrailMergeabilityChecks `json:"checks"`
+}
+
+// TrailMergeabilityChecks is third-party CI evidence for the head. Runs is
+// meaningful only when Availability is "available".
+type TrailMergeabilityChecks struct {
+	Availability string          `json:"availability"`
+	Runs         []TrailCheckRun `json:"runs"`
+}
+
+type TrailCheckRun struct {
+	Name       string  `json:"name"`
+	Status     string  `json:"status"`
+	Conclusion *string `json:"conclusion"`
+	DetailsURL *string `json:"details_url"`
+	AppName    *string `json:"app_name"`
 }
 
 type TrailGateResult struct {
@@ -215,15 +234,9 @@ type TrailGateResult struct {
 	GateKey   string          `json:"gate_key"`
 	Blocking  bool            `json:"blocking"`
 	Status    string          `json:"status"`
+	State     string          `json:"state,omitempty"`
 	Rationale *string         `json:"rationale"`
 	Value     json.RawMessage `json:"value"`
-}
-
-type TrailGatesResponse struct {
-	HeadSHA          *string           `json:"head_sha"`
-	Mergeable        bool              `json:"mergeable"`
-	GatesEnabled     bool              `json:"gates_enabled"`
-	BlockingFailures []TrailGateResult `json:"blocking_failures"`
 }
 
 type TrailMergeRequest struct {

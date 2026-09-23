@@ -20,6 +20,17 @@ const (
 	trailConflictConflicting = "conflicting"
 	trailChecksNone          = "none"
 	trailMergeUnknown        = "unknown"
+
+	trailChecksAvailable     = "available"
+	trailChecksNotApplicable = "not_applicable"
+
+	trailGateTypeChecks    = "checks"
+	trailGateStateDisabled = "disabled"
+	trailGatePassed        = "passed"
+	trailGateSkipped       = "skipped"
+	trailGateFailed        = "failed"
+	trailGatePending       = "pending"
+	trailGateError         = "error"
 )
 
 type trailMergeOptions struct {
@@ -89,10 +100,10 @@ func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, re
 		}
 		printTrailMergeability(w, found, m)
 
-		var blockers []string
-		bypassable := 0
+		gates := trailMergeBlockingGates(m)
+		bypassable := len(gates)
 		if !m.Mergeable {
-			blockers, bypassable = describeTrailMergeBlockers(ctx, client, mergePath, m)
+			blockers := describeTrailMergeBlockers(m, gates)
 			fmt.Fprintln(w, "Blocked by:")
 			for _, b := range blockers {
 				fmt.Fprintf(w, "  - %s\n", b)
@@ -106,7 +117,7 @@ func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, re
 			if m.Mergeable {
 				fmt.Fprintf(w, "Trail #%d is mergeable (dry run; no merge performed).\n", found.Number)
 			} else {
-				fmt.Fprintf(w, "Trail #%d is blocked; --force would bypass %d failing %s (dry run; no merge performed).\n",
+				fmt.Fprintf(w, "Trail #%d is blocked; --force would bypass %d blocking %s (dry run; no merge performed).\n",
 					found.Number, bypassable, pluralize("gate", bypassable))
 			}
 			return nil
@@ -132,7 +143,7 @@ func runTrailMerge(ctx context.Context, w, errW io.Writer, insecureHTTP bool, re
 		if m.Mergeable {
 			fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
 		} else {
-			fmt.Fprintf(w, "Merged trail #%d into %s (%s), bypassing %d failing %s\n",
+			fmt.Fprintf(w, "Merged trail #%d into %s (%s), bypassing %d blocking %s\n",
 				found.Number, base, commit, bypassable, pluralize("gate", bypassable))
 		}
 		return nil
@@ -161,22 +172,6 @@ func fetchTrailMergeability(ctx context.Context, client *api.Client, trailPath s
 		return nil, fmt.Errorf("failed to decode mergeability response: %w", err)
 	}
 	return &m, nil
-}
-
-func fetchTrailGates(ctx context.Context, client *api.Client, trailPath string) (*api.TrailGatesResponse, error) {
-	resp, err := client.Get(ctx, trailPath+"/gates")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read gates: %w", err)
-	}
-	defer resp.Body.Close()
-	if err := checkTrailResponse(resp); err != nil {
-		return nil, err
-	}
-	var g api.TrailGatesResponse
-	if err := api.DecodeJSON(resp, &g); err != nil {
-		return nil, fmt.Errorf("failed to decode gates response: %w", err)
-	}
-	return &g, nil
 }
 
 func postTrailMerge(ctx context.Context, client *api.Client, trailPath string, number int, req api.TrailMergeRequest, bypassPolicy string) (*api.TrailMergeResponse, error) {
@@ -249,7 +244,7 @@ func trailMergeBlockedError(number int, m *api.TrailMergeabilityResponse, bypass
 func printTrailMergeability(w io.Writer, t *api.TrailResource, m *api.TrailMergeabilityResponse) {
 	fmt.Fprintf(w, "Trail #%d (%s → %s)\n", t.Number, t.Branch, t.Base)
 	fmt.Fprintf(w, "  Approvals:  %s\n", checkmark(m.ApprovalGatePassed))
-	fmt.Fprintf(w, "  Checks:     %s (%s)\n", checkmark(m.ChecksStatus == "success" || m.ChecksStatus == trailChecksNone), trailChecksStatusDisplay(m.ChecksStatus))
+	fmt.Fprintf(w, "  Checks:     %s\n", trailChecksDisplay(m))
 	fmt.Fprintf(w, "  Up to date: %s\n", trailUpToDateDisplay(m))
 	fmt.Fprintf(w, "  Conflicts:  %s\n", trailConflictDisplay(m.ConflictStatus))
 	fmt.Fprintf(w, "  Mergeable:  %s\n", checkmark(m.Mergeable))
@@ -262,11 +257,96 @@ func checkmark(ok bool) string {
 	return "✗"
 }
 
-func trailChecksStatusDisplay(status string) string {
-	if strings.TrimSpace(status) == "" {
-		return trailChecksNone
+// trailChecksDisplay renders the checks gate's verdict with the CI runs it
+// was evaluated from. Without a checks gate the runs alone decide.
+func trailChecksDisplay(m *api.TrailMergeabilityResponse) string {
+	counts := countTrailCheckRuns(m.Checks.Runs)
+	status := ""
+	if g := findTrailGate(m.Gates, trailGateTypeChecks); g != nil {
+		status = tuiutil.SanitizeDisplayText(strings.TrimSpace(g.Status))
 	}
-	return status
+	if status == "" {
+		switch m.Checks.Availability {
+		case trailChecksAvailable:
+			status = counts.verdict()
+		case trailChecksNotApplicable:
+			status = trailChecksNone
+		default:
+			status = trailMergeUnknown
+		}
+	}
+	ok := status == trailGatePassed || status == trailGateSkipped || status == trailChecksNone
+	line := checkmark(ok) + " " + status
+	switch m.Checks.Availability {
+	case trailChecksAvailable:
+		if counts.total > 0 {
+			line += " (" + counts.summary() + ")"
+		}
+	case trailChecksNotApplicable:
+	default:
+		line += " (CI evidence unavailable)"
+	}
+	return line
+}
+
+type trailCheckRunCounts struct {
+	total, failed, pending, passed int
+}
+
+func countTrailCheckRuns(runs []api.TrailCheckRun) trailCheckRunCounts {
+	var c trailCheckRunCounts
+	for _, r := range runs {
+		c.total++
+		conclusion := ""
+		if r.Conclusion != nil {
+			conclusion = strings.TrimSpace(*r.Conclusion)
+		}
+		switch {
+		case !strings.EqualFold(strings.TrimSpace(r.Status), "completed"):
+			c.pending++
+		case conclusion == "success" || conclusion == "neutral" || conclusion == "skipped":
+			c.passed++
+		default:
+			c.failed++
+		}
+	}
+	return c
+}
+
+func (c trailCheckRunCounts) verdict() string {
+	switch {
+	case c.failed > 0:
+		return trailGateFailed
+	case c.pending > 0:
+		return trailGatePending
+	case c.total == 0:
+		return trailChecksNone
+	default:
+		return trailGatePassed
+	}
+}
+
+func (c trailCheckRunCounts) summary() string {
+	parts := make([]string, 0, 3)
+	if c.failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", c.failed))
+	}
+	if c.pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", c.pending))
+	}
+	if c.passed > 0 {
+		parts = append(parts, fmt.Sprintf("%d passed", c.passed))
+	}
+	return fmt.Sprintf("%d %s: %s", c.total, pluralize("run", c.total), strings.Join(parts, ", "))
+}
+
+func findTrailGate(gates []api.TrailGateResult, gateType string) *api.TrailGateResult {
+	for i := range gates {
+		if gates[i].GateType == gateType {
+			return &gates[i]
+		}
+	}
+	return nil
 }
 
 func trailUpToDateDisplay(m *api.TrailMergeabilityResponse) string {
@@ -290,18 +370,31 @@ func trailConflictDisplay(status string) string {
 	}
 }
 
-func describeTrailMergeBlockers(ctx context.Context, client *api.Client, trailPath string, m *api.TrailMergeabilityResponse) ([]string, int) {
-	var blockers []string
-	var bypassable int
-	if gates, err := fetchTrailGates(ctx, client, trailPath); err == nil {
-		for _, g := range gates.BlockingFailures {
-			blockers = append(blockers, describeGateFailure(g))
+// trailMergeBlockingGates returns the gates that block the merge, mirroring
+// the server's rollup: blocking, enabled, and failed, pending, or errored.
+// They come from the mergeability read itself, which is evaluated for the
+// current head (the /gates route only reports persisted results).
+func trailMergeBlockingGates(m *api.TrailMergeabilityResponse) []api.TrailGateResult {
+	var out []api.TrailGateResult
+	for _, g := range m.Gates {
+		if !g.Blocking || g.State == trailGateStateDisabled {
+			continue
 		}
-		bypassable = len(gates.BlockingFailures)
-	} else {
-		fallback := describeMergeabilityBlockers(m)
-		blockers = append(blockers, fallback...)
-		bypassable = len(fallback)
+		switch g.Status {
+		case trailGateFailed, trailGatePending, trailGateError:
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+func describeTrailMergeBlockers(m *api.TrailMergeabilityResponse, gates []api.TrailGateResult) []string {
+	blockers := make([]string, 0, len(gates)+1)
+	for _, g := range gates {
+		blockers = append(blockers, describeGateFailure(g))
+	}
+	if len(gates) == 0 {
+		blockers = append(blockers, describeMergeabilityBlockers(m)...)
 	}
 	if m.ConflictStatus == trailConflictConflicting {
 		blockers = append(blockers, "branch conflicts with its base; resolve the conflicts first (--force cannot bypass this)")
@@ -309,7 +402,7 @@ func describeTrailMergeBlockers(ctx context.Context, client *api.Client, trailPa
 	if len(blockers) == 0 {
 		blockers = append(blockers, "the trail is not in a mergeable state")
 	}
-	return blockers, bypassable
+	return blockers
 }
 
 func describeGateFailure(g api.TrailGateResult) string {
@@ -339,11 +432,13 @@ func describeMergeabilityBlockers(m *api.TrailMergeabilityResponse) []string {
 	if !m.ApprovalGatePassed {
 		reasons = append(reasons, "required approvals are missing")
 	}
-	switch m.ChecksStatus {
-	case "failure":
-		reasons = append(reasons, "CI checks failed")
-	case "pending":
-		reasons = append(reasons, "CI checks are still running")
+	if m.Checks.Availability == trailChecksAvailable {
+		switch countTrailCheckRuns(m.Checks.Runs).verdict() {
+		case trailGateFailed:
+			reasons = append(reasons, "CI checks failed")
+		case trailGatePending:
+			reasons = append(reasons, "CI checks are still running")
+		}
 	}
 	if m.ComparisonStatus == trailComparisonAvailable && m.BehindBy > 0 {
 		reasons = append(reasons, fmt.Sprintf("branch is %d %s behind its base", m.BehindBy, pluralize("commit", m.BehindBy)))
