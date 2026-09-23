@@ -89,7 +89,7 @@ mise run test
 
 If `mise run test` passes, you're good to go. If something failed, see [Troubleshooting](#troubleshooting) below.
 
-> Detailed setup notes live in [CONTRIBUTING.md](../CONTRIBUTING.md#local-setup), and architecture notes live in [AGENTS.md](../AGENTS.md).
+> Detailed setup notes live in [CONTRIBUTING.md](../CONTRIBUTING.md#local-setup), and architecture notes are indexed in the [reference map](../AGENTS.md#read-when-relevant).
 
 ---
 
@@ -220,5 +220,5 @@ type -a entire
 Once you've landed your first PR:
 
 - [CONTRIBUTING.md](../CONTRIBUTING.md): the full contribution guide, including PR conventions and the Entire-specific workflow notes.
-- [AGENTS.md](../AGENTS.md): architecture and development reference. Read this before tackling a non-trivial change.
+- [AGENTS.md](../AGENTS.md): repository rules and task-specific reference map. Read this before tackling a non-trivial change.
 - [Discord](https://discord.gg/jZJs3Tue4S): say hi, hang out, help the next first-time contributor.

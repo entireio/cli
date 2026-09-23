@@ -195,7 +195,8 @@ func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, err
 //
 // (The investigation stores used to be described here as callers. They are not:
 // they hold a commonDir of their own and resolve run ids as names inside it,
-// which is the stronger form — see investigate.StateStore.)
+// which is the stronger form. They now live in the entire-investigate plugin
+// and still reach this package through OpenAt.)
 func OpenPathIn(commonDir, absPath string) (root *os.Root, name string, err error) {
 	base, err := filepath.Abs(commonDir)
 	if err != nil {

@@ -86,7 +86,7 @@ func TestRenderDataAPIAuthError_NotOnboardedPrintsOneActionableLine(t *testing.T
 	if !strings.Contains(out, "not onboarded to Entire") {
 		t.Errorf("stderr = %q, want it to say the repo is not onboarded", out)
 	}
-	if !strings.Contains(out, "entire repo mirror create") {
+	if !strings.Contains(out, "entire repo mirror add") {
 		t.Errorf("stderr = %q, want it to name the command that onboards the repo", out)
 	}
 	// The whole point is that the internal resolution chain does not reach the

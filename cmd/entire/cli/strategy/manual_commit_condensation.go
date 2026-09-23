@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -519,14 +518,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	condenseStart := time.Now()
-	policy, err := readLocalCheckpointPolicy(logCtx, repo)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint policy could not be read: %w", err)
-	}
-	if !checkpointpolicy.CanSatisfyPolicy(policy) {
-		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
-		return nil, errors.New("checkpoint policy cannot be satisfied by this Entire CLI")
-	}
 
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	ref, hasShadowBranch := resolveShadowRef(repo, shadowBranchName, o.shadowRef)
@@ -1178,7 +1169,11 @@ func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
 // persist in session state after condensation.
 func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
-	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
+	if agentType != agent.AgentTypeCopilotCLI {
+		return nil
+	}
+
+	if len(transcript) > 0 {
 		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
@@ -1186,11 +1181,7 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 		logging.Debug(ctx, "copilot-cli: full-session token read produced no data, falling back to checkpoint usage")
 	}
 
-	if agentType == agent.AgentTypeCopilotCLI && hasTokenUsageData(checkpointUsage) {
-		return checkpointUsage
-	}
-
-	if checkpointUsage != nil && checkpointUsage.InputTokens > 0 {
+	if hasTokenUsageData(checkpointUsage) {
 		return checkpointUsage
 	}
 

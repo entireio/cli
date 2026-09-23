@@ -560,3 +560,35 @@ func TestEnableCheckpointPushRemote_IneligibleSavedReport(t *testing.T) {
 	require.NotContains(t, output.String(), "Checkpoints will be uploaded")
 	require.Contains(t, output.String(), "--checkpoint-push-remote")
 }
+
+func TestParseCheckpointRemoteFlag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		value        string
+		wantProvider string
+		wantRepo     string
+		wantErr      string
+	}{
+		{name: "github", value: "github:org/checkpoints", wantProvider: "github", wantRepo: "org/checkpoints"},
+		{name: "gitlab", value: "gitlab:org/checkpoints", wantProvider: "gitlab", wantRepo: "org/checkpoints"},
+		{name: "gitlab nested group", value: "gitlab:group/subgroup/project", wantProvider: "gitlab", wantRepo: "group/subgroup/project"},
+		{name: "provider is case-insensitive and stored lowercase", value: "GitLab:org/repo", wantProvider: "gitlab", wantRepo: "org/repo"},
+		{name: "provider whitespace is trimmed", value: " github :org/repo", wantProvider: "github", wantRepo: "org/repo"},
+		{name: "unsupported provider", value: "bitbucket:org/repo", wantErr: `unsupported provider "bitbucket" (supported: github, gitlab)`},
+		{name: "missing colon", value: "org/repo", wantErr: "expected format provider:owner/repo"},
+		{name: "missing repo slash", value: "github:repo", wantErr: "repo must be in owner/name format"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			provider, repo, err := parseCheckpointRemoteFlag(tc.value)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantProvider, provider)
+			require.Equal(t, tc.wantRepo, repo)
+		})
+	}
+}

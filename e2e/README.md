@@ -43,7 +43,7 @@ e2e/
 
 `controlplane/` runs the `entire` binary against the production control plane with no coding agent involved. Its `TestMain` logs in once per run with `entire login --device`, completing GitHub sign-in and the device approval in headless Chromium (playwright-go) as the GitHub test user named by `E2E_GH_USERNAME` / `E2E_GH_PASSWORD` / `E2E_GH_TOTP_SECRET`; every test then starts from that session. The account has authenticator-app 2FA enabled on purpose: GitHub skips its emailed new-device verification for 2FA accounts, and the test computes the one-time code from the secret. The CLI's config and token store live in a temp dir outside `e2e/artifacts/`, which CI uploads.
 
-Tests create real resources named `e2e-cp-<timestamp>` and delete them in reverse order (repo, project, org) through `t.Cleanup`. The test account may own at most three orgs, so a run that is killed before cleanup (package timeout, cancelled job, lost runner) would block later ones; each run therefore starts by sweeping `e2e-cp-*` orgs older than 30 minutes, and everything under them.
+Tests create real resources named `e2e-cp-<timestamp>` and delete them in reverse order (repo, project, org) through `t.Cleanup`. The native-mirror lifecycle test also places a real mirror and removes it; seeding one took 9 seconds when measured against production, so it needs no extra time budget. The test account may own at most three orgs, so a run that is killed before cleanup (package timeout, cancelled job, lost runner) would block later ones; each run therefore starts by sweeping `e2e-cp-*` orgs older than 30 minutes, and everything under them.
 
 Run it with `mise run test:e2e:controlplane [filter]`; the task installs the Playwright driver and Chromium on first use.
 
@@ -60,7 +60,7 @@ Run it with `mise run test:e2e:controlplane [filter]`; the task installs the Pla
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
+| `E2E_AGENT` | Runner filter (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor-cli`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`, `roger-roger`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
 | `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. | per runner: 60s (codex, copilot-cli, gemini), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |

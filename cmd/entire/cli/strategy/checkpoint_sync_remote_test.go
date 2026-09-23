@@ -728,10 +728,10 @@ func TestCaptureCheckpointSyncRemote(t *testing.T) {
 // The election is permanent and one-shot ("first capture sticks"), so it must
 // follow evidence that checkpoints ARRIVED, not evidence that a push was about
 // to be attempted. Everything between the gate and the network can still stop
-// delivery — a diverged checkpoint policy, an OPF rewrite failure, the
-// empty-remote defer, a rejected transfer — and capturing on intent both
-// announced a move that carried nothing and left the queued checkpoints able to
-// drain only to the remote that had just failed to take them.
+// delivery — an OPF rewrite failure, the empty-remote defer, a rejected
+// transfer — and capturing on intent both announced a move that carried
+// nothing and left the queued checkpoints able to drain only to the remote
+// that had just failed to take them.
 //
 // Not parallel: uses t.Chdir()
 func TestCaptureCheckpointSyncRemote_OnlyOnDelivery(t *testing.T) {

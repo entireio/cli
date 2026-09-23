@@ -119,7 +119,7 @@ mise run build
 mise run test
 ```
 
-> See [CLAUDE.md](CLAUDE.md) for detailed architecture and development reference.
+> See the [reference map](CLAUDE.md#read-when-relevant) for architecture and development documentation.
 
 ---
 
@@ -143,7 +143,7 @@ mise run test
 
 ## Code Style
 
-Follow standard Go idioms and conventions. For detailed guidance, see the **Go Code Style** section in [CLAUDE.md](CLAUDE.md).
+Follow standard Go idioms and conventions. See the [verification requirements](CLAUDE.md#verification) and [CLI conventions](docs/development/cli-conventions.md) for repository-specific guidance.
 
 ### Key Points
 
@@ -156,7 +156,7 @@ Follow standard Go idioms and conventions. For detailed guidance, see the **Go C
 
 ## Testing
 
-> See [CLAUDE.md](CLAUDE.md) for complete testing documentation.
+> See [Testing and development tools](docs/development/testing.md) for complete testing documentation.
 
 ```bash
 # Unit tests - always run before committing
@@ -221,7 +221,7 @@ These are Go implementations that integrate Entire with different AI coding tool
    2. Register your agent in the agent registry
    3. Add setup and hook configuration as needed
    4. Ensure session and checkpoint tracking is handled per the abstraction
-- **Reference:** See [CLAUDE.md](CLAUDE.md) for architecture and code examples.
+- **Reference:** Use the [reference map](CLAUDE.md#read-when-relevant) to find architecture and code examples.
 
 ---
 
@@ -344,8 +344,8 @@ Join the Entire community:
 ## Additional Resources
 
 - [README](README.md) - Setup and usage documentation
-- [CLAUDE.md](CLAUDE.md) - Architecture and development reference (Claude Code)
-- [AGENTS.md](AGENTS.md) - Architecture and development reference (Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
+- [CLAUDE.md](CLAUDE.md) - Repository rules and task-specific reference map (Claude Code)
+- [AGENTS.md](AGENTS.md) - Same instructions via symlink (Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
 - [Code of Conduct](CODE_OF_CONDUCT.md) - Community guidelines
 - [Security Policy](SECURITY.md) - Reporting security vulnerabilities
 

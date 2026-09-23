@@ -27,8 +27,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -49,7 +49,6 @@ var _ agent.Agent = (*mockLifecycleAgent)(nil)
 func (m *mockLifecycleAgent) Name() types.AgentName                          { return m.name }
 func (m *mockLifecycleAgent) Type() types.AgentType                          { return m.agentType }
 func (m *mockLifecycleAgent) Description() string                            { return "Mock agent for lifecycle tests" }
-func (m *mockLifecycleAgent) IsPreview() bool                                { return false }
 func (m *mockLifecycleAgent) DetectPresence(_ context.Context) (bool, error) { return false, nil }
 func (m *mockLifecycleAgent) ProtectedDirs() []string                        { return nil }
 func (m *mockLifecycleAgent) GetSessionID(_ *agent.HookInput) string         { return "" }
@@ -2465,11 +2464,11 @@ const testInvestigateRunID = "abcdef012345"
 // the hook's agent for adoption to succeed.
 func setInvestigateEnv(t *testing.T, agentName, startingSHA, topic string) {
 	t.Helper()
-	t.Setenv(investigate.EnvSession, "1")
-	t.Setenv(investigate.EnvAgent, agentName)
-	t.Setenv(investigate.EnvStartingSHA, startingSHA)
-	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
-	t.Setenv(investigate.EnvTopic, topic)
+	t.Setenv(provenance.InvestigateSession, "1")
+	t.Setenv(provenance.InvestigateAgent, agentName)
+	t.Setenv(provenance.InvestigateStartingSHA, startingSHA)
+	t.Setenv(provenance.InvestigateRunID, testInvestigateRunID)
+	t.Setenv(provenance.InvestigateTopic, topic)
 }
 
 // TestAdoptInvestigateEnv_Success verifies that adoptInvestigateEnv tags the
@@ -2618,11 +2617,11 @@ func TestAdoptInvestigateEnv_SessionEnvNotOne(t *testing.T) {
 
 	ag := newMockAgent()
 	headSHA := testutil.GetHeadHash(t, tmp)
-	t.Setenv(investigate.EnvSession, "0")
-	t.Setenv(investigate.EnvAgent, string(ag.Name()))
-	t.Setenv(investigate.EnvStartingSHA, headSHA)
-	t.Setenv(investigate.EnvRunID, testInvestigateRunID)
-	t.Setenv(investigate.EnvTopic, "topic")
+	t.Setenv(provenance.InvestigateSession, "0")
+	t.Setenv(provenance.InvestigateAgent, string(ag.Name()))
+	t.Setenv(provenance.InvestigateStartingSHA, headSHA)
+	t.Setenv(provenance.InvestigateRunID, testInvestigateRunID)
+	t.Setenv(provenance.InvestigateTopic, "topic")
 
 	state := &session.State{
 		SessionID:  "test-investigate-env-session-not-one",
@@ -2713,11 +2712,11 @@ func TestAdoptInvestigateEnv_RejectsBadRunID(t *testing.T) {
 
 			ag := newMockAgent()
 			headSHA := testutil.GetHeadHash(t, tmp)
-			t.Setenv(investigate.EnvSession, "1")
-			t.Setenv(investigate.EnvAgent, string(ag.Name()))
-			t.Setenv(investigate.EnvStartingSHA, headSHA)
-			t.Setenv(investigate.EnvRunID, tc.runID)
-			t.Setenv(investigate.EnvTopic, "topic")
+			t.Setenv(provenance.InvestigateSession, "1")
+			t.Setenv(provenance.InvestigateAgent, string(ag.Name()))
+			t.Setenv(provenance.InvestigateStartingSHA, headSHA)
+			t.Setenv(provenance.InvestigateRunID, tc.runID)
+			t.Setenv(provenance.InvestigateTopic, "topic")
 
 			state := &session.State{
 				SessionID:  "test-investigate-env-bad-run-id-" + tc.name,

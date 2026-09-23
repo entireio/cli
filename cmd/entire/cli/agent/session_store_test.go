@@ -56,7 +56,26 @@ func TestSessionStore_SessionFileRejectsEscapingSessionID(t *testing.T) {
 
 	store, _ := newStore(t, joinResolve)
 	_, _, err := store.SessionFile("../../escaped")
-	require.ErrorIs(t, err, agent.ErrOutsideSessionStore)
+	require.ErrorIs(t, err, agent.ErrUnsafeSessionName)
+}
+
+func TestSessionStore_SessionFileRejectsUnsafeIDBeforeResolver(t *testing.T) {
+	t.Parallel()
+
+	for _, sessionID := range []string{"session.", "CON"} {
+		t.Run(sessionID, func(t *testing.T) {
+			t.Parallel()
+
+			resolverCalled := false
+			store, _ := newStore(t, func(dir, id string) string {
+				resolverCalled = true
+				return joinResolve(dir, id)
+			})
+			_, _, err := store.SessionFile(sessionID)
+			require.ErrorIs(t, err, agent.ErrUnsafeSessionName)
+			assert.False(t, resolverCalled, "unsafe ID must not reach the agent resolver")
+		})
+	}
 }
 
 // An agent that resolves to a sibling directory is rejected too — the store's
@@ -93,6 +112,65 @@ func TestSessionStore_WriteFileRejectsEscapingName(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "an escaping write must not land outside the store")
 }
 
+// A symlinked store root is FOLLOWED, deliberately. The store's location comes
+// from the agent (GetSessionDir), not from checkpoint metadata or a hook
+// payload, and a ~/.claude or ~/.codex managed by a dotfile tool is an ordinary
+// setup among exactly the people who run coding agents. Containment starts one
+// level down — see TestSessionStore_WriteFileRejectsEscapingName and the
+// symlinked-parent cases in the external agent's preflight.
+func TestSessionStore_FollowsSymlinkedStoreRoot(t *testing.T) {
+	t.Parallel()
+
+	realStore := t.TempDir()
+	storeDir := filepath.Join(t.TempDir(), "store")
+	if err := os.Symlink(realStore, storeDir); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
+	require.NoError(t, err)
+
+	// ABSOLUTE refs on purpose. A relative one is returned by Name unchanged
+	// without s.dir being consulted at all, so it answers nil whether the store
+	// root is a symlink, a real directory, or absent — which is what let the
+	// realpath case below ship broken.
+	require.NoError(t, store.ValidateExternalWriteRef(filepath.Join(storeDir, "session.jsonl")))
+
+	// The same file named through the link's TARGET. A plugin reports its store
+	// through get-session-dir and may hand back a realpath'd reference; both
+	// spellings are one directory and both must be accepted.
+	require.NoError(t, store.ValidateExternalWriteRef(filepath.Join(realStore, "session.jsonl")))
+
+	// Several missing components, so the resolve-the-deepest-existing-prefix walk
+	// has to strip more than the leaf. A version of it that stripped only the
+	// leaf passes every other assertion here.
+	require.NoError(t, store.ValidateExternalWriteRef(filepath.Join(realStore, "a", "b", "session.jsonl")))
+
+	// Still outside is still refused, resolved or not.
+	outside := t.TempDir()
+	require.Error(t, store.ValidateExternalWriteRef(filepath.Join(outside, "session.jsonl")))
+
+	require.NoError(t, store.WriteFile("session.jsonl", []byte("hi\n"), 0o600))
+	assert.FileExists(t, filepath.Join(realStore, "session.jsonl"))
+}
+
+// A store that does not exist yet is created even below a symlinked ancestor,
+// for the same reason: that is where a dotfile-managed agent directory puts it.
+func TestSessionStore_CreatesMissingStoreBelowSymlinkedAncestor(t *testing.T) {
+	t.Parallel()
+
+	outside := t.TempDir()
+	linkedParent := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(outside, linkedParent); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	storeDir := filepath.Join(linkedParent, "missing-store")
+	store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
+	require.NoError(t, err)
+
+	require.NoError(t, store.WriteFile("session.jsonl", []byte("hi\n"), 0o600))
+	assert.FileExists(t, filepath.Join(outside, "missing-store", "session.jsonl"))
+}
+
 // Lstat, not Stat: a dangling session log still exists, and both the rewind and
 // resume paths must keep it rather than silently overwrite it.
 func TestSessionStore_ExistsReportsDanglingSymlink(t *testing.T) {
@@ -103,6 +181,38 @@ func TestSessionStore_ExistsReportsDanglingSymlink(t *testing.T) {
 		t.Skipf("symlink not supported: %v", err)
 	}
 	assert.True(t, store.Exists("a.jsonl"))
+}
+
+func TestSessionStore_ValidateExternalWriteRefAllowsMissingStore(t *testing.T) {
+	t.Parallel()
+
+	storeDir := filepath.Join(t.TempDir(), "missing-store")
+	store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
+	require.NoError(t, err)
+
+	require.NoError(t, store.ValidateExternalWriteRef("session.jsonl"))
+	_, err = os.Stat(storeDir)
+	assert.True(t, os.IsNotExist(err), "validation must not create the missing store")
+}
+
+func TestSessionStore_ValidateExternalWriteRefRejectsUnsafeNameWithMissingStore(t *testing.T) {
+	t.Parallel()
+
+	storeDir := filepath.Join(t.TempDir(), "missing-store")
+	store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		filepath.Join(".. ", "session.jsonl"),
+		filepath.Join("session.", "session.jsonl"),
+		filepath.Join("bad\x00name", "session.jsonl"),
+		filepath.Join("CON", "session.jsonl"),
+		filepath.Join("nul.jsonl", "session.jsonl"),
+	} {
+		require.Error(t, store.ValidateExternalWriteRef(name), name)
+	}
+	_, err = os.Stat(storeDir)
+	assert.True(t, os.IsNotExist(err), "validation must not create the missing store")
 }
 
 func TestWriteSessionFile_WritesThroughTheStore(t *testing.T) {
@@ -170,4 +280,47 @@ func TestSessionStore_ProbingManyDirectoriesRetainsNoDescriptors(t *testing.T) {
 	// this guards produced exactly `candidates` extra descriptors.
 	require.Less(t, countFDs()-before, 16,
 		"probing %d candidate directories must not retain a descriptor per directory", candidates)
+}
+
+// The store itself may not exist yet — an external plugin is allowed to create
+// it — so the walk has to resolve a symlinked ANCESTOR while the store and the
+// reference below it are both still missing.
+func TestSessionStore_FollowsSymlinkedAncestorOfAMissingStore(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	realParent := filepath.Join(base, "real-parent")
+	require.NoError(t, os.MkdirAll(realParent, 0o700))
+	linkedParent := filepath.Join(base, "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	storeDir := filepath.Join(linkedParent, "missing-store")
+	store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
+	require.NoError(t, err)
+
+	// The plugin's own spelling, and the same location through the link's target.
+	require.NoError(t, store.ValidateExternalWriteRef(filepath.Join(storeDir, "session.jsonl")))
+	require.NoError(t, store.ValidateExternalWriteRef(filepath.Join(realParent, "missing-store", "session.jsonl")))
+
+	// A sibling of the missing store is still outside it.
+	require.Error(t, store.ValidateExternalWriteRef(filepath.Join(realParent, "other-store", "session.jsonl")))
+}
+
+// Nested directories inherit the store root's 0700 rather than 0750: they hold
+// the same transcripts, and Copilot, Cursor and Codex all write into them.
+func TestSessionStore_CreatesNestedDirectories0700(t *testing.T) {
+	t.Parallel()
+
+	storeDir := filepath.Join(t.TempDir(), "store")
+	store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
+	require.NoError(t, err)
+	require.NoError(t, store.WriteFile("nested/deeper/session.jsonl", []byte("hi\n"), 0o600))
+
+	for _, dir := range []string{storeDir, filepath.Join(storeDir, "nested"), filepath.Join(storeDir, "nested", "deeper")} {
+		info, err := os.Stat(dir)
+		require.NoError(t, err, dir)
+		assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), dir)
+	}
 }

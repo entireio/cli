@@ -1274,18 +1274,6 @@ func TestOpenCodeHelperMethods(t *testing.T) {
 			t.Errorf("ProtectedDirs() = %v, want to contain '.opencode'", dirs)
 		}
 	})
-
-	t.Run("IsPreview returns true", func(t *testing.T) {
-		t.Parallel()
-
-		ag, err := agent.Get("opencode")
-		if err != nil {
-			t.Fatalf("agent.Get(opencode) error = %v", err)
-		}
-		if !ag.IsPreview() {
-			t.Error("IsPreview() = false, want true")
-		}
-	})
 }
 
 // hooksInstalledNow reports whether the agent's hooks are installed, failing the

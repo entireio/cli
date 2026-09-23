@@ -121,6 +121,33 @@ jobs:
           "NIGHTLY_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "E2E_ENTIRE_BIN=$((Get-Command entire).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      # Windows reads the version from the binary's PE resource section, not
+      # from the ldflags stamp `entire version` prints (#2218). Compared against
+      # the tag this nightly was built from, so resources generated for the
+      # wrong version fail here too, not only missing ones.
+      - name: Verify Windows PE version metadata
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Stop is what makes the Write-Error calls below terminating.
+          $ErrorActionPreference = "Stop"
+          # goreleaser passes {{.Version}}, which is the tag without its "v".
+          $expected = $env:NIGHTLY_TAG -replace '^v', ''
+          # The numeric tuple carries major.minor.patch only; the prerelease
+          # suffix lives in the string fields.
+          $expectedNumeric = [version]"$($expected -replace '-.*', '').0"
+          foreach ($name in "entire", "git-remote-entire") {
+            $command = Get-Command $name
+            $product = (Get-Item $command.Source).VersionInfo.ProductVersion
+            Write-Host "$name  $($command.Version)  $product"
+            if ($command.Version -ne $expectedNumeric) {
+              Write-Error "$name PE version is $($command.Version), expected $expectedNumeric from $env:NIGHTLY_TAG"
+            }
+            if ($product -ne $expected) {
+              Write-Error "$name PE product version is '$product', expected '$expected'"
+            }
+          }
+
       - name: Checkout the nightly tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -166,19 +193,21 @@ jobs:
         shell: pwsh
         run: |
           irm https://claude.ai/install.ps1 | iex
+          irm https://app.factory.ai/cli/windows | iex
           npm install -g @openai/codex @github/copilot opencode-ai
           # Stop does not cover native commands ($PSNativeCommandUseError-
           # ActionPreference defaults to $false), so npm's failure needs this.
           if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
-          # The iex line needs no such guard: that installer throws or exits on
-          # every failure path, and both end this step. Verified 2026-09-09.
+          # Neither iex line needs such a guard: both installers throw or exit
+          # on every failure path, and that ends this step. Verified 2026-09-09
+          # for claude, 2026-09-10 for droid, whose installer shadows
+          # Write-Error with one that exits 1.
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          # factoryai-droid is left out, installer included: on Windows it
-          # fails "checkpoint state did not advance within 30s" while passing on
-          # Linux and macOS (runs 34131195807, 34127634577) — a real defect in
-          # its hook path. Restoring means this name plus
-          # `irm https://app.factory.ai/cli/windows | iex` and ~\bin on PATH.
-          "AGENTS=claude-code codex copilot-cli opencode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # droid's Windows installer puts droid.exe in %USERPROFILE%\bin, not
+          # .local\bin, and updates only the stored user PATH, which later
+          # steps do not re-read.
+          "$HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "AGENTS=claude-code codex copilot-cli opencode factoryai-droid" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # One step per agent: a step timeout is the only per-agent bound that
       # works on all three runners (macOS has no timeout(1)), and one hung agent
@@ -251,7 +280,7 @@ jobs:
         env:
           AGENT: codex
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          E2E_CODEX_MODEL: gpt-5.4-mini
+          E2E_CODEX_MODEL: gpt-6-luna
         run: |
           set +e
           set -uo pipefail

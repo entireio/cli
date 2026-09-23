@@ -1348,8 +1348,7 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 
 	// Use -z for NUL-separated output (handles quoted filenames with spaces/special chars)
 	// Use -uall to list individual untracked files instead of collapsed directories.
-	// Note: CLAUDE.md warns against -uall for user-facing display, but we need the full list
-	// for checkpointing.
+	// Checkpointing needs the full list, not the collapsed user-facing display.
 	//
 	// --no-optional-locks matters because `git status` is a WRITE, not a read.
 	// It refreshes the index's stat cache and, whenever any entry is stale,

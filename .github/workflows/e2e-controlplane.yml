@@ -52,3 +52,43 @@ jobs:
           name: e2e-controlplane-artifacts
           path: e2e/artifacts/
           retention-days: 7
+
+  # The suite never runs on PRs, so a push to main is the only place a
+  # regression shows up; without this it stayed red for two days unnoticed.
+  notify-slack:
+    runs-on: ubuntu-latest
+    permissions: {}
+    needs: [controlplane]
+    if: ${{ always() && needs.controlplane.result == 'failure' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Notify Slack of control-plane E2E failure
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "attachments": [
+                {
+                  "color": "#d50200",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ":red_circle: *Control-plane E2E failed* on `main` — these tests run against production and never on PRs, so this is the first place a regression shows up. A killed run skips cleanup: check the shared test account for leftover `e2e-cp-*` orgs.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                      }
+                    },
+                    {
+                      "type": "context",
+                      "elements": [
+                        {
+                          "type": "mrkdwn",
+                          "text": "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }

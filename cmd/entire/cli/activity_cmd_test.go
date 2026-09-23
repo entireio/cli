@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -42,6 +43,7 @@ func TestRunActivity_SilencesContextCanceled(t *testing.T) {
 	// Simulate the user hitting Ctrl+C during auth resolution: the
 	// cancellation surfaces from the discovery fetch, and runActivity must
 	// silence it rather than mislabel it "Not logged in".
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
 		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
 			return nil, context.Canceled
@@ -77,6 +79,7 @@ func TestRunActivity_PrintsLoginHintOnNotLoggedIn(t *testing.T) {
 	//
 	// Discovery selects a context whose keyring slot holds nothing, so the
 	// per-context provider reports ErrNotLoggedIn.
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
 	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
 	c := &contexts.Context{Name: "me@core", CoreURL: "https://core.example", Handle: "me", KeychainService: "kc:me"}
 	t.Cleanup(auth.SetResolveContextForAPIForTest(t,

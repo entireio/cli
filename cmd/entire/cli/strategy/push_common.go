@@ -70,9 +70,10 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 }
 
 // pushCheckpointRefWithRecovery pushes a single checkpoint ref fast-forward-only;
-// on rejection — typically the ref diverged on the remote (the same checkpoint
-// re-written elsewhere) — it fetches the remote ref and replays the local-only
-// commits on top via fetchAndRebaseRefCommon, then retries. The retry is still
+// confirmed remote policy/hook rejections return immediately. Other failures —
+// typically the ref diverged on the remote (the same checkpoint re-written
+// elsewhere) — fetch the remote ref and replay the local-only commits on top via
+// fetchAndRebaseRefCommon, then retry. The retry is still
 // non-force: after the replay the local ref is a fast-forward over the remote, so
 // the remote commit is preserved as an ancestor rather than overwritten. The
 // cherry-pick is delta-based, so non-overlapping changes merge; a genuine overlap
@@ -85,13 +86,58 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
-	if err := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref}); err == nil {
+	pushErr := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	if pushErr == nil {
 		return nil
 	}
+	if checkpointRefRejectionReason(pushErr) != "" {
+		// Fetch+replay cannot fix a remote policy/hook rejection. If the ref
+		// already exists remotely, replay would needlessly rewrite local
+		// commits (including their committer timestamps) on every push.
+		return pushErr
+	}
 	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
-		return fmt.Errorf("sync diverged checkpoint ref %s: %w", ref, err)
+		// Recovery is speculative: a missing remote ref may mean the push was
+		// blocked, not that it diverged. Keep the push failure primary.
+		return &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
 	}
 	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+}
+
+// checkpointRefRecoveryError keeps both failures inspectable, while allowing the
+// terminal to show just the bounded push reason, not the speculative fetch error.
+type checkpointRefRecoveryError struct {
+	pushErr     error
+	recoveryErr error
+}
+
+func (e *checkpointRefRecoveryError) Error() string {
+	return fmt.Sprintf("%v (checkpoint ref recovery failed: %v)", e.pushErr, e.recoveryErr)
+}
+
+func (e *checkpointRefRecoveryError) Unwrap() []error {
+	return []error{e.pushErr, e.recoveryErr}
+}
+
+// checkpointRefRejectionReason reports only confirmed remote rejections. Network
+// failures must not be described as rejections, and plain divergence stays quiet.
+func checkpointRefRejectionReason(err error) string {
+	var recoveryErr *checkpointRefRecoveryError
+	if errors.As(err, &recoveryErr) {
+		err = recoveryErr.pushErr
+	}
+	if err == nil {
+		return ""
+	}
+	detail := err.Error() // Already collapsed and elided by remote.PushWithOptions.
+	if strings.Contains(detail, "[remote rejected]") || isProtectedRefRejection(detail) {
+		var pushErr *remote.PushError
+		if errors.As(err, &pushErr) {
+			return pushErr.Output() // Keep line breaks for the terminal, not log formatting.
+		}
+		return detail
+	}
+	return ""
 }
 
 // pushRefIfNeeded pushes a ref to the given target if it has unpushed changes.

@@ -136,7 +136,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
+          E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-6-luna' || '' }}
           E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
@@ -174,12 +174,15 @@ jobs:
           retention-days: 7
 
   e2e-windows:
-    if: inputs.agent == '' || inputs.agent == 'claude-code'
+    # Windows covers the two agents e2e-windows.yml can install. An unset agent
+    # (the push path) means claude-code, as before.
+    if: inputs.agent == '' || inputs.agent == 'claude-code' || inputs.agent == 'factoryai-droid'
     uses: ./.github/workflows/e2e-windows.yml
     permissions:
       contents: read
     with:
       test: ${{ inputs.test }}
+      agent: ${{ inputs.agent || 'claude-code' }}
     secrets: inherit
 
   notify-slack:

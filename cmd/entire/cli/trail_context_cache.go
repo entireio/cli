@@ -115,10 +115,19 @@ func currentTrailEnablementScope(ctx context.Context) (trailEnablementScope, err
 		Owner:     info.Owner,
 		Repo:      info.Repo,
 		RepoKey:   trailEnablementRepoKey(info.Forge, info.Owner, info.Repo),
-		APIBase:   api.BaseURL(),
+		APIBase:   dataAPIBase(),
 		AuthKey:   authKey,
 		Supported: info.Forge != "",
 	}, nil
+}
+
+// dataAPIBase scopes the cache to the login's data host.
+func dataAPIBase() string {
+	base, err := auth.DataBaseURL()
+	if err != nil {
+		return ""
+	}
+	return base
 }
 
 func trailEnablementRepoKey(forge, owner, repo string) string {
@@ -191,7 +200,7 @@ func saveTrailsEnabledForRemote(ctx context.Context, forge, owner, repo string, 
 		Owner:     owner,
 		Repo:      repo,
 		RepoKey:   trailEnablementRepoKey(forge, owner, repo),
-		APIBase:   api.BaseURL(),
+		APIBase:   dataAPIBase(),
 		AuthKey:   authKey,
 		Supported: forge != "",
 	}

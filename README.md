@@ -54,8 +54,7 @@ With Entire, you can:
 Install with Homebrew:
 
 ```bash
-brew install --cask entireio/tap/entire            # stable
-# brew install --cask entireio/tap/entire@nightly  # or nightly
+brew install --cask entireio/tap/entire
 ```
 
 Use the fully-qualified cask name (`entireio/tap/entire`, not `entire`). Homebrew 6 requires third-party taps to be trusted before it will evaluate them, and a fully-qualified name taps and trusts just that one cask, so no separate `brew tap` / `brew trust` step is needed. Requires Homebrew 6.0.10 or newer.
@@ -282,7 +281,7 @@ By default `entire login` opens a browser to sign in and stores tokens in the OS
 
 ### Interactive login on a headless machine
 
-Sign-in itself already handles this: with no interactive terminal, or over SSH, `entire login` switches to the device-code flow on its own and prints an approval URL you can open on any machine. `entire login --device` forces that flow explicitly. Only token *storage* needs an override — use the file-backed store:
+Sign-in itself already handles this: with no interactive terminal, over SSH, or on a Linux or BSD machine with no graphical display, `entire login` switches to the device-code flow on its own and prints an approval URL you can open on any machine. `entire login --device` forces that flow explicitly. Only token *storage* needs an override — use the file-backed store:
 
 ```bash
 ENTIRE_TOKEN_STORE=file entire login
@@ -338,16 +337,16 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `entire login`   | Log in to Entire (browser by default; `--device` for the device-code flow)            |
 | `entire logout`  | Log out of Entire                                                                    |
-| `entire auth`    | Manage authentication (`status`, `contexts`, `use`, `token`, `login`, `logout`)       |
+| `entire auth`    | Manage authentication (`status`, `contexts`, `switch`, `token`, `login`, `logout`)       |
 
 ### Control Plane
 
 | Command          | Description                                                                       |
 | ---------------- | --------------------------------------------------------------------------------- |
-| `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`)                    |
-| `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`)                         |
-| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`) |
-| `entire grant`   | Manage Entire access grants and org membership (`org`, `project`, `repo`)          |
+| `entire cluster` | Show the Entire clusters you can place projects and repos on (`list`)              |
+| `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`, `grant`)           |
+| `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`, `grant`)                |
+| `entire repo`    | Manage Entire repositories (`create`, `list`, `view`, `edit`, `delete`, `clone`, `mirror`, `remote`, `access`, `visibility`, `protection`, `grant`) |
 | `entire api`     | Make an authenticated request to an Entire API and print the response              |
 
 ### Other
@@ -365,7 +364,6 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | Command              | Description                                              |
 | -------------------- | -------------------------------------------------------- |
 | `entire review`      | Run a multi-agent review against a branch                |
-| `entire investigate` | Run a multi-agent investigation against the current branch |
 | `entire tokens`      | Analyze token usage across sessions and checkpoints       |
 | `entire blame`       | Show which lines came from Entire checkpoints             |
 | `entire why`         | Show why a line exists                                   |
@@ -382,7 +380,7 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `--agent <name>`                            | Agent to set up hooks for: `claude-code`, `codex`, `copilot-cli`, `cursor`, `factoryai-droid`, `gemini`, `opencode`, `pi` (external agents on `$PATH` also work). Enables non-interactive mode |
 | `--yes`, `-y`                               | Accept all defaults without prompting                                                                             |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
-| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo (e.g., `github:org/checkpoints-repo`)                                     |
+| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo; providers `github`, `gitlab` (e.g., `github:org/checkpoints-repo`)      |
 | `--checkpoint-push-remote <name>`           | Select an existing Git remote for checkpoints; always saves to this clone's `.entire/settings.local.json`, even with `--project` |
 | `--skip-push-sessions`                      | Disable automatic pushing of checkpoint data on git push                                                           |
 | `--local`                                   | Write settings to `.entire/settings.local.json` instead of `.entire/settings.json`                                |

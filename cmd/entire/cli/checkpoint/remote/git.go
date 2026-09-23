@@ -29,7 +29,9 @@ const stampConfigTimeout = 10 * time.Second
 // used to authenticate git push/fetch operations for checkpoint branches.
 // The token is injected as an HTTP Basic Authorization header per RFC 7617:
 // the credentials string "x-access-token:<token>" is base64-encoded and sent as
-// "Authorization: Basic <base64>". This matches GitHub's token auth for Git HTTPS.
+// "Authorization: Basic <base64>". GitHub accepts this as a token credential, and
+// GitLab ignores the Basic-auth username for Personal/Project Access Tokens, so
+// one header serves both checkpoint_remote providers.
 // SSH remotes ignore the token (with a warning).
 const CheckpointTokenEnvVar = "ENTIRE_CHECKPOINT_TOKEN"
 
@@ -443,10 +445,107 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 	disableTerminalPrompt(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", err)
+		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", formatGitPushError(ctx, err, output, pushTarget))
 	}
 	return PushResult{Output: string(output)}, nil
 }
+
+// PushError retains bounded Git diagnostics in two forms: a single-line Error
+// for logging and Output with the original line breaks for terminal display.
+// Both mask the push target's embedded credentials; neither scans remote text
+// for secrets, which would destroy actionable push-protection unblock URLs.
+type PushError struct {
+	cause  error
+	detail string
+	output string
+}
+
+func (e *PushError) Error() string {
+	return fmt.Sprintf("%v (%s)", e.cause, e.detail)
+}
+
+func (e *PushError) Unwrap() error { return e.cause }
+
+// Output returns Git's bounded diagnostics without error wrappers, preserving
+// line breaks and indentation. It is not the unbounded raw PushResult.Output.
+func (e *PushError) Output() string { return e.output }
+
+// formatGitPushError enriches a failed push with git's own output, so a caller
+// that logs only the error still learns why the remote said no.
+//
+// formatGitCommandError cannot do this job: it reads exitErr.Stderr, which the
+// os/exec contract populates only for Output(), and Push uses CombinedOutput().
+// The remote's reason — "push declined due to repository rule violations" from a
+// secret-scanning or ruleset block, "non-fast-forward", "repository not found",
+// an auth failure — therefore lives in the combined output, and dropping it
+// leaves the caller with a bare "git push: exit status 1". That is not enough to
+// act on: a checkpoint ref rejected for its content retries on every push and
+// stays queued forever, and the only way to see the cause was to reproduce the
+// push by hand.
+//
+// Error output is collapsed to one line and capped for log attributes; PushError
+// also retains capped multiline output for the terminal. A URL-shaped target is
+// redacted first in both forms because git echoes the
+// remote back into its messages and a URL may carry credentials (same reasoning
+// as formatGitCommandError and FetchBlobs).
+func formatGitPushError(ctx context.Context, err error, output []byte, remote string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("deadline exceeded: %w", err)
+	}
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		return err
+	}
+	if remote != "" {
+		detail = strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
+	}
+	return &PushError{
+		cause:  err,
+		detail: elideMiddle(strings.Join(strings.Fields(detail), " "), maxPushErrorDetail),
+		output: elideMiddle(detail, maxPushErrorDetail),
+	}
+}
+
+// elideMiddle shortens s to at most limit runes by dropping the middle, keeping
+// both ends.
+//
+// Truncating the tail would be wrong here, which is the whole reason this is not
+// a plain slice: git prints the remote's banner first and its own verdict last,
+// so the decisive lines — "! <ref> [remote rejected] (<reason>)", "error: failed
+// to push some refs" — are at the END of the output. A head-only cut discards
+// exactly what the caller needs, and does so precisely when the output is long,
+// which is when a remote has the most to say. GitHub's push-protection block is
+// the worked example: several hundred characters of banner and unblock URLs per
+// offending secret, and only then "(push declined due to repository rule
+// violations)".
+//
+// The tail gets the larger share for that reason. The cut is rune-aware because
+// git's own output carries multi-byte characters (em dashes in GitHub banners,
+// its own "…"), and slicing bytes through one would put invalid UTF-8 into a log
+// record.
+func elideMiddle(s string, limit int) string {
+	if limit <= 0 || len([]rune(s)) <= limit {
+		return s
+	}
+	const marker = " […] "
+	budget := limit - len([]rune(marker))
+	if budget < 2 {
+		return string([]rune(s)[:limit])
+	}
+	head := budget / 3
+	tail := budget - head
+	r := []rune(s)
+	return string(r[:head]) + marker + string(r[len(r)-tail:])
+}
+
+// maxPushErrorDetail bounds the git output folded into a push error, in runes.
+// Push output carries per-secret push-protection banners and progress lines and
+// can run to several KB; this keeps the error usable as a log attribute while
+// leaving room for both ends of a long rejection.
+const maxPushErrorDetail = 2000
 
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
 func LsRemoteInDir(ctx context.Context, dir, remote string, patterns ...string) ([]byte, error) {
@@ -663,8 +762,10 @@ func extractRemoteFromArgs(args []string) string {
 
 // appendCheckpointTokenEnv appends GIT_CONFIG_COUNT-based env vars to inject
 // an Authorization header into git HTTP requests. The token is sent as a Basic
-// credential with the format "x-access-token:<token>" (base64-encoded), which
-// is compatible with GitHub's token authentication.
+// credential with the format "x-access-token:<token>" (base64-encoded). GitHub
+// accepts this as a token credential; GitLab ignores the Basic-auth username for
+// Personal/Project Access Tokens, so one header serves both checkpoint_remote
+// providers.
 //
 // Existing GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* entries are preserved; the new
 // http.extraHeader entry is appended at the next free index and

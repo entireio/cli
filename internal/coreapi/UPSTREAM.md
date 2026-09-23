@@ -35,7 +35,7 @@ upstream retires it.
 `Repo.visibility`, `Repo.objectFormat`) are declared as `enum`. ogen turns
 each into a named type with a strict `Validate()` that the response decoder
 calls unconditionally, so the day the server adds a new value (a new repo
-lifecycle state, say) the whole `repo list` / repo-get request fails to
+lifecycle state, say) the whole `repo list` / `repo view` request fails to
 decode — even though the client never branches on the value.
 
 **Fix upstream:** model client-display fields that may grow new values as

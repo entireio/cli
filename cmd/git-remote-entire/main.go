@@ -236,10 +236,9 @@ func setAuthWithProvider(provider credentialProvider) transport.SetAuthFunc {
 //
 // The trailing segments are labelled per forge (gitremote.ForgePathLabels), so
 // a native path reads <project>/<repo> rather than a mirror's <owner>/<repo>.
-// The suggestion stays neutral about what `repo clone` will then do — it
-// prompts between clusters for a multi-cluster mirror, and goes straight to the
-// home cluster for a native ref — because naming the mirror picker here was
-// wrong for half the forges.
+// The suggestion stays neutral about what `repo clone` will then do — on
+// either forge it resolves the repo's readable clusters and prompts when there
+// is more than one — because describing that flow here would just drift.
 func missingClusterHostMessage(parsedURL *url.URL, rawURL string) string {
 	// Reconstruct the forge/owner/repo shorthand the user likely intended: a
 	// forge id in the host slot sits in front of the path; an empty host
