@@ -983,6 +983,7 @@ func TestCellClientFactory_RefusesCrossSiteCell(t *testing.T) {
 	}{
 		{name: "prod login to staging cell", core: "https://eu.auth.entire.io", cell: "https://aws-us-west-2.api.partial.to", wantDeny: true},
 		{name: "staging login to prod cell", core: "https://us.auth.partial.to", cell: "https://aws-us-east-2.api.entire.io", wantDeny: true},
+		{name: "trailing-dot cell host", core: "https://eu.auth.entire.io", cell: "https://aws-us-west-2.api.partial.to.", wantDeny: true},
 		{name: "same site, other jurisdiction", core: "https://eu.auth.entire.io", cell: "https://aws-us-east-2.api.entire.io"},
 		{name: "loopback core", core: "http://127.0.0.1:9000", cell: "https://aws-us-east-2.api.entire.io"},
 		{name: "custom cell", core: "https://us.auth.entire.io", cell: "https://api.example.test"},
@@ -1004,5 +1005,22 @@ func TestCellClientFactory_RefusesCrossSiteCell(t *testing.T) {
 				t.Fatalf("got %q, %v; want %q", got, err, tc.cell)
 			}
 		})
+	}
+}
+
+// The override is what points the CLI at one environment while the selected
+// login belongs to another, and it can sit on either side (a staging login with
+// a prod override, or a prod ENTIRE_TOKEN with a staging cell override), so the
+// hint must name the override's actual value rather than guess a direction.
+// Not parallel: sets ENTIRE_API_BASE_URL.
+func TestCellClientFactory_CrossSiteHintNamesOverride(t *testing.T) {
+	t.Setenv(api.BaseURLEnvVar, "https://entire.io")
+	f := &CellClientFactory{subject: cellSubject{loginJWT: "login", discoveredCore: "https://eu.auth.entire.io"}}
+	_, err := f.cellBaseURLFor(context.Background(), &CellTarget{BaseURL: "https://aws-us-west-2.api.partial.to", Jurisdiction: "us"})
+	if !errors.Is(err, ErrCellSiteMismatch) {
+		t.Fatalf("err = %v, want ErrCellSiteMismatch", err)
+	}
+	if want := api.BaseURLEnvVar + "=https://entire.io"; !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %q, want it to name %q", err, want)
 	}
 }
