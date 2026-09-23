@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/coreapi"
@@ -1411,6 +1413,51 @@ func TestAuthStatusCmd(t *testing.T) {
 				t.Errorf("flag --%s is not registered", name)
 			}
 		}
+	})
+
+	// The --json promise has to survive the failures raised before
+	// runAuthStatus is ever reached, or a script cannot rely on it at all.
+	assertJSONFailure := func(t *testing.T, cmd *cobra.Command, args ...string) {
+		t.Helper()
+		cmd.SetArgs(args)
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+
+		err := cmd.ExecuteContext(t.Context())
+		if err == nil {
+			t.Fatal("err = nil, want the failure to keep its non-zero exit")
+		}
+		var silent *SilentError
+		if !errors.As(err, &silent) {
+			t.Errorf("err = %v, want a SilentError — the reason is already on stdout", err)
+		}
+		var got authStatusJSON
+		if jerr := json.Unmarshal(out.Bytes(), &got); jerr != nil {
+			t.Fatalf("decode %q: %v", out.String(), jerr)
+		}
+		if got.LoggedIn {
+			t.Error("logged_in = true, want false")
+		}
+		if got.Error == "" {
+			t.Error("error = empty, want the failure named in-band")
+		}
+	}
+
+	t.Run("unresolvable target still answers in JSON", func(t *testing.T) {
+		// A malformed ENTIRE_TOKEN fails in resolveAuthStatusTarget, before
+		// any target exists to report against.
+		t.Setenv("ENTIRE_TOKEN", "not-a-jwt")
+		assertJSONFailure(t, newAuthStatusCmd(), "--json")
+	})
+
+	t.Run("insecure login server still answers in JSON", func(t *testing.T) {
+		// A stored context on http:// fails the TLS check between target
+		// resolution and runAuthStatus. The port is closed on purpose: the
+		// refusal must land before anything is sent.
+		isolateLogoutState(t)
+		seedLogin(t, "http://127.0.0.1:1", "alice")
+		assertJSONFailure(t, newAuthStatusCmd(), "--json")
 	})
 
 	t.Run("not logged in reports through the command", func(t *testing.T) {

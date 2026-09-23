@@ -240,14 +240,32 @@ func newAuthStatusCmd() *cobra.Command {
 		// word, which reads as the flag having no effect.
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Argument validation has already run, so every failure from here
+			// is a runtime one and a usage dump is noise — and on --json it is
+			// worse than noise, since cobra prints it to stdout and it would
+			// follow the envelope there, leaving nothing parseable. The root
+			// command silences usage too; not depending on that keeps the
+			// promise wherever this command is mounted.
+			cmd.SilenceUsage = true
+			// The --json contract covers every way this command can fail, not
+			// just the ones inside runAuthStatus: a caller piping to jq gets a
+			// parseable object whether the login server was unreachable or the
+			// contexts file never parsed.
+			fail := func(coreURL string, err error) error {
+				if !asJSON {
+					return err
+				}
+				return authStatusJSONFailure(cmd.OutOrStdout(), coreURL, err)
+			}
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
-				return err
+				// No target resolved, so no server to name.
+				return fail("", err)
 			}
 			// We send the session token to target.coreURL; enforce TLS on it.
 			if !applyInsecureHTTPAuth(insecureHTTPAuth) && target.coreURL != "" {
 				if err := api.RequireSecureURL(target.coreURL); err != nil {
-					return fmt.Errorf("context login server URL check: %w", err)
+					return fail(target.coreURL, fmt.Errorf("context login server URL check: %w", err))
 				}
 			}
 			opts := authStatusOptions{Sessions: showSessions, JSON: asJSON}
@@ -573,20 +591,28 @@ func detectRevokedLogin(token string, sessions []api.AuthSession, current int) (
 	return true, expiry
 }
 
+// authStatusJSONFailure reports a failure as the --json envelope: a parseable
+// object naming it on stdout, and a silent error so the exit stays non-zero
+// without main.go also printing the reason as plain text.
+//
+// `entire auth status --json | jq .logged_in` must answer false rather than
+// fail to parse, and a promise like that is worth nothing if it holds only for
+// the failures raised past a certain point in the command. Every exit that can
+// happen once --json is set goes through here.
+func authStatusJSONFailure(w io.Writer, coreURL string, err error) error {
+	if perr := printJSON(w, authStatusJSON{Error: err.Error(), Server: authServerHost(coreURL)}); perr != nil {
+		return perr
+	}
+	return NewSilentError(err)
+}
+
 func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget, opts authStatusOptions) error {
 	d, err := resolveAuthStatus(ctx, fetchProfile, listSessions, t)
 	if err != nil {
 		if !opts.JSON {
 			return err
 		}
-		// A caller that asked for JSON gets a parseable object naming the
-		// failure rather than empty stdout — `--json | jq .logged_in` should
-		// report false, not fail to parse. The exit stays non-zero, and the
-		// reason is already on stdout, so the error itself is silent.
-		if perr := printJSON(w, authStatusJSON{Error: err.Error(), Server: authServerHost(t.coreURL)}); perr != nil {
-			return perr
-		}
-		return NewSilentError(err)
+		return authStatusJSONFailure(w, t.coreURL, err)
 	}
 	if opts.JSON {
 		return printJSON(w, buildAuthStatusJSON(d, opts))
