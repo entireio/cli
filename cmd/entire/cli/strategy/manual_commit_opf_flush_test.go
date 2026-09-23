@@ -2,14 +2,17 @@ package strategy
 
 import (
 	"bytes"
+	"context"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -21,6 +24,22 @@ const (
 	flushFitsID      = "a1b2c3d4e5f6"
 	flushOversizedID = "b2c3d4e5f6a1"
 )
+
+type opfThatAddsRefOnFirstBatch struct {
+	fakeOPFForRewrite
+
+	once sync.Once
+	add  func()
+}
+
+func (f *opfThatAddsRefOnFirstBatch) RedactBatch(
+	ctx context.Context,
+	inputs []string,
+	categories []string,
+) ([][]redact.Span, error) {
+	f.once.Do(f.add)
+	return f.fakeOPFForRewrite.RedactBatch(ctx, inputs, categories)
+}
 
 // swapOPFFlushSpawn replaces the detached-spawn seam with a recorder for the
 // duration of the test, and returns the slice of worktree roots it was asked to
@@ -173,4 +192,31 @@ func TestRunOPFFlush_RewritesTheBacklogButNeverPushes(t *testing.T) {
 	out, lsErr := lsCmd.CombinedOutput()
 	require.NoError(t, lsErr, "ls-remote failed: %s", out)
 	assert.NotContains(t, string(out), refs[0].String(), "a background process must not deliver anything")
+}
+
+// Equal backlog counts do not imply stagnation. If the worker finishes A while
+// a concurrent checkpoint write adds B, {A} becomes {B}; another pass is needed
+// even though both sets contain one ref.
+func TestRunOPFFlush_RetriesWhenBacklogSetChangesAtSameSize(t *testing.T) {
+	_, repo, refs := setupGitRefsOPFRepo(t, flushFitsID)
+	secondRef := mustRefName(t, id.MustCheckpointID(flushOversizedID))
+	fake := &opfThatAddsRefOnFirstBatch{
+		add: func() {
+			addGitRefsSession(t, repo, flushOversizedID, "sess-added-during-flush")
+		},
+	}
+	configureFakeOPF(t, fake)
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+
+	require.NoError(t, RunOPFFlush(t.Context()))
+	require.Equal(t, 2, fake.batchCallCount(), "the changed backlog set must receive another pass")
+
+	for _, refName := range append(refs, secondRef) {
+		ref, err := repo.Reference(refName, true)
+		require.NoError(t, err)
+		commit, err := repo.CommitObject(ref.Hash())
+		require.NoError(t, err)
+		require.True(t, trailers.HasOPFApplied(commit.Message), "ref %s must be rewritten", refName)
+	}
 }

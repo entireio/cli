@@ -25,6 +25,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	git "github.com/go-git/go-git/v6"
@@ -284,9 +285,9 @@ func RunOPFFlush(ctx context.Context) error {
 				slog.String("error", afterErr.Error()))
 			return nil
 		}
-		if len(after) == 0 || len(after) >= len(before) {
-			// Fully rewritten, or this pass moved nothing further: every ref
-			// left fails on its own terms and a retry would fail identically.
+		if len(after) == 0 || sameCheckpointRefSet(before, after) {
+			// Fully rewritten, or this pass left the same refs pending: every
+			// ref left fails on its own terms and a retry would fail identically.
 			return nil
 		}
 		before = after
@@ -294,4 +295,15 @@ func RunOPFFlush(ctx context.Context) error {
 	logging.Warn(logCtx, "opf flush: stopping after the maximum number of passes",
 		slog.Int("passes", opfFlushMaxPasses))
 	return nil
+}
+
+func sameCheckpointRefSet(a, b []plumbing.ReferenceName) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	a = slices.Clone(a)
+	b = slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }
