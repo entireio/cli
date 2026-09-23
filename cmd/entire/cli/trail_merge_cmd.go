@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"strings"
 
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/spf13/cobra"
 )
@@ -24,6 +26,9 @@ const (
 
 	trailChecksAvailable     = "available"
 	trailChecksNotApplicable = "not_applicable"
+
+	trailCheckConclusionSuccess = "success"
+	trailCheckConclusionNeutral = "neutral"
 
 	trailGateTypeChecks    = "checks"
 	trailGateStateDisabled = "disabled"
@@ -39,6 +44,7 @@ type trailMergeOptions struct {
 	Branch   string
 	DryRun   bool
 	Force    bool
+	Yes      bool
 	JSON     bool
 }
 
@@ -59,7 +65,9 @@ or is still pending, the blocking gates are listed and nothing is merged. A
 trail that conflicts with its base is never merged; resolve the conflicts first.
 
 Pass --force to merge anyway. This bypasses the blocking gates and is recorded
-on the trail; the repo's bypass policy decides who may do it.
+on the trail; the repo's bypass policy decides who may do it. You are asked to
+confirm the bypass unless --yes is passed; without a terminal to prompt on (or
+with --json), --force requires --yes.
 
 Pass --dry-run to only report whether the trail can be merged; it exits
 non-zero when the merge would be refused, so it can gate CI.`,
@@ -76,6 +84,7 @@ non-zero when the merge would be refused, so it can gate CI.`,
 	cmd.Flags().StringVar(&opts.Branch, "branch", "", "Branch of the trail (defaults to current); cannot be combined with a trail selector")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Only check whether the trail can be merged; do not merge")
 	cmd.Flags().BoolVar(&opts.Force, "force", false, "Merge even when blocking gates fail (requires bypass permission)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Skip the confirmation prompt before --force bypasses gates")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output as JSON")
 
 	return cmd
@@ -207,6 +216,13 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 		}
 	}
 
+	if !opts.DryRun && bypass {
+		proceed, err := confirmTrailMergeBypass(ctx, w, found, gates, opts.Yes, !opts.JSON && trailMergeCanPrompt())
+		if err != nil || !proceed {
+			return err
+		}
+	}
+
 	if opts.DryRun {
 		if bypass {
 			fmt.Fprintf(w, "Trail #%d is blocked; --force would bypass %d blocking %s, subject to the repo's bypass policy (%s) (dry run; no merge performed).\n",
@@ -244,6 +260,62 @@ func trailMergeAfterRead(ctx context.Context, w io.Writer, client *api.Client, m
 		fmt.Fprintf(w, "Merged trail #%d into %s (%s)\n", found.Number, base, commit)
 	}
 	return nil
+}
+
+// Seams for tests: whether a terminal can be prompted, and the prompt itself.
+var (
+	trailMergeCanPrompt    = interactive.CanPromptInteractively
+	trailMergeBypassPrompt = promptTrailMergeBypass
+)
+
+// confirmTrailMergeBypass decides whether a --force bypass should proceed,
+// mirroring confirmTrailDeletion: --yes proceeds silently; otherwise it needs
+// an interactive terminal, and without one it refuses rather than bypassing
+// unprompted. A declined or aborted prompt is a clean cancel.
+func confirmTrailMergeBypass(ctx context.Context, w io.Writer, t *api.TrailResource, gates []api.TrailGateResult, yes, canPrompt bool) (bool, error) {
+	if yes {
+		return true, nil
+	}
+	n := len(gates)
+	if !canPrompt {
+		return false, fmt.Errorf("refusing to bypass %d blocking %s on trail #%d without confirmation; pass --yes", n, pluralize("gate", n), t.Number)
+	}
+	if ctx.Err() != nil {
+		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
+	}
+	base := tuiutil.SanitizeDisplayText(strings.TrimSpace(t.Base))
+	if base == "" {
+		base = "its base"
+	}
+	title := fmt.Sprintf("Bypass %d blocking %s and merge trail #%d into %s?", n, pluralize("gate", n), t.Number, base)
+	lines := make([]string, 0, n+1)
+	lines = append(lines, "The bypass is recorded on the trail. Gates bypassed:")
+	for _, g := range gates {
+		lines = append(lines, "  - "+describeGateFailure(g))
+	}
+	confirmed, err := trailMergeBypassPrompt(ctx, title, strings.Join(lines, "\n"))
+	if err != nil {
+		return false, err
+	}
+	if !confirmed {
+		fmt.Fprintln(w, "Trail merge cancelled.")
+		return false, nil
+	}
+	return true, nil
+}
+
+func promptTrailMergeBypass(ctx context.Context, title, description string) (bool, error) {
+	confirmed := false
+	form := NewAccessibleForm(
+		huh.NewGroup(huh.NewConfirm().Title(title).Description(description).Value(&confirmed)),
+	)
+	if err := form.RunWithContext(ctx); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			return false, nil
+		}
+		return false, fmt.Errorf("trail merge prompt: %w", err)
+	}
+	return confirmed, nil
 }
 
 func trailMergeHead(m *api.TrailMergeabilityResponse) string {
@@ -463,7 +535,7 @@ func countTrailCheckRuns(runs []api.TrailCheckRun) trailCheckRunCounts {
 		switch {
 		case !strings.EqualFold(strings.TrimSpace(r.Status), "completed"):
 			c.pending++
-		case conclusion == "success" || conclusion == "neutral" || conclusion == "skipped":
+		case conclusion == trailCheckConclusionSuccess || conclusion == trailCheckConclusionNeutral || conclusion == trailGateSkipped:
 			c.passed++
 		default:
 			c.failed++

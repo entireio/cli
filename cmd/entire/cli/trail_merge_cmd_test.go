@@ -49,7 +49,11 @@ func trailMergeability(t *testing.T, edits ...func(map[string]any)) string {
 
 func withGate(g map[string]any) func(map[string]any) {
 	return func(m map[string]any) {
-		m["gates"] = append(m["gates"].([]any), g) //nolint:forcetypeassert // test fixture
+		gates, ok := m["gates"].([]any)
+		if !ok {
+			panic("trailMergeability: gates is not a list")
+		}
+		m["gates"] = append(gates, g)
 	}
 }
 
@@ -70,6 +74,10 @@ type trailMergeStub struct {
 	mergeability string
 	mergeStatus  int
 	mergeBody    string
+
+	canPrompt bool     // what the TTY probe reports
+	confirm   bool     // the answer to the bypass prompt
+	prompts   []string // title + description of each bypass prompt shown
 
 	mu    sync.Mutex
 	posts []string
@@ -127,6 +135,13 @@ func runTrailMergeTestArgs(t *testing.T, stub *trailMergeStub, args ...string) (
 		return api.NewClientWithBaseURL("token", srv.URL), trailMergeTestRepoID, nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = previous })
+	previousCanPrompt, previousPrompt := trailMergeCanPrompt, trailMergeBypassPrompt
+	trailMergeCanPrompt = func() bool { return stub.canPrompt }
+	trailMergeBypassPrompt = func(_ context.Context, title, description string) (bool, error) {
+		stub.prompts = append(stub.prompts, title+"\n"+description)
+		return stub.confirm, nil
+	}
+	t.Cleanup(func() { trailMergeCanPrompt, trailMergeBypassPrompt = previousCanPrompt, previousPrompt })
 
 	cmd := newTrailCmd()
 	cmd.SetContext(t.Context())
@@ -157,7 +172,8 @@ func TestTrailMerge_BlockersComeFromMergeabilityGates(t *testing.T) {
 	out, err := runTrailMergeTest(t, stub, "et/acme/widget")
 
 	require.Error(t, err)
-	blockedBy := out[strings.Index(out, "Blocked by:"):]
+	_, blockedBy, ok := strings.Cut(out, "Blocked by:")
+	require.True(t, ok, out)
 	require.Contains(t, blockedBy, "base_checks: trunk is red")
 	require.NotContains(t, blockedBy, "findings", "a non-blocking gate does not block the merge")
 	require.NotContains(t, blockedBy, "checks: passed", "a passed gate does not block the merge")
@@ -173,18 +189,20 @@ func TestTrailMerge_ChecksLineReadsChecksGateAndRuns(t *testing.T) {
 		}}
 	}
 	for _, tc := range []struct {
-		name  string
-		edits []func(map[string]any)
-		want  string
+		name    string
+		edits   []func(map[string]any)
+		want    string
+		wantErr bool
 	}{
 		{name: "passed", want: "Checks:     ✓ passed (1 run: 1 passed)"},
-		{name: "failed", edits: []func(map[string]any){blocked, failedChecks}, want: "Checks:     ✗ failed (3 runs: 1 failed, 1 pending, 1 passed)"},
+		{name: "failed", edits: []func(map[string]any){blocked, failedChecks}, wantErr: true, want: "Checks:     ✗ failed (3 runs: 1 failed, 1 pending, 1 passed)"},
 		{name: "no checks gate or CI", edits: []func(map[string]any){withField("gates", []any{}), withField("checks", map[string]any{"availability": "not_applicable", "runs": []any{}})}, want: "Checks:     ✓ none"},
 		{name: "CI unavailable", edits: []func(map[string]any){withField("gates", []any{}), withField("checks", map[string]any{"availability": "unavailable", "runs": []any{}})}, want: "Checks:     ✗ unknown (CI evidence unavailable)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, tc.edits...), mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`}
-			out, _ := runTrailMergeTest(t, stub, "et/acme/widget", "--dry-run")
+			out, err := runTrailMergeTest(t, stub, "et/acme/widget", "--dry-run")
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			require.Contains(t, out, tc.want)
 		})
 	}
@@ -213,7 +231,7 @@ func TestTrailMerge_ForceSendsBypass(t *testing.T) {
 				t: t, lookupBase: target.lookupBase, mergeability: trailMergeability(t, blocked, baseChecksRed),
 				mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`,
 			}
-			out, err := runTrailMergeTest(t, stub, target.repo, "--force")
+			out, err := runTrailMergeTest(t, stub, target.repo, "--force", "--yes")
 
 			require.NoError(t, err)
 			posts := stub.mergePosts()
@@ -245,7 +263,7 @@ func TestTrailMerge_ForceBypassForbidden(t *testing.T) {
 		mergeStatus: http.StatusForbidden,
 		mergeBody:   `{"title":"Forbidden","status":403,"detail":"merge_gates_bypass_forbidden"}`,
 	}
-	_, err := runTrailMergeTest(t, stub, "et/acme/widget", "--force")
+	_, err := runTrailMergeTest(t, stub, "et/acme/widget", "--force", "--yes")
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "bypass policy (admins) does not allow you to bypass")
@@ -464,4 +482,59 @@ func TestTrailMerge_JSON(t *testing.T) {
 			"dryRun":true,"merged":false,"bypassed":false}`, out)
 		require.Empty(t, stub.mergePosts())
 	})
+}
+
+func TestTrailMerge_ConfirmsBeforeBypass(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		canPrompt  bool
+		confirm    bool
+		args       []string
+		wantPrompt bool
+		wantPost   bool
+		wantErr    string
+		wantOut    string
+	}{
+		{name: "confirmed", canPrompt: true, confirm: true, wantPrompt: true, wantPost: true, wantOut: "bypassing 1 blocking gate"},
+		{name: "declined", canPrompt: true, confirm: false, wantPrompt: true, wantOut: "Trail merge cancelled."},
+		{name: "yes skips the prompt", canPrompt: true, args: []string{"--yes"}, wantPost: true},
+		{name: "non-interactive without yes", canPrompt: false, wantErr: "refusing to bypass 1 blocking gate on trail #7 without confirmation; pass --yes"},
+		{name: "json never prompts", canPrompt: true, confirm: true, args: []string{"--json"}, wantErr: "pass --yes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &trailMergeStub{
+				t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t, blocked, baseChecksRed),
+				mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`, canPrompt: tc.canPrompt, confirm: tc.confirm,
+			}
+			out, err := runTrailMergeTest(t, stub, "et/acme/widget", append([]string{"--force"}, tc.args...)...)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			if tc.wantPrompt {
+				require.Len(t, stub.prompts, 1)
+				require.Contains(t, stub.prompts[0], "Bypass 1 blocking gate and merge trail #7 into trunk?")
+				require.Contains(t, stub.prompts[0], "base_checks: trunk is red", "the prompt lists the gates being bypassed")
+			} else {
+				require.Empty(t, stub.prompts)
+			}
+			if tc.wantPost {
+				require.Len(t, stub.mergePosts(), 1)
+			} else {
+				require.Empty(t, stub.mergePosts())
+			}
+			require.Contains(t, out, tc.wantOut)
+		})
+	}
+}
+
+func TestTrailMerge_MergeableForceDoesNotPrompt(t *testing.T) {
+	stub := &trailMergeStub{t: t, lookupBase: trailMergeLookupBase, mergeability: trailMergeability(t), mergeBody: `{"ok":true,"mergeCommitSha":"merge-example"}`, canPrompt: true}
+	_, err := runTrailMergeTest(t, stub, "et/acme/widget", "--force")
+
+	require.NoError(t, err)
+	require.Empty(t, stub.prompts, "nothing is bypassed, so nothing to confirm")
+	require.JSONEq(t, `{"expectedHeadSha":"`+trailMergeTestHead+`"}`, stub.mergePosts()[0])
 }
