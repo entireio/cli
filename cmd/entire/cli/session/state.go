@@ -967,6 +967,17 @@ func (s *State) IsEnded() bool {
 	return s.Phase == PhaseEnded || s.EndedAt != nil
 }
 
+// HasShadowBranchContent reports whether this state records checkpoint content
+// written to its shadow branch.
+func (s *State) HasShadowBranchContent() bool {
+	return s.StepCount > 0 || len(s.FilesTouched) > 0
+}
+
+func (s *State) hasPendingCheckpointContent() bool {
+	return (!s.FullyCondensed && s.HasShadowBranchContent()) ||
+		s.HasTaskContent() || len(s.TurnCheckpointIDs) > 0 || s.CondensationAttempt != nil
+}
+
 func (s *State) IsStale() bool {
 	// Imported sessions are historical, read-only records reconstructed from
 	// pre-existing transcripts; their timestamps are always old by nature.
@@ -1127,8 +1138,8 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 }
 
 // Load loads the session state for the given session ID.
-// Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
-// Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
+// Returns (nil, nil) for missing files or expired records with no pending content.
+// Stale sessions are deleted only when they have no pending checkpoint content.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
 	return s.load(ctx, sessionID, true)
 }
@@ -1166,10 +1177,7 @@ func (s *StateStore) load(ctx context.Context, sessionID string, deleteStale boo
 	}
 	state.NormalizeAfterLoad(ctx)
 
-	if state.IsStale() {
-		if !deleteStale {
-			return &state, nil
-		}
+	if deleteStale && state.IsStale() && !state.hasPendingCheckpointContent() {
 		logCtx := logging.WithComponent(ctx, "session")
 		logging.Debug(logCtx, "deleting stale session state",
 			slog.String("session_id", sessionID),
@@ -1273,22 +1281,28 @@ func (s *StateStore) RemoveAll() error {
 	return nil
 }
 
-// List returns all session states, deleting any that have gone stale.
+// List returns readable session states, skipping individual load failures.
+// Expired records are deleted only when they have no pending checkpoint content.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
-	return s.list(ctx, true)
+	return s.list(ctx, false, true)
 }
 
-// ListReadOnly returns every persisted session without deleting or hiding
-// stale records.
-//
-// `entire status` is the caller this exists for: asking what is happening must
-// not change what is happening. Cleanup stays with the callers that own it —
-// doctor and the session sweeper — which keep using List.
+// ListStrict refuses an incomplete inventory. Destructive consumers must use
+// this instead of treating an unreadable session as absent.
+func (s *StateStore) ListStrict(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, true, true)
+}
+
+// ListReadOnly returns readable persisted sessions without deleting or hiding
+// stale records, skipping individual load failures.
 func (s *StateStore) ListReadOnly(ctx context.Context) ([]*State, error) {
-	return s.list(ctx, false)
+	return s.list(ctx, false, false)
 }
 
-func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, error) {
+func (s *StateStore) list(ctx context.Context, strict, deleteStale bool) ([]*State, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("list session states: %w", err)
+	}
 	root, err := s.dirRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
@@ -1303,17 +1317,26 @@ func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, erro
 
 	var states []*State
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("list session states: %w", err)
+		}
+		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		if strings.HasSuffix(entry.Name(), ".tmp") {
-			continue // Skip temp files
+		if entry.IsDir() {
+			if strict {
+				return nil, fmt.Errorf("session state %s is a directory", entry.Name())
+			}
+			continue
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
 		state, err := s.load(ctx, sessionID, deleteStale)
 		if err != nil {
-			continue // Skip corrupted state files
+			if strict {
+				return nil, fmt.Errorf("load session %s: %w", sessionID, err)
+			}
+			continue
 		}
 		if state == nil {
 			continue // Not found or stale (Load handles cleanup)

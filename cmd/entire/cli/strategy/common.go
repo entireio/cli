@@ -1618,16 +1618,6 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 	return nil
 }
 
-// branchExistsCLI checks if a branch exists using git CLI.
-// Returns nil if the branch exists, or an error if it does not.
-func branchExistsCLI(ctx context.Context, branchName string) error {
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("branch %s not found: %w", branchName, err)
-	}
-	return nil
-}
-
 // collectUntrackedFiles collects untracked files in the working directory that are
 // NOT ignored by .gitignore. This is used to capture the initial state when starting
 // a session, distinguishing files present at session start from ones it created.

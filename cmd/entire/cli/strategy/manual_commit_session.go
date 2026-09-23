@@ -155,7 +155,26 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		// Record-bearing sessions hold condensable content off the shadow branch — never orphaned.
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
-		if _, err := repo.Reference(refName, true); err != nil {
+		if _, refErr := repo.Reference(refName, true); refErr != nil {
+			absent, err := gitrepo.ReferenceIsAbsent(repo, refName)
+			if err != nil {
+				logging.Debug(logging.WithComponent(ctx, "session"),
+					"session discovery skipped state because shadow branch absence could not be verified",
+					slog.String("session_id", state.SessionID),
+					slog.String("branch", shadowBranch),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			if !absent {
+				logging.Debug(logging.WithComponent(ctx, "session"),
+					"session discovery skipped state because its shadow branch could not be read",
+					slog.String("session_id", state.SessionID),
+					slog.String("branch", shadowBranch),
+					slog.String("error", refErr.Error()),
+				)
+				continue
+			}
 			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
 				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
 				store.Clear(ctx, state.SessionID)
