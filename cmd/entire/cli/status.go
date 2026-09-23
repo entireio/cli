@@ -588,8 +588,8 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 //
 // Gated on the setting first so the default (filter off) opens no repository
 // and touches no files: this runs on every `entire status` in an enabled repo.
-// The settings answer is the right one here even though the gate that runs OPF
-// consults redact.OPFEnabled — see settings.EntireSettings.OPFEnabled.
+// The settings answer is the right one here even though the push decision and
+// worker consult redact.OPFEnabled — see settings.EntireSettings.OPFEnabled.
 func opfBacklogForStatus(ctx context.Context, s *EntireSettings) int {
 	if !s.OPFEnabled() {
 		return 0
@@ -692,9 +692,9 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 }
 
 // formatPendingOPFLine phrases the pending-redaction counter: checkpoints whose
-// OPF rewrite has not happened yet. A detached worker retries them and the next
-// push attempts them inline, so this is informational — the count going down on
-// its own is the normal case.
+// OPF rewrite has not happened yet. A detached worker retries them; a later
+// user push delivers generations the worker has finished, so this is
+// informational — the count going down on its own is the normal case.
 //
 // It deliberately says nothing about whether these checkpoints can be pushed.
 // That depends on the OPF decision resolved at push time, and a user who

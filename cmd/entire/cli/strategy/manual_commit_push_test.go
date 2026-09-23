@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"os/exec"
 	"testing"
@@ -62,48 +61,37 @@ func TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs(t *testing.T) {
 }
 
 // TestPrePushCheckpointRefs_AlreadyRedactedRefShipsWhileSiblingStillQueued
-// pins the per-ref delivery gate: prePushCheckpointRefs used to withhold the
-// WHOLE flush the moment opfGateForCheckpointRefs reported any error, so a ref
-// already rewritten and trailered by RewriteQueuedCheckpointRefsWithOPF (per
-// PR #2533's per-ref scoping) still never reached the remote if a sibling ref
-// failed. With real OPF throughput (~1.14s/KB) a queue nearly always has at
-// least one ref mid-redaction, so that made the all-or-nothing gate the jam.
-//
-// Ref order is load-bearing for the same reason it is in
-// TestRewriteQueuedCheckpointRefsWithOPF_FailingOPFRefDoesNotBlockOthers: the
-// OPF breaker trips on the first runtime failure, so the succeeding ref must be
-// processed first or it would never be scanned at all.
+// pins the asynchronous delivery boundary: pre-push ships a hash already
+// trailered by an earlier worker pass while leaving its untrailered sibling for
+// the detached worker.
 func TestPrePushCheckpointRefs_AlreadyRedactedRefShipsWhileSiblingStillQueued(t *testing.T) {
 	// No t.Parallel: the fixture uses t.Chdir.
-	const okID, failID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
-	const failSentinel = "OPFBOOM"
-	configureFakeOPF(t, &fakeRuntimeFailsOnSentinel{sentinel: failSentinel})
-	bareDir, repo, refs := setupGitRefsOPFRepo(t, okID, failID)
-	addGitRefsSessionWithTranscript(t, repo, failID, "sess-fail",
-		"Hello, PERSONABC asked about "+failSentinel)
-
-	var buf bytes.Buffer
-	oldWriter := stderrWriter
-	stderrWriter = &buf
-	t.Cleanup(func() { stderrWriter = oldWriter })
+	const okID, pendingID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, okID)
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	addGitRefsSession(t, repo, pendingID, "sess-pending")
+	refs = append(refs, mustRefName(t, id.MustCheckpointID(pendingID)))
+	spawns := swapOPFFlushSpawn(t)
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
-		"an OPF failure on one ref must not block the user's git push")
+		"pending background OPF work must not block the user's git push")
+	require.Equal(t, 1, fake.batchCallCount(), "pre-push must not add an inline OPF call")
+	require.Len(t, *spawns, 1)
 
 	lsCmd := exec.CommandContext(t.Context(), "git", "ls-remote", bareDir)
 	lsCmd.Env = testutil.GitIsolatedEnv()
 	out, lsErr := lsCmd.CombinedOutput()
 	require.NoError(t, lsErr, "ls-remote failed: %s", out)
 	require.Contains(t, string(out), refs[0].String(),
-		"the ref whose OPF call succeeded must reach the remote despite its failing sibling")
+		"the ref completed by the worker must reach the remote")
 	require.NotContains(t, string(out), refs[1].String(),
-		"the failing ref must not reach the remote")
+		"the pending ref must not reach the remote")
 
 	stillQueued := queuedRefs(t, repo)
-	require.Contains(t, stillQueued, refs[1], "the failing ref stays queued for the next push")
+	require.Contains(t, stillQueued, refs[1], "the pending ref stays queued for the worker")
 	require.NotContains(t, stillQueued, refs[0], "a ref that landed must leave the queue")
-	require.Contains(t, buf.String(), "stay queued for the next push",
-		"the refs left behind must still be visible to the user")
 }
 
 // TestPushQueuedCheckpointRefs_ShipsReadyRefsAndReportsTheRest is the explicit

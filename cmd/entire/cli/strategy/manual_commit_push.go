@@ -233,11 +233,9 @@ func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
 	return resolveOPFDecisionForPrePush(ctx, opfCfg, opfPrePushProgressWriter)
 }
 
-// opfGateForCheckpointRefs resolves the OPF decision and, when it says run,
-// rewrites the queued checkpoint refs. A nil error means the flush may proceed;
-// a non-nil one means it must be withheld, leaving the refs queued rather than
-// shipping 8-layer content the user did not opt out of. OPF being disabled is a
-// nil error, so every flush can call this unconditionally.
+// opfDecisionForCheckpointRefs resolves whether this push requires OPF. It does
+// not run model inference: normal pre-push hands that work to the detached
+// worker, while the explicit migration push calls the rewrite separately.
 //
 // The resolved decision is returned alongside the error because a caller that
 // hands leftover work to the background worker needs to know WHY a backlog
@@ -250,25 +248,25 @@ func opfPrePushDecision(ctx context.Context) (OPFDecision, error) {
 //
 // Every path that flushes the queue must pass through here, because skipping it
 // is not the same as an OPFSkip: a skip is a decision the user made for this
-// push and it ships untagged content deliberately, while a missing gate ships
-// exactly the same bytes having never asked.
+// push and it ships untagged content deliberately, while a missing decision
+// ships exactly the same bytes having never asked.
 //
 // Reporting belongs to the caller: the pre-push hook warns and carries on,
 // because a checkpoint failure must never block the user's own git push, while
 // an explicitly requested push surfaces the error instead.
 //
-// Precondition, and the one way to make this gate a silent no-op: OPFEnabled
+// Precondition, and the one way to make this decision a silent no-op: OPFEnabled
 // reads process-global config that only EnsureRedactionConfigured sets, so a
 // caller that reaches here without it having run reads "OPF off" and flushes
 // everything unscanned. Every caller must ensure it — the hook path via
 // withHookSession (hooks_git_cmd.go), the migration push via pushMigratedRefs
 // (doctor_migrate.go).
 //
-// This gate does not call it itself: on the hook path its scanner-config error
-// is deliberately logged and survived rather than propagated, so raising it
-// here would withhold pushes on a condition that path documents as
-// non-fatal.
-func opfGateForCheckpointRefs(ctx context.Context, repo *git.Repository) (OPFDecision, error) {
+// This decision helper does not call it itself: on the hook path its
+// scanner-config error is deliberately logged and survived rather than
+// propagated, so raising it here would withhold pushes on a condition that path
+// documents as non-fatal.
+func opfDecisionForCheckpointRefs(ctx context.Context) (OPFDecision, error) {
 	if !redact.OPFEnabled() {
 		return OPFSkip, nil
 	}
@@ -284,19 +282,25 @@ func opfGateForCheckpointRefs(ctx context.Context, repo *git.Repository) (OPFDec
 		// untagged — same as the v1 path.
 		logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
 	case OPFRun:
-		_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite_refs")
-		defer opfSpan.End()
-		if rewriteErr := RewriteQueuedCheckpointRefsWithOPF(ctx, repo); rewriteErr != nil {
-			opfSpan.RecordError(rewriteErr)
-			return OPFRun, rewriteErr
-		}
+		// The normal pre-push path schedules the rewrite worker; explicit
+		// migration performs its synchronous rewrite after this decision.
 	}
 	return decision, nil
 }
 
+func rewriteCheckpointRefsForPush(ctx context.Context, repo *git.Repository) error {
+	_, opfSpan := perf.Start(ctx, "opf_rewrite_refs")
+	defer opfSpan.End()
+	if err := RewriteQueuedCheckpointRefsWithOPF(ctx, repo); err != nil {
+		opfSpan.RecordError(err)
+		return err
+	}
+	return nil
+}
+
 // deliveryRequiresOPFTrailer reports whether this push may deliver only the
 // queued refs that already carry the OPF trailer, given the decision
-// opfGateForCheckpointRefs resolved. It is the whole of the fail-closed delivery
+// opfDecisionForCheckpointRefs resolved. It is the whole of the fail-closed delivery
 // contract: under every decision but OPFSkip a ref ships once it already carries
 // the trailer, never because we gave up waiting for it.
 //
@@ -306,10 +310,9 @@ func opfGateForCheckpointRefs(ctx context.Context, repo *git.Repository) (OPFDec
 // session can be absent from a readiness snapshot yet present in the push.
 // Answering "which refs?" here instead is what opened that window.
 //
-// The gate's ERROR is likewise not an input. Whether the gate fully succeeded,
-// failed on one ref, or stopped the whole rewrite (a tripped breaker, an
-// unresolvable decision), the question "may this ref ship?" has the same answer,
-// and the ref's own trailer answers it.
+// A decision error is likewise not an input. Whether the decision was aborted
+// or could not be resolved, the question "may this ref ship?" has the same
+// answer, and the ref's own trailer answers it.
 //
 // OPFSkip is an explicit opt-out for this push (or OPF off entirely): nothing is
 // withheld and the queue ships as-is, untagged. Returning false also keeps the
@@ -324,19 +327,18 @@ func deliveryRequiresOPFTrailer(decision OPFDecision) bool {
 	return decision != OPFSkip
 }
 
-// warnOPFCheckpointRefsWithheld reports refs the gate held back on both
+// warnOPFCheckpointRefsWithheld reports refs the delivery check held back on both
 // channels: the log for diagnosis, and the user's terminal so a silently
 // un-synced checkpoint is never the first they hear of it. withheld is how many
-// queued refs this push is leaving behind — zero means the gate's failure cost
-// this push nothing to deliver (every queued ref already carried the trailer),
-// so there is nothing to tell the user to look for.
+// queued refs this push is leaving behind — zero means the decision failure
+// cost this push nothing to deliver (every queued ref already carried the
+// trailer), so there is nothing to tell the user to look for.
 //
 // Names no cause, for the reason PushQueuedCheckpointRefs does not either: the
-// gate withholds on an unresolvable decision or a failed scan, but also on a
-// ref update that lost a race after a scan that ran fine. Saying "OPF did not
-// run" on the pre-push channel — the one nearly every withheld flush comes
-// through — would send those users after the wrong problem. The wrapped error
-// says which it was.
+// delivery check can withhold after an unresolvable decision, or because the
+// worker has not finished a ref yet. Saying "OPF did not run" on the pre-push
+// channel would send some users after the wrong problem. The wrapped error says
+// which decision failure occurred when one exists.
 func warnOPFCheckpointRefsWithheld(ctx context.Context, err error, withheld int) {
 	logging.Warn(ctx, "checkpoint ref push withheld; refs left queued",
 		slog.String("error", err.Error()),
@@ -443,8 +445,9 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 // recorded refs fast-forward-only (git-refs primary; never a force push — a
 // diverged ref is recovered via fetch+replay). Transient push failures are logged and
 // swallowed — like the v1 path, they must not block the user's git push — and the
-// refs stay queued for the next pre-push. When OPF is enabled the queued refs
-// are re-redacted with it first (RewriteQueuedCheckpointRefsWithOPF).
+// refs stay queued for the next pre-push. When OPF is enabled, normal pre-push
+// schedules queued rewrite work in the detached worker and immediately ships
+// only immutable generations that already carry the OPF trailer.
 func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings, pendingCapture string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -460,13 +463,11 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// failing closed means withholding the refs OPF has not finished with —
 	// nothing un-OPF'd ships, those refs stay queued, and the user's push
 	// proceeds.
-	opfDecision, opfErr := opfGateForCheckpointRefs(ctx, repo)
-	// Hand any remaining OPF backlog to a detached worker whether the gate
-	// succeeded or not: a partially withheld flush leaves the rest of the
-	// backlog, and a gate that succeeded can still have skipped a ref over the
-	// per-ref cap. It never blocks — the child makes the model call, this push
-	// does not wait for it. Only when the user asked for OPF on this push: see
-	// the gate's doc.
+	opfDecision, opfErr := opfDecisionForCheckpointRefs(ctx)
+	// Hand the OPF backlog to a detached worker. It never blocks — the child
+	// makes the model call and this push does not wait for it. Only do this when
+	// the user asked for OPF on this push; a skip or abort must not launch work
+	// the user declined.
 	if opfDecision == OPFRun {
 		maybeSpawnOPFFlush(ctx, repo)
 	}
@@ -475,9 +476,9 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// they were handed one shared snapshot to divide: each answers from the
 	// ref's own tip trailer, so "the worker's work" (no trailer yet) and "this
 	// push's cargo" (trailer already there) are complements of one predicate and
-	// disjoint however the two interleave. A ref the worker trailers mid-push is
-	// pushed by name, so the remote receives the rewritten tip or the next push
-	// delivers it — either way more redacted, never less.
+	// disjoint however the two interleave. Delivery captures an immutable hash;
+	// if the worker advances the ref mid-push, exact queue-token cleanup preserves
+	// that newer generation for the next user push.
 	flushed, withheld, flushErr := flushCheckpointRefsQueue(ctx, repo, ps, deliveryRequiresOPFTrailer(opfDecision))
 	if opfErr != nil {
 		// After the flush, because the count of refs left behind is the flush's
@@ -519,9 +520,13 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	if ps.pushDisabled {
 		return 0, true, nil
 	}
-	opfDecision, opfErr := opfGateForCheckpointRefs(ctx, repo)
+	opfDecision, opfErr := opfDecisionForCheckpointRefs(ctx)
+	if opfDecision == OPFRun && opfErr == nil {
+		opfErr = rewriteCheckpointRefsForPush(ctx, repo)
+	}
 	// Same follow-up as the pre-push path, for the same reasons: see
-	// maybeSpawnOPFFlush and the gate's doc.
+	// maybeSpawnOPFFlush. This also retries any refs the synchronous rewrite
+	// could not finish.
 	if opfDecision == OPFRun {
 		maybeSpawnOPFFlush(ctx, repo)
 	}
@@ -537,13 +542,11 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	}
 	if opfErr != nil && withheld > 0 {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message
-		// below: the gate fails on an unresolvable decision or a failed scan,
-		// but also on a ref update that lost a race after a scan that ran
-		// fine, so "OPF did not run" would sometimes send the user after the
-		// wrong problem. The wrapped error says which it was. pushed already
-		// reflects whatever shipped — this reports that some refs remain
-		// queued, not that nothing did. A gate failure that withheld nothing
-		// is not reported at all: there is no leftover to act on.
+		// below: the decision can fail before a rewrite, or the synchronous
+		// rewrite can fail on one ref after others completed. The wrapped error
+		// says which it was. pushed already reflects whatever shipped — this
+		// reports that some refs remain queued, not that nothing did. An error
+		// that withheld nothing is not reported: there is no leftover to act on.
 		return pushed, false, fmt.Errorf("%d checkpoint ref(s) stay queued: %w", withheld, opfErr)
 	}
 	return pushed, false, nil
@@ -597,7 +600,7 @@ func checkpointRefPushTokens(refs []checkpointRefPush) []checkpoint.PushQueueEnt
 // When requireOPFTrailer is set, a drained ref whose tip does not already carry
 // Entire-OPF-Applied is excluded from this push entirely: never attempted, never
 // pruned as stale, left queued exactly like a ref whose push was rejected. That
-// is how the OPF gate fails closed per ref — a ref still awaiting redaction is
+// is how OPF delivery fails closed per ref — a ref still awaiting redaction is
 // simply invisible to this delivery attempt — rather than by withholding the
 // whole flush and stranding siblings that already carry the trailer.
 //

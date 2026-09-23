@@ -2,17 +2,17 @@
 //
 // The OPF rewrite is a model call: on a real backlog it can run for tens of
 // seconds, and until now it ran inline in the pre-push hook, where the user's
-// `git push` waits on it. This file moves that work off the push path. The
-// pre-push gate still runs one inline attempt — delivery must stay fail-closed
-// and the gate is what decides it — but whatever the gate could not finish is
-// handed to a detached `entire __opf_flush` child and the push returns.
+// `git push` waits on it. This file moves that work off the normal push path.
+// Pre-push resolves the user's OPF decision, delivers only checkpoint
+// generations that already carry the trailer, and hands the remaining rewrite
+// work to a detached `entire __opf_flush` child.
 //
 // The worker REWRITES; it never pushes. That division is the whole reason this
 // is safe to run unattended: rewriting only ever makes checkpoint content more
-// redacted and stamps commits the pre-push gate would have stamped anyway,
-// while the decision about whether redacted-enough content may leave the
-// machine stays with opfGateForCheckpointRefs on the user's own push. A
-// background process must not be able to ship anything.
+// redacted and stamps commits the user's push authorized it to stamp, while the
+// decision about whether content may leave the machine stays with delivery on
+// a user-initiated push. A background process must not be able to ship
+// anything.
 //
 // Same detached one-shot shape as the zombie-session sweep and the
 // trail-enablement refresh in package cli (maybeSpawnSessionSweep,
@@ -152,11 +152,11 @@ func refTipCarriesOPFApplied(repo *git.Repository, refName plumbing.ReferenceNam
 }
 
 // maybeSpawnOPFFlush fires one detached __opf_flush child when OPF is enabled
-// and queued checkpoint refs still need rewriting after the inline pre-push
-// attempt. Called from both OPF gate call sites, but only when the gate's
-// decision was OPFRun — the user asked for OPF on this push. A failed or
-// partial rewrite under that decision still leaves a backlog worth a
-// follow-up; an explicit OPFSkip (or an unresolvable decision, mapped to
+// and queued checkpoint refs still need rewriting. Normal pre-push always
+// assigns that backlog to the worker; the explicit migration path may first
+// have attempted a synchronous rewrite. Both call this only when the decision
+// was OPFRun — the user asked for OPF on this push. An explicit OPFSkip (or an
+// unresolvable decision, mapped to
 // OPFAbort) must not, since running OPF in the background after the user
 // declined it for this push would redact content they chose to flush as-is
 // and diverge the local ref from what was actually pushed. Not permanent: a
@@ -208,8 +208,9 @@ func maybeSpawnOPFFlush(ctx context.Context, repo *git.Repository) {
 		slog.Int("refs", len(awaiting)))
 }
 
-// RunOPFFlush is the detached background pass that rewrites the checkpoint refs
-// the inline pre-push attempt could not finish. It retries until a pass makes
+// RunOPFFlush is the detached background pass that rewrites queued checkpoint
+// refs assigned to it by normal pre-push, plus any leftovers from an explicit
+// synchronous migration attempt. It retries until a pass makes
 // no further progress — either every queued ref now carries the OPF trailer, or
 // the refs that remain fail identically every time and nothing will change
 // without new input. A ref that never clears simply stays in the backlog
@@ -221,7 +222,7 @@ func maybeSpawnOPFFlush(ctx context.Context, repo *git.Repository) {
 // and a non-zero exit would only produce a failure signal no one can act on.
 //
 // It deliberately does NOT push, and does not resolve an OPF decision. Delivery
-// stays with the pre-push gate on the user's own push, where the decision was
+// stays with the delivery path on the user's own push, where the decision was
 // already made and where a withheld flush is reported to the user's terminal.
 // It also does not touch the git-branch entire/checkpoints/v1 rewrite: that
 // rewrite's unpushed set is computed against a specific push target
@@ -232,8 +233,8 @@ func RunOPFFlush(ctx context.Context) error {
 	logCtx := logging.WithComponent(ctx, opfFlushComponent)
 
 	// OPFEnabled reads process-global config that only EnsureRedactionConfigured
-	// sets. Without this the child would read "OPF off" and silently do nothing
-	// — the exact failure mode opfGateForCheckpointRefs documents.
+	// sets. Without this the child would read "OPF off" and silently do nothing,
+	// while opfDecisionForCheckpointRefs in the parent had resolved OPFRun.
 	//
 	// Unlike the hook path, a scanner-config error stops this worker rather than
 	// being survived: the hook survives it so the user's own push is not blocked

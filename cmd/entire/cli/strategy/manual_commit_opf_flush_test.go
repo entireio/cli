@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -51,11 +50,9 @@ func addOversizedRef(t *testing.T, repo *git.Repository) {
 	t.Setenv(batchEnvVar, "7000")
 }
 
-// The point of the whole change: the pre-push hook hands leftover OPF work to a
-// detached child instead of doing it inline. With a WORKING OPF runtime and one
-// ref the per-ref cap skips, the gate leaves a genuine backlog behind — so the
-// hook must spawn exactly one flush child, and still return (the user's push is
-// never blocked on the model call for the ref it could not finish).
+// Normal pre-push hands every untrailered ref to the detached worker without
+// invoking OPF itself. The cap difference is irrelevant to the hook: both refs
+// remain queued until background processing advances them.
 func TestPrePushCheckpointRefs_SpawnsOPFFlushWhenBacklogRemains(t *testing.T) {
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 	_, repo, refs := setupGitRefsOPFRepo(t, flushFitsID, flushOversizedID)
@@ -71,17 +68,31 @@ func TestPrePushCheckpointRefs_SpawnsOPFFlushWhenBacklogRemains(t *testing.T) {
 		"leftover OPF work must not fail the user's git push")
 
 	require.Len(t, *spawns, 1, "exactly one detached flush child per push with a backlog")
-	assert.Equal(t, []plumbing.ReferenceName{refs[1]}, queuedRefs(t, repo),
-		"only the ref the cap skipped stays queued for the worker; the rewritten one shipped")
+	assert.ElementsMatch(t, refs, queuedRefs(t, repo),
+		"normal pre-push leaves every untrailered ref queued for the worker")
 }
 
-// The mirror case, and the reason maybeSpawnOPFFlush pre-checks at all: when the
-// inline gate finished the work there is nothing for a child to do, so forking
-// one would cost a process to discover that. Mirrors the countSweepableZombies
-// pre-check in maybeSpawnSessionSweep.
+func TestPrePushCheckpointRefs_DoesNotRunOPFInline(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, flushFitsID)
+	spawns := swapOPFFlushSpawn(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+
+	assert.Zero(t, fake.batchCallCount(), "normal pre-push must leave model inference to the detached worker")
+	require.Len(t, *spawns, 1, "an ordinary untrailered ref must schedule the detached worker")
+	assert.Equal(t, refs, queuedRefs(t, repo), "untrailered refs stay queued until the worker rewrites them")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "pre-push must not deliver content before background OPF finishes")
+}
+
+// The mirror case, and the reason maybeSpawnOPFFlush pre-checks at all: when all
+// queued refs already carry the trailer, forking a child would only make it
+// rediscover that there is no work.
 func TestPrePushCheckpointRefs_NoOPFFlushSpawnWhenNothingAwaitsOPF(t *testing.T) {
 	configureFakeOPF(t, &fakeOPFForRewrite{})
-	setupGitRefsOPFRepo(t, flushFitsID)
+	_, repo, _ := setupGitRefsOPFRepo(t, flushFitsID)
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
 	spawns := swapOPFFlushSpawn(t)
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))

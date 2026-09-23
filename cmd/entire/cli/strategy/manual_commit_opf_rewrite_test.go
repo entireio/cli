@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1127,8 +1126,8 @@ func TestRewriteQueuedCheckpointRefsWithOPF_FailingOPFRefDoesNotBlockOthers(t *t
 // oversized one is left byte-identical and stays queued, and only it is named
 // in the returned error.
 //
-// The caller still withholds the *delivery* of the whole flush on that error
-// (opfGateForCheckpointRefs), so this isolates the rewrite, not the push.
+// This exercises the rewrite operation directly. Delivery independently checks
+// each immutable candidate's trailer before deciding whether it may ship.
 func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *testing.T) {
 	const fitsID, oversizedID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
 	fake := &fakeOPFForRewrite{}
@@ -1170,26 +1169,23 @@ func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *te
 // that one pins that a trailered SIBLING still ships, this one that the sole
 // ref of a failed flush ships nothing at all. Per-ref delivery must not become
 // "push it anyway when there is nothing else to push".
-func TestPrePushCheckpointRefs_OPFFailureWithholdsFlush(t *testing.T) {
-	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+func TestPrePushCheckpointRefs_UntraileredRefStaysQueuedForWorker(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
-
-	var buf bytes.Buffer
-	oldWriter := stderrWriter
-	stderrWriter = &buf
-	t.Cleanup(func() { stderrWriter = oldWriter })
+	spawns := swapOPFFlushSpawn(t)
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
-		"an OPF failure must not block the user's git push")
+		"pending OPF work must not block the user's git push")
 
-	assert.Contains(t, buf.String(), "1 checkpoint ref(s) were not pushed",
-		"the withheld push must be visible to the user, and say how much it held back")
+	assert.Zero(t, fake.batchCallCount(), "pre-push must not call OPF inline")
+	assert.Len(t, *spawns, 1)
 	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued for the next push")
 	lsCmd := exec.CommandContext(t.Context(), "git", "ls-remote", bareDir)
 	lsCmd.Env = testutil.GitIsolatedEnv()
 	out, err := lsCmd.CombinedOutput()
 	require.NoError(t, err, "ls-remote failed: %s", out)
-	assert.NotContains(t, string(out), refs[0].String(), "no ref may reach the remote when OPF failed")
+	assert.NotContains(t, string(out), refs[0].String(), "no untrailered ref may reach the remote")
 }
 
 // With OPF off the git-refs path is unchanged: refs push as written, unrewritten.
