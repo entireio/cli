@@ -181,6 +181,7 @@ func TestEnsureLefthookIntegration_PreservesLocalConfig(t *testing.T) {
 		{"existing content", "# keep me\npre-commit:\n  commands:\n    mine:\n      run: true\n",
 			[]string{"# keep me", "mine"}},
 		{"existing extends", "extends:\n  - user.yml\n", []string{"user.yml"}},
+		{"scalar extends", "extends: user.yml\n", []string{"user.yml"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := newLefthookRepo(t, "")
@@ -494,6 +495,23 @@ func TestEnsureLefthookIntegration_ExcludesArtifacts(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "the empty script dir must be pruned")
 }
 
+func TestEnsureLefthookIntegration_ExcludesSelectedLocalConfig(t *testing.T) {
+	dir := newLefthookRepo(t, "")
+	localConfig := lefthookLocalConfigNames[1]
+	require.NoError(t, os.WriteFile(filepath.Join(dir, localConfig), []byte("pre-commit: {}\n"), 0o644))
+
+	_, err := EnsureLefthookIntegration(t.Context())
+	require.NoError(t, err)
+
+	exclude, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+	require.NoError(t, err)
+	require.Contains(t, string(exclude), "/"+localConfig+"\n")
+
+	current, err := LefthookIntegrationCurrent(t.Context())
+	require.NoError(t, err)
+	require.True(t, current)
+}
+
 // Entire creates lefthook-local.yml itself, so it must never be the thing that
 // makes a repo look Lefthook-managed — otherwise removing Lefthook leaves
 // status claiming delivery "via Lefthook" with nothing running Entire.
@@ -541,7 +559,7 @@ func TestEnsureLefthookIntegration_RefusesToBuryABackup(t *testing.T) {
 	// manage to write must already be excluded.
 	exclude, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
 	require.NoError(t, err)
-	require.Contains(t, string(exclude), lefthookExcludeBlock(),
+	require.Contains(t, string(exclude), lefthookExcludeBlock(lefthookLocalConfigNames[0]),
 		"a partial install must not leave unignored artifacts")
 }
 

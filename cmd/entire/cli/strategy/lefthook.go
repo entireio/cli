@@ -140,13 +140,15 @@ func EnsureLefthookIntegration(ctx context.Context) (int, error) {
 	// the point of excluding — and because ensureLefthookIntegrationIfManaged
 	// treats this refusal as a decision rather than a failure, that recurred
 	// on every turn instead of resolving itself.
-	if name, existing, err := findLocalConfig(root); err != nil {
+	localConfigName, existing, err := findLocalConfig(root)
+	if err != nil {
 		return 0, err
-	} else if existing != nil && !extendsEntryPresent(root) && lefthookLocalConfigTracked(ctx, repoRoot, name) {
+	}
+	if existing != nil && !extendsEntryPresent(root) && lefthookLocalConfigTracked(ctx, repoRoot, localConfigName) {
 		// Only when the entry would actually be ADDED: a tracked config that
 		// already carries it (committed by the team, or added by hand) is
 		// working as intended, and nothing here writes to it.
-		return 0, fmt.Errorf("%w: %s", ErrLefthookLocalConfigTracked, name)
+		return 0, fmt.Errorf("%w: %s", ErrLefthookLocalConfigTracked, localConfigName)
 	}
 	cmdPrefix, err := hookCmdPrefix(hookSettingsFromConfig(ctx))
 	if err != nil {
@@ -157,7 +159,7 @@ func EnsureLefthookIntegration(ctx context.Context) (int, error) {
 	// blocked artifact path, a full disk) otherwise leaves files in the
 	// worktree that nothing has excluded yet, and the entries name paths
 	// rather than existing files, so writing them early costs nothing.
-	if err := excludeArtifacts(ctx, repoRoot); err != nil {
+	if err := excludeArtifacts(ctx, repoRoot, localConfigName); err != nil {
 		return 0, err
 	}
 
@@ -202,27 +204,28 @@ func EnsureLefthookIntegration(ctx context.Context) (int, error) {
 
 // artifactsExcluded reports whether the exclude block is in place, which the
 // install treats as part of being current.
-func artifactsExcluded(ctx context.Context, repoRoot string) bool {
+func artifactsExcluded(ctx context.Context, repoRoot, localConfigName string) bool {
 	root, err := openGitCommonDir(ctx, repoRoot)
 	if err != nil {
 		return true // cannot tell; do not churn the install on it
 	}
 	data, err := osroot.ReadFileNoFollow(root, gitExcludePath)
-	return err == nil && strings.Contains(string(data), lefthookExcludeBlock())
+	return err == nil && strings.Contains(string(data), lefthookExcludeBlock(localConfigName))
 }
 
 // lefthookExcludeBlock is the exact text excludeArtifacts writes, so
 // artifactsExcluded tests for what an install would produce and any future
 // change to the entries repairs itself on the next turn.
-func lefthookExcludeBlock() string {
-	// lefthook-local.yml is included because Entire creates it when absent and
-	// Lefthook documents it as a personal, uncommitted file. An exclude entry
-	// only affects untracked paths, so a repository that does commit it is
-	// unaffected by this.
+func lefthookExcludeBlock(localConfigName string) string {
+	// The selected local config is included because Entire creates it when
+	// absent or modifies the first existing name in Lefthook's precedence
+	// order. Lefthook documents these as personal, uncommitted files. An
+	// exclude entry only affects untracked paths, so a repository that does
+	// commit one is unaffected by this.
 	return excludeBlockBegin +
 		"/" + entireLefthookConfig + "\n" +
 		"/" + lefthookScriptDir + "/\n" +
-		"/" + lefthookLocalConfigNames[0] + "\n" +
+		"/" + localConfigName + "\n" +
 		excludeBlockEnd
 }
 
@@ -232,6 +235,7 @@ const (
 	// for pulling in another config file at run time.
 	LefthookManagerName = "Lefthook"
 	lefthookExtendsKey  = "extends"
+	yamlStringTag       = "!!str"
 
 	gitExcludePath    = "info/exclude"
 	excludeBlockBegin = "# " + lefthookOwnedMarker + " begin\n"
@@ -243,8 +247,8 @@ const (
 // in the user's .gitignore — and left unignored they make a dirty worktree the
 // normal state in every Lefthook repo, which eventually gets Entire's
 // integration files committed by an agent that sees them in git status.
-func excludeArtifacts(ctx context.Context, repoRoot string) error {
-	return rewriteExcludeBlock(ctx, repoRoot, lefthookExcludeBlock())
+func excludeArtifacts(ctx context.Context, repoRoot, localConfigName string) error {
+	return rewriteExcludeBlock(ctx, repoRoot, lefthookExcludeBlock(localConfigName))
 }
 
 // rewriteExcludeBlock replaces Entire's marked block in .git/info/exclude with
@@ -376,6 +380,10 @@ func LefthookIntegrationCurrent(ctx context.Context) (bool, error) {
 	if err != nil || string(data) != want {
 		return false, nil //nolint:nilerr // a missing or stale config is "not current", not a failure
 	}
+	localConfigName, _, err := findLocalConfig(root)
+	if err != nil {
+		return false, nil //nolint:nilerr // an unsupported local config cannot be current
+	}
 	if !extendsEntryPresent(root) {
 		return false, nil
 	}
@@ -392,7 +400,7 @@ func LefthookIntegrationCurrent(ctx context.Context) (bool, error) {
 	// The exclude entry counts as part of the install. Without it every
 	// Lefthook worktree reads as dirty, and a repo that predates this check
 	// needs a repair pass to pick it up.
-	return artifactsExcluded(ctx, repoRoot), nil
+	return artifactsExcluded(ctx, repoRoot, localConfigName), nil
 }
 
 // RemoveLefthookIntegration removes Entire's artifacts, returning the number
@@ -598,7 +606,7 @@ func ensureExtendsEntry(root *os.Root) (string, error) {
 		}
 	}
 	seq.Content = append(seq.Content, &yaml.Node{
-		Kind: yaml.ScalarNode, Tag: "!!str", Value: entireLefthookConfig,
+		Kind: yaml.ScalarNode, Tag: yamlStringTag, Value: entireLefthookConfig,
 		LineComment: lefthookOwnedMarker,
 	})
 	out, err := encodeYAML(doc)
@@ -705,6 +713,16 @@ func extendsSequence(existing []byte) (*yaml.Node, *yaml.Node, error) {
 	}
 	if found >= 0 {
 		seq := mapping.Content[found+1]
+		if seq.Kind == yaml.ScalarNode && seq.Tag == yamlStringTag {
+			seq = &yaml.Node{
+				Kind: yaml.SequenceNode,
+				Tag:  "!!seq",
+				Content: []*yaml.Node{
+					mapping.Content[found+1],
+				},
+			}
+			mapping.Content[found+1] = seq
+		}
 		if seq.Kind != yaml.SequenceNode {
 			return nil, nil, errors.New("extends must be a sequence")
 		}
@@ -712,7 +730,7 @@ func extendsSequence(existing []byte) (*yaml.Node, *yaml.Node, error) {
 	}
 	seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
 	mapping.Content = append(mapping.Content,
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: lefthookExtendsKey}, seq)
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: yamlStringTag, Value: lefthookExtendsKey}, seq)
 	return doc, seq, nil
 }
 
