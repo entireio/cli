@@ -77,13 +77,22 @@ func (c *CopilotCLI) Bootstrap() error {
 	return nil
 }
 
+// copilotModel returns the model for e2e runs. E2E_COPILOT_MODEL overrides the
+// cheap default, mirroring the other paid runners.
+func copilotModel() string {
+	if m := strings.TrimSpace(os.Getenv("E2E_COPILOT_MODEL")); m != "" {
+		return m
+	}
+	return "claude-haiku-4.5"
+}
+
 func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
-	cfg := &runConfig{Model: "claude-haiku-4.5"}
+	cfg := &runConfig{Model: copilotModel()}
 	for _, o := range opts {
 		o(cfg)
 	}
 
-	timeout, err := promptTimeout(60*time.Second, cfg)
+	timeout, err := promptTimeout(c, 60*time.Second, cfg)
 	if err != nil {
 		return Output{}, err
 	}
@@ -395,7 +404,7 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 		envArgs = append(envArgs, "GH_CONFIG_DIR="+ghConfigDir)
 	}
 	args := append([]string{"env"}, envArgs...)
-	args = append(args, bin, "--model", "claude-haiku-4.5", "--allow-all")
+	args = append(args, bin, "--model", copilotModel(), "--allow-all")
 
 	name := fmt.Sprintf("copilot-test-%d", time.Now().UnixNano())
 	// Strip CI env vars that may affect interactive mode.
