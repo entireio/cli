@@ -198,3 +198,41 @@ type TrailApprovalResponse struct {
 type TrailApprovalsResponse struct {
 	Approvals []TrailApproval `json:"approvals"`
 }
+
+type TrailMergeabilityResponse struct {
+	BypassPolicy       string  `json:"bypass_policy"`
+	Mergeable          bool    `json:"mergeable"`
+	ApprovalGatePassed bool    `json:"approval_gate_passed"`
+	ChecksStatus       string  `json:"checks_status"`
+	BehindBy           int     `json:"behind_by"`
+	ComparisonStatus   string  `json:"comparison_status"`
+	ConflictStatus     string  `json:"conflict_status"`
+	HeadSHA            *string `json:"head_sha"`
+}
+
+type TrailGateResult struct {
+	GateType  string          `json:"gate_type"`
+	GateKey   string          `json:"gate_key"`
+	Blocking  bool            `json:"blocking"`
+	Status    string          `json:"status"`
+	Rationale *string         `json:"rationale"`
+	Value     json.RawMessage `json:"value"`
+}
+
+type TrailGatesResponse struct {
+	HeadSHA          *string           `json:"head_sha"`
+	Mergeable        bool              `json:"mergeable"`
+	GatesEnabled     bool              `json:"gates_enabled"`
+	BlockingFailures []TrailGateResult `json:"blocking_failures"`
+}
+
+type TrailMergeRequest struct {
+	ExpectedHeadSha string `json:"expectedHeadSha,omitempty"`
+	Bypass          bool   `json:"bypass,omitempty"`
+}
+
+type TrailMergeResponse struct {
+	OK bool `json:"ok"`
+	// Empty when the merge fast-forwarded or the base was already up to date.
+	MergeCommitSha string `json:"mergeCommitSha"`
+}
