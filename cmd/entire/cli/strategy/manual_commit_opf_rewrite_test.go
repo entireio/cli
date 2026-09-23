@@ -992,6 +992,15 @@ func queuedRefs(t *testing.T, repo *git.Repository) []plumbing.ReferenceName {
 	return got
 }
 
+func queuedRefEntries(t *testing.T, repo *git.Repository) []checkpoint.PushQueueEntry {
+	t.Helper()
+	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
+	require.NoError(t, err)
+	entries, err := queue.PeekEntries()
+	require.NoError(t, err)
+	return entries
+}
+
 // Queued checkpoint refs are OPF-rewritten and stamped applied; a second run is
 // a no-op because the trailer marks them done (no re-scan, no ref movement).
 //
@@ -1009,7 +1018,11 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.
 	require.Equal(t, 2, fake.batchCallCount(), "one OPF call per ref")
 
 	after := refHashes(t, repo, refs)
+	entries := queuedRefEntries(t, repo)
+	require.Len(t, entries, len(refs))
 	for i, ref := range refs {
+		require.Equal(t, checkpoint.PushQueueEntry{Ref: ref, Hash: after[i]}, entries[i],
+			"the rewritten generation must replace the queue token for the old tip")
 		require.NotEqual(t, before[i], after[i], "ref %s should have been rewritten", ref)
 		commit, err := repo.CommitObject(after[i])
 		require.NoError(t, err)

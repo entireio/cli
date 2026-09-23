@@ -233,13 +233,29 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 
 		// CAS: a concurrent write that advanced this checkpoint ref during the
 		// rewrite must not be clobbered by our stale rebuild.
-		if err := checkpoint.CASPersistentRef(ctx, repo, pr.ref, parent, pr.old); err != nil {
+		if err := updateOPFRewrittenRef(ctx, repo, queue, pr.ref, parent, pr.old); err != nil {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("update checkpoint ref %s: %w", pr.ref, err)
+				firstErr = err
 			}
 		}
 	}
 	return firstErr
+}
+
+func updateOPFRewrittenRef(
+	ctx context.Context,
+	repo *git.Repository,
+	queue *checkpoint.PushQueue,
+	refName plumbing.ReferenceName,
+	newHash, oldHash plumbing.Hash,
+) error {
+	if err := checkpoint.CASPersistentRef(ctx, repo, refName, newHash, oldHash); err != nil {
+		return fmt.Errorf("update checkpoint ref %s: %w", refName, err)
+	}
+	if err := queue.EnqueueRef(repo, refName); err != nil {
+		return fmt.Errorf("enqueue rewritten checkpoint ref %s: %w", refName, err)
+	}
+	return nil
 }
 
 // unappliedAncestry walks first parents back from a checkpoint ref's tip and

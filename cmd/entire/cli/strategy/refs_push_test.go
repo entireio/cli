@@ -88,6 +88,36 @@ func TestBatchPushRefs(t *testing.T) {
 	}
 }
 
+func TestBatchPushCheckpointRefs_PinsVerifiedHash(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	refName := refs[0]
+	verified, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+
+	testutil.WriteFile(t, workDir, "later.txt", "later")
+	testutil.GitAdd(t, workDir, "later.txt")
+	testutil.GitCommit(t, workDir, "later")
+	later, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, later.Hash())))
+
+	candidate := checkpointRefPush{
+		token: checkpoint.PushQueueEntry{Ref: refName, Hash: verified.Hash()},
+		name:  refName,
+		hash:  verified.Hash(),
+	}
+	require.NoError(t, batchPushCheckpointRefs(t.Context(), bareDir, []checkpointRefPush{candidate}))
+
+	assert.Equal(t, verified.Hash().String(), remoteRefHash(t, bareDir, refName),
+		"the remote must receive the captured hash, not the ref's later tip")
+	current, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	assert.Equal(t, later.Hash(), current.Hash(), "pushing the captured hash must not rewind the local ref")
+}
+
 func TestBatchPushRefs_Empty(t *testing.T) {
 	t.Parallel()
 	// No refs → no git invocation, no error.

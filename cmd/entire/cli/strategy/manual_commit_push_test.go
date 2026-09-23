@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -189,6 +190,47 @@ func TestFlushCheckpointRefsQueue_WithholdsARefEnqueuedAfterTheReadinessRead(t *
 		"a ref enqueued after the readiness read must not ship unchecked")
 	assert.Equal(t, []plumbing.ReferenceName{lateRef}, queuedRefs(t, repo),
 		"the withheld ref stays queued untouched, for the worker and the next push")
+}
+
+func TestCheckpointRefDelivery_PreservesSameRefGenerationAdvancedAfterVerification(t *testing.T) {
+	// No t.Parallel: the fixture uses t.Chdir and OPF test configuration.
+	const checkpointID = "a1b2c3d4e5f6"
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, checkpointID)
+	refName := refs[0]
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
+	require.NoError(t, err)
+	drained, err := queue.DrainEntries()
+	require.NoError(t, err)
+	ready, awaiting, stale := partitionCheckpointRefPushes(repo, drained, true)
+	require.Len(t, ready, 1)
+	require.Empty(t, awaiting)
+	require.Empty(t, stale)
+	verifiedHash := ready[0].hash
+
+	addGitRefsSession(t, repo, checkpointID, "sess-later")
+	current, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	require.NotEqual(t, verifiedHash, current.Hash())
+
+	require.NoError(t, batchPushCheckpointRefs(t.Context(), bareDir, ready))
+	require.NoError(t, queue.RemoveEntries(checkpointRefPushTokens(ready)))
+	assert.Equal(t, verifiedHash.String(), remoteRefHash(t, bareDir, refName),
+		"delivery must stay pinned to the hash that passed the trailer check")
+
+	remaining, err := queue.DrainEntries()
+	require.NoError(t, err)
+	require.Equal(t, []checkpoint.PushQueueEntry{{Ref: refName, Hash: current.Hash()}}, remaining,
+		"cleanup for the delivered generation must preserve the newer generation")
+
+	pushed, withheld, err := flushCheckpointRefsQueue(
+		t.Context(), repo, pushSettings{remote: bareDir}, true)
+	require.NoError(t, err)
+	assert.Zero(t, pushed)
+	assert.Equal(t, 1, withheld, "the newer untrailered generation must remain fail-closed")
+	assert.Equal(t, verifiedHash.String(), remoteRefHash(t, bareDir, refName))
 }
 
 // TestPrePushCheckpointRefs_OPFSkipShipsTheWholeQueueUnchanged is the other half

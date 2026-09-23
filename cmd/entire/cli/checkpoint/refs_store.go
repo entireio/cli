@@ -215,7 +215,7 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 			slog.String("ref", refName.String()), slog.String("error", err.Error()))
 		return
 	}
-	if err := q.Enqueue(refName); err != nil {
+	if err := q.EnqueueRef(s.repo, refName); err != nil {
 		logging.Warn(ctx, "checkpoint: enqueue checkpoint ref for push failed",
 			slog.String("ref", refName.String()), slog.String("error", err.Error()))
 	}

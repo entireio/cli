@@ -12,15 +12,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
+
+// checkpointRefPush binds delivery to one immutable source hash while retaining
+// the queue generation token that successful delivery may remove.
+type checkpointRefPush struct {
+	token checkpoint.PushQueueEntry
+	name  plumbing.ReferenceName
+	hash  plumbing.Hash
+}
+
+func (p checkpointRefPush) refSpec() string {
+	return p.hash.String() + ":" + p.name.String()
+}
 
 // partitionLocalRefs splits refs into those that exist locally (pushable) and
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
@@ -69,6 +83,20 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 	return nil
 }
 
+func batchPushCheckpointRefs(ctx context.Context, target string, refs []checkpointRefPush) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	refSpecs := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		refSpecs = append(refSpecs, ref.refSpec())
+	}
+	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
+		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+	}
+	return nil
+}
+
 // pushCheckpointRefWithRecovery pushes a single checkpoint ref fast-forward-only;
 // confirmed remote policy/hook rejections return immediately. Other failures —
 // typically the ref diverged on the remote (the same checkpoint re-written
@@ -80,28 +108,52 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 // (e.g. both sides rewrote the root metadata.json) surfaces as a rebase error and
 // the ref is left for a later pre-push. Returns nil only if the ref reached the
 // remote.
-func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+func pushCheckpointRefWithRecovery(
+	ctx context.Context,
+	repo *git.Repository,
+	target string,
+	candidate checkpointRefPush,
+	requireOPFTrailer bool,
+) (checkpointRefPush, error) {
 	// One shared budget across the initial push, fetch+replay, and retry, matching
 	// doPushRef (fetchAndRebaseRefCommon relies on the caller's deadline).
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
 	defer cancel()
 
-	pushErr := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	pushErr := batchPushCheckpointRefs(ctx, target, []checkpointRefPush{candidate})
 	if pushErr == nil {
-		return nil
+		return candidate, nil
 	}
 	if checkpointRefRejectionReason(pushErr) != "" {
 		// Fetch+replay cannot fix a remote policy/hook rejection. If the ref
 		// already exists remotely, replay would needlessly rewrite local
 		// commits (including their committer timestamps) on every push.
-		return pushErr
+		return checkpointRefPush{}, pushErr
 	}
-	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
+	if err := fetchAndRebaseRefCommon(ctx, target, candidate.name); err != nil {
 		// Recovery is speculative: a missing remote ref may mean the push was
 		// blocked, not that it diverged. Keep the push failure primary.
-		return &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
+		return checkpointRefPush{}, &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
 	}
-	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	ref, err := repo.Reference(candidate.name, true)
+	if err != nil {
+		return checkpointRefPush{}, fmt.Errorf("resolve recovered checkpoint ref %s: %w", candidate.name, err)
+	}
+	recovered := candidate
+	recovered.hash = ref.Hash()
+	if requireOPFTrailer {
+		commit, commitErr := repo.CommitObject(recovered.hash)
+		if commitErr != nil {
+			return checkpointRefPush{}, fmt.Errorf("load recovered checkpoint ref %s: %w", candidate.name, commitErr)
+		}
+		if !trailers.HasOPFApplied(commit.Message) {
+			return checkpointRefPush{}, fmt.Errorf("recovered checkpoint ref %s does not carry the OPF trailer", candidate.name)
+		}
+	}
+	if err := batchPushCheckpointRefs(ctx, target, []checkpointRefPush{recovered}); err != nil {
+		return checkpointRefPush{}, err
+	}
+	return recovered, nil
 }
 
 // checkpointRefRecoveryError keeps both failures inspectable, while allowing the
