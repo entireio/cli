@@ -350,14 +350,13 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// A squash in progress links to the commits being squashed, never to a
 	// session matched here — see inheritSquashedCheckpointTrailers.
-	if s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source) {
-		return nil
-	}
+	// Inherited trailers link the squashed commits' checkpoints; matching still
+	// runs so work the session holds gets a checkpoint of its own.
+	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
 
-	// Skip for merge and squash sources
-	// These are auto-generated messages - not from Claude sessions
+	// A merge commit is skipped: the merged commits keep their own trailers.
 	switch source {
-	case "merge", "squash":
+	case "merge":
 		logging.Debug(logCtx, "prepare-commit-msg: skipped for source",
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
@@ -409,7 +408,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	s.warnIfAttributionDiverged(ctx, sessions)
 
 	// Fast path: skip content detection for mid-turn agent commits.
-	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source) {
+	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source, inherited) {
 		return nil
 	}
 
@@ -439,8 +438,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	message := string(content)
 
-	// Check if trailer already exists (ParseCheckpoint validates format, so found==true means valid)
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	// A trailer prepare already stamped is kept (e.g. amend); inherited ones are links
+	if existingCpID, found := stampedTrailer(message, inherited); found {
 		readCommitMessageSpan.End()
 		// Trailer already exists (e.g., amend) - keep it
 		logging.Debug(logCtx, "prepare-commit-msg: trailer already exists",
@@ -552,33 +551,33 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 // keep its own logic even when an abandoned squash left SQUASH_MSG behind.
 // Reports whether it took over; no trailers or an unusable message fall
 // through to ordinary matching.
-func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) bool {
+func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) []id.CheckpointID {
 	if source != "message" && source != "squash" {
-		return false
+		return nil
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	gitDir, err := GetGitDir(ctx)
 	if err != nil {
-		return false
+		return nil
 	}
 	// SQUASH_MSG lives in the PER-WORKTREE git dir, like the sequencer markers.
 	// The root is the shared registry handle (gitdir.OpenAt): never close it.
 	root, err := gitdir.OpenAt(gitDir)
 	if err != nil {
-		return false
+		return nil
 	}
 	squashMsg, err := osroot.ReadFileNoFollow(root, "SQUASH_MSG")
 	if err != nil {
-		return false // no squash in progress (or unreadable: fall through to normal matching)
+		return nil // no squash in progress (or unreadable: fall through to normal matching)
 	}
 
 	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
 	if len(inherited) == 0 {
-		return false
+		return nil
 	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
 	if err != nil {
-		return false // nothing inherited; let ordinary matching report its own failure
+		return nil // nothing inherited; let ordinary matching report its own failure
 	}
 	message := string(content)
 	present := make(map[string]bool)
@@ -597,17 +596,17 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		logging.Debug(logCtx, "prepare-commit-msg: squash in progress, message already carries the squashed trailers",
 			slog.String("source", source),
 			slog.Int("inherited", len(inherited)))
-		return true
+		return inherited
 	}
 	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
-		return false // nothing landed; hooks stay silent, ordinary matching may still try
+		return nil // nothing landed; hooks stay silent, ordinary matching may still try
 	}
 	logging.Info(logCtx, "prepare-commit-msg: inherited checkpoint trailers from the squashed commits",
 		slog.String("strategy", "manual-commit"),
 		slog.String("source", source),
 		slog.Int("inherited", len(inherited)),
 		slog.Int("added", added))
-	return true
+	return inherited
 }
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
@@ -1005,11 +1004,16 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if commit has checkpoint trailer (ParseCheckpoint validates format)
-	checkpointID, found := trailers.ParseCheckpoint(commit.Message)
+	// Condense into the trailer prepare stamped, never into an inherited one.
+	stamped := trailers.ParseAllCheckpoints(commit.Message)
+	checkpointID, found := s.condensationTarget(ctx, repo, stamped)
 	openRepoSpan.End()
 
 	if !found {
+		if len(stamped) > 0 {
+			logging.Debug(logCtx, "post-commit: every trailer links an existing checkpoint; nothing to condense",
+				slog.Int("trailers", len(stamped)))
+		}
 		// No trailer — user removed it or it was never added (mid-turn commit).
 		// Still update BaseCommit for active sessions so future commits can match.
 		s.postCommitUpdateBaseCommitOnly(ctx, head)
@@ -1612,6 +1616,12 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	opts condenseOpts,
 ) (condensed bool, newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
+	if s.checkpointBelongsElsewhere(ctx, repo, checkpointID, state) {
+		logging.Warn(logCtx, "refusing to condense into a checkpoint this session did not stamp",
+			slog.String("session_id", state.SessionID),
+			slog.String("checkpoint_id", checkpointID.String()))
+		return false, nil, nil
+	}
 	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts)
 	if err != nil {
 		logging.Warn(logCtx, "condensation failed",
@@ -2378,7 +2388,7 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 // A session is eligible when it is ACTIVE, or IDLE with a fresh task record
 // (a background subagent committing between the parent's turns; the widened
 // no-TTY trust window is an accepted trade-off — see PR #2034).
-func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
+func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string, inherited []id.CheckpointID) bool {
 	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
 	if !skipContentDetection {
@@ -2416,7 +2426,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			)
 			continue
 		}
-		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source) //nolint:errcheck // always returns nil; kept for signature stability
+		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source, inherited) //nolint:errcheck // always returns nil; kept for signature stability
 		return true
 	}
 	// Log why fast path didn't fire — task_records spans ALL sessions so
@@ -2452,7 +2462,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // this commit's checkpoint ID and merge unrelated transcript ranges. The ended
 // session loses nothing: without touched files PostCommit does not condense it,
 // and `entire doctor` remains its retry path.
-func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
+func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string, inherited []id.CheckpointID) error { //nolint:unparam // kept for signature stability
 	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
@@ -2465,8 +2475,8 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 
 	message := string(content)
 
-	// Don't add if trailer already exists
-	if _, found := trailers.ParseCheckpoint(message); found {
+	// Don't add if prepare already stamped one (inherited trailers are links)
+	if _, found := stampedTrailer(message, inherited); found {
 		return nil
 	}
 
