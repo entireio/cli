@@ -33,28 +33,19 @@ import (
 // already carrying the trailer (unappliedAncestry) — bounded by the same
 // resolveBootstrapLimit the v1 path uses.
 //
-// Each ref is scanned, rebuilt and CAS-updated independently, so a ref whose
-// prose-leaf bytes exceed the inference cap is skipped — left untouched and
-// still queued — rather than failing the refs beside it. The first such failure
-// is still returned, so the caller's flush is withheld exactly as before: the
-// scoping isolates the rewrite, not the delivery.
+// Each ref is collected, cap-checked, scanned, rebuilt and CAS-updated before
+// the next ref is loaded. Both the raw-memory ceiling and the prose-leaf
+// inference cap therefore apply per ref. A ref that exceeds either is left
+// untouched and still queued rather than failing the refs beside it.
 //
 // That isolation is not unconditional. Two conditions stop the whole flush and
 // leave every ref after them untouched: an empty effective category set, and a
 // tripped OPF circuit breaker — both mean OPF cannot scan anything, so no
-// remaining ref may be stamped applied. See the breaker check in Pass 2.
+// remaining ref may be stamped applied. See the breaker check in the loop.
 //
 // Caller checks redact.OPFEnabled() and skips this when OPF is off. Returns
-// the same error taxonomy as RewriteUnpushedV1WithOPF; the caller fails closed
-// by withholding the flush (see prePushCheckpointRefs).
-//
-// Follow-up (not done here): Pass 2's body sits at this file's comment-density
-// ceiling — golangci's maintidx nearly failed on the breaker-check comment
-// alone. Extracting that check into a small named helper (e.g.
-// stopFlushOnBreakerTrip) would give the "second whole-flush-stop condition"
-// explanation a home that doesn't compete with the loop's own narrative, and
-// buy real headroom for the next legitimate addition. Don't resolve a future
-// maintidx failure here by trimming a safety comment instead.
+// the same error taxonomy as RewriteUnpushedV1WithOPF; delivery fails closed by
+// withholding any ref whose current generation still lacks the trailer.
 func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repository) error {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
@@ -79,91 +70,16 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		return &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
 	}
 
-	// Pass 1: collect every redactable blob from every un-applied commit on every
-	// queued ref, keeping each ref's blobs separately addressable so Pass 2 can
-	// scan one ref at a time. Raw bytes in memory are still bounded cumulatively
-	// across the whole flush, exactly as the v1 collect pass does: that ceiling
-	// is about this process's RAM, which every ref shares, not about the
-	// per-ref inference cost the leaf-byte cap governs.
-	type pendingCommit struct {
-		commit *object.Commit
-		// blobs and paths are parallel; blobs are indexed against their own
-		// ref's redaction results, not a flush-wide slice.
-		blobs []redact.NamedBlob
-		paths []string
-	}
-	type pendingRef struct {
-		ref plumbing.ReferenceName
-		old plumbing.Hash
-		// base is the parent the deepest rewritten commit keeps.
-		base    plumbing.Hash
-		commits []pendingCommit // ancestor-first
-	}
-	pendings := make([]pendingRef, 0, len(queued))
-	rawCap := scaleBatchLimit(resolveBatchLimit(), rawByteCapMultiplier)
+	batchLimit := resolveBatchLimit()
+	rawCap := rawByteCapForBatchLimit(batchLimit)
 	bootstrapLimit := resolveBootstrapLimit()
-	var rawBytesSoFar int
 	// Stale entries (refs no longer present locally) are skipped, not pruned:
 	// the queue belongs to the flush.
 	existing, _ := partitionLocalRefs(repo, queued)
-	for _, refName := range existing {
-		ref, refErr := repo.Reference(refName, true)
-		if refErr != nil {
-			if errors.Is(refErr, plumbing.ErrReferenceNotFound) {
-				continue
-			}
-			return fmt.Errorf("resolve checkpoint ref %s: %w", refName, refErr)
-		}
-		chain, base, walkErr := unappliedAncestry(repo, ref.Hash())
-		if walkErr != nil {
-			return fmt.Errorf("walk ancestry of %s: %w", refName, walkErr)
-		}
-		if len(chain) == 0 {
-			continue
-		}
-		if len(chain) > bootstrapLimit {
-			return &BootstrapTooLargeError{Count: len(chain), Limit: bootstrapLimit}
-		}
-		pr := pendingRef{ref: refName, old: ref.Hash(), base: base}
-		for _, c := range chain {
-			tree, treeErr := repo.TreeObject(c.TreeHash)
-			if treeErr != nil {
-				return fmt.Errorf("load tree for %s: %w", c.Hash.String()[:7], treeErr)
-			}
-			pc := pendingCommit{commit: c}
-			if err := collectTreeBlobs(repo, tree, "", &pc.blobs, &pc.paths); err != nil {
-				return fmt.Errorf("collect blobs %s: %w", c.Hash.String()[:7], err)
-			}
-			for _, b := range pc.blobs {
-				rawBytesSoFar += len(b.Content)
-			}
-			if rawBytesSoFar > rawCap {
-				return &OPFRawBytesTooLargeError{RawBytes: rawBytesSoFar, Limit: rawCap}
-			}
-			pr.commits = append(pr.commits, pc)
-		}
-		pendings = append(pendings, pr)
-	}
-	if len(pendings) == 0 {
-		return nil
-	}
-
-	// Pass 2: take each ref on its own — enforce the leaf-byte cap over that
-	// ref's blobs, make one OPF shell-out for them, replay its chain, and CAS
-	// its ref — before moving to the next. A ref that trips the cap is skipped,
-	// left exactly as it was and still queued for the next push, without
-	// blocking any other ref in this flush. That scoping is the whole point:
-	// the cap bounds one inference call's cost, and one oversized ref is no
-	// reason to leave every ref beside it unredacted.
-	//
-	// The fail-closed contract holds at ref granularity: a ref is either fully
-	// redacted, tagged and moved, or fully untouched. No ref's chain is ever
-	// partially rewritten — within a ref, each rebuilt commit is the next
-	// one's parent, so a chain that fails part-way through is abandoned whole.
 	var firstErr error
-	for _, pr := range pendings {
-		// Second whole-flush stop, alongside ErrOPFNoEnabledCategories below:
-		// a tripped process-wide breaker (this loop's own prior ref, or anything
+	for _, refName := range existing {
+		// Whole-flush stop, alongside ErrOPFNoEnabledCategories below: a
+		// tripped process-wide breaker (this loop's own prior ref, or anything
 		// earlier in the process) makes BatchBytesWithPrivacyFilter return
 		// regex-only content with a NIL error, so break — not continue. Skipping
 		// only this ref would rebuild every later one from content OPF never saw
@@ -177,69 +93,143 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 			break
 		}
 
-		var refBlobs []redact.NamedBlob
-		for _, pc := range pr.commits {
-			refBlobs = append(refBlobs, pc.blobs...)
-		}
-
-		var refRedacted [][]byte
-		if len(refBlobs) > 0 {
-			leafBytes := redact.SumProseLeafBytes(refBlobs)
-			if limit := resolveBatchLimit(); leafBytes > limit {
-				if firstErr == nil {
-					firstErr = &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}
-				}
-				continue // leave this ref queued; the rest can still run
-			}
-			var opfErr error
-			refRedacted, opfErr = redact.BatchBytesWithPrivacyFilter(ctx, refBlobs)
-			if opfErr != nil {
-				if errors.Is(opfErr, redact.ErrOPFNoEnabledCategories) {
-					// Configuration-level failure: every ref fails identically,
-					// so report the config remediation rather than retrying.
-					return &OPFNoCategoriesError{}
-				}
-				if firstErr == nil {
-					firstErr = &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: opfErr}
-				}
+		pending, collectErr := collectCheckpointRefForOPF(repo, refName, rawCap, bootstrapLimit)
+		if collectErr != nil {
+			if errors.Is(collectErr, errNoCheckpointRefOPFWork) {
 				continue
 			}
-		}
-
-		// Replay this ref's chain ancestor→tip, so the rewritten parent carries
-		// into the next commit and the deepest one keeps the boundary parent.
-		parent := pr.base
-		startIdx := 0
-		rebuildFailed := false
-		for _, pc := range pr.commits {
-			redactedByPath := make(map[string][]byte, len(pc.blobs))
-			for j, path := range pc.paths {
-				redactedByPath[path] = refRedacted[startIdx+j]
-			}
-			startIdx += len(pc.blobs)
-			newHash, rebuildErr := rebuildCheckpointCommit(ctx, repo, pc.commit, parent, redactedByPath)
-			if rebuildErr != nil {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("rebuild checkpoint commit %s on %s: %w", pc.commit.Hash.String()[:7], pr.ref, rebuildErr)
-				}
-				rebuildFailed = true
-				break
-			}
-			parent = newHash
-		}
-		if rebuildFailed {
-			continue // the half-built chain is abandoned; the ref never moves
-		}
-
-		// CAS: a concurrent write that advanced this checkpoint ref during the
-		// rewrite must not be clobbered by our stale rebuild.
-		if err := updateOPFRewrittenRef(ctx, repo, queue, pr.ref, parent, pr.old); err != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = collectErr
 			}
+			continue
+		}
+		rewriteErr := rewriteCollectedCheckpointRefWithOPF(ctx, repo, queue, pending, batchLimit)
+		if rewriteErr == nil {
+			continue
+		}
+		if errors.Is(rewriteErr, redact.ErrOPFNoEnabledCategories) {
+			return &OPFNoCategoriesError{}
+		}
+		if firstErr == nil {
+			firstErr = rewriteErr
+		}
+		var runtimeErr *OPFRuntimeFailedError
+		if errors.As(rewriteErr, &runtimeErr) {
+			break
 		}
 	}
 	return firstErr
+}
+
+type pendingOPFCommit struct {
+	commit *object.Commit
+	// blobs and paths are parallel and index the same redaction results.
+	blobs []redact.NamedBlob
+	paths []string
+}
+
+type pendingOPFRef struct {
+	ref plumbing.ReferenceName
+	old plumbing.Hash
+	// base is the parent the deepest rewritten commit keeps.
+	base    plumbing.Hash
+	commits []pendingOPFCommit // ancestor-first
+}
+
+var errNoCheckpointRefOPFWork = errors.New("checkpoint ref does not need OPF rewrite")
+
+func collectCheckpointRefForOPF(
+	repo *git.Repository,
+	refName plumbing.ReferenceName,
+	rawCap, bootstrapLimit int,
+) (*pendingOPFRef, error) {
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return nil, errNoCheckpointRefOPFWork
+		}
+		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
+	chain, base, err := unappliedAncestry(repo, ref.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("walk ancestry of %s: %w", refName, err)
+	}
+	if len(chain) == 0 {
+		return nil, errNoCheckpointRefOPFWork
+	}
+	if len(chain) > bootstrapLimit {
+		return nil, &BootstrapTooLargeError{Count: len(chain), Limit: bootstrapLimit}
+	}
+
+	pending := &pendingOPFRef{ref: refName, old: ref.Hash(), base: base}
+	rawBytes := 0
+	for _, commit := range chain {
+		tree, treeErr := repo.TreeObject(commit.TreeHash)
+		if treeErr != nil {
+			return nil, fmt.Errorf("load tree for %s: %w", commit.Hash.String()[:7], treeErr)
+		}
+		pc := pendingOPFCommit{commit: commit}
+		if err := collectTreeBlobs(repo, tree, "", &pc.blobs, &pc.paths); err != nil {
+			return nil, fmt.Errorf("collect blobs %s: %w", commit.Hash.String()[:7], err)
+		}
+		for _, blob := range pc.blobs {
+			rawBytes += len(blob.Content)
+		}
+		if rawBytes > rawCap {
+			return nil, &OPFRawBytesTooLargeError{RawBytes: rawBytes, Limit: rawCap}
+		}
+		pending.commits = append(pending.commits, pc)
+	}
+	return pending, nil
+}
+
+func rewriteCollectedCheckpointRefWithOPF(
+	ctx context.Context,
+	repo *git.Repository,
+	queue *checkpoint.PushQueue,
+	pending *pendingOPFRef,
+	batchLimit int,
+) error {
+	var blobs []redact.NamedBlob
+	for _, commit := range pending.commits {
+		blobs = append(blobs, commit.blobs...)
+	}
+	if leafBytes := redact.SumProseLeafBytes(blobs); leafBytes > batchLimit {
+		return &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: batchLimit}
+	}
+
+	var redacted [][]byte
+	if len(blobs) > 0 {
+		var err error
+		redacted, err = redact.BatchBytesWithPrivacyFilter(ctx, blobs)
+		if err != nil {
+			if errors.Is(err, redact.ErrOPFNoEnabledCategories) {
+				return fmt.Errorf("scan checkpoint ref %s: %w", pending.ref, err)
+			}
+			return &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
+		}
+	}
+
+	// Replay ancestor→tip. A partial rebuild only creates unreachable objects;
+	// the ref moves once, after the whole replacement chain exists.
+	parent := pending.base
+	startIdx := 0
+	for _, commit := range pending.commits {
+		redactedByPath := make(map[string][]byte, len(commit.blobs))
+		for j, path := range commit.paths {
+			redactedByPath[path] = redacted[startIdx+j]
+		}
+		startIdx += len(commit.blobs)
+		newHash, err := rebuildCheckpointCommit(ctx, repo, commit.commit, parent, redactedByPath)
+		if err != nil {
+			return fmt.Errorf("rebuild checkpoint commit %s on %s: %w", commit.commit.Hash.String()[:7], pending.ref, err)
+		}
+		parent = newHash
+	}
+
+	// CAS prevents a concurrent checkpoint generation from being overwritten;
+	// EnqueueRef then replaces the queue token with the rewritten generation.
+	return updateOPFRewrittenRef(ctx, repo, queue, pending.ref, parent, pending.old)
 }
 
 func updateOPFRewrittenRef(

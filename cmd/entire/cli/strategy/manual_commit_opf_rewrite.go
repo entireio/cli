@@ -250,18 +250,18 @@ func resolveBatchLimit() int {
 	return batchDefaultLimit
 }
 
-// scaleBatchLimit multiplies a batch-limit value by mult, saturating
-// at math.MaxInt to avoid signed-overflow when the limit is "unlimited"
-// (math.MaxInt) or a very large explicit value. Returns 0 if either
-// operand is non-positive, so the caller can treat 0 as "no cap" too.
-func scaleBatchLimit(limit, mult int) int {
-	if limit <= 0 || mult <= 0 {
+// rawByteCapForBatchLimit derives the raw-memory ceiling from the prose-leaf
+// limit, saturating at math.MaxInt to avoid signed overflow when the limit is
+// "unlimited" (math.MaxInt) or a very large explicit value. A non-positive
+// limit returns 0 so the caller can treat it as "no cap" too.
+func rawByteCapForBatchLimit(limit int) int {
+	if limit <= 0 {
 		return 0
 	}
-	if limit > math.MaxInt/mult {
+	if limit > math.MaxInt/rawByteCapMultiplier {
 		return math.MaxInt
 	}
-	return limit * mult
+	return limit * rawByteCapMultiplier
 }
 
 // OPFRawBytesTooLargeError: the cumulative raw blob bytes the
@@ -408,7 +408,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	// scaleBatchLimit saturates at math.MaxInt so "unlimited" actually
 	// means unlimited — without saturation, "unlimited" × 16 overflows
 	// int and the cap trips on every push.
-	rawCap := scaleBatchLimit(resolveBatchLimit(), rawByteCapMultiplier)
+	rawCap := rawByteCapForBatchLimit(resolveBatchLimit())
 	var rawBytesSoFar int
 	for _, c := range unpushed {
 		pc := pendingCommit{commit: c}

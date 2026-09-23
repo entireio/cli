@@ -963,6 +963,26 @@ func refHashes(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceName
 	return out
 }
 
+func refRewriteSizes(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) (rawBytes, leafBytes int) {
+	t.Helper()
+	ref, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	chain, _, err := unappliedAncestry(repo, ref.Hash())
+	require.NoError(t, err)
+	for _, commit := range chain {
+		tree, treeErr := repo.TreeObject(commit.TreeHash)
+		require.NoError(t, treeErr)
+		var blobs []redact.NamedBlob
+		var paths []string
+		require.NoError(t, collectTreeBlobs(repo, tree, "", &blobs, &paths))
+		for _, blob := range blobs {
+			rawBytes += len(blob.Content)
+		}
+		leafBytes += redact.SumProseLeafBytes(blobs)
+	}
+	return rawBytes, leafBytes
+}
+
 // treeContents concatenates every file in the commit's tree.
 func treeContents(t *testing.T, repo *git.Repository, hash plumbing.Hash) string {
 	t.Helper()
@@ -1076,7 +1096,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_FailureLeavesEveryRefUnmoved(t *test
 // Ref ORDER here is load-bearing, not incidental. redact.handleOPFFailure trips
 // the process-wide breaker on the FIRST runtime failure (a CompareAndSwap, not
 // an N-strike counter), and a tripped breaker makes BatchBytesWithPrivacyFilter
-// return regex-only content with a NIL error — so Pass 2's top-of-loop breaker
+// return regex-only content with a NIL error — so the top-of-loop breaker
 // check deliberately breaks out of the whole loop rather than continuing to the
 // next ref. There is therefore no ref that can be OPF-scanned *after* a runtime
 // failure, and a test that ordered the failing ref first would pass for the
@@ -1118,6 +1138,70 @@ func TestRewriteQueuedCheckpointRefsWithOPF_FailingOPFRefDoesNotBlockOthers(t *t
 		"a ref OPF never finished scanning must not be stamped applied")
 	require.Contains(t, treeContents(t, repo, after[1]), "PERSONABC",
 		"the failing ref's content must be left byte-identical, sentinel included")
+}
+
+// The raw-byte memory ceiling is scoped to the one ref whose blobs are resident
+// for the current OPF call. Two refs that each fit must both rewrite even when
+// their combined raw bytes would exceed one ref's ceiling.
+func TestRewriteQueuedCheckpointRefsWithOPF_RawByteCapIsPerRef(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+
+	raw0, leaf0 := refRewriteSizes(t, repo, refs[0])
+	raw1, leaf1 := refRewriteSizes(t, repo, refs[1])
+	limit := max(max(leaf0, leaf1), (max(raw0, raw1)+rawByteCapMultiplier-1)/rawByteCapMultiplier)
+	rawCap := rawByteCapForBatchLimit(limit)
+	require.LessOrEqual(t, raw0, rawCap)
+	require.LessOrEqual(t, raw1, rawCap)
+	require.Greater(t, raw0+raw1, rawCap,
+		"fixture must exceed one raw ceiling only when refs are combined")
+	t.Setenv(batchEnvVar, strconv.Itoa(limit))
+	before := refHashes(t, repo, refs)
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.Equal(t, 2, fake.batchCallCount(), "each fitting ref must reach OPF")
+	after := refHashes(t, repo, refs)
+	for i := range refs {
+		require.NotEqual(t, before[i], after[i])
+		commit, err := repo.CommitObject(after[i])
+		require.NoError(t, err)
+		require.True(t, trailers.HasOPFApplied(commit.Message))
+	}
+}
+
+// A raw-oversized ref is a local failure. It stays untouched and reports the
+// cap error, while a later fitting sibling is still collected, scanned, and
+// rewritten.
+func TestRewriteQueuedCheckpointRefsWithOPF_RawOversizedRefDoesNotBlockLaterRef(t *testing.T) {
+	const oversizedID, fitsID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, oversizedID, fitsID)
+	addGitRefsSessionWithTranscript(t, repo, oversizedID, "sess-raw-oversized",
+		strings.Repeat("the quick brown fox jumps over PERSONABC again ", 800))
+
+	oversizedRaw, _ := refRewriteSizes(t, repo, refs[0])
+	fitsRaw, fitsLeaf := refRewriteSizes(t, repo, refs[1])
+	limit := max(fitsLeaf, (fitsRaw+rawByteCapMultiplier-1)/rawByteCapMultiplier)
+	rawCap := rawByteCapForBatchLimit(limit)
+	require.Greater(t, oversizedRaw, rawCap)
+	require.LessOrEqual(t, fitsRaw, rawCap)
+	t.Setenv(batchEnvVar, strconv.Itoa(limit))
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+
+	var tooLarge *OPFRawBytesTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	require.Greater(t, tooLarge.RawBytes, tooLarge.Limit)
+	after := refHashes(t, repo, refs)
+	require.Equal(t, before[0], after[0], "raw-oversized ref must remain byte-identical")
+	require.NotEqual(t, before[1], after[1], "later fitting ref must still rewrite")
+	require.Equal(t, 1, fake.batchCallCount(), "only the fitting ref may reach OPF")
+	fitting, commitErr := repo.CommitObject(after[1])
+	require.NoError(t, commitErr)
+	require.True(t, trailers.HasOPFApplied(fitting.Message))
 }
 
 // Per-ref cap scoping: the leaf-byte cap is enforced per ref, not across the
