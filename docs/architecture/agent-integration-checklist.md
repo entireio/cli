@@ -41,11 +41,12 @@ Store transcripts in the **agent's native format**. Any transformation or normal
 
 ### Transcript Capture
 
-See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [TranscriptAnalyzer](agent-guide.md#transcriptanalyzer), [TranscriptPreparer](agent-guide.md#transcriptpreparer)
+See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [TranscriptAnalyzer](agent-guide.md#transcriptanalyzer), [TranscriptPreparer](agent-guide.md#transcriptpreparer), [TranscriptFetcher](agent-guide.md#transcriptfetcher)
 
 - [ ] **Full transcript on every turn**: At turn-end, capture the complete session transcript, not just events since the last checkpoint
 - [ ] **Resumed session handling**: When a user resumes an existing session, the transcript must include all historical messages, not just new ones since the plugin/hook loaded
 - [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Gemini's JSON, Cursor's JSONL, Factory AI Droid's JSONL, Copilot CLI's JSONL, OpenCode's `opencode export` JSON, Pi's JSONL session file) over manually reconstructing from events
+- [ ] **On-demand export**: If the agent can produce a transcript for a session Entire never hooked (e.g. one spawned by an external session host), implement `TranscriptFetcher` so `entire session attach` works for it instead of failing with "transcript not found"
 - [ ] **No custom formats**: Store the agent's native format directly in `NativeData` - do not convert between formats (e.g., JSON to JSONL) or create intermediate representations
 - [ ] **Graceful degradation**: If the canonical source is unavailable (e.g., agent shutting down), fall back to best-effort capture with clear documentation of limitations
 
