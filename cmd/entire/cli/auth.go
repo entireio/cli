@@ -235,6 +235,10 @@ func newAuthStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   cmdStatus,
 		Short: "Show authentication status",
+		// `auth status sessions` is a natural guess now that --sessions
+		// exists; without this it prints the collapsed default and drops the
+		// word, which reads as the flag having no effect.
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
@@ -311,7 +315,13 @@ type statusTarget struct {
 	token         string
 	activeContext string
 	totalContexts int
-	envToken      bool
+	// distinctServers counts the login servers the saved contexts are spread
+	// across. It is what decides whether naming the host tells the reader
+	// anything: with every login on one server the host is the same fact
+	// repeated, and only a split across servers makes it the thing that
+	// separates one login from another.
+	distinctServers int
+	envToken        bool
 }
 
 // resolveAuthStatusTarget picks the target for `entire auth status`, honouring
@@ -367,21 +377,28 @@ func resolveStatusTarget(ctx context.Context, listContexts contextsProvider, res
 		return statusTarget{}, fmt.Errorf("load contexts: %w", err)
 	}
 	total := len(all)
+	servers := make(map[string]struct{}, total)
+	for _, c := range all {
+		if host := authServerHost(c.CoreURL); host != "" {
+			servers[host] = struct{}{}
+		}
+	}
+	distinct := len(servers)
 	for _, c := range all {
 		if c.Name != current || c.CoreURL == "" {
 			continue
 		}
 		if tok, terr := resolveLogin(ctx, c); terr == nil && tok != "" {
-			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
+			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 		}
 		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
-			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
+			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 		}
 		// Active context with no readable token: report against its core so
 		// the not-logged-in message names the right login server.
-		return statusTarget{coreURL: c.CoreURL, activeContext: c.Name, totalContexts: total}, nil
+		return statusTarget{coreURL: c.CoreURL, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 	}
-	return statusTarget{totalContexts: total}, nil
+	return statusTarget{totalContexts: total, distinctServers: distinct}, nil
 }
 
 // defaultFetchProfile fetches a user's profile from coreURL's GET /me with the
@@ -559,7 +576,17 @@ func detectRevokedLogin(token string, sessions []api.AuthSession, current int) (
 func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget, opts authStatusOptions) error {
 	d, err := resolveAuthStatus(ctx, fetchProfile, listSessions, t)
 	if err != nil {
-		return err
+		if !opts.JSON {
+			return err
+		}
+		// A caller that asked for JSON gets a parseable object naming the
+		// failure rather than empty stdout — `--json | jq .logged_in` should
+		// report false, not fail to parse. The exit stays non-zero, and the
+		// reason is already on stdout, so the error itself is silent.
+		if perr := printJSON(w, authStatusJSON{Error: err.Error(), Server: authServerHost(t.coreURL)}); perr != nil {
+			return perr
+		}
+		return NewSilentError(err)
 	}
 	if opts.JSON {
 		return printJSON(w, buildAuthStatusJSON(d, opts))
@@ -611,16 +638,18 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 	// so it is stated only when that session was actually identified — showing
 	// some other session's expiry as yours would be worse than showing none.
 	headline := sty.render(sty.green, "●") + " " + sty.render(sty.bold, "Logged in")
+	var deadline string
 	switch {
 	case d.current >= 0:
-		if exp := formatAuthTimestamp(d.sessions[d.current].ExpiresAt); exp != placeholderDash {
-			headline += sty.render(sty.dim, " · ") + "expires " + exp
-		}
-	case d.revoked && !d.tokenExpiry.IsZero():
+		deadline = authDeadlineClause(parseAuthTimestamp(d.sessions[d.current].ExpiresAt))
+	case d.revoked:
 		// The bearer's own expiry, not a session's. Here they mean the same
 		// thing — there is nothing left to renew it, so this is when the user
 		// is logged out.
-		headline += sty.render(sty.dim, " · ") + "expires " + timeAgo(d.tokenExpiry)
+		deadline = authDeadlineClause(d.tokenExpiry)
+	}
+	if deadline != "" {
+		headline += sty.render(sty.dim, " · ") + deadline
 	}
 	fmt.Fprintln(w, headline)
 	if d.revoked {
@@ -636,12 +665,12 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 	// have.
 	if t.totalContexts > 1 {
 		if t.activeContext != "" {
-			rows = append(rows, authContextRow(sty, t.activeContext, t.coreURL))
+			rows = append(rows, authContextRow(sty, t.activeContext, t.coreURL, t.distinctServers > 1))
 		}
 		rows = append(rows, authContextsCountRow(sty, t.totalContexts))
 	}
 	rows = append(rows, explainRow{Label: authTokenRowLabel, Value: tokenstore.BackendDescription()})
-	if row, ok := authSessionsRow(sty, d.sessions, d.sessionErr, opts.Sessions, d.current); ok {
+	if row, ok := authSessionsRow(sty, d.sessions, d.sessionErr, opts.Sessions, d.current, deadline != ""); ok {
 		rows = append(rows, row)
 	}
 	fmt.Fprint(w, sty.metadataRows(rows))
@@ -667,7 +696,10 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 		// action arrives with its subject attached.
 		hint := "Run 'entire logout' to end every CLI session."
 		if opts.Sessions && len(d.sessions) > 1 {
-			hint = fmt.Sprintf("Run 'entire logout' to end every CLI session, or 'entire logout --everywhere' to end all %d.", len(d.sessions))
+			// No count: logout sweeps every saved login on every login server,
+			// while these rows are one server's. Naming the smaller number
+			// beside the wider command understates what it destroys.
+			hint += " Add --everywhere to end browser and web sessions too."
 		}
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, hint)
@@ -747,6 +779,17 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 		total := t.totalContexts
 		out.AvailableContexts = &total
 	}
+	// Where the bearer came from is settled before /me is consulted, so it is
+	// reported whatever /me said. A script told only `{"logged_in":false}` has
+	// no way to see that ENTIRE_TOKEN supplied the rejected token and is still
+	// winning over every stored context — which is also why the text view's
+	// "run entire login" cannot help there.
+	if t.envToken {
+		out.EnvToken = true
+		out.TokenSource = auth.EnvTokenVar + " environment variable"
+	} else {
+		out.TokenSource = tokenstore.BackendDescription()
+	}
 	if d.invalid {
 		out.Error = "login is no longer valid; run 'entire login' to re-authenticate"
 	}
@@ -756,16 +799,11 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 
 	out.ForeignRegion = d.profile.ForeignRegion
 	out.Jurisdiction = d.profile.Jurisdiction
-	if d.profile.Handle != "" {
-		out.User = formatQualifiedHandle(d.profile.Provider, d.profile.Handle)
-	}
+	out.User = authIdentityLabel(d.profile)
 
 	if t.envToken {
-		out.EnvToken = true
-		out.TokenSource = auth.EnvTokenVar + " environment variable"
 		return out
 	}
-	out.TokenSource = tokenstore.BackendDescription()
 
 	if d.sessionErr != nil {
 		out.SessionsError = d.sessionErr.Error()
@@ -819,10 +857,28 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 // and neither is rendered any more; what was left restated the `jurisdiction`
 // and `context` rows it sat between. The condition still reaches machine
 // readers as the JSON `foreign_region` flag.
+// authIdentityLabel names the account the way `entire grant` takes it —
+// "github:alice" — falling back to the provider's own user id when the account
+// carries no handle.
+//
+// /me's handle is optional, and an account without one would otherwise be
+// described by nothing at all: a verdict line, a jurisdiction and a token
+// backend, with no way to tell whose login this is. The provider id is not a
+// grantee spelling, but it identifies the account, which is the row's job.
+func authIdentityLabel(p *authProfile) string {
+	if p.Handle != "" {
+		return formatQualifiedHandle(p.Provider, p.Handle)
+	}
+	if p.ProviderUserID != "" {
+		return formatQualifiedHandle(p.Provider, p.ProviderUserID)
+	}
+	return ""
+}
+
 func authProfileRows(p *authProfile) []explainRow {
 	var rows []explainRow
-	if p.Handle != "" {
-		rows = append(rows, explainRow{Label: "user", Value: formatQualifiedHandle(p.Provider, p.Handle)})
+	if user := authIdentityLabel(p); user != "" {
+		rows = append(rows, explainRow{Label: "user", Value: user})
 	}
 	// The home jurisdiction slug is what 'entire auth token --jurisdiction'
 	// takes; surface it so it's discoverable non-interactively.
@@ -833,12 +889,20 @@ func authProfileRows(p *authProfile) []explainRow {
 }
 
 // authContextRow names the active login context, appending the login server's
-// host only when the context name does not already spell it. The name defaults
-// to the host, so repeating it would be noise — but a context the user named
-// "work" would otherwise leave the server unnamed among the several on show.
-func authContextRow(sty statusStyles, name, coreURL string) explainRow {
+// host when that host is what tells this login apart from the others.
+//
+// splitServers is the caller's count of distinct servers across the saved
+// contexts, and it gates the host for the same reason the row itself is gated
+// on there being more than one context: several logins that all live on one
+// server are distinguished by their names, and printing the shared host beside
+// one of them says nothing about which login this is. Spread across servers,
+// the host is precisely the distinguishing fact.
+//
+// A name that already spells the host is never doubled — context names default
+// to the issuer host, so the common multi-server case needs no suffix either.
+func authContextRow(sty statusStyles, name, coreURL string, splitServers bool) explainRow {
 	value := name
-	if host := authServerHost(coreURL); host != "" && !strings.EqualFold(name, host) {
+	if host := authServerHost(coreURL); splitServers && host != "" && !strings.EqualFold(name, host) {
 		value += sty.render(sty.dim, " · ") + host
 	}
 	return explainRow{Label: "context", Value: value}
@@ -853,6 +917,12 @@ func authContextRow(sty statusStyles, name, coreURL string) explainRow {
 // counting it adds a row and no information. Zero still reports — logged in
 // with no sessions is a contradiction worth seeing.
 //
+// headlineDeadline is that premise, passed rather than assumed. ExpiresAt is a
+// plain string with no omitempty, so a session can arrive with none, and an
+// unreadable one is dropped from the headline too; dropping the row as well
+// would leave the default view with no count, no expiry and no route to
+// --sessions.
+//
 // current gates that drop, and must not be assumed. A caller whose session was
 // not identified gets no expiry on the verdict line, so dropping the row there
 // would leave the default view with no count, no expiry and no route to
@@ -861,11 +931,11 @@ func authContextRow(sty statusStyles, name, coreURL string) explainRow {
 // family is revoked while its access token is still inside its own lifetime:
 // resolveStatusTarget falls back to the stale bearer, /me still honours it, and
 // fid names a family the listing no longer contains.
-func authSessionsRow(sty statusStyles, sessions []api.AuthSession, listErr error, showSessions bool, current int) (explainRow, bool) {
+func authSessionsRow(sty statusStyles, sessions []api.AuthSession, listErr error, showSessions bool, current int, headlineDeadline bool) (explainRow, bool) {
 	if listErr != nil {
 		return explainRow{Label: activeSessionsRowLabel, Value: fmt.Sprintf("(unavailable: %v)", listErr)}, true
 	}
-	if len(sessions) == 1 && current >= 0 {
+	if len(sessions) == 1 && current >= 0 && headlineDeadline {
 		return explainRow{}, false
 	}
 	value := strconv.Itoa(len(sessions))
@@ -1071,11 +1141,51 @@ func lastUsedSortKey(s api.AuthSession) string {
 	return *s.LastUsedAt
 }
 
+// parseAuthTimestamp reads an RFC3339 instant, reporting the zero time for a
+// value that is missing or unreadable. Both are "no deadline to state" to the
+// verdict line, which is the only distinction it needs.
+func parseAuthTimestamp(s string) time.Time {
+	ts, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts
+}
+
+// authDeadlineClause renders a deadline for the verdict line: "expires in 30d"
+// while it is ahead, a flat "expired" once it has passed, and nothing at all
+// for an instant that is missing or unreadable.
+//
+// Tense matters more here than anywhere else in the output, because the clause
+// shares its line with the word "Logged in": rendering a lapsed deadline as
+// "expires 19h ago" contradicts the verdict beside it. A past instant is
+// genuinely reachable — a session's ExpiresAt is server-supplied and
+// independent of the bearer /me has just accepted, so clock skew or a family
+// that lapsed mid-command lands here.
+//
+// An unreadable value yields nothing rather than the raw wire string, which in
+// the middle of a sentence reads as corruption of the line rather than of the
+// field. The session table still shows it verbatim in a cell of its own, and
+// --json carries it untouched.
+func authDeadlineClause(deadline time.Time) string {
+	switch {
+	case deadline.IsZero():
+		return ""
+	case !deadline.After(time.Now()):
+		return "expired"
+	default:
+		return "expires " + timeAgo(deadline)
+	}
+}
+
 // formatAuthTimestamp renders an RFC3339 timestamp as a relative duration
 // ("3h ago" for the past, "in 30d" for the future), falling back to a dash
-// (empty) or the raw value (unparseable) — the same contract as formatAuthDate.
-// Relative rather than absolute because a session table is read for recency:
-// three rows all stamped the same day say nothing about which one is live.
+// (empty) or the raw value (unparseable). The raw fallback belongs to the
+// table, where a cell of its own is the right place to show a value the server
+// sent and this code could not read; the verdict line drops it instead (see
+// authDeadlineClause). Relative rather than absolute because a session table is
+// read for recency: three rows all stamped the same day say nothing about which
+// one is live.
 func formatAuthTimestamp(s string) string {
 	if s == "" {
 		return placeholderDash

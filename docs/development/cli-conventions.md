@@ -57,7 +57,9 @@ the commands are always runnable in every build.
   `aud=<jurisdiction host>`) for that jurisdiction's entire-api cells (e.g.
   `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
   bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
-  env token's `aud`), else the active login. `auth status` shows the caller's
+  env token's `aud`), else the active login. `auth status` takes no positional
+  arguments (`auth status sessions` is refused rather than silently read as the
+  default view). It shows the caller's
   home jurisdiction so the slug is discoverable. A login served by a core
   outside that home region reaches `--json` as `foreign_region` and is not
   called out in the text view: the note that used to sit there existed mostly
@@ -73,7 +75,13 @@ the commands are always runnable in every build.
   context count goes the `context` row naming the active login. Both of those
   rows exist to say "this login, not the others", so both wait until there are
   others: a sole login is not a choice, and describing it as one costs two lines
-  to tell the reader nothing they can act on. The sole session is likewise
+  to tell the reader nothing they can act on. The **login server** is held to the
+  same test: the `context` row appends the host only when the saved logins are
+  spread across more than one server, because logins that all sit on one server
+  are told apart by their names and the host they share names none of them. A
+  sole login therefore shows neither row, and `--json` still carries `server`
+  for anyone who needs it. ENTIRE_TOKEN mode is the one place the host is stated
+  outright, having no context to carry it. The sole session is likewise
   already described by the verdict line's expiry. The session half
   additionally requires that sole session to have been
   *identified* as the caller's: without a `fid` match there is no expiry on the
@@ -100,10 +108,21 @@ the commands are always runnable in every build.
   every session revoked while the current bearer still had hours to run. Zero sessions still reports, being a contradiction worth seeing.
   `logout --everywhere` is offered **only alongside the table**: it ends every
   session at once, browser logins included, and in the collapsed view those
-  sessions are a count the reader cannot inspect. The whole logout hint is
+  sessions are a count the reader cannot inspect. It is named as a flag and
+  never sized by a number: `logout` sweeps every saved login on every login
+  server, while the rows on screen are one server's, so a count there would
+  understate what the command destroys. The whole logout hint is
   withheld once a login is known revoked — any session still listed belongs to
   the login that replaced this one, so there is nothing here worth ending, and
   the notice above already names `entire login` as the action.
+  The verdict line's deadline is tense-checked before it is printed: a lapsed
+  instant renders as a flat `expired` rather than `expires 19h ago`, which would
+  contradict the "Logged in" beside it, and an unreadable one is dropped rather
+  than echoed mid-sentence (the session table still shows it verbatim in a cell
+  of its own, and `--json` carries it untouched). Because that deadline is the
+  sole-session row's whole premise, the drop is gated on it having actually
+  rendered — a session whose `expires_at` is empty or unparseable keeps its
+  count row, or the default view would carry no session information at all.
   The drop-at-one collapse is text-only — `--json` never applies it. What the
   JSON does omit is anything it could not determine, which is why
   `active_sessions`, `available_contexts` and `sessions` are **pointers**:
@@ -114,7 +133,13 @@ the commands are always runnable in every build.
   reached the listing, as `[]` when empty, so a satisfied request stays
   distinguishable from the default where the key is absent. Paths that return
   before the listing — not logged in, env token, a failed fetch — omit it
-  along with the rest. The JSON carries the provider-qualified
+  along with the rest. `env_token` and `token_source` are the exception: where
+  the bearer came from is settled before `/me` is consulted, so they are emitted
+  even for a bearer `/me` rejected — a script told only `logged_in:false` could
+  not otherwise see that `ENTIRE_TOKEN` supplied the token and is still winning
+  over every stored context. A hard fetch failure (network, DNS, 5xx) likewise
+  still prints an envelope carrying `error`, so `--json | jq .logged_in` parses;
+  the command keeps its non-zero exit and prints nothing further to stderr. The JSON carries the provider-qualified
   `user` and deliberately not a split `handle`/`provider`: one directly usable
   field beats two a caller has to rejoin. `auth status` also marks the caller's
   own row `(current)`, matching the login JWT's `fid` (refresh-token family id)

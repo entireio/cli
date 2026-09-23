@@ -302,10 +302,11 @@ func TestRunAuthStatusJSON_EnvTokenHasNoSessions(t *testing.T) {
 }
 
 // The context row names the login server only when the context name does not
-// already spell it. The name defaults to the host, so repeating it is noise —
-// but a context the user named "work" would otherwise leave the server unnamed
-// anywhere in the output.
-func TestAuthContextRow_NamesTheServerOnlyWhenTheNameDoesNot(t *testing.T) {
+// The host joins the row only when the saved logins are spread across servers,
+// and only when the context name does not already spell it. Logins that all sit
+// on one server are told apart by their names, so the shared host beside one of
+// them says nothing about which login it is.
+func TestAuthContextRow_NamesTheServerOnlyWhenItDistinguishes(t *testing.T) {
 	t.Parallel()
 
 	sty := newStatusStyles(io.Discard)
@@ -313,17 +314,19 @@ func TestAuthContextRow_NamesTheServerOnlyWhenTheNameDoesNot(t *testing.T) {
 		name      string
 		ctxName   string
 		coreURL   string
+		split     bool
 		wantValue string
 	}{
-		{"name is the host", "eu.auth.entire.io", "https://eu.auth.entire.io", "eu.auth.entire.io"},
-		{"name differs", "work", "https://eu.auth.entire.io", "work · eu.auth.entire.io"},
-		{"case-insensitive match", "EU.AUTH.ENTIRE.IO", "https://eu.auth.entire.io", "EU.AUTH.ENTIRE.IO"},
-		{"unparseable core URL still names something", "work", "::nonsense", "work · ::nonsense"},
+		{"name is the host", "eu.auth.entire.io", "https://eu.auth.entire.io", true, "eu.auth.entire.io"},
+		{"name differs, servers split", "work", "https://eu.auth.entire.io", true, "work · eu.auth.entire.io"},
+		{"name differs, one server", "work", "https://eu.auth.entire.io", false, "work"},
+		{"case-insensitive match", "EU.AUTH.ENTIRE.IO", "https://eu.auth.entire.io", true, "EU.AUTH.ENTIRE.IO"},
+		{"unparseable core URL still names something", "work", "::nonsense", true, "work · ::nonsense"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := authContextRow(sty, tt.ctxName, tt.coreURL)
+			got := authContextRow(sty, tt.ctxName, tt.coreURL, tt.split)
 			if got.Label != "context" {
 				t.Errorf("label = %q, want %q", got.Label, "context")
 			}
@@ -630,9 +633,13 @@ func TestRunAuthStatus_RendersSessionsTable(t *testing.T) {
 		}
 	}
 	// The table is on screen here (--sessions), so the bulk action may be
-	// offered: its subject is visible.
-	if !strings.Contains(got, "entire logout --everywhere") {
+	// offered: its subject is visible. It is named as a flag rather than as a
+	// count, because logout sweeps every login server and these rows are one.
+	if !strings.Contains(got, "--everywhere") {
 		t.Fatalf("output = %q, want logout hint tying the table to logout", got)
+	}
+	if strings.Contains(got, "end all 2") {
+		t.Fatalf("output = %q, must not size an every-server command by one server's rows", got)
 	}
 	// "tok" is not a JWT, so no session can be identified as the caller's.
 	if strings.Contains(got, currentSessionMarker) {
@@ -1150,4 +1157,219 @@ func TestRunAuthStatus_FileTokenStoreProvenance(t *testing.T) {
 	if strings.Contains(got, "keychain") {
 		t.Fatalf("output = %q, must not claim the OS keychain when the file backend is configured", got)
 	}
+}
+
+// --- findings-driven regressions ---------------------------------------------
+
+// The verdict line says "Logged in", so a deadline printed beside it must not
+// contradict it. ExpiresAt is server-supplied and independent of the bearer /me
+// has just accepted, so clock skew or a family that lapsed mid-command lands a
+// past instant here.
+func TestRunAuthStatus_LapsedDeadlineSaysExpired(t *testing.T) {
+	t.Parallel()
+
+	lapsed := func(context.Context, string, string) ([]api.AuthSession, error) {
+		return []api.AuthSession{{ID: "fam-1", Name: "this login", CreatedAt: "2026-01-01T00:00:00Z", ExpiresAt: time.Now().Add(-19 * time.Hour).UTC().Format(time.RFC3339)}}, nil
+	}
+	token := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","fid":"fam-1"}`)
+	target := statusTarget{coreURL: testCoreURL, token: token, activeContext: "a", totalContexts: 1}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, lapsed, target, authStatusOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "expired") {
+		t.Fatalf("output = %q, want a lapsed deadline named as expired", got)
+	}
+	if strings.Contains(got, "ago") {
+		t.Fatalf("output = %q, must not render a deadline that has passed as \"expires ... ago\"", got)
+	}
+}
+
+// A timestamp this code cannot read is dropped from the verdict line rather
+// than echoed into the middle of the sentence, where it reads as corruption of
+// the line rather than of the field.
+func TestRunAuthStatus_UnreadableDeadlineIsDropped(t *testing.T) {
+	t.Parallel()
+
+	const garbage = "not-a-timestamp"
+	garbled := func(context.Context, string, string) ([]api.AuthSession, error) {
+		return []api.AuthSession{{ID: "fam-1", Name: "this login", CreatedAt: "2026-01-01T00:00:00Z", ExpiresAt: garbage}}, nil
+	}
+	token := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","fid":"fam-1"}`)
+	target := statusTarget{coreURL: testCoreURL, token: token, activeContext: "a", totalContexts: 1}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, okProfile, garbled, target, authStatusOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, garbage) {
+		t.Fatalf("output = %q, must not echo an unreadable timestamp into the verdict line", got)
+	}
+	// With no deadline on the verdict line, the sole-session row is the only
+	// thing left to say a session exists, so the drop must not fire.
+	if !hasMetadataLabel(got, activeSessionsRowLabel) {
+		t.Fatalf("output = %q, want the session count when the headline carries no expiry", got)
+	}
+}
+
+// The login server earns a place only where it separates one saved login from
+// another. A sole login has nothing to be separated from, so neither the
+// context row nor a server row appears.
+func TestRunAuthStatus_ServerIsNamedOnlyWhereItSeparatesLogins(t *testing.T) {
+	t.Parallel()
+
+	render := func(t *testing.T, target statusTarget) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runAuthStatus(context.Background(), &out, okProfile, noSessions, target, authStatusOptions{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return out.String()
+	}
+
+	t.Run("sole login names neither", func(t *testing.T) {
+		t.Parallel()
+		got := render(t, statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "work", totalContexts: 1, distinctServers: 1})
+		for _, unwanted := range []string{"context", "server"} {
+			if hasMetadataLabel(got, unwanted) {
+				t.Fatalf("output = %q, want no %q row for a sole login", got, unwanted)
+			}
+		}
+	})
+
+	t.Run("several logins on one server name the context alone", func(t *testing.T) {
+		t.Parallel()
+		got := render(t, statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "work", totalContexts: 2, distinctServers: 1})
+		if !hasMetadataRow(got, "context", "work") {
+			t.Fatalf("output = %q, want the context named without a host they all share", got)
+		}
+	})
+
+	t.Run("logins split across servers name the host", func(t *testing.T) {
+		t.Parallel()
+		got := render(t, statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "work", totalContexts: 2, distinctServers: 2})
+		if !strings.Contains(got, "eu.auth.entire.io") {
+			t.Fatalf("output = %q, want the host that tells this login from the others", got)
+		}
+	})
+}
+
+// An account /me returns without a handle still has an identity; without this
+// the text view describes it with nothing at all.
+func TestAuthIdentityLabel_FallsBackToProviderUserID(t *testing.T) {
+	t.Parallel()
+
+	handleless := &authProfile{Provider: "github", ProviderUserID: "12345"}
+	if got := authIdentityLabel(handleless); got != "github:12345" {
+		t.Errorf("authIdentityLabel = %q, want the provider user id", got)
+	}
+	rows := authProfileRows(handleless)
+	if !hasRow(rows, "user", "github:12345") {
+		t.Errorf("rows = %+v, want a user row for a handle-less account", rows)
+	}
+	if got := authIdentityLabel(&authProfile{Provider: "github"}); got != "" {
+		t.Errorf("authIdentityLabel = %q, want empty when the account names neither", got)
+	}
+}
+
+// Where the bearer came from is settled before /me is consulted, so a script
+// can see that ENTIRE_TOKEN supplied the token even when /me rejected it —
+// which is also why "run entire login" cannot help in that state.
+func TestBuildAuthStatusJSON_EnvTokenSurvivesAnInvalidBearer(t *testing.T) {
+	t.Parallel()
+
+	target := statusTarget{coreURL: testCoreURL, token: "tok", envToken: true}
+	got := buildAuthStatusJSON(authStatusData{target: target, invalid: true, current: -1}, authStatusOptions{})
+	if !got.EnvToken {
+		t.Error("env_token = false, want it reported for a rejected env bearer")
+	}
+	if got.TokenSource == "" {
+		t.Error("token_source = empty, want the env var named")
+	}
+	if got.Error == "" {
+		t.Error("error = empty, want the invalid-login reason")
+	}
+}
+
+// A caller that asked for JSON gets an object naming the failure, not empty
+// stdout: `--json | jq .logged_in` must parse.
+func TestRunAuthStatus_JSONOnAHardFetchFailure(t *testing.T) {
+	t.Parallel()
+
+	boom := func(context.Context, string, string) (*authProfile, error) {
+		return nil, errors.New("dial tcp: no route to host")
+	}
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "a", totalContexts: 1}
+
+	var out bytes.Buffer
+	err := runAuthStatus(context.Background(), &out, boom, noSessions, target, authStatusOptions{JSON: true})
+	if err == nil {
+		t.Fatal("err = nil, want the failure to keep its non-zero exit")
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("err = %v, want a SilentError — the reason is already on stdout", err)
+	}
+	var got authStatusJSON
+	if jerr := json.Unmarshal(out.Bytes(), &got); jerr != nil {
+		t.Fatalf("decode %q: %v", out.String(), jerr)
+	}
+	if got.LoggedIn {
+		t.Error("logged_in = true, want false")
+	}
+	if got.Error == "" {
+		t.Error("error = empty, want the failure named in-band")
+	}
+}
+
+// TestAuthStatusCmd covers the cobra wiring — flag names and their mapping into
+// authStatusOptions — which calling runAuthStatus directly cannot reach.
+//
+// Not parallel: it manipulates ENTIRE_TOKEN / ENTIRE_CONFIG_DIR.
+func TestAuthStatusCmd(t *testing.T) {
+	unsetEnv(t, "ENTIRE_TOKEN")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	t.Run("rejects stray positionals", func(t *testing.T) {
+		cmd := newAuthStatusCmd()
+		cmd.SetArgs([]string{"sessions"})
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		if err := cmd.ExecuteContext(t.Context()); err == nil {
+			t.Fatal("err = nil, want `auth status sessions` refused rather than silently ignored")
+		}
+	})
+
+	// The flags exist under these names; renaming one must fail here rather
+	// than leave every runAuthStatus test green.
+	t.Run("declares the documented flags", func(t *testing.T) {
+		cmd := newAuthStatusCmd()
+		for _, name := range []string{"sessions", "json"} {
+			if cmd.Flags().Lookup(name) == nil {
+				t.Errorf("flag --%s is not registered", name)
+			}
+		}
+	})
+
+	t.Run("not logged in reports through the command", func(t *testing.T) {
+		cmd := newAuthStatusCmd()
+		cmd.SetArgs([]string{"--json"})
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		if err := cmd.ExecuteContext(t.Context()); err != nil {
+			t.Fatalf("unexpected error: %v (stderr=%q)", err, errOut.String())
+		}
+		var got authStatusJSON
+		if jerr := json.Unmarshal(out.Bytes(), &got); jerr != nil {
+			t.Fatalf("decode %q: %v", out.String(), jerr)
+		}
+		if got.LoggedIn {
+			t.Errorf("logged_in = true with an empty config dir, want false")
+		}
+	})
 }

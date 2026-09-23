@@ -3,7 +3,6 @@ package auth
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -31,6 +30,30 @@ func LoginTokenExpiry(loginJWT string) (time.Time, error) {
 	return claims.ExpiresAt, nil
 }
 
+// decodeLoginJWTClaims reads custom claims out of a login JWT's payload into
+// out, without verifying the signature — the server re-verifies, and the
+// readers here only use what they find to recognise a row or route a request.
+//
+// Unverified is not unchecked. tokens.ParseClaims runs first, so the token must
+// be a well-formed three-segment JWT naming a real algorithm; an alg:none token
+// is refused here exactly as CoreURLFromEnvToken refuses one, keeping every
+// reader in this package on a single policy. Having passed, the payload segment
+// is known present and decodable, so the second pass only has to reach the
+// claim ParseClaims has no field for.
+func decodeLoginJWTClaims(loginJWT string, out any) error {
+	if _, err := tokens.ParseClaims(loginJWT); err != nil {
+		return fmt.Errorf("login token: %w", err)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.Split(loginJWT, ".")[1])
+	if err != nil {
+		return fmt.Errorf("decode login token payload: %w", err)
+	}
+	if err := json.Unmarshal(payload, out); err != nil {
+		return fmt.Errorf("parse login token payload: %w", err)
+	}
+	return nil
+}
+
 // SessionFamilyIDFromLoginJWT reads the fid (refresh-token family id) claim
 // without verifying the signature — the caller only uses it to recognise which
 // row of a session listing is its own, exactly as HomeJurisdictionFromLoginJWT
@@ -40,19 +63,11 @@ func LoginTokenExpiry(loginJWT string) (time.Time, error) {
 // Returns "" (no error) when the claim is absent, so a core too old to mint it
 // degrades to "no session identified" rather than to an error.
 func SessionFamilyIDFromLoginJWT(loginJWT string) (string, error) {
-	parts := strings.Split(loginJWT, ".")
-	if len(parts) < 2 {
-		return "", errors.New("login token is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("decode login token payload: %w", err)
-	}
 	var claims struct {
 		FID string `json:"fid"`
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("parse login token payload: %w", err)
+	if err := decodeLoginJWTClaims(loginJWT, &claims); err != nil {
+		return "", err
 	}
 	return claims.FID, nil
 }
