@@ -222,8 +222,8 @@ depending on the rescue or falling into the ambiguity refusal below.
 The hook itself follows first (`followAgentWorkingDirectory`): agents report
 the directory they work in on every hook payload (`Event.CWD`; Claude Code's
 `cwd` follows `EnterWorktree` and `cd`), and when that is another worktree of
-the same repository the hook process moves there before anything is resolved,
-and its log sink moves with it, so the rest of the hook logs in the worktree
+the same repository, and Entire is enabled there, the hook process moves there
+before anything is resolved, and its log sink moves with it, so the rest of the hook logs in the worktree
 where the work happens.
 At turn-start and turn-end `rehomeSessionToCurrentWorktree` then applies the
 same re-home under the same pending-content guard, so the first commit after

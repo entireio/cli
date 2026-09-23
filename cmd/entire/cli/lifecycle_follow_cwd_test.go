@@ -31,6 +31,9 @@ func TestFollowAgentWorkingDirectory(t *testing.T) {
 	worktree := filepath.Join(resolved(t.TempDir()), "feature")
 	testutil.RunGit(t, parent, "worktree", "add", "-q", "-b", "feature", worktree)
 	require.NoError(t, os.MkdirAll(filepath.Join(worktree, "src", "pkg"), 0o755))
+	testutil.WriteFile(t, worktree, ".entire/settings.json", `{"enabled": true}`)
+	plain := filepath.Join(resolved(t.TempDir()), "plain")
+	testutil.RunGit(t, parent, "worktree", "add", "-q", "-b", "plain", plain)
 	other := resolved(t.TempDir())
 	testutil.InitRepo(t, other)
 	testutil.WriteFile(t, other, "x", "x\n")
@@ -45,12 +48,13 @@ func TestFollowAgentWorkingDirectory(t *testing.T) {
 		want      string // process directory afterwards
 		confirmed bool   // the payload named the tree the hook now runs in
 	}{
-		"another worktree of the repo":       {cwd: worktree, want: worktree, confirmed: true},
-		"a subdirectory of that worktree":    {cwd: filepath.Join(worktree, "src", "pkg"), want: worktree, confirmed: true},
-		"a subdirectory of the current tree": {cwd: filepath.Join(parent, ".git"), want: parent, confirmed: true},
-		"a different repository":             {cwd: other, want: parent},
-		"a directory that does not exist":    {cwd: filepath.Join(parent, "nope"), want: parent},
-		"no cwd in the payload":              {cwd: "", want: parent},
+		"another worktree of the repo":           {cwd: worktree, want: worktree, confirmed: true},
+		"a subdirectory of that worktree":        {cwd: filepath.Join(worktree, "src", "pkg"), want: worktree, confirmed: true},
+		"a subdirectory of the current tree":     {cwd: filepath.Join(parent, ".git"), want: parent, confirmed: true},
+		"a worktree where entire is not enabled": {cwd: plain, want: parent},
+		"a different repository":                 {cwd: other, want: parent},
+		"a directory that does not exist":        {cwd: filepath.Join(parent, "nope"), want: parent},
+		"no cwd in the payload":                  {cwd: "", want: parent},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

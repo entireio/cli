@@ -31,6 +31,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
@@ -173,9 +174,14 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 			slog.String("cwd", target), slog.String("error", err.Error()))
 		return ctx
 	}
-	paths.ClearWorktreeRootCache()
-	gitdir.ClearCache()
-	session.ClearGitCommonDirCache()
+	// The launch worktree passed the enablement gate; the target must too, or
+	// the hook would set Entire up in a worktree the user never enabled.
+	if !targetWorktreeEnabled(ctx, current) {
+		logging.Debug(logCtx, "payload cwd is a worktree where entire is not enabled; staying put",
+			slog.String("cwd", target))
+		return ctx
+	}
+	clearWorktreeCaches()
 	logging.Info(logCtx, "hook follows the agent's working directory",
 		slog.String("event", event.Type.String()),
 		slog.String("from", current),
@@ -208,6 +214,27 @@ func sameDir(a, b string) bool {
 // worktreeRootOf finds the worktree containing dir — nearest root first, so a
 // cwd inside a subdirectory still resolves — through the canonical metadata
 // resolver rather than a git query.
+// targetWorktreeEnabled runs the hooks' enablement gate against the worktree
+// the process has just moved into. When it fails, the process moves back to
+// launchDir, so callers can simply stay put.
+func targetWorktreeEnabled(ctx context.Context, launchDir string) bool {
+	clearWorktreeCaches()
+	if settings.IsSetUpAndEnabled(ctx) {
+		return true
+	}
+	if err := os.Chdir(launchDir); err == nil {
+		clearWorktreeCaches()
+	}
+	return false
+}
+
+// clearWorktreeCaches drops everything resolved from the process directory.
+func clearWorktreeCaches() {
+	paths.ClearWorktreeRootCache()
+	gitdir.ClearCache()
+	session.ClearGitCommonDirCache()
+}
+
 func worktreeRootOf(dir string) (string, gitrepo.WorktreeMetadata, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
