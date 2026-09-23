@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -674,18 +674,12 @@ func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSetti
 	return loadMergedSettings(ctx, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
-func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreeRoot, "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
+func clonePreferencesPathForWorktreeRoot(_ context.Context, worktreeRoot string) (string, error) {
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-
-	commonDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreeRoot, commonDir)
-	}
-	return filepath.Join(filepath.Clean(commonDir), ClonePreferencesFile), nil
+	return filepath.Join(metadata.CommonDir, ClonePreferencesFile), nil
 }
 
 // worktreeRootOfSettingsFile recovers the worktree root a settings path was

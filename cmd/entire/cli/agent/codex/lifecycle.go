@@ -156,6 +156,7 @@ func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
 		TurnID:       raw.TurnID,
 		SubagentID:   raw.AgentID,
 		SubagentType: raw.AgentType,
+		CWD:          raw.CWD,
 		Model:        raw.Model,
 		Timestamp:    time.Now(),
 	}, nil
@@ -179,6 +180,7 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		ProvisionalSubagentStop: true,
 		SubagentType:            raw.AgentType,
 		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),
+		CWD:                     raw.CWD,
 		Model:                   raw.Model,
 		Timestamp:               time.Now(),
 	}, nil
