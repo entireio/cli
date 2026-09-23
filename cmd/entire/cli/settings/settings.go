@@ -621,8 +621,8 @@ func validateScannerSettings(s *EntireSettings) error {
 }
 
 // Load loads the Entire settings from .entire/settings.json, then applies
-// clone-local preferences from the git common dir, then applies any overrides
-// from .entire/settings.local.json if it exists.
+// clone-local preferences from the git common dir, the user settings tier,
+// and finally any overrides from .entire/settings.local.json if it exists.
 // Returns default settings if no settings or preferences file exists.
 // Works correctly from any subdirectory within the repository.
 func Load(ctx context.Context) (*EntireSettings, error) {

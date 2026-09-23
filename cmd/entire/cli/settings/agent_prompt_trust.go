@@ -22,7 +22,7 @@ type AgentPromptRejection struct {
 // an agent that runs with approvals disabled does not read as executable to a
 // reviewer.
 const (
-	agentPromptRejectionNotLocal   = "it did not come from .entire/settings.local.json or clone-local preferences"
+	agentPromptRejectionNotLocal   = "it did not come from the user settings file, .entire/settings.local.json, or clone-local preferences"
 	agentPromptRejectionUnverified = "the local settings file could not be verified as untracked"
 )
 
@@ -38,9 +38,10 @@ func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 }
 
 // enforceAgentPromptTrust drops agent instruction fields unless they came from
-// a layer that is this developer's own: clone-local preferences (which live in
-// the git common dir and cannot arrive by cloning), or a local settings file
-// positively verified as untracked.
+// a layer that is this developer's own: the user settings file (which lives
+// outside the repository), clone-local preferences (which live in the git
+// common dir and cannot arrive by cloning), or a local settings file positively
+// verified as untracked.
 //
 // The gated fields are the free-text instruction channels: every
 // ReviewConfig.Prompt and every review profile's Task. Both land verbatim in
