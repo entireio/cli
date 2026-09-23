@@ -121,6 +121,47 @@ func TestWriteFollowsASymlinkedSettingsFile(t *testing.T) {
 	assert.Contains(t, string(got["preferences"]), "telemetry", "the write landed on the link's target")
 }
 
+func TestNormalizeOrigin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "direct GitHub", url: "https://github.com/entireio/cli.git", want: "gh/entireio/cli"},
+		{name: "mixed-case GitHub", url: "git@GitHub.com:entireio/cli.git", want: "gh/entireio/cli"},
+		{name: "Entire GitHub mirror", url: "entire://aws-us-east-2.entire.io/gh/entireio/cli", want: "gh/entireio/cli"},
+		{name: "Entire native US region", url: "entire://aws-us-east-2.entire.io/et/acme/widgets", want: "et/acme/widgets"},
+		{name: "Entire native EU region", url: "entire://eu-west-1.entire.io/et/acme/widgets", want: "et/acme/widgets"},
+		{name: "GitLab fallback", url: "https://gitlab.com/acme/widgets.git", want: "gitlab.com/acme/widgets"},
+		{name: "self-hosted fallback", url: "ssh://git@git.corp.example/acme/widgets.git", want: "git.corp.example/acme/widgets"},
+		{name: "unknown Entire forge fallback", url: "entire://cluster.example/jk/acme/widgets", want: "cluster.example/acme/widgets"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, NormalizeOrigin(tt.url))
+		})
+	}
+}
+
+func TestOriginKeysCollapsesGitHubTransports(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	runGit(t, root, "init", "-q", ".")
+	runGit(t, root, "remote", "add", "origin", "https://github.com/entireio/cli.git")
+	runGit(t, root, "config", "--add", "remote.origin.pushurl",
+		"entire://aws-us-east-2.entire.io/gh/entireio/cli")
+
+	keys, present, err := OriginKeys(t.Context(), root)
+	require.NoError(t, err)
+	require.True(t, present)
+	assert.Equal(t, []string{"gh/entireio/cli"}, keys)
+}
+
 // OriginKeys runs on the hook path: IsSetUpAndEnabled reaches it, and git
 // exports GIT_DIR and GIT_WORK_TREE to every hook it runs. Those OUTRANK
 // cmd.Dir, so a child that inherits them reads the hook's repository instead
@@ -141,7 +182,7 @@ func TestOriginKeysIgnoresHookRepoOverrides(t *testing.T) {
 	keys, present, err := OriginKeys(t.Context(), target)
 	require.NoError(t, err)
 	require.True(t, present)
-	require.Equal(t, []string{"github.com/acme/widgets"}, keys, "sanity, with a clean environment")
+	require.Equal(t, []string{"gh/acme/widgets"}, keys, "sanity, with a clean environment")
 
 	// Exactly what git hands a hook running in the other repository.
 	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
@@ -150,7 +191,7 @@ func TestOriginKeysIgnoresHookRepoOverrides(t *testing.T) {
 	keys, present, err = OriginKeys(t.Context(), target)
 	require.NoError(t, err)
 	require.True(t, present)
-	assert.Equal(t, []string{"github.com/acme/widgets"}, keys,
+	assert.Equal(t, []string{"gh/acme/widgets"}, keys,
 		"the directory asked about must win over a hook's exported repository")
 }
 

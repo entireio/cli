@@ -63,8 +63,8 @@ func TestUserTier_ReposEntryMatchesByOrigin(t *testing.T) {
 	writeUserSettings(t, `{
 	  "preferences": {"review_fix_agent": "claude-code"},
 	  "repos": {
-	    "github.com/acme/widgets": {"review_fix_agent": "codex"},
-	    "github.com/other/thing":  {"review_fix_agent": "gemini"}
+	    "gh/acme/widgets": {"review_fix_agent": "codex"},
+	    "gh/other/thing":  {"review_fix_agent": "gemini"}
 	  }
 	}`)
 
@@ -81,7 +81,7 @@ func TestUserTier_ReposEntryForAnotherRepoDoesNotApply(t *testing.T) {
 
 	writeUserSettings(t, `{
 	  "preferences": {"review_fix_agent": "claude-code"},
-	  "repos": {"github.com/other/thing": {"review_fix_agent": "gemini"}}
+	  "repos": {"gh/other/thing": {"review_fix_agent": "gemini"}}
 	}`)
 
 	s, err := loadMergedSettings(t.Context(), project, "", local)
@@ -119,16 +119,9 @@ func TestUserTier_UnknownKeyDropsOnlyThatBlock(t *testing.T) {
 	assert.True(t, s.Enabled, "the repository's own settings still applied")
 }
 
-// The user tier outranks both the committed project file and the per-worktree
-// local file.
-//
-// Beating the local file is the point, not a side effect. Both files are the
-// developer's own, so provenance does not separate them; what does is that the
-// user file has one answer per developer while the local file has one per
-// worktree. If the local file stayed on top, every worktree that already has
-// one would keep overriding the shared answer, and the tier would be inert for
-// exactly the people whose worktrees disagree.
-func TestUserTier_OutranksProjectAndLocal(t *testing.T) {
+// The user tier outranks committed project settings, while the per-worktree
+// local file remains the final override.
+func TestUserTier_OutranksProjectButLocalWins(t *testing.T) {
 	_, project, local := newUserTierRepo(t)
 	require.NoError(t, os.WriteFile(project, []byte(`{"enabled":true,"review_fix_agent":"from-project"}`), 0o644))
 	writeUserSettings(t, `{"preferences": {"review_fix_agent": "from-user"}}`)
@@ -140,12 +133,12 @@ func TestUserTier_OutranksProjectAndLocal(t *testing.T) {
 	require.NoError(t, os.WriteFile(local, []byte(`{"review_fix_agent":"from-local"}`), 0o644))
 	s, err = loadMergedSettings(t.Context(), project, "", local)
 	require.NoError(t, err)
-	assert.Equal(t, "from-user", s.ReviewFixAgent,
-		"the user tier must outrank a per-worktree local file, or the divergence survives")
+	assert.Equal(t, "from-local", s.ReviewFixAgent,
+		"the per-worktree local file remains the final override")
 }
 
 // A repos entry and a machine-wide preference can both name a key; the
-// repository-specific one wins, and the local file no longer overrides either.
+// repository-specific one wins until the per-worktree local file overrides it.
 func TestUserTier_CheckpointRemoteAndEnabledReachEveryWorktree(t *testing.T) {
 	root, project, local := newUserTierRepo(t)
 	testutil.InitRepo(t, root)
@@ -155,9 +148,8 @@ func TestUserTier_CheckpointRemoteAndEnabledReachEveryWorktree(t *testing.T) {
 	// and the developer's own choice used to live in a per-worktree file.
 	require.NoError(t, os.WriteFile(project, []byte(
 		`{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"upstream/app-checkpoints"}}}`), 0o644))
-	require.NoError(t, os.WriteFile(local, []byte(`{"enabled":false}`), 0o644))
 	writeUserSettings(t, `{
-	  "repos": {"github.com/acme/widgets": {
+	  "repos": {"gh/acme/widgets": {
 	    "enabled": true,
 	    "checkpoint_remote": {"provider": "github", "repo": "mydev/my-checkpoints"}
 	  }}
@@ -169,7 +161,17 @@ func TestUserTier_CheckpointRemoteAndEnabledReachEveryWorktree(t *testing.T) {
 	cr := s.GetCheckpointRemote()
 	require.NotNil(t, cr, "a user-tier destination must decode through the existing reader")
 	assert.Equal(t, "mydev/my-checkpoints", cr.Repo)
-	assert.True(t, s.Enabled, "the user tier's enabled must beat a per-worktree disable")
+	assert.True(t, s.Enabled, "the user tier configures a worktree without a local override")
+
+	require.NoError(t, os.WriteFile(local, []byte(
+		`{"enabled":false,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"local/checkpoints"}}}`), 0o644))
+	s, err = loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+	assert.False(t, s.Enabled, "the per-worktree local file remains the final override")
+	cr = s.GetCheckpointRemote()
+	require.NotNil(t, cr)
+	assert.Equal(t, "local/checkpoints", cr.Repo,
+		"the per-worktree destination remains the final override")
 }
 
 // The claim that a user file without a repos block costs no git reads. With
@@ -222,7 +224,7 @@ func TestIsSetUpAny_ReachesTheUserTierInAWorktreeWithNoEntireDir(t *testing.T) {
 	assert.False(t, IsSetUpAny(t.Context()),
 		"sanity: with nothing configured anywhere, this repository is not set up")
 
-	writeUserSettings(t, `{"repos": {"github.com/acme/widgets": {"enabled": true}}}`)
+	writeUserSettings(t, `{"repos": {"gh/acme/widgets": {"enabled": true}}}`)
 	ClearOriginKeyCache()
 
 	assert.True(t, IsSetUpAny(t.Context()),
@@ -240,7 +242,7 @@ func TestIsSetUpAny_IgnoresAUserEntryForAnotherRepo(t *testing.T) {
 	t.Cleanup(ClearOriginKeyCache)
 	t.Chdir(root)
 
-	writeUserSettings(t, `{"repos": {"github.com/other/thing": {"enabled": true}}}`)
+	writeUserSettings(t, `{"repos": {"gh/other/thing": {"enabled": true}}}`)
 
 	assert.False(t, IsSetUpAny(t.Context()),
 		"an entry naming a different origin must not activate this repository")
@@ -270,6 +272,76 @@ func TestUserTier_InstructionFieldsSurviveTheAgentPromptGate(t *testing.T) {
 	profile := s.ReviewProfiles["mine"]
 	assert.Equal(t, "Only real defects.", profile.Task)
 	assert.Equal(t, "Be terse.", profile.Agents["claude-code"].Prompt)
+}
+
+// A local profile merges after the user tier, so its provenance must be
+// checked before the lower user-owned profile. If the local file is still
+// reachable from HEAD after git rm --cached, the deep check fails closed; the
+// user tier must not launder the effective local instructions as user-owned.
+func TestUserTier_UnverifiableLocalProfileFailsClosed(t *testing.T) {
+	root, project, local := newUserTierRepo(t)
+	testutil.InitRepo(t, root)
+	writeUserSettings(t, `{
+	  "preferences": {
+	    "review_profiles": {"general": {
+	      "task": "User task.",
+	      "agents": {"codex": {"prompt": "User worker prompt."}},
+	      "judge": {"agent": "claude-code", "prompt": "User judge prompt."}
+	    }}
+	  }
+	}`)
+	require.NoError(t, os.WriteFile(local, []byte(`{
+	  "review_profiles": {"general": {
+	    "task": "Local task.",
+	    "agents": {"codex": {"prompt": "Local worker prompt."}},
+	    "judge": {"agent": "claude-code", "prompt": "Local judge prompt."}
+	  }}
+	}`), 0o644))
+	testutil.RunGit(t, root, "add", "-f", EntireSettingsLocalFile)
+	testutil.RunGit(t, root, "commit", "-m", "carry local settings")
+	testutil.RunGit(t, root, "rm", "--cached", EntireSettingsLocalFile)
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	profile := s.ReviewProfiles["general"]
+	assert.Empty(t, profile.Task)
+	assert.Empty(t, profile.Agents["codex"].Prompt)
+	assert.Empty(t, profile.Judge.Prompt)
+	require.Len(t, s.AgentPromptRejections(), 3)
+	for _, rejection := range s.AgentPromptRejections() {
+		assert.Equal(t, agentPromptRejectionUnverified, rejection.Reason)
+	}
+}
+
+// A local file tracked in the index is discarded before merging, so the lower
+// user-owned profile remains effective and trusted.
+func TestUserTier_TrackedLocalProfileFallsBackToUserTier(t *testing.T) {
+	root, project, local := newUserTierRepo(t)
+	testutil.InitRepo(t, root)
+	writeUserSettings(t, `{
+	  "preferences": {
+	    "review_profiles": {"general": {
+	      "task": "User task.",
+	      "agents": {"codex": {"prompt": "User worker prompt."}}
+	    }}
+	  }
+	}`)
+	require.NoError(t, os.WriteFile(local, []byte(`{
+	  "review_profiles": {"general": {
+	    "task": "Tracked local task.",
+	    "agents": {"codex": {"prompt": "Tracked local prompt."}}
+	  }}
+	}`), 0o644))
+	testutil.RunGit(t, root, "add", "-f", EntireSettingsLocalFile)
+
+	s, err := loadMergedSettings(t.Context(), project, "", local)
+	require.NoError(t, err)
+
+	profile := s.ReviewProfiles["general"]
+	assert.Equal(t, "User task.", profile.Task)
+	assert.Equal(t, "User worker prompt.", profile.Agents["codex"].Prompt)
+	assert.Empty(t, s.AgentPromptRejections())
 }
 
 // The gate must still drop an instruction the COMMITTED project file carries,
@@ -324,7 +396,7 @@ func TestIsSetUpAndEnabled_TrueFromALinkedWorktreeConfiguredOnlyByTheUserTier(t 
 		"sanity: nothing configures this repository yet")
 
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName),
-		[]byte(`{"repos":{"github.com/acme/widgets":{"enabled":true}}}`), 0o600))
+		[]byte(`{"repos":{"gh/acme/widgets":{"enabled":true}}}`), 0o600))
 	ClearOriginKeyCache()
 
 	assert.True(t, IsSetUpAndEnabled(t.Context()),
@@ -333,7 +405,7 @@ func TestIsSetUpAndEnabled_TrueFromALinkedWorktreeConfiguredOnlyByTheUserTier(t 
 	// And an explicit disable in the user file must still switch it off, or
 	// the pointer shape on Enabled is buying nothing.
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName),
-		[]byte(`{"repos":{"github.com/acme/widgets":{"enabled":false}}}`), 0o600))
+		[]byte(`{"repos":{"gh/acme/widgets":{"enabled":false}}}`), 0o600))
 	ClearOriginKeyCache()
 	assert.False(t, IsSetUpAndEnabled(t.Context()),
 		"an explicit false must be honoured, not read as absent")

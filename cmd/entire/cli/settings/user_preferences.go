@@ -101,7 +101,7 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 	if raw, ok := us.Block(userReposBlock); ok && !usersettings.IsJSONNull(raw) {
 		var repos map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &repos); err != nil {
-			overlay.reject(ctx, fmt.Sprintf("%s: must be an object keyed by host/owner/repo or absolute path: %v", userReposBlock, err))
+			overlay.reject(ctx, fmt.Sprintf("%s: must be an object keyed by forge/owner/repo, host/owner/repo, or absolute path: %v", userReposBlock, err))
 		} else {
 			overlay.repos = repos
 		}
@@ -142,10 +142,11 @@ func decodeUserPreferences(raw json.RawMessage) (*UserPreferences, error) {
 
 // repoPreferences returns the `repos` entries that name this worktree, in key
 // order, each decoded like `preferences`. An entry is keyed either by a
-// normalized origin (host/owner/repo, derived from every fetch and push URL of
-// `origin`) or, for a repository with no usable origin, by its absolute
-// worktree path. Nothing is resolved unless the block has entries, so a user
-// file without `repos` costs no git reads at all.
+// normalized origin (forge/owner/repo for recognized Entire forges, otherwise
+// host/owner/repo, derived from every fetch and push URL of `origin`) or, for a
+// repository with no usable origin, by its absolute worktree path. Nothing is
+// resolved unless the block has entries, so a user file without `repos` costs
+// no git reads at all.
 //
 // Several entries can match one repository (an origin with two URLs, or a path
 // and an origin); they apply in sorted key order so the result is
@@ -307,8 +308,9 @@ func applyUserPreferences(settings *EntireSettings, prefs *UserPreferences) {
 	}
 }
 
-// UserTierSetsCheckpointRemote reports whether the effective checkpoint_remote
-// came from the user settings file.
+// UserTierSetsCheckpointRemote reports whether the matching user tier supplies
+// a checkpoint_remote. Callers check CheckpointRemoteIsLocalOnly first, so a
+// higher-precedence local destination short-circuits before this lower layer.
 //
 // This is the user-tier half of the ownership question CheckpointRemoteIsLocalOnly
 // answers for .entire/settings.local.json: "did this developer choose this
@@ -350,10 +352,7 @@ func UserTierConfiguresRepo(ctx context.Context, worktreeRoot string) bool {
 //
 // Called between the clone-preferences layer and the local-file merge, which
 // is what puts the user tier above a preference the developer set for the
-// clone and below one they set for this worktree. The local file keeps the
-// last word for now; demoting it is a separate change, because doing it here
-// would alter behaviour for every existing settings.local.json in the same
-// commit that introduces the tier.
+// clone and below one they set for this worktree.
 func applyUserTier(ctx context.Context, settings *EntireSettings, worktreeRoot string) {
 	overlay := loadUserOverlay(ctx)
 	owned := userPromptOwnership{profiles: map[string]bool{}}

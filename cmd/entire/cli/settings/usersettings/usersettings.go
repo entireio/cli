@@ -265,8 +265,9 @@ func writeAtomicThroughSymlink(path string, data []byte, perm fs.FileMode) error
 	return jsonutil.WriteFileAtomic(target, data, perm) //nolint:wrapcheck // caller names the file
 }
 
-// NormalizeOrigin reduces a git remote URL to lowercase host/owner/repo form.
-// This is the key shape `repos` entries use.
+// NormalizeOrigin reduces a git remote URL to the lowercase key shape `repos`
+// entries use: forge/owner/repo for recognized Entire forge namespaces, or
+// canonical-host/owner/repo for everything else.
 func NormalizeOrigin(rawURL string) string {
 	if rawURL == "" {
 		return ""
@@ -275,11 +276,14 @@ func NormalizeOrigin(rawURL string) string {
 	if err != nil || info == nil || info.Owner == "" || info.Repo == "" {
 		return ""
 	}
-	host := info.CanonicalHost()
-	if host == "" {
+	prefix := info.Forge
+	if !gitremote.IsForgePathToken(prefix) {
+		prefix = info.CanonicalHost()
+	}
+	if prefix == "" {
 		return ""
 	}
-	return strings.ToLower(host + "/" + info.Owner + "/" + info.Repo)
+	return strings.ToLower(prefix + "/" + info.Owner + "/" + info.Repo)
 }
 
 // OriginKeys returns the normalized origin keys for a worktree, derived from

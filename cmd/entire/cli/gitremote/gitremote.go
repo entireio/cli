@@ -248,7 +248,7 @@ func ParseURL(rawURL string) (*Info, error) {
 		// Forge first: splitOwnerRepo needs it to decide whether `.git` is
 		// decoration. An SCP-style URL never names a native repo (the map holds
 		// git hosts only), but reading it here keeps one rule in one place.
-		forge := hostToForge[host]
+		forge := hostToForge[strings.ToLower(host)]
 		owner, repo, err := splitOwnerRepo(parts[1], forge)
 		if err != nil {
 			return nil, err
@@ -266,7 +266,7 @@ func ParseURL(rawURL string) (*Info, error) {
 	}
 
 	pathPart := strings.TrimPrefix(u.Path, "/")
-	forge := hostToForge[u.Hostname()]
+	forge := hostToForge[strings.ToLower(u.Hostname())]
 	if u.Scheme == ProtocolEntire {
 		// entire:// URLs encode the forge as the first path segment.
 		forge, pathPart = splitForgePrefix(pathPart)

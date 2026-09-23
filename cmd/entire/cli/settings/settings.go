@@ -730,6 +730,15 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		applyClonePreferences(settings, preferences)
 	}
 
+	// The user tier (~/.config/entire/settings.json) applies above clone
+	// preferences and below the per-worktree local file: machine-wide
+	// preferences first, then this repository's entry.
+	//
+	// Unlike every layer around it, this one resolves without a git repository
+	// at all, so it is also the only tier readable when repository resolution
+	// itself fails.
+	applyUserTier(ctx, settings, worktreeRootOfSettingsFile(settingsFileAbs))
+
 	// Apply local overrides if they exist — but only from a file that is
 	// genuinely local. See localLayerTrackedReason.
 	localData, err := readConfined(localSettingsFileAbs)
@@ -748,23 +757,6 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	} else if err := mergeJSON(settings, localData); err != nil {
 		return nil, fmt.Errorf("merging local settings: %w", err)
 	}
-
-	// The user tier (~/.config/entire/settings.json) applies LAST, above the
-	// per-worktree local file: machine-wide preferences first, then this
-	// repository's entry.
-	//
-	// Above, not below, and that ordering is the point of the change. Both
-	// files are the developer's own, so neither outranks the other on
-	// provenance; what separates them is that one has a single answer per
-	// developer and the other has one answer per worktree. Leaving the local
-	// file on top would mean every worktree that already has one keeps
-	// overriding the shared answer, which is the divergence being removed —
-	// the tier would be inert for exactly the people who need it.
-	//
-	// Unlike every layer around it, this one resolves without a git repository
-	// at all, so it is also the only tier readable when repository resolution
-	// itself fails.
-	applyUserTier(ctx, settings, worktreeRootOfSettingsFile(settingsFileAbs))
 
 	// openai_privacy_filter.command is executed, so it is honored only from a
 	// local file positively verified as this developer's own. external_agents

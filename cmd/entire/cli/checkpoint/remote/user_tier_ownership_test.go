@@ -45,7 +45,7 @@ func TestCheckpointRemoteIsInherited_UserTierProvesOwnership(t *testing.T) {
 	assert.Contains(t, reason, "upstream")
 
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName), []byte(
-		`{"repos":{"github.com/upstream/app":{"checkpoint_remote":{"provider":"github","repo":"mydev/my-checkpoints"}}}}`), 0o600))
+		`{"repos":{"gh/upstream/app":{"checkpoint_remote":{"provider":"github","repo":"mydev/my-checkpoints"}}}}`), 0o600))
 	settings.ClearOriginKeyCache()
 
 	inherited, _ = checkpointRemoteIsInherited(t.Context(), config, originURL, nil)

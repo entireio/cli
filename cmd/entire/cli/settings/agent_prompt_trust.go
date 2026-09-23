@@ -97,7 +97,7 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 	}
 
 	// userOwned reports whether the user settings file supplied this field.
-	// Checked before the local file because the user tier merges after it.
+	// The local file is checked first below because it merges after this tier.
 	userOwned := func(field string) bool {
 		switch {
 		case strings.HasPrefix(field, "review_profiles."):
@@ -122,20 +122,14 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 	}
 
 	// decide returns the field's surviving value, recording a rejection when
-	// it is dropped. setLocally must win over prefsOwned: a key present in the
-	// local file merged last, so the effective value is the local file's even
-	// when preferences also carried one.
+	// it is dropped. setLocally must win over every lower layer: a key present
+	// in the local file merged last, so the effective value is the local file's
+	// even when the user tier or clone preferences also carried one.
 	decide := func(field, value string, setLocally, prefsOwned bool) string {
 		if value == "" {
 			return ""
 		}
 		switch {
-		case userOwned(field):
-			// The user settings file applies ABOVE the local file, so when it
-			// set a field the effective value is its own regardless of what
-			// any lower layer said. It needs no trackedness probe: nothing a
-			// repository can do puts content under ~/.config.
-			return value
 		case setLocally:
 			if localVerified() {
 				return value
@@ -143,6 +137,10 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 			s.agentPromptRejections = append(s.agentPromptRejections,
 				AgentPromptRejection{Field: field, Value: value, Reason: agentPromptRejectionUnverified})
 			return ""
+		case userOwned(field):
+			// The user settings file needs no trackedness probe: nothing a
+			// repository can do puts content under ~/.config.
+			return value
 		case prefsOwned:
 			return value
 		default:

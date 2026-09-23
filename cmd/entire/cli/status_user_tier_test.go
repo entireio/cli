@@ -44,7 +44,7 @@ func TestStatus_ReportsEnabledWhenOnlyTheUserTierConfiguresTheRepo(t *testing.T)
 		"sanity: with nothing configured anywhere, status says so")
 
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName),
-		[]byte(`{"repos":{"github.com/acme/widgets":{"enabled":true}}}`), 0o600))
+		[]byte(`{"repos":{"gh/acme/widgets":{"enabled":true}}}`), 0o600))
 	settings.ClearOriginKeyCache()
 
 	var after bytes.Buffer
@@ -75,7 +75,7 @@ func TestStatusJSON_ReportsEnabledWhenOnlyTheUserTierConfiguresTheRepo(t *testin
 	assert.Contains(t, before.String(), "not set up", "sanity")
 
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, usersettings.FileName),
-		[]byte(`{"repos":{"github.com/acme/widgets":{"enabled":true}}}`), 0o600))
+		[]byte(`{"repos":{"gh/acme/widgets":{"enabled":true}}}`), 0o600))
 	settings.ClearOriginKeyCache()
 
 	var after bytes.Buffer
