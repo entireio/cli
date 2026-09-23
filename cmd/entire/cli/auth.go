@@ -1111,7 +1111,7 @@ func renderAuthSessionsTable(w io.Writer, sty authTableStyles, sessions []api.Au
 			sty.render(sty.name, orDash(s.Name)),
 			sty.render(sty.value, formatAuthTimestamp(s.CreatedAt)),
 			sty.render(sty.value, formatLastUsed(s.LastUsedAt)),
-			sty.render(sty.value, formatAuthTimestamp(s.ExpiresAt)),
+			sty.render(sty.value, formatSessionExpiry(s.ExpiresAt)),
 			marker,
 		})
 	}
@@ -1139,6 +1139,32 @@ func lastUsedSortKey(s api.AuthSession) string {
 		return ""
 	}
 	return *s.LastUsedAt
+}
+
+// formatSessionExpiry renders the session table's EXPIRES cell: the remaining
+// time ("in 27d") while the session is live, a flat "expired" once it is not.
+//
+// The column header already supplies the verb, so the cell carries only the
+// time — and "19h ago" under a heading reading EXPIRES states its tense by
+// implication alone, which a reader scanning the column for a dead session will
+// not pick up. CREATED and LAST USED keep the plain relative formatter, where
+// the past IS the tense being reported.
+//
+// An unreadable value still reaches the cell verbatim: a column of its own is
+// exactly where a value the server sent and this code could not parse should be
+// shown, which is the distinction authDeadlineClause draws for the prose line.
+func formatSessionExpiry(s string) string {
+	if s == "" {
+		return placeholderDash
+	}
+	ts := parseAuthTimestamp(s)
+	if ts.IsZero() {
+		return s
+	}
+	if !ts.After(time.Now()) {
+		return "expired"
+	}
+	return timeAgo(ts)
 }
 
 // parseAuthTimestamp reads an RFC3339 instant, reporting the zero time for a

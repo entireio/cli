@@ -1187,6 +1187,49 @@ func TestRunAuthStatus_LapsedDeadlineSaysExpired(t *testing.T) {
 	}
 }
 
+// The EXPIRES column has the same tense problem as the verdict line and a
+// weaker cue against it: the heading supplies the verb, so a cell reading
+// "19h ago" says "expired" only by implication. CREATED keeps the plain
+// relative form, where the past is the tense being reported.
+func TestRenderAuthSessionsTable_LapsedSessionReadsExpired(t *testing.T) {
+	t.Parallel()
+
+	past := time.Now().Add(-19 * time.Hour).UTC().Format(time.RFC3339)
+	future := time.Now().Add(27 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	sessions := []api.AuthSession{
+		{ID: "fam-1", Name: "lapsed", CreatedAt: "2026-01-01T00:00:00Z", ExpiresAt: past},
+		{ID: "fam-2", Name: "live", CreatedAt: "2026-01-01T00:00:00Z", ExpiresAt: future},
+	}
+
+	var out bytes.Buffer
+	renderAuthSessionsTable(&out, newAuthTableStyles(&out), sessions, -1)
+	got := out.String()
+	if !strings.Contains(got, "expired") {
+		t.Fatalf("output = %q, want the lapsed session's cell to read expired", got)
+	}
+	if !strings.Contains(got, "in 2") {
+		t.Fatalf("output = %q, want the live session to keep its remaining time", got)
+	}
+	// CREATED is genuinely in the past and must keep saying so.
+	if !strings.Contains(got, "ago") {
+		t.Fatalf("output = %q, want CREATED to stay relative-past", got)
+	}
+}
+
+func TestFormatSessionExpiry(t *testing.T) {
+	t.Parallel()
+
+	if got := formatSessionExpiry(""); got != placeholderDash {
+		t.Errorf("formatSessionExpiry(\"\") = %q, want %q", got, placeholderDash)
+	}
+	// A value this code cannot read belongs in the cell verbatim — a column of
+	// its own is where an unparseable server value should surface.
+	const garbage = "not-a-timestamp"
+	if got := formatSessionExpiry(garbage); got != garbage {
+		t.Errorf("formatSessionExpiry(%q) = %q, want it passed through", garbage, got)
+	}
+}
+
 // A timestamp this code cannot read is dropped from the verdict line rather
 // than echoed into the middle of the sentence, where it reads as corruption of
 // the line rather than of the field.

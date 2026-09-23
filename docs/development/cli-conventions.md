@@ -119,7 +119,12 @@ the commands are always runnable in every build.
   instant renders as a flat `expired` rather than `expires 19h ago`, which would
   contradict the "Logged in" beside it, and an unreadable one is dropped rather
   than echoed mid-sentence (the session table still shows it verbatim in a cell
-  of its own, and `--json` carries it untouched). Because that deadline is the
+  of its own, and `--json` carries it untouched). The `--sessions` table's
+  `EXPIRES` column is held to the same tense rule and for a sharper reason: its
+  heading supplies the verb, so a cell reading `19h ago` says "expired" only by
+  implication, which a reader scanning the column will not pick up. `CREATED`
+  and `LAST USED` keep the plain relative form, the past being the tense they
+  report. Because that deadline is the
   sole-session row's whole premise, the drop is gated on it having actually
   rendered — a session whose `expires_at` is empty or unparseable keeps its
   count row, or the default view would carry no session information at all.
