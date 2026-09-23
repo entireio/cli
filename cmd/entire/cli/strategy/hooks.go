@@ -493,6 +493,23 @@ const bareEntireHookCmd = "entire"
 // Current, which is what makes EnsureSetup reinstall it rather than leaving a
 // broken hook in place forever.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
+	return gitHookStateYielding(hooksDir, false)
+}
+
+// nativeHooksCurrent reports whether the hook files Entire should own are
+// current. When Lefthook delivers Entire, a hook carrying Lefthook's launcher
+// is not Entire's to own (see installSkipsHook), so it is not counted as
+// missing. Without that, a Lefthook repo read as "not installed" on every
+// turn and EnsureSetup re-ran the whole native install to change nothing.
+func nativeHooksCurrent(ctx context.Context, lefthookDelivers bool) bool {
+	hooksDir, err := GetHooksDir(ctx)
+	if err != nil {
+		return false
+	}
+	return gitHookStateYielding(hooksDir, lefthookDelivers) == GitHooksCurrent
+}
+
+func gitHookStateYielding(hooksDir string, yieldToLefthook bool) GitHookState {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
 	// turn, to fail on a refusal only `entire enable` should ever hit. Seeing
@@ -503,6 +520,9 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	}
 	outdated := false
 	for _, hook := range gitHookNames {
+		if yieldToLefthook && isLefthookLauncher(root, hook, hook) {
+			continue
+		}
 		// NoFollow: a hook that is a symlink is not one Entire wrote, whatever
 		// is at the far end. Reporting Absent is what sends EnsureSetup to
 		// InstallGitHook, which backs the link up and chains to it.

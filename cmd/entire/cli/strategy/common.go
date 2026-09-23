@@ -116,12 +116,13 @@ func EnsureSetup(ctx context.Context) error {
 	// .git/hooks/* is no fix in a Lefthook repo anyway: Lefthook takes those
 	// files back at the top of its next run, which is typically the pre-commit
 	// of the very commit being made.
-	if err := ensureLefthookIntegrationIfManaged(ctx); err != nil {
+	lefthookDelivers, err := ensureLefthookIntegrationIfManaged(ctx)
+	if err != nil {
 		return err
 	}
 
 	// Install generic hooks (they delegate to strategy at runtime)
-	if !IsGitHookInstalled(ctx) {
+	if !nativeHooksCurrent(ctx, lefthookDelivers) {
 		if _, err := ReinstallGitHooks(ctx); err != nil {
 			return fmt.Errorf("failed to install git hooks: %w", err)
 		}
@@ -1819,32 +1820,33 @@ func prepareTranscriptIfNeeded(ctx context.Context, ag agent.Agent, transcriptPa
 }
 
 // ensureLefthookIntegrationIfManaged installs or repairs Entire's Lefthook
-// registration when this repository is Lefthook-managed. A repo that declines
+// registration when this repository is Lefthook-managed, and reports whether
+// Lefthook now delivers Entire's hooks. A repo that declines
 // the integration (a non-YAML local config Entire will not shadow) keeps the
 // native hooks and is not an error.
 //
 // An already-current integration still reconciles the hook files, because
 // that is where a repo left mid-fight — Entire's hook chaining to Lefthook's
 // displaced launcher, running Entire twice — gets straightened out.
-func ensureLefthookIntegrationIfManaged(ctx context.Context) error {
+func ensureLefthookIntegrationIfManaged(ctx context.Context) (bool, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil || !LefthookManaged(repoRoot) {
-		return nil //nolint:nilerr // not a Lefthook repo: nothing to do
+		return false, nil //nolint:nilerr // not a Lefthook repo: nothing to do
 	}
 	current, err := LefthookIntegrationCurrent(ctx)
 	if err != nil {
-		return nil //nolint:nilerr // inspection failure falls back to native hooks
+		return false, nil //nolint:nilerr // inspection failure falls back to native hooks
 	}
 	if current {
-		return reconcileHookFiles(ctx)
+		return true, reconcileHookFiles(ctx)
 	}
 	if _, err := EnsureLefthookIntegration(ctx); err != nil {
 		// Both refusals are decisions about the user's repository, not
 		// failures: the native hooks stay and status/doctor report why.
 		if errors.Is(err, ErrLefthookLocalConfigUnwritable) || errors.Is(err, ErrLefthookLocalConfigTracked) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("failed to register Entire with Lefthook: %w", err)
+		return false, fmt.Errorf("failed to register Entire with Lefthook: %w", err)
 	}
-	return nil
+	return true, nil
 }

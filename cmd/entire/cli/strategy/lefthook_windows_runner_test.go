@@ -14,9 +14,9 @@ import (
 // TestLefthookScriptRunsUnderItsRunnerOnWindows exercises the one assumption
 // in the Lefthook integration that does not hold by construction.
 //
-// Entire's hooks reach Lefthook as `scripts` declared with `runner: bash`, so
-// Lefthook resolves bash through PATH and spawns it with the script. Every
-// other artifact is a file Entire writes and reads itself, but this step is
+// Entire's hooks reach Lefthook as commands that invoke their scripts through
+// bash, so Lefthook resolves bash through PATH and spawns it with the script.
+// Every other artifact is a file Entire writes and reads itself, but this step is
 // Lefthook executing a POSIX script on a platform whose shell is not POSIX —
 // and if bash does not resolve, or the script does not run under it, Entire
 // silently stops capturing in every Lefthook repo on Windows.

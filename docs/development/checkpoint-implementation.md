@@ -145,12 +145,15 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
   loses the race: the file is taken back by the `pre-commit` of the very commit
   being made. Owning the files is therefore not a fix, and Entire instead
   registers with Lefthook itself — `entire-lefthook.yml` (Entire's own config,
-  declaring a script per hook), an `extends:` entry in `lefthook-local.yml`
+  declaring a command per hook), an `extends:` entry in `lefthook-local.yml`
   pointing at it, and the scripts under `.lefthook-local/<hook>/entire.sh`.
   Lefthook resolves `extends` at **run time**, so this needs no `lefthook
-  install`. Load-bearing details: Lefthook *scripts* receive the hook's `$@`
-  (pre-push needs the remote and URL) while *commands* do not, so Entire uses
-  scripts; `lefthook-local.yml` shadows `lefthook-local.toml`, so Entire
+  install`. Load-bearing details: each command names Entire's script directly,
+  avoiding the merged `source_dir_local` setting that would otherwise override
+  the user's script directory, and `{0}` forwards the hook's arguments
+  (pre-push needs the remote and URL); `post-rewrite` also sets `use_stdin` so
+  Git's rewrite pairs reach Entire; `lefthook-local.yml` shadows
+  `lefthook-local.toml`, so Entire
   refuses to create it beside a non-YAML local config
   (`ErrLefthookLocalConfigUnwritable`) and keeps the native hooks instead; the
   local config is edited as a `yaml.Node` so comments and key order survive;

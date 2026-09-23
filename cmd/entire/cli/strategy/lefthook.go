@@ -399,19 +399,19 @@ func RemoveLefthookIntegration(ctx context.Context) (int, error) {
 	}
 	for _, hook := range gitHookNames {
 		name := lefthookScriptPath(hook)
-		owned, err := fileIsOwned(root, name)
-		if err != nil || !owned {
-			continue // unreadable or not ours: leave it
+		wasRemoved, err := removeOwnedLefthookArtifact(root, name)
+		if err != nil {
+			return removed, err
 		}
-		if err := osroot.RemoveNoSymlinks(root, name); err != nil && !os.IsNotExist(err) {
-			return removed, fmt.Errorf("remove %s: %w", name, err)
+		if wasRemoved {
+			removed++
 		}
-		removed++
 	}
-	if owned, ownErr := fileIsOwned(root, entireLefthookConfig); ownErr == nil && owned {
-		if err := osroot.RemoveNoSymlinks(root, entireLefthookConfig); err != nil && !os.IsNotExist(err) {
-			return removed, fmt.Errorf("remove %s: %w", entireLefthookConfig, err)
-		}
+	wasRemoved, err := removeOwnedLefthookArtifact(root, entireLefthookConfig)
+	if err != nil {
+		return removed, err
+	}
+	if wasRemoved {
 		removed++
 	}
 	if err := rewriteExcludeBlock(ctx, repoRoot, ""); err != nil {
@@ -427,6 +427,25 @@ func RemoveLefthookIntegration(ctx context.Context) (int, error) {
 	//nolint:errcheck // same
 	_ = osroot.RemoveNoSymlinks(root, lefthookScriptDir)
 	return removed, nil
+}
+
+// removeOwnedLefthookArtifact removes a file Entire installed and restores the
+// foreign file installation displaced to <name>.pre-entire, when present.
+// A file that no longer carries Entire's marker is left untouched together
+// with its backup: uninstall must not replace content changed after install.
+func removeOwnedLefthookArtifact(root *os.Root, name string) (bool, error) {
+	owned, err := fileIsOwned(root, name)
+	if err != nil || !owned {
+		return false, nil //nolint:nilerr // absent, unreadable, or foreign: leave it
+	}
+	if err := osroot.RemoveNoSymlinks(root, name); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("remove %s: %w", name, err)
+	}
+	backup := name + GitHookBackupSuffix
+	if err := root.Rename(backup, name); err != nil && !os.IsNotExist(err) {
+		return true, fmt.Errorf("restore %s from %s: %w", name, backup, err)
+	}
+	return true, nil
 }
 
 func lefthookScriptPath(hook string) string {

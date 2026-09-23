@@ -20,6 +20,7 @@ import (
 func newLefthookRepo(t *testing.T, mainConfig string) string {
 	t.Helper()
 	dir := t.TempDir()
+	testutil.IsolateGitConfigEnv(t)
 	testutil.InitRepo(t, dir)
 	if mainConfig == "" {
 		mainConfig = "lefthook.yml"
@@ -45,6 +46,19 @@ func newLefthookRepo(t *testing.T, mainConfig string) string {
 	reset()
 	t.Cleanup(reset)
 	return dir
+}
+
+func TestNewLefthookRepo_IgnoresInheritedGitConfig(t *testing.T) {
+	outside := t.TempDir()
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_0", outside)
+
+	newLefthookRepo(t, "")
+	hooksDir, err := GetHooksDir(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(".git", "hooks"), hooksDir,
+		"test repositories must not inherit the developer's core.hooksPath")
 }
 
 // Install writes Entire's own config, one extends entry, and a script per
@@ -198,6 +212,13 @@ func TestRemoveLefthookIntegration(t *testing.T) {
 	dir := newLefthookRepo(t, "")
 	localPath := filepath.Join(dir, "lefthook-local.yml")
 	require.NoError(t, os.WriteFile(localPath, []byte("pre-commit:\n  commands:\n    mine:\n      run: true\n"), 0o644))
+	configPath := filepath.Join(dir, entireLefthookConfig)
+	userConfig := []byte("# user's config\npre-commit: {}\n")
+	require.NoError(t, os.WriteFile(configPath, userConfig, 0o644))
+	scriptPath := filepath.Join(dir, lefthookScriptPath("pre-push"))
+	require.NoError(t, os.MkdirAll(filepath.Dir(scriptPath), 0o755))
+	userScript := []byte("#!/bin/sh\necho user hook\n")
+	require.NoError(t, os.WriteFile(scriptPath, userScript, 0o755))
 	_, err := EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 
@@ -205,8 +226,16 @@ func TestRemoveLefthookIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Positive(t, removed)
 
-	_, statErr := os.Stat(filepath.Join(dir, entireLefthookConfig))
-	require.True(t, os.IsNotExist(statErr))
+	restoredConfig, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.Equal(t, userConfig, restoredConfig, "the displaced config must be restored")
+	_, statErr := os.Stat(configPath + GitHookBackupSuffix)
+	require.True(t, os.IsNotExist(statErr), "the restored config backup must be consumed")
+	restoredScript, err := os.ReadFile(scriptPath)
+	require.NoError(t, err)
+	require.Equal(t, userScript, restoredScript, "the displaced script must be restored")
+	_, statErr = os.Stat(scriptPath + GitHookBackupSuffix)
+	require.True(t, os.IsNotExist(statErr), "the restored script backup must be consumed")
 	local, err := os.ReadFile(localPath)
 	require.NoError(t, err, "the user's local config must survive")
 	require.NotContains(t, string(local), entireLefthookConfig)
@@ -223,12 +252,18 @@ func TestRemoveLefthookIntegration_LeavesForeignFiles(t *testing.T) {
 	configPath := filepath.Join(dir, entireLefthookConfig)
 	theirs := []byte("# not Entire's\nkey: value\n")
 	require.NoError(t, os.WriteFile(configPath, theirs, 0o644))
+	backup := []byte("# displaced before a later user edit\n")
+	require.NoError(t, os.WriteFile(configPath+GitHookBackupSuffix, backup, 0o644))
 
 	_, err := RemoveLefthookIntegration(t.Context())
 	require.NoError(t, err)
 	after, err := os.ReadFile(configPath)
 	require.NoError(t, err)
 	require.Equal(t, theirs, after)
+	afterBackup, err := os.ReadFile(configPath + GitHookBackupSuffix)
+	require.NoError(t, err)
+	require.Equal(t, backup, afterBackup,
+		"a later user edit must not be replaced by an older backup")
 }
 
 // Two kinds of wreckage from the era when Entire and Lefthook fought over
@@ -634,4 +669,40 @@ func TestLefthookIntegration_HonoursAbsoluteGitHookPath(t *testing.T) {
 	after, err := os.ReadFile(filepath.Join(dir, lefthookScriptPath("pre-push")))
 	require.NoError(t, err)
 	require.Equal(t, script, after, "a second install must not downgrade the command")
+}
+
+// In a repo where Lefthook delivers Entire, a hook holding Lefthook's
+// launcher is Lefthook's, so it must not read as a missing Entire hook —
+// otherwise EnsureSetup re-ran the full native install on every turn to
+// change nothing. A hook with no file at all still needs Entire's.
+func TestNativeHooksCurrent_YieldsToLefthookLaunchers(t *testing.T) {
+	dir := newLefthookRepo(t, "")
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	for _, h := range gitHookNames {
+		require.NoError(t, os.WriteFile(filepath.Join(hooksDir, h), lefthookLauncher(h), 0o755))
+	}
+	ctx := t.Context()
+
+	delivers, err := ensureLefthookIntegrationIfManaged(ctx)
+	require.NoError(t, err)
+	require.True(t, delivers)
+	require.False(t, IsGitHookInstalled(ctx), "no hook carries Entire's own marker")
+	require.True(t, nativeHooksCurrent(ctx, true), "every hook is Lefthook's to own")
+	require.False(t, nativeHooksCurrent(ctx, false), "without Lefthook delivering, launchers are not Entire's hooks")
+
+	var nativePostCommit []byte
+	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
+		if spec.name == "post-commit" {
+			nativePostCommit = []byte(spec.content)
+			break
+		}
+	}
+	require.NotEmpty(t, nativePostCommit)
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "post-commit"), nativePostCommit, 0o755))
+	require.True(t, nativeHooksCurrent(ctx, true),
+		"a mixed set of Lefthook launchers and current native hooks is current")
+
+	require.NoError(t, os.Remove(filepath.Join(hooksDir, "pre-push")))
+	require.False(t, nativeHooksCurrent(ctx, true), "a hook with no file must still be installed")
 }
