@@ -2516,9 +2516,9 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	assert.Empty(t, buf.String(), "second call within window must be suppressed")
 
 	// Backdate sentinel file by 25h → call should warn again
-	commonDir, err := GetGitCommonDir(ctx)
+	commonRoot, err := openGitCommonRoot(ctx)
 	require.NoError(t, err)
-	warnFile := filepath.Join(commonDir, session.SessionStateDirName, staleEndedSessionWarnFile)
+	warnFile := filepath.Join(commonRoot.Name(), session.SessionStateDirName, staleEndedSessionWarnFile)
 	past := time.Now().Add(-25 * time.Hour)
 	require.NoError(t, os.Chtimes(warnFile, past, past))
 
