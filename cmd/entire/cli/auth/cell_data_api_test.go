@@ -61,7 +61,7 @@ func TestIsBFFOrigin(t *testing.T) {
 	}
 }
 
-func TestEntireDomainFamily(t *testing.T) {
+func TestEntireSite(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		core string
@@ -74,8 +74,8 @@ func TestEntireDomainFamily(t *testing.T) {
 		{"https://auth.example.com", ""},
 	}
 	for _, tc := range tests {
-		if got := entireDomainFamily(tc.core); got != tc.want {
-			t.Errorf("entireDomainFamily(%q) = %q, want %q", tc.core, got, tc.want)
+		if got := EntireSite(tc.core); got != tc.want {
+			t.Errorf("EntireSite(%q) = %q, want %q", tc.core, got, tc.want)
 		}
 	}
 }
@@ -962,49 +962,6 @@ func TestCellClientFactory_EnvTokenHonoursExplicitDataHost(t *testing.T) {
 			}
 			if len(rt.clusters) != tc.wantCatalogs {
 				t.Fatalf("clusters listed %d times, want %d", len(rt.clusters), tc.wantCatalogs)
-			}
-		})
-	}
-}
-
-// TestDataAPIServesSelectedLogin pins when activity/recap may fall back from
-// the cell to the data API: only while both are in the same environment.
-func TestDataAPIServesSelectedLogin(t *testing.T) {
-	tests := []struct {
-		name     string
-		baseURL  string // ENTIRE_API_BASE_URL, "" = unset
-		current  string // current_context among the prod/staging fixtures, "" = none saved
-		envToken string // aud core for ENTIRE_TOKEN, "" = unset
-		want     bool
-	}{
-		{"prod login, default host", "", prodFixture.name, "", true},
-		{"staging login, default host", "", stagingFixture.name, "", false},
-		{"staging login, explicit staging host", "https://partial.to", stagingFixture.name, "", true},
-		{"staging login, explicit prod host (discovery decides)", "https://entire.io", stagingFixture.name, "", true},
-		{"no login selected", "", "", "", true},
-		// The data-API path never reads ENTIRE_TOKEN, so no fallback can act as
-		// the env-token login — whatever its environment, and even under an
-		// explicit data host.
-		{"env token prod", "", "", prodCoreURL, false},
-		{"env token staging", "", "", stagingCoreURL, false},
-		{"env token invalid", "", "", "not-a-jwt", false},
-		{"env token invalid, explicit host", "https://entire.io", "", "not-a-jwt", false},
-		{"env token prod, explicit host", "https://entire.io", "", prodCoreURL, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			configDir := isolateCellClientEnv(t, tc.baseURL)
-			if tc.current != "" {
-				seedProdAndStagingContexts(t, configDir, tc.current)
-			}
-			switch {
-			case tc.envToken == "not-a-jwt":
-				t.Setenv(EnvTokenVar, tc.envToken)
-			case tc.envToken != "":
-				t.Setenv(EnvTokenVar, makeJWT(t, fmt.Sprintf(`{"aud":%q,"exp":%d}`, tc.envToken, time.Now().Add(time.Hour).Unix())))
-			}
-			if got := DataAPIServesSelectedLogin(); got != tc.want {
-				t.Fatalf("DataAPIServesSelectedLogin() = %v, want %v", got, tc.want)
 			}
 		})
 	}

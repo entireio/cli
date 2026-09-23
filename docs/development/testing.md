@@ -135,6 +135,29 @@ t.Chdir(tmpDir)                                 // redirect CWD-based git resolu
 
 **Do NOT** shell out to `git init`/`git commit` directly without setting user config and `--no-gpg-sign`, and **do NOT** run lifecycle/strategy handlers from the real repo CWD in tests.
 
+#### Keeping the developer's git config out
+
+An isolated temp repo is not the same as an isolated git *config*. `testutil.InitRepo` writes repo-local settings, but `~/.gitconfig` still applies on top of them, so a host that sets `commit.gpgSign`, `tag.gpgSign` or `transfer.fsckObjects` can decide test outcomes. Isolation has two layers, and most packages need both:
+
+- **In-process go-git reads.** Register an empty `ConfigLoader` plugin in `TestMain` (see `checkpoint`, `strategy`, `cli`, `agentimport` `global_test.go`). Without it go-git resolves global scope through its `Auto` loader, which reads all of git's global sources.
+- **Git subprocesses.** The plugin does nothing for children. Production code under test shells out to git (remote fetches, hooks), and those children read the host config unless the environment is isolated:
+
+| Helper | Use for |
+| --- | --- |
+| `gitenv.Isolated()` / `testutil.GitIsolatedEnv()` | The `Env` of an `exec.Command` that runs git or the CLI binary |
+| `gitenv.IsolateProcess(t)` / `testutil.IsolateGitConfigEnv(t)` | One test that drives production code invoking git with `os.Environ()` |
+| `gitenv.IsolateMain()` | A `TestMain`; process-wide, so spawned binaries and git hooks inherit it and `t.Parallel` tests are not excluded |
+| `gitenv.Run(t, dir, args...)` / `testutil.RunGit(...)` | A one-off git command in a test |
+
+`gitenv` deliberately imports nothing from this repo, so internal tests of packages `testutil` itself imports (e.g. `gitrepo`) can use it without an import cycle; everywhere else prefer the `testutil` spelling.
+
+Two failure modes are worth recognizing, because neither names the host config in its error:
+
+- `commit.gpgSign` / `tag.gpgSign` make go-git writes fail with "cannot auto-sign … or register an ObjectSigner plugin" where no signer is registered, and turn a lightweight `git tag` into an annotated one that git then rejects for want of a message.
+- `transfer.fsckObjects` routes a fetch through `index-pack` instead of `unpack-objects`. The fetched commit lands in a packfile an already-open go-git repository never indexes, so reads of it report "object not found" (tracked as ENCLI-378).
+
+A helper that exists to read a real `~/.gitconfig` — `useAutoConfigLoader`, `pointHomeAt` — must **unset** `GIT_CONFIG_GLOBAL` rather than empty it: set, it replaces every standard path; empty, it disables global config entirely. `t.Setenv(key, "")` followed by `os.Unsetenv(key)` registers the restore and still leaves the variable absent.
+
 ### Config/Cache/Keyring Isolation in Tests
 
 Tests must never read or write the developer's real `~/.config/entire`

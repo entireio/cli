@@ -105,6 +105,11 @@ func TestResolve_SeveralEligibleLoginsAreAmbiguous(t *testing.T) {
 	assert.Contains(t, err.Error(), "multiple login contexts can authenticate against cluster cluster1.entire.io")
 	assert.Contains(t, err.Error(), "admin@core-us, alice@core-us", "candidates must be listed in sorted order")
 	assert.Contains(t, err.Error(), "entire auth switch")
+	// The per-command remedy must be named too: `auth switch` mutates the
+	// machine-wide default, and a user holding logins across jurisdictions
+	// should not have to retarget every shell to clone once (COR-1630).
+	assert.Contains(t, err.Error(), "--context <context>")
+	assert.Contains(t, err.Error(), "ENTIRE_CONTEXT=<context>")
 }
 
 // TestResolve_ActiveContextIneligibleAndNothingElseFits: an active context that
@@ -701,7 +706,7 @@ func TestResolve_NilStoredContextDoesNotPanic(t *testing.T) {
 
 	// And with a matching core, the nil entry must be skipped while the real one
 	// is auto-selected.
-	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}, autoSelect: true}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name, "the valid entry is still the sole candidate")
 }
@@ -717,7 +722,7 @@ func TestResolve_NilStoredContextIsSelectable(t *testing.T) {
 			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
 		},
 	}
-	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}, autoSelect: true}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name)
 }

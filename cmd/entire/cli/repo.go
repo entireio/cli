@@ -112,7 +112,6 @@ func parseObjectFormat(s string) (coreapi.CreateRepoInputBodyObjectFormat, error
 func newRepoCreateCmd() *cobra.Command {
 	var (
 		projectID    string
-		clusterHost  string
 		objectFormat string
 		noWait       bool
 		waitTimeout  time.Duration
@@ -145,24 +144,6 @@ and recovery instructions go to stderr.`,
 		},
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Refuse a name Entire could not address once it existed: every ref
-			// parser drops a trailing `.git` (see gitDirSuffix), so the repo
-			// would be reachable only by ULID. The server would accept it —
-			// an interior dot is legal — which is exactly why the check is here.
-			if name := strings.TrimSpace(args[0]); strings.HasSuffix(name, gitDirSuffix) {
-				cmd.SilenceUsage = true
-				err := fmt.Errorf("repo name %q must not end in %s: Entire treats that suffix as never part of a name, so the repo could not be addressed by name afterwards", name, gitDirSuffix)
-				if trimmed := strings.TrimSuffix(name, gitDirSuffix); trimmed != "" {
-					err = fmt.Errorf("%w (use %q)", err, trimmed)
-				}
-				return err
-			}
-			if clusterHost != "" {
-				if err := validateClusterHost(clusterHost); err != nil {
-					cmd.SilenceUsage = true
-					return fmt.Errorf("invalid --cluster-host: %w", err)
-				}
-			}
 			var format coreapi.CreateRepoInputBodyObjectFormat
 			if objectFormat != "" {
 				parsed, err := parseObjectFormat(objectFormat)
@@ -180,9 +161,6 @@ and recovery instructions go to stderr.`,
 					return err
 				}
 				body := &coreapi.CreateRepoInputBody{Name: args[0], ProjectId: projID}
-				if clusterHost != "" {
-					body.ClusterHost = coreapi.NewOptString(clusterHost)
-				}
 				if format != "" {
 					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
 				}
@@ -207,7 +185,6 @@ and recovery instructions go to stderr.`,
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return after creation without confirming provisioning readiness")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 10*time.Minute, "Time limit for project resolution, creation, and provisioning readiness")
 	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
-	cmd.Flags().StringVar(&clusterHost, "cluster-host", "", "Public host of the cluster to pin the repo to (defaults to the jurisdiction default)")
 	cmd.Flags().StringVar(&objectFormat, "object-format", "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
 	markRequired(cmd, "project")
 	addJSONFlag(cmd)
@@ -386,8 +363,8 @@ func newRepoDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "repo", args[0],
-				func(ctx context.Context, c *coreapi.Client) (string, error) {
-					return resolveRepoRef(ctx, c, args[0], project)
+				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
+					return resolveRepoRefResolved(ctx, c, args[0], project)
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
 					return c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
@@ -407,7 +384,7 @@ type repoVisibility struct {
 	Visibility string `json:"visibility"`
 }
 
-var visibilityColumns = []string{"REPO", "VISIBILITY"}
+var visibilityColumns = []string{colHeaderRepo, "VISIBILITY"}
 
 func visibilityRow(v repoVisibility) []string {
 	return []string{v.Repo, v.Visibility}

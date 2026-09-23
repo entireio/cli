@@ -21,6 +21,8 @@ const originRemote = "origin"
 const (
 	ProtocolSSH    = gitremote.ProtocolSSH
 	ProtocolHTTPS  = gitremote.ProtocolHTTPS
+	ProtocolHTTP   = gitremote.ProtocolHTTP
+	ProtocolGit    = gitremote.ProtocolGit
 	ProtocolEntire = gitremote.ProtocolEntire
 )
 
@@ -731,6 +733,37 @@ func isDirectGitTransport(protocol string) bool {
 	return protocol == ProtocolSSH || protocol == ProtocolHTTPS
 }
 
+// isTokenRewritableTransport reports whether an origin on this protocol may be
+// rewritten into a token-bearing HTTPS URL. It is an allow-list because the
+// returned URL is one a checkpoint token gets attached to: an unrecognized
+// scheme must fail closed rather than inherit the rewrite.
+//
+// Every admitted scheme names the git host itself, so "https://<same host>" is
+// the same repository reached over a transport the token can authenticate —
+// the upgrade this function exists to perform. It is wider than
+// isDirectGitTransport, which answers whether a remote is usable as configured
+// and so excludes the two schemes that have to be upgraded first: http:// and
+// git:// carry no credential of their own, and rewriting them moves the token
+// onto HTTPS instead of that host's cleartext port.
+//
+// These are transports, not spellings. git's git+ssh:// and ssh+git:// arrive
+// as ProtocolSSH (gitremote.normalizeProtocol) and so need no case of their
+// own; a case here would admit them while every call site that switches on
+// ProtocolSSH stayed blind to them.
+//
+// entire:// and file:// are the exclusions that matter. An entire:// host is an
+// Entire cluster rather than a git endpoint, so the rewrite invents an HTTPS
+// git URL on a host that serves none and sends the token there; file:// names
+// no host at all.
+func isTokenRewritableTransport(protocol string) bool {
+	switch protocol {
+	case ProtocolSSH, ProtocolHTTPS, ProtocolHTTP, ProtocolGit:
+		return true
+	default:
+		return false
+	}
+}
+
 func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteConfig) (string, error) {
 	switch info.Protocol {
 	case ProtocolSSH:
@@ -868,6 +901,13 @@ func findRemoteInfoForHost(repo *git.Repository, host string) (*Info, bool) {
 func deriveTokenOriginURL(originURL string) (string, bool) {
 	info, err := gitremote.ParseURL(originURL)
 	if err != nil {
+		return "", false
+	}
+	// The guard lives here rather than at the call sites because most callers
+	// gate only on the token being set. resolveTargetForTokenAuth checks the
+	// protocol before calling and stays correct with the check duplicated.
+	// See COR-1892 for the analysis.
+	if !isTokenRewritableTransport(info.Protocol) {
 		return "", false
 	}
 	if info.Host == "" || info.Owner == "" || info.Repo == "" {

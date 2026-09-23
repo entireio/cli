@@ -15,12 +15,11 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotURI = r.RequestURI
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"items":[],"nextPageToken":null,"totalCount":0}`)) //nolint:errcheck // test handler
+		w.Write([]byte(`{"items":[],"next_cursor":null,"total_count":0}`)) //nolint:errcheck // test handler
 	}))
 	defer server.Close()
 
-	c := NewClient("tok")
-	c.baseURL = server.URL
+	c := NewClientWithBaseURL("tok", server.URL)
 
 	ok, err := c.TrailsEnabled(context.Background(), "g/h", "acme?org", "repo#frag")
 	if err != nil {
@@ -29,7 +28,7 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	if !ok {
 		t.Fatal("enabled = false, want true")
 	}
-	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?pageSize=1"
+	want := "/api/v1/trails/g%2Fh/acme%3Forg/repo%23frag?per_page=1"
 	if gotURI != want {
 		t.Errorf("request URI = %q, want %q", gotURI, want)
 	}
@@ -56,7 +55,7 @@ func TestClient_RewritesResolvedTrailReviewRoute(t *testing.T) {
 	}
 }
 
-func TestClient_TrailRequestsUseCamelCase(t *testing.T) {
+func TestClient_TrailRequestsUseSnakeCase(t *testing.T) {
 	t.Parallel()
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,11 +74,13 @@ func TestClient_TrailRequestsUseCamelCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if got["branchName"] != "feature/test" || got["branchAction"] != "link" {
+	if got["branch_name"] != "feature/test" || got["branch_action"] != "link" {
 		t.Fatalf("body = %#v", got)
 	}
-	if _, ok := got["branch_name"]; ok {
-		t.Fatalf("body contains snake_case: %#v", got)
+	for _, key := range []string{"branchName", "branchAction"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("body contains camelCase %q: %#v", key, got)
+		}
 	}
 }
 
@@ -93,10 +94,10 @@ func TestClient_TrailsEnabled(t *testing.T) {
 		wantOK     bool
 		wantErrNil bool
 	}{
-		{"enabled (200)", http.StatusOK, `{"items":[],"nextPageToken":null,"totalCount":0}`, true, true},
-		{"enabled empty (200)", http.StatusOK, `{"items":[],"nextPageToken":null,"totalCount":0}`, true, true},
+		{"enabled (200)", http.StatusOK, `{"items":[],"next_cursor":null,"total_count":0}`, true, true},
+		{"enabled empty (200)", http.StatusOK, `{"items":[],"next_cursor":null,"total_count":0}`, true, true},
 		{"not enabled (404)", http.StatusNotFound, `{"error":"not found"}`, false, true},
-		{"forbidden (403)", http.StatusForbidden, `{"error":"forbidden"}`, false, true},
+		{"forbidden (403)", http.StatusForbidden, `{"type":"https://example.test/problems/forbidden","title":"Forbidden","status":403,"detail":"No access","code":"forbidden","request_id":"request-example"}`, false, true},
 		{"gone (410)", http.StatusGone, `{"error":"gone"}`, false, true},
 		{"unauthorized (401)", http.StatusUnauthorized, `{"error":"unauthorized"}`, false, false},
 		{"server error (500)", http.StatusInternalServerError, `{"error":"boom"}`, false, false},
@@ -116,8 +117,7 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			}))
 			defer server.Close()
 
-			c := NewClient("tok")
-			c.baseURL = server.URL
+			c := NewClientWithBaseURL("tok", server.URL)
 
 			ok, err := c.TrailsEnabled(context.Background(), "gh", "acme", "repo")
 			if (err == nil) != tt.wantErrNil {
@@ -129,8 +129,8 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			if gotPath != "/api/v1/trails/gh/acme/repo" {
 				t.Errorf("path = %q, want /api/v1/trails/gh/acme/repo", gotPath)
 			}
-			if gotQuery != "pageSize=1" {
-				t.Errorf("query = %q, want pageSize=1", gotQuery)
+			if gotQuery != "per_page=1" {
+				t.Errorf("query = %q, want per_page=1", gotQuery)
 			}
 		})
 	}
