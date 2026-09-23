@@ -162,7 +162,28 @@ func (f *CellClientFactory) cellBaseURLFor(ctx context.Context, target *CellTarg
 	if err := requireSafeExchangeURL("entire-api cell", cellBaseURL); err != nil {
 		return "", err
 	}
+	if err := requireSameSite(cellBaseURL, f.subject.discoveredCore); err != nil {
+		return "", err
+	}
 	return cellBaseURL, nil
+}
+
+// ErrCellSiteMismatch reports a cell that belongs to a different Entire site
+// than the login about to be sent to it.
+var ErrCellSiteMismatch = errors.New("entire-api cell and login belong to different Entire sites")
+
+// requireSameSite refuses to send a login issued by one Entire site to another
+// site's cell. The cell would reject it anyway, so the request can only leak
+// the credential across environments; this happens when the cell address and
+// the token come from different logins (ENT-2573). Loopback and custom hosts
+// have no site and are not checked.
+func requireSameSite(cellBaseURL, loginCore string) error {
+	cellSite, loginSite := EntireSite(cellBaseURL), EntireSite(loginCore)
+	if cellSite == "" || loginSite == "" || cellSite == loginSite {
+		return nil
+	}
+	return fmt.Errorf("refusing to send a %s login (%s) to %s: %w; select a %s login with `entire auth switch`, or unset %s if it points at %s",
+		loginSite, strings.TrimRight(loginCore, "/"), cellBaseURL, ErrCellSiteMismatch, cellSite, api.BaseURLEnvVar, loginSite)
 }
 
 // JurisdictionToken mints and returns a jurisdictional identity token

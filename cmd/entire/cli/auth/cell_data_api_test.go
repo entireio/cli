@@ -966,3 +966,43 @@ func TestCellClientFactory_EnvTokenHonoursExplicitDataHost(t *testing.T) {
 		})
 	}
 }
+
+// A login JWT is only accepted by cells of the Entire site that issued it, so
+// sending it to another site's cell can never succeed and only leaks the
+// credential across environments (ENT-2573: prod logins reaching staging
+// cells). cellBaseURLFor must refuse before any request is built.
+func TestCellClientFactory_RefusesCrossSiteCell(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name     string
+		core     string
+		cell     string
+		wantDeny bool
+	}{
+		{name: "prod login to staging cell", core: "https://eu.auth.entire.io", cell: "https://aws-us-west-2.api.partial.to", wantDeny: true},
+		{name: "staging login to prod cell", core: "https://us.auth.partial.to", cell: "https://aws-us-east-2.api.entire.io", wantDeny: true},
+		{name: "same site, other jurisdiction", core: "https://eu.auth.entire.io", cell: "https://aws-us-east-2.api.entire.io"},
+		{name: "loopback core", core: "http://127.0.0.1:9000", cell: "https://aws-us-east-2.api.entire.io"},
+		{name: "custom cell", core: "https://us.auth.entire.io", cell: "https://api.example.test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &CellClientFactory{subject: cellSubject{loginJWT: "login", discoveredCore: tc.core}}
+			got, err := f.cellBaseURLFor(ctx, &CellTarget{BaseURL: tc.cell, Jurisdiction: "us"})
+			if tc.wantDeny {
+				if !errors.Is(err, ErrCellSiteMismatch) {
+					t.Fatalf("err = %v, want ErrCellSiteMismatch", err)
+				}
+				if !strings.Contains(err.Error(), "entire auth switch") {
+					t.Errorf("err = %q, want it to name the fix", err)
+				}
+				return
+			}
+			if err != nil || got != tc.cell {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.cell)
+			}
+		})
+	}
+}

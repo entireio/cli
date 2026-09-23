@@ -126,6 +126,9 @@ func TestClient_TrailsEnabled(t *testing.T) {
 			if ok != tt.wantOK {
 				t.Errorf("enabled = %v, want %v", ok, tt.wantOK)
 			}
+			if !tt.wantErrNil && !IsHTTPErrorStatus(err, tt.status) {
+				t.Errorf("err = %v, want an *HTTPError with status %d", err, tt.status)
+			}
 			if gotPath != "/api/v1/trails/gh/acme/repo" {
 				t.Errorf("path = %q, want /api/v1/trails/gh/acme/repo", gotPath)
 			}
