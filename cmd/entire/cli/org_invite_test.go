@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,19 @@ import (
 
 	"github.com/entireio/cli/internal/coreapi"
 )
+
+// withExtraProperty marshals v, then splices in one more top-level property
+// ahead of its own fields. It lets a fixture keep using the modeled builders
+// (testInvitation, etc.) to simulate an unmodeled server property instead of
+// hand-typing every required field into a raw JSON literal.
+func withExtraProperty(t *testing.T, v any, key, value string) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	require.NoError(t, err)
+	s := string(raw)
+	require.True(t, strings.HasPrefix(s, "{"), "fixture must marshal to a JSON object")
+	return `{"` + key + `":"` + value + `",` + s[1:]
+}
 
 // testInvitationULID addresses an invitation directly, so the commands skip the
 // by-email lookup and the fake only has to answer the revoke.
@@ -126,6 +140,41 @@ func TestOrgInvite_RejectsAnUnknownRoleWithoutCallingTheServer(t *testing.T) {
 	require.ErrorContains(t, err, `invalid --role "auditor": must be one of owner, admin, member`)
 }
 
+// The generated response types round-trip any property the schema doesn't
+// declare, so a server that ever sent one under an unmodeled key would
+// otherwise reach --json output verbatim. An invitation is the one object with
+// an accept token (see org_join.go's identical defense), so this pins the same
+// guarantee here.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInvite_JSONDropsUnmodeledResponseProperties(t *testing.T) {
+	const leakedValue = "SHOULD-NEVER-REACH-JSON-OUTPUT"
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{name: "201 created", status: http.StatusCreated},
+		{name: "200 resent", status: http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				body := withExtraProperty(t, testInvitation("admin", "open"), "unexpectedField", leakedValue)
+				_, err := fmt.Fprint(w, body)
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(srv.Close)
+
+			out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invite", testOrgULID, "dev@example.com", "--role", "admin", "--json")
+			require.NoError(t, err)
+			assert.NotContains(t, out, leakedValue, "an unmodeled response property reached --json output")
+			assert.NotContains(t, out, "unexpectedField")
+		})
+	}
+}
+
 // The filter is the server's: the CLI passes --status through and renders what
 // comes back, defaulting to the open invitations.
 //
@@ -183,6 +232,33 @@ func TestOrgInvites_ReportsAnEmptyListing(t *testing.T) {
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invites", testOrgULID)
 	require.NoError(t, err)
 	assert.Contains(t, out, "No invitations found.")
+}
+
+// The list path loops over every invitation returned, so the create path's
+// defense (see TestOrgInvite_JSONDropsUnmodeledResponseProperties) must hold
+// for each item, not just the first — this is the case that matters more.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInvites_JSONDropsUnmodeledResponsePropertiesOnEveryItem(t *testing.T) {
+	const leaked1 = "SHOULD-NEVER-REACH-JSON-OUTPUT-1"
+	const leaked2 = "SHOULD-NEVER-REACH-JSON-OUTPUT-2"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		body := `{"invitations":[` +
+			withExtraProperty(t, testInvitation("admin", "open"), "unexpectedField", leaked1) + "," +
+			withExtraProperty(t, testInvitation("member", "open"), "unexpectedField", leaked2) +
+			`]}`
+		_, err := fmt.Fprint(w, body)
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(srv.Close)
+
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invites", testOrgULID, "--json")
+	require.NoError(t, err)
+	assert.NotContains(t, out, leaked1, "the first invitation's unmodeled property reached --json output")
+	assert.NotContains(t, out, leaked2, "the second invitation's unmodeled property reached --json output")
+	assert.NotContains(t, out, "unexpectedField")
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.

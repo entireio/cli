@@ -64,13 +64,20 @@ func newOrgInviteCmd() *cobra.Command {
 				}
 				switch out := res.(type) {
 				case *coreapi.CreateOrgInvitationCreated:
+					// An invitation is the one object with an accept token (see
+					// org_join.go). Its modeled fields carry none today, but ogen
+					// round-trips any response property this schema doesn't
+					// declare, verbatim, into --json output, so blank the bag
+					// rather than trust the endpoint's contract never grows one.
 					inv := coreapi.Invitation(*out)
+					inv.AdditionalProps = nil
 					return fmt.Sprintf("✓ Invited %s to org %s as %s", inv.Email, args[0], inv.Role), &inv, nil
 				case *coreapi.CreateOrgInvitationOK:
 					// The role here is the stored one, which an earlier invite
 					// chose; saying so stops a --role that did not take effect
 					// from reading as though it had.
 					inv := coreapi.Invitation(*out)
+					inv.AdditionalProps = nil
 					return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s", inv.Email, args[0], inv.Role), &inv, nil
 				default:
 					return "", nil, fmt.Errorf("invite %s: unexpected response %T from the control plane", args[1], res)
@@ -113,7 +120,7 @@ func newOrgInvitesCmd() *cobra.Command {
 }
 
 func listOrgInvitations(ctx context.Context, c *coreapi.Client, orgID, status string) ([]coreapi.Invitation, error) {
-	return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Invitation, string, error) {
+	invitations, err := fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Invitation, string, error) {
 		params := coreapi.ListOrgInvitationsParams{
 			OrgId:  orgID,
 			Status: coreapi.NewOptListOrgInvitationsStatus(coreapi.ListOrgInvitationsStatus(status)),
@@ -127,6 +134,15 @@ func listOrgInvitations(ctx context.Context, c *coreapi.Client, orgID, status st
 		}
 		return out.Invitations, out.NextPageToken.Or(""), nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Same defense as the create path above, applied to every invitation the
+	// listing returns.
+	for i := range invitations {
+		invitations[i].AdditionalProps = nil
+	}
+	return invitations, nil
 }
 
 func newOrgUninviteCmd() *cobra.Command {
