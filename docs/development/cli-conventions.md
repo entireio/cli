@@ -245,7 +245,21 @@ the commands are always runnable in every build.
   `parseMirrorRepoRef`, the same grammar the bare refs take, so a URL and the
   ref it was built from can never disagree about what a name may contain —
   a trailing `.git` included, which is part of a native name and decoration on
-  a `/gh/` one.
+  a `/gh/` one. `--authoritative` and `--project` say nothing about a GitHub
+  upstream — Entire holds no repo record for one — so the `/gh/` route warns
+  that it ignored them rather than exiting 0 with the check the flag promised
+  never performed.
+  `repo view --json` emits the `repoDirRow` shape `mirror list --json` uses, so
+  both forges answer one way. Three consequences a consumer must be told about,
+  because two of them keep a key's name while changing what it holds:
+  `placements[].cluster` is the public **host** where it used to be the catalog
+  slug (the slug moved to `placements[].clusterSlug`, so nothing is lost);
+  `.state` is the repo's own lifecycle word and `placements[].status` the
+  placement vocabulary, which are **different spellings of related facts**
+  (`active` there is `ready` here) and so are both carried rather than one
+  folded into the other; and `.private` is **absent** when the server stated no
+  visibility, because an absent field must not read as `false` on a question
+  asked to confirm a repo is restricted.
   Every `<project>/<repo>` name pair resolves through **one** call,
   `POST /repos/resolve` (`resolveNativeRepoByPath`), because that route needs
   `repo#pull` alone. The project-scoped routes (`GET /projects?name=`,
