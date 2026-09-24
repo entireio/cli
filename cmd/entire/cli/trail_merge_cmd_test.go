@@ -538,3 +538,30 @@ func TestTrailMerge_MergeableForceDoesNotPrompt(t *testing.T) {
 	require.Empty(t, stub.prompts, "nothing is bypassed, so nothing to confirm")
 	require.JSONEq(t, `{"expectedHeadSha":"`+trailMergeTestHead+`"}`, stub.mergePosts()[0])
 }
+
+// A cancelled context still reaches the prompt, which lists the gates and
+// handles the cancellation itself, so the user sees what would have been
+// bypassed and a "cancelled" line instead of a silent exit.
+func TestConfirmTrailMergeBypassCancelledContextStillPrompts(t *testing.T) {
+	previous := trailMergeBypassPrompt
+	t.Cleanup(func() { trailMergeBypassPrompt = previous })
+	var gotDescription string
+	trailMergeBypassPrompt = func(ctx context.Context, _, description string) (bool, error) {
+		gotDescription = description
+		require.Error(t, ctx.Err())
+		return false, nil
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var out bytes.Buffer
+	status := "failed"
+	rationale := "main is red: acme/app build #1 failed"
+	gates := []api.TrailGateResult{{GateType: "base_checks", Status: status, Rationale: &rationale}}
+
+	ok, err := confirmTrailMergeBypass(ctx, &out, &api.TrailResource{Number: 7, Base: "main"}, gates, false, true)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Contains(t, gotDescription, "main is red")
+	require.Contains(t, out.String(), "Trail merge cancelled.")
+}

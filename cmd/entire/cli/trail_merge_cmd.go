@@ -280,9 +280,6 @@ func confirmTrailMergeBypass(ctx context.Context, w io.Writer, t *api.TrailResou
 	if !canPrompt {
 		return false, fmt.Errorf("refusing to bypass %d blocking %s on trail #%d without confirmation; pass --yes", n, pluralize("gate", n), t.Number)
 	}
-	if ctx.Err() != nil {
-		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
-	}
 	base := tuiutil.SanitizeDisplayText(strings.TrimSpace(t.Base))
 	if base == "" {
 		base = "its base"
