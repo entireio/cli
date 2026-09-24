@@ -255,6 +255,62 @@ func TestRepoView_UnplacedRepoStatesItsLifecycle(t *testing.T) {
 	})
 }
 
+// TestRepoView_AnInterruptedReadinessReadIsNotSwallowed pins the arm that tells
+// a cancelled command apart from a server that cannot answer.
+//
+// The authoritative read is best-effort, so a server failure costs a dashed
+// STATUS and the table still prints. A context error is not that: the command
+// was STOPPED. Without the distinction it fell through every case, printed a
+// table built on the plain read's stale state, and exited 0 — success reported
+// for work the user interrupted.
+//
+// The cancellation tests elsewhere in this file all exercise awaitRepoActive,
+// the create/poll path; this is the view's own read, which had none.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoView_AnInterruptedReadinessReadIsNotSwallowed(t *testing.T) {
+	body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","clusterSlug":"us","state":"active","visibility":"private"}`,
+		testDeleteULID, testProjectULID)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			fmt.Fprint(w, `{"nativeMirrors":[]}`)
+		case r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.URL.Query().Get("authoritative") == "true":
+			// Ctrl-C lands while this read is in flight. Block until the
+			// cancellation actually reaches the transport, so the client sees a
+			// context error rather than racing a written body.
+			cancel()
+			<-r.Context().Done()
+		default:
+			fmt.Fprint(w, body)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srv.URL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+
+	cmd := newRepoViewCmd()
+	var out, errW bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errW)
+	cmd.SetArgs([]string{testDeleteULID})
+	err := cmd.ExecuteContext(ctx)
+
+	require.Error(t, err, "an interrupted command must not report success")
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotContains(t, out.String(), "CLUSTER",
+		"no table may be built on the state the interrupted read failed to refresh")
+}
+
 func TestRepoCreateReadinessFlags(t *testing.T) {
 	// Not parallel: shared client seam.
 	for _, tc := range []struct {
