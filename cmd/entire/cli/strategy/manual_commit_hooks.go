@@ -46,6 +46,10 @@ import (
 // ttyResult represents the outcome of a TTY confirmation prompt.
 type ttyResult int
 
+const commitMessageSourceMessage = "message"
+
+const commitLinkComment = " Remove the Entire-Checkpoint trailer above"
+
 const (
 	ttyResultLink       ttyResult = iota // Link: add the checkpoint trailer
 	ttyResultSkip                        // Skip: don't add the trailer
@@ -140,22 +144,28 @@ func saveCommitLinkingAlways(ctx context.Context) error {
 // If the message contains only our trailer (no actual user content), strip it
 // so git will abort the commit due to empty message.
 
-func (s *ManualCommitStrategy) CommitMsg(_ context.Context, commitMsgFile string) error { //nolint:unparam // error return is part of the hook contract; callers check it
+func (s *ManualCommitStrategy) CommitMsg(ctx context.Context, commitMsgFile string) error { //nolint:unparam // hook interface requires an error result
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // Path comes from git hook
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
 
 	message := string(content)
+	messageForValidation := message
+	if strings.Contains(message, commitLinkComment) {
+		commentPrefix := gitCommentPrefix(ctx, message)
+		if strings.Contains(message, commentPrefix+commitLinkComment) {
+			messageForValidation = stripGitCommentLines(message, commentPrefix)
+		}
+	}
 
-	// Check if our trailer is present (ParseCheckpoint validates format, so found==true means valid)
-	if _, found := trailers.ParseCheckpoint(message); !found {
+	if _, found := trailers.ParseCheckpointFromFinalTrailerBlock(messageForValidation); !found {
 		// No trailer, nothing to do
 		return nil
 	}
 
 	// Check if there's any user content (non-comment, non-trailer lines)
-	if !hasUserContent(message) {
+	if !hasUserContent(messageForValidation) {
 		// No user content - strip the trailer so git aborts
 		message = stripCheckpointTrailer(message)
 		if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil {
@@ -286,6 +296,56 @@ func stripCheckpointTrailer(message string) string {
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+func parseCheckpointFromCommitMessageFile(ctx context.Context, message, source string) (id.CheckpointID, bool) {
+	if source != commitMessageSourceMessage {
+		message = stripGitCommentLines(message, gitCommentPrefix(ctx, message))
+	}
+	return trailers.ParseCheckpointFromFinalTrailerBlock(message)
+}
+
+func stripGitCommentLines(message, commentPrefix string) string {
+	if commentPrefix == "" {
+		return message
+	}
+	lines := strings.Split(message, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !strings.HasPrefix(line, commentPrefix) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+func gitCommentPrefix(ctx context.Context, message string) string {
+	prefix := gitConfigValue(ctx, "core.commentString")
+	if prefix == "" {
+		prefix = gitConfigValue(ctx, "core.commentChar")
+	}
+	if prefix == "" {
+		prefix = "#"
+	}
+	if prefix != "auto" {
+		return prefix
+	}
+
+	lines := strings.Split(message, "\n")
+	for _, candidate := range "#;@!$%^&|:" {
+		candidatePrefix := string(candidate)
+		available := true
+		for _, line := range lines {
+			if strings.HasPrefix(line, candidatePrefix) {
+				available = false
+				break
+			}
+		}
+		if available {
+			return candidatePrefix
+		}
+	}
+	return "#"
 }
 
 // isGitSequenceOperation checks if git is currently in the middle of a rebase,
@@ -432,8 +492,13 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	message := string(content)
 
-	// Check if trailer already exists (ParseCheckpoint validates format, so found==true means valid)
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	commentPrefix := ""
+	messageForValidation := message
+	if source != commitMessageSourceMessage {
+		commentPrefix = gitCommentPrefix(ctx, message)
+		messageForValidation = stripGitCommentLines(message, commentPrefix)
+	}
+	if existingCpID, found := trailers.ParseCheckpointFromFinalTrailerBlock(messageForValidation); found {
 		readCommitMessageSpan.End()
 		// Trailer already exists (e.g., amend) - keep it
 		logging.Debug(logCtx, "prepare-commit-msg: trailer already exists",
@@ -479,7 +544,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	// NOTE: TTY confirmation (askConfirmTTY) is intentionally NOT wrapped in a span
 	// because it blocks on user input and would skew timing.
 	switch source {
-	case "message":
+	case commitMessageSourceMessage:
 		// Using -m or -F: behavior depends on TTY availability and commit_linking setting
 		switch {
 		case !interactive.CanPromptInteractively():
@@ -516,7 +581,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		}
 	default:
 		// Normal editor flow: add trailer with explanatory comment (will be stripped by git)
-		message = addCheckpointTrailerWithComment(message, checkpointID, string(agentType), displayPrompt)
+		message = addCheckpointTrailerWithComment(message, checkpointID, string(agentType), displayPrompt, commentPrefix)
 	}
 
 	logging.Info(logCtx, "prepare-commit-msg: trailer added",
@@ -550,7 +615,7 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 	message := string(content)
 
 	// If message already has a trailer, keep it unchanged
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	if existingCpID, found := parseCheckpointFromCommitMessageFile(ctx, message, "commit"); found {
 		logging.Debug(logCtx, "prepare-commit-msg: amend preserves existing trailer",
 			slog.String("strategy", "manual-commit"),
 			slog.String("checkpoint_id", existingCpID.String()),
@@ -932,8 +997,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if commit has checkpoint trailer (ParseCheckpoint validates format)
-	checkpointID, found := trailers.ParseCheckpoint(commit.Message)
+	checkpointID, found := trailers.ParseCheckpointFromFinalTrailerBlock(commit.Message)
 	openRepoSpan.End()
 
 	if !found {
@@ -2393,7 +2457,7 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	message := string(content)
 
 	// Don't add if trailer already exists
-	if _, found := trailers.ParseCheckpoint(message); found {
+	if _, found := parseCheckpointFromCommitMessageFile(logCtx, message, source); found {
 		return nil
 	}
 
@@ -2435,23 +2499,23 @@ func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
 // The trailer is placed above the git comment block but below the user's message area,
 // with a comment explaining that the user can remove it if they don't want to link the commit
 // to the agent session. If prompt is non-empty, it's shown as context.
-func addCheckpointTrailerWithComment(message string, checkpointID id.CheckpointID, agentName, prompt string) string {
+func addCheckpointTrailerWithComment(message string, checkpointID id.CheckpointID, agentName, prompt, commentPrefix string) string {
 	trailer := trailers.CheckpointTrailerKey + ": " + checkpointID.String()
 	commentLines := []string{
-		"# Remove the Entire-Checkpoint trailer above if you don't want to link this commit to " + agentName + " session context.",
+		commentPrefix + commitLinkComment + " if you don't want to link this commit to " + agentName + " session context.",
 	}
 	if prompt != "" {
-		commentLines = append(commentLines, "# Last Prompt: "+prompt)
+		commentLines = append(commentLines, commentPrefix+" Last Prompt: "+prompt)
 	}
-	commentLines = append(commentLines, "# The trailer will be added to your next commit based on this branch.")
+	commentLines = append(commentLines, commentPrefix+" The trailer will be added to your next commit based on this branch.")
 	comment := strings.Join(commentLines, "\n")
 
 	lines := strings.Split(message, "\n")
 
-	// Find where the git comment block starts (first # line)
+	// Find where the git comment block starts.
 	commentStart := -1
 	for i, line := range lines {
-		if strings.HasPrefix(line, "#") {
+		if strings.HasPrefix(line, commentPrefix) {
 			commentStart = i
 			break
 		}
