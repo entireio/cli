@@ -152,7 +152,7 @@ func (f *fakeProtectionServer) apply(body coreapi.UpdateBranchProtectionInputBod
 			}
 		}
 		if !present {
-			next = append(next, a)
+			next = append(next, coreapi.BranchRule{Ref: a.Ref, ServerSideMergeOnly: a.ServerSideMergeOnly})
 		}
 	}
 	f.rules = next
@@ -177,6 +177,16 @@ func newProtectionFixture(t *testing.T, rules ...coreapi.BranchRule) *fakeProtec
 // structs carry an empty AdditionalProps map that a literal does not.
 func rulesView(rs []coreapi.BranchRule) []branchRule {
 	return branchRulesFromWire(&coreapi.BranchProtection{Rules: rs})
+}
+
+// updatesView is rulesView for the rules a patch sends, which the spec types
+// separately from the rules a read returns.
+func updatesView(us []coreapi.BranchRuleUpdate) []branchRule {
+	rs := make([]coreapi.BranchRule, len(us))
+	for i, u := range us {
+		rs[i] = coreapi.BranchRule{Ref: u.Ref, ServerSideMergeOnly: u.ServerSideMergeOnly}
+	}
+	return rulesView(rs)
 }
 
 func execRepoProtection(t *testing.T, args ...string) (stdout string, err error) {
@@ -278,7 +288,7 @@ func TestRepoProtection_AddAndRemove(t *testing.T) {
 	out, err := execRepoProtection(t, "add", testProtectionRepoULID, "release/*")
 	require.NoError(t, err)
 	require.Len(t, fake.patches, 1)
-	assert.Equal(t, []branchRule{{Ref: "refs/heads/release/*"}}, rulesView(fake.patches[0].AddRules))
+	assert.Equal(t, []branchRule{{Ref: "refs/heads/release/*"}}, updatesView(fake.patches[0].AddRules))
 	assert.False(t, fake.patches[0].AddRules[0].ServerSideMergeOnly.IsSet(), "no flag, no level on the wire")
 	assert.Empty(t, fake.patches[0].RemoveRefs)
 	assert.Contains(t, out, "refs/heads/release/*")
@@ -286,7 +296,7 @@ func TestRepoProtection_AddAndRemove(t *testing.T) {
 	out, err = execRepoProtection(t, "add", testProtectionRepoULID, "HEAD", "--server-side-merge-only")
 	require.NoError(t, err)
 	require.Len(t, fake.patches, 2)
-	assert.Equal(t, []branchRule{{Ref: "HEAD", ServerSideMergeOnly: true}}, rulesView(fake.patches[1].AddRules))
+	assert.Equal(t, []branchRule{{Ref: "HEAD", ServerSideMergeOnly: true}}, updatesView(fake.patches[1].AddRules))
 	assert.True(t, fake.patches[1].AddRules[0].ServerSideMergeOnly.IsSet())
 	assert.Contains(t, out, protectionLevelMergeOnly)
 	assert.Equal(t, []branchRule{

@@ -44,8 +44,8 @@ func TestGrantTargetRoles(t *testing.T) {
 	require.Empty(t, repoGrantTarget.defaultRole)
 
 	require.Equal(t, enumStrings(coreapi.AddOrgMemberInputBodyRole("").AllValues()), orgGrantTarget.roles)
-	require.Equal(t, enumStrings(coreapi.GrantProjectAccessInputBodyRole("").AllValues()), projectGrantTarget.roles)
-	require.Equal(t, enumStrings(coreapi.GrantRepoAccessInputBodyRole("").AllValues()), repoGrantTarget.roles)
+	require.Equal(t, enumStrings(coreapi.GrantAccessBodyRole("").AllValues()), projectGrantTarget.roles)
+	require.Equal(t, enumStrings(coreapi.GrantAccessBodyRole("").AllValues()), repoGrantTarget.roles)
 }
 
 // enumStrings converts a generated enum's AllValues() into the plain strings a

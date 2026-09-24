@@ -284,9 +284,6 @@ func TransitionAndLog(goCtx context.Context, state *SessionState, event session.
 // hooks that fire as separate CLI processes before TurnStart:
 //
 //   - Claude Code sends "model" on SessionStart (before any TurnStart)
-//   - Gemini CLI sends "llm_request.model" on BeforeModel (after TurnStart,
-//     so handleLifecycleModelUpdate writes to SessionState directly when it
-//     exists and only falls back to this hint file otherwise)
 //
 // The hint is read by handleLifecycleTurnStart/TurnEnd when event.Model is
 // empty, passed to InitializeSession, and persisted in state.ModelName. After

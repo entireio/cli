@@ -5,7 +5,7 @@ package agent
 // below use this interface to gate capability access: an agent must both implement
 // the optional interface AND declare the capability as true.
 //
-// Built-in agents (Claude Code, Gemini CLI, etc.) do NOT implement this interface.
+// Built-in agents (Claude Code, Codex, etc.) do NOT implement this interface.
 // For those agents, the As* helpers fall through to a direct type assertion,
 // preserving existing behavior.
 type CapabilityDeclarer interface {

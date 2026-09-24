@@ -159,7 +159,6 @@ const (
 	AgentNameCopilotCLI     types.AgentName = "copilot-cli"
 	AgentNameCursor         types.AgentName = "cursor"
 	AgentNameFactoryAIDroid types.AgentName = "factoryai-droid"
-	AgentNameGemini         types.AgentName = "gemini"
 	AgentNameOpenCode       types.AgentName = "opencode"
 	AgentNamePi             types.AgentName = "pi"
 )
@@ -171,10 +170,14 @@ const (
 	AgentTypeCopilotCLI     types.AgentType = "Copilot CLI"
 	AgentTypeCursor         types.AgentType = "Cursor"
 	AgentTypeFactoryAIDroid types.AgentType = "Factory AI Droid"
-	AgentTypeGemini         types.AgentType = "Gemini CLI"
 	AgentTypeOpenCode       types.AgentType = "OpenCode"
 	AgentTypePi             types.AgentType = "Pi"
 	AgentTypeUnknown        types.AgentType = "Unknown"
+
+	// AgentTypeGemini tags checkpoints recorded before Gemini CLI support was
+	// removed. No agent registers it; it survives so those checkpoints still
+	// read correctly (see transcript/geminilegacy).
+	AgentTypeGemini types.AgentType = "Gemini CLI"
 )
 
 // DefaultAgentName is the registry key for the default agent.

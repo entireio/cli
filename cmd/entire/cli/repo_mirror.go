@@ -817,7 +817,7 @@ func chooseMirrorAddRegions(cmd *cobra.Command, ref mirrorRepoRef, nativeRepo *c
 // mirrorAddOutcome bundles the create response with the clone status
 // observed while waiting. polled is false for --no-wait, where status is unset.
 type mirrorAddOutcome struct {
-	created *coreapi.CreatedMirror
+	created *coreapi.MirrorRequestResult
 	status  coreapi.MirrorStatus
 	polled  bool
 }

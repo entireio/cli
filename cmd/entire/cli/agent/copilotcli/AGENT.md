@@ -45,7 +45,7 @@ Copilot CLI has a complete hook system with 9 hook types, JSONL transcripts, and
 }
 ```
 
-Note: Uses `bash` key (not `command` like Claude Code/Gemini). Also supports `powershell` for Windows. Each entry can have optional `cwd`, `timeoutSec` (default 30), `env`, and `comment` fields.
+Note: Uses `bash` key (not `command` like Claude Code/Cursor). Also supports `powershell` for Windows. Each entry can have optional `cwd`, `timeoutSec` (default 30), `env`, and `comment` fields.
 
 ### Hook Names and Event Mapping
 
@@ -176,7 +176,7 @@ copilot --allow-all-tools --disable-builtin-mcps   # prompt piped to stdin
 ```
 
 This matches the pattern used by every other summary-capable agent in the
-repo (Claude, Codex, Gemini, Cursor), which all converge on one transport
+repo (Claude, Codex, Cursor), which all converge on one transport
 through the shared `agent.RunIsolatedTextGeneratorCLI` helper. It also
 sidesteps the OS `ARG_MAX` limit on long transcripts — and while Copilot's
 `--help` does not explicitly document stdin input, Copilot's own error

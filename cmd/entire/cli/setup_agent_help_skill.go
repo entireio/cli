@@ -96,15 +96,13 @@ func agentHelpSkillTemplatePath(agentName types.AgentName) string {
 		return filepath.Join(claudeDirName, "skills", "entire", "SKILL.md")
 	case agent.AgentNameCodex:
 		return filepath.Join(".codex", "agents", "entire.toml")
-	case agent.AgentNameGemini:
-		return filepath.Join(".gemini", "agents", "entire.md")
 	default:
 		return ""
 	}
 }
 
 func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
-	// One switch, so a fourth agent cannot get a path with no body or a body
+	// One switch, so a third agent cannot get a path with no body or a body
 	// with no path — which is the failure splitting the path out would otherwise
 	// introduce.
 	var content string
@@ -113,8 +111,6 @@ func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
 		content = claudeAgentHelpSkillTemplate
 	case agent.AgentNameCodex:
 		content = codexAgentHelpSkillTemplate
-	case agent.AgentNameGemini:
-		content = geminiAgentHelpSkillTemplate
 	default:
 		return "", nil, false
 	}
@@ -122,7 +118,7 @@ func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
 }
 
 // agentHelpSkillBody is the shared, format-agnostic instruction body for the
-// agent-help skill. It is byte-identical across claude/gemini/codex (only the
+// agent-help skill. It is byte-identical across claude/codex (only the
 // surrounding frontmatter differs), so it lives in one place to stay in sync.
 // The drill-down example uses checkpoint (always advertised) rather than a
 // feature-gated command, matching renderAgentHelpTop's example selection so the
@@ -140,20 +136,6 @@ const claudeAgentHelpSkillTemplate = `
 ---
 name: entire
 description: How to use the Entire CLI (checkpoints, search, sessions, and more). Use whenever a task involves entire, checkpoints, or the ` + "`entire`" + ` command.
----
-
-<!-- ` + entireManagedAgentHelpSkillMarker + ` -->
-
-` + agentHelpSkillBody + `
-`
-
-const geminiAgentHelpSkillTemplate = `
----
-name: entire
-description: How to use the Entire CLI (checkpoints, search, sessions, and more). Use whenever a task involves entire, checkpoints, or the ` + "`entire`" + ` command.
-kind: local
-tools:
-  - run_shell_command
 ---
 
 <!-- ` + entireManagedAgentHelpSkillMarker + ` -->

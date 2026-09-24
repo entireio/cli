@@ -13,7 +13,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -26,6 +25,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/imageextract"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
@@ -978,7 +978,9 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 	var scopedTranscript []byte
 	switch state.AgentType {
 	case agent.AgentTypeGemini:
-		scoped, sliceErr := geminicli.SliceFromMessage(transcriptBytes, state.CheckpointTranscriptStart)
+		// No new Gemini sessions start, but one still in the session store when
+		// Gemini CLI support was removed is condensed on the next commit.
+		scoped, sliceErr := geminilegacy.SliceFromMessage(transcriptBytes, state.CheckpointTranscriptStart)
 		if sliceErr != nil {
 			logging.Warn(summarizeCtx, "failed to scope Gemini transcript for summary",
 				slog.String("session_id", state.SessionID),
@@ -1381,11 +1383,11 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 
 // extractSessionData extracts session data from the shadow branch.
 // filesTouched is the list of files tracked during the session (from SessionState.FilesTouched).
-// agentType identifies the agent (e.g., "Gemini CLI", "Claude Code") to determine transcript format.
+// agentType identifies the agent (e.g., "Claude Code", "OpenCode") to determine transcript format.
 // liveTranscriptPath, when non-empty and readable, is preferred over the shadow branch copy.
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
-// checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
+// checkpointTranscriptStart is the line offset (JSONL agents) or message index (OpenCode) where the current checkpoint began.
 func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
 	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	commit, err := repo.CommitObject(shadowRef)
@@ -1568,7 +1570,8 @@ func liveSubagentsDir(ag agent.Agent, state *SessionState, transcriptPath string
 
 // countTranscriptItems counts lines (JSONL) or messages (JSON) in a transcript.
 // For Claude Code and JSONL-based agents, this counts lines.
-// For Gemini CLI, OpenCode, and JSON-based agents, this counts messages.
+// For OpenCode (export JSON) and Gemini CLI (session JSON, from sessions
+// still in the store when its support was removed), this counts messages.
 // Returns 0 if the content is empty or malformed.
 func countTranscriptItems(agentType types.AgentType, content string) int {
 	if content == "" {
@@ -1584,17 +1587,12 @@ func countTranscriptItems(agentType types.AgentType, content string) int {
 		return 0
 	}
 
-	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
-	if agentType == agent.AgentTypeGemini || agentType == agent.AgentTypeUnknown {
-		transcript, err := geminicli.ParseTranscript([]byte(content))
-		if err == nil && transcript != nil && len(transcript.Messages) > 0 {
+	if agentType == agent.AgentTypeGemini {
+		transcript, err := geminilegacy.ParseTranscript([]byte(content))
+		if err == nil && transcript != nil {
 			return len(transcript.Messages)
 		}
-		// If agentType is explicitly Gemini but parsing failed, return 0
-		if agentType == agent.AgentTypeGemini {
-			return 0
-		}
-		// Otherwise fall through to JSONL parsing for Unknown type
+		return 0
 	}
 
 	// Claude Code and other JSONL-based agents

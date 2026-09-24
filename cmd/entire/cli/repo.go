@@ -147,7 +147,11 @@ and recovery instructions go to stderr.`,
 				if format != "" {
 					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
 				}
-				created, err := c.CreateRepo(ctx, body)
+				response, err := c.CreateRepo(ctx, body)
+				if err != nil {
+					return err
+				}
+				created, err := createdRepoAsRepo(&response.Response)
 				if err != nil {
 					return err
 				}
@@ -381,7 +385,8 @@ func newRepoDeleteCmd() *cobra.Command {
 					return resolveRepoRefResolved(ctx, c, args[0], project)
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
-					return c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
+					_, err := c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
+					return err
 				})
 		},
 	}

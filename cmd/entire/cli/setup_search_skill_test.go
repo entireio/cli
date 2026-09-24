@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -31,7 +30,6 @@ func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 	}{
 		{"claude", claudecode.NewClaudeCodeAgent(), filepath.Join(".claude", "skills", "entire-search", "SKILL.md")},
 		{"codex", codex.NewCodexAgent(), filepath.Join(".agents", "skills", "entire-search", "SKILL.md")},
-		{"gemini", geminicli.NewGeminiCLIAgent(), filepath.Join(".gemini", "skills", "entire-search", "SKILL.md")},
 		{"opencode", opencode.NewOpenCodeAgent(), filepath.Join(".opencode", "skills", "entire-search", "SKILL.md")},
 		{"copilot", copilotcli.NewCopilotCLIAgent(), filepath.Join(".github", "skills", "entire-search", "SKILL.md")},
 		{"cursor", cursor.NewCursorAgent(), filepath.Join(".cursor", "skills", "entire-search", "SKILL.md")},
@@ -166,7 +164,6 @@ func TestScaffoldSearchSkill_RemovesManagedLegacySubagent(t *testing.T) {
 	}{
 		{"claude", claudecode.NewClaudeCodeAgent(), filepath.Join(".claude", "agents", "entire-search.md")},
 		{"codex", codex.NewCodexAgent(), filepath.Join(".codex", "agents", "entire-search.toml")},
-		{"gemini", geminicli.NewGeminiCLIAgent(), filepath.Join(".gemini", "agents", "entire-search.md")},
 	}
 
 	for _, tc := range testCases {
@@ -627,7 +624,6 @@ func TestSearchSkillTemplates_NameMatchesTelemetryProbe(t *testing.T) {
 		agent.AgentNameCopilotCLI,
 		agent.AgentNameCursor,
 		agent.AgentNameFactoryAIDroid,
-		agent.AgentNameGemini,
 		agent.AgentNameOpenCode,
 		agent.AgentNamePi,
 	} {
