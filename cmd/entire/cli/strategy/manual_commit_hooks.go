@@ -2690,6 +2690,7 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
 		s.rehomeSessionToCurrentWorktree(ctx, repo, state, false)
+		recordTurnWorktree(ctx, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -3091,6 +3092,7 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 		}
 	}
 
+	s.rehomeSessionAtTurnEnd(ctx, state)
 	return nil
 }
 

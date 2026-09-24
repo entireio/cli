@@ -673,6 +673,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
+		TurnWorktreePath:      worktreePath,
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),
@@ -734,6 +735,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		if state.UntrackedFilesAtStart == nil {
 			state.UntrackedFilesAtStart = untrackedFiles
 		}
+		state.TurnWorktreePath = worktreePath
 
 		// This is a repair, not an authoritative SessionStart inventory. Keep
 		// the ledger and token data but retain conservative coverage markers.

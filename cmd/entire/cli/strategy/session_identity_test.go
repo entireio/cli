@@ -541,3 +541,47 @@ func TestIsNearerOwner_Contract(t *testing.T) {
 		})
 	}
 }
+
+func TestHomeHoldsPendingContent(t *testing.T) {
+	t.Parallel()
+	const home, moved = "/repo", "/repo-wt"
+	withFiles := func(recordedIn string) *SessionState {
+		return &SessionState{WorktreePath: home, FilesTouched: []string{"a.txt"}, PendingContentWorktree: recordedIn}
+	}
+	cases := map[string]struct {
+		state *SessionState
+		holds bool
+	}{
+		"nothing pending":                         {state: &SessionState{WorktreePath: home}, holds: false},
+		"files recorded in the tree it moves to":  {state: withFiles(moved), holds: false},
+		"files recorded at home":                  {state: withFiles(home), holds: true},
+		"files recorded in several trees":         {state: withFiles(session.PendingContentInSeveralWorktrees), holds: true},
+		"files recorded before locations existed": {state: withFiles(""), holds: true},
+		"shadow steps are keyed to the home":      {state: &SessionState{WorktreePath: home, StepCount: 1, PendingContentWorktree: moved}, holds: true},
+		"a task recorded in the tree it moves to": {state: &SessionState{WorktreePath: home, TaskRecords: []session.TaskRecord{{ToolUseID: "t"}}, PendingContentWorktree: moved}, holds: false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.holds, homeHoldsPendingContent(tc.state, moved))
+		})
+	}
+}
+
+func TestNotePendingContentGrowth_LocatesOnlyAddedContent(t *testing.T) {
+	t.Parallel()
+	state := &SessionState{FilesTouched: []string{"a.txt"}, PendingContentWorktree: "/elsewhere"}
+	before := snapshotPendingContent(state)
+	state.FilesTouched = []string{"a.txt"}
+	require.False(t, pendingContentGrew(before, state), "rewriting existing content adds nothing")
+	state.TaskRecords = []session.TaskRecord{{ToolUseID: "t"}}
+	require.True(t, pendingContentGrew(before, state))
+
+	fresh := &SessionState{PendingContentWorktree: "/stale-after-condensation"}
+	fresh.NotePendingContentAt("/repo-wt", false)
+	require.Equal(t, "/repo-wt", fresh.PendingContentWorktree, "content after a condensation replaces a stale location")
+	fresh.NotePendingContentAt("/repo-wt", true)
+	require.Equal(t, "/repo-wt", fresh.PendingContentWorktree)
+	fresh.NotePendingContentAt("/repo", true)
+	require.Equal(t, session.PendingContentInSeveralWorktrees, fresh.PendingContentWorktree)
+}

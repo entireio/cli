@@ -138,7 +138,7 @@ func (s *ManualCommitStrategy) rehomeSessionAfterOwnCommit(ctx context.Context, 
 	if worktreePath == "" || isSessionHomeWorktree(worktreePath, state) {
 		return false
 	}
-	if homeHoldsPendingContent(state) {
+	if homeHoldsPendingContent(state, worktreePath) {
 		logging.Debug(logCtx, "post-commit: session committed outside its home worktree but the home holds pending content; staying guest-linked",
 			slog.String("session_id", state.SessionID),
 			slog.String("home_worktree", state.WorktreePath),
@@ -174,7 +174,7 @@ func (s *ManualCommitStrategy) rehomeSessionToCurrentWorktree(ctx context.Contex
 	if err != nil || current == "" || state.WorktreePath == "" || isSessionHomeWorktree(current, state) {
 		return
 	}
-	if homeHoldsPendingContent(state) {
+	if homeHoldsPendingContent(state, current) {
 		return
 	}
 	homeCommon := gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath)
@@ -188,10 +188,98 @@ func (s *ManualCommitStrategy) rehomeSessionToCurrentWorktree(ctx context.Contex
 	rehomeSession(ctx, repo, state, current, head.Hash().String(), "its agent's hooks now run there")
 }
 
-// homeHoldsPendingContent reports whether moving the session would orphan
-// content at its current home: tracked files, shadow-branch steps or task records.
-func homeHoldsPendingContent(state *SessionState) bool {
-	return len(state.FilesTouched) > 0 || state.StepCount > 0 || state.HasTaskContent()
+// rehomeSessionAtTurnEnd re-homes at a turn end that saved no step, such as
+// one whose only work was a subagent's; SaveStep already re-homed the others.
+func (s *ManualCommitStrategy) rehomeSessionAtTurnEnd(ctx context.Context, state *SessionState) {
+	if !AgentWorkingTreeConfirmed(ctx) {
+		return
+	}
+	if current, err := paths.WorktreeRoot(ctx); err != nil || isSessionHomeWorktree(current, state) {
+		return
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
+	s.rehomeSessionToCurrentWorktree(ctx, repo, state, false)
+}
+
+// recordTurnWorktree notes where this turn-start hook captures the turn's
+// baselines, so an end hook the agent has since moved away from finds them.
+func recordTurnWorktree(ctx context.Context, state *SessionState) {
+	if current, err := paths.WorktreeRoot(ctx); err == nil {
+		state.TurnWorktreePath = current
+	}
+}
+
+// homeHoldsPendingContent reports whether moving the session to worktree would
+// orphan content at its current home. Shadow-branch steps are keyed to the home
+// worktree and always hold it; files and task records hold it unless every one
+// was recorded by hooks running in worktree.
+func homeHoldsPendingContent(state *SessionState, worktree string) bool {
+	if state.StepCount > 0 {
+		return true
+	}
+	if !hasPendingFilesOrTasks(state) {
+		return false
+	}
+	return !state.PendingContentRecordedOnlyIn(worktree)
+}
+
+func hasPendingFilesOrTasks(state *SessionState) bool {
+	return len(state.FilesTouched) > 0 || state.HasTaskContent()
+}
+
+// pendingContentSnapshot is what a mutation started from, so the outermost
+// MutateSessionState frame can tell whether it added pending content.
+type pendingContentSnapshot struct {
+	had   bool
+	files map[string]struct{}
+	tasks map[string]int // tool use ID -> file count
+}
+
+func snapshotPendingContent(state *SessionState) pendingContentSnapshot {
+	snap := pendingContentSnapshot{
+		had:   hasPendingFilesOrTasks(state),
+		files: make(map[string]struct{}, len(state.FilesTouched)),
+		tasks: make(map[string]int, len(state.TaskRecords)),
+	}
+	for _, f := range state.FilesTouched {
+		snap.files[f] = struct{}{}
+	}
+	for _, rec := range state.TaskRecords {
+		snap.tasks[rec.ToolUseID] = len(rec.Files)
+	}
+	return snap
+}
+
+// notePendingContentGrowth attributes content a mutation added to the worktree
+// the hook runs in. Every writer goes through MutateSessionState, so none can
+// add content without it being located.
+func notePendingContentGrowth(ctx context.Context, before pendingContentSnapshot, state *SessionState) {
+	if !pendingContentGrew(before, state) {
+		return
+	}
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		current = ""
+	}
+	state.NotePendingContentAt(current, before.had)
+}
+
+func pendingContentGrew(before pendingContentSnapshot, state *SessionState) bool {
+	for _, f := range state.FilesTouched {
+		if _, ok := before.files[f]; !ok {
+			return true
+		}
+	}
+	for _, rec := range state.TaskRecords {
+		if n, ok := before.tasks[rec.ToolUseID]; !ok || len(rec.Files) > n {
+			return true
+		}
+	}
+	return false
 }
 
 // rehomeSession re-derives every worktree-coupled field together so

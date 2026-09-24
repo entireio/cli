@@ -652,12 +652,14 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 	}
 	gate.activeState = state
 
+	before := snapshotPendingContent(state)
 	if err := fn(state); err != nil {
 		if errors.Is(err, ErrMutationSkip) {
 			return nil
 		}
 		return err
 	}
+	notePendingContentGrowth(ctx, before, state)
 	if err := SaveSessionState(ctx, state); err != nil {
 		return fmt.Errorf("save session state: %w", err)
 	}

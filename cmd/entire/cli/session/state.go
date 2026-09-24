@@ -132,6 +132,17 @@ type State struct {
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
 
+	// TurnWorktreePath is the worktree whose turn-start hook captured the
+	// current turn's baselines. An agent can move between worktrees mid-turn,
+	// so the end hook finds them there rather than in its own tree.
+	TurnWorktreePath string `json:"turn_worktree_path,omitempty"`
+
+	// PendingContentWorktree is the worktree whose hooks recorded the session's
+	// uncondensed files and task records, or PendingContentInSeveralWorktrees.
+	// Re-homing consults it: content recorded in the tree a session moves to
+	// does not pin the session to its old home.
+	PendingContentWorktree string `json:"pending_content_worktree,omitempty"`
+
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
 	// `entire session adopt` moves this session into another repository/worktree.
 	// Hook TurnStart must not reactivate tombstoned source records, otherwise the
@@ -708,6 +719,31 @@ func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool
 // existence: task records never touch the shadow branch.
 func (s *State) HasTaskContent() bool {
 	return len(s.TaskRecords) > 0
+}
+
+// PendingContentInSeveralWorktrees marks pending content recorded by hooks in
+// more than one worktree. It is never an absolute path, so no tree matches it.
+const PendingContentInSeveralWorktrees = "several"
+
+// NotePendingContentAt records that worktree's hooks just added pending
+// content; hadContent reports whether any was pending before. A stale value
+// left by an earlier condensation is replaced rather than merged.
+func (s *State) NotePendingContentAt(worktree string, hadContent bool) {
+	switch {
+	case worktree == "":
+		s.PendingContentWorktree = PendingContentInSeveralWorktrees
+	case !hadContent:
+		s.PendingContentWorktree = worktree
+	case filepath.Clean(s.PendingContentWorktree) != filepath.Clean(worktree):
+		s.PendingContentWorktree = PendingContentInSeveralWorktrees
+	}
+}
+
+// PendingContentRecordedOnlyIn reports whether every pending file and task
+// record came from worktree's hooks.
+func (s *State) PendingContentRecordedOnlyIn(worktree string) bool {
+	return worktree != "" && s.PendingContentWorktree != "" &&
+		filepath.Clean(s.PendingContentWorktree) == filepath.Clean(worktree)
 }
 
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —

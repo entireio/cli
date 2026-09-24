@@ -143,8 +143,10 @@ const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this rep
 // follows the agent (Claude Code: EnterWorktree and cd), so without this a
 // session stays homed in the launch directory while its work lands elsewhere.
 // Everything resolved from the process directory follows the move; the state
-// itself is re-homed by the strategy (rehomeSessionToCurrentWorktree), which
-// the returned context authorises only when the payload named this tree.
+// itself is re-homed by the strategy (rehomeSessionToCurrentWorktree). Only a
+// turn boundary confirms the target as the parent session's working tree;
+// task-scoped events still follow their subagent so their baselines and paths
+// are resolved in the tree where that task actually runs.
 func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *agent.Event) context.Context {
 	if event.CWD == "" {
 		return ctx
@@ -161,7 +163,7 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 		return ctx
 	}
 	if filepath.Clean(current) == filepath.Clean(target) {
-		return strategy.WithAgentWorkingTree(ctx)
+		return confirmSessionWorkingTree(ctx, event.Type)
 	}
 	currentMeta, err := gitrepo.ResolveWorktreeMetadata(current)
 	if err != nil || !sameDir(currentMeta.CommonDir, targetMeta.CommonDir) {
@@ -198,7 +200,18 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 				slog.String("from", current))
 		}
 	}
-	return strategy.WithAgentWorkingTree(ctx)
+	return confirmSessionWorkingTree(ctx, event.Type)
+}
+
+// confirmSessionWorkingTree distinguishes a session boundary from a task
+// event emitted by one of that session's subagents. Both need to run in the
+// payload worktree, but only the former is evidence that the parent session
+// itself should be re-homed there.
+func confirmSessionWorkingTree(ctx context.Context, eventType agent.EventType) context.Context {
+	if eventType == agent.TurnStart || eventType == agent.TurnEnd {
+		return strategy.WithAgentWorkingTree(ctx)
+	}
+	return ctx
 }
 
 // sameDir compares two directory paths with symlinks resolved.
@@ -928,6 +941,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		logging.Warn(logCtx, "failed to load pre-prompt state",
 			slog.String("error", err.Error()))
 	}
+	if preState != nil && preState.capturedIn != "" {
+		if carryErr := carryTurnPrompt(ctx, preState.capturedIn, sessionID); carryErr != nil {
+			logging.Warn(logCtx, "failed to carry the turn's prompt from the worktree it started in",
+				slog.String("worktree", preState.capturedIn),
+				slog.String("error", carryErr.Error()))
+		}
+	}
 
 	// Determine transcript offset
 	transcriptOffset := resolveTranscriptOffset(ctx, preState, sessionID)
@@ -1045,11 +1065,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
 		logStatusDegrade(logCtx, "failed to compute file changes", err)
 	}
-	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
+	if changes != nil && preState.NewFilesUndetectable() {
 		// The turn-start untracked scan was skipped (e.g. status-walk budget
-		// breach), so there is no baseline: every untracked file in the
-		// worktree would be misreported as created by this turn.
-		logging.Warn(logCtx, "skipping new-file detection: pre-prompt untracked scan was skipped")
+		// breach) or scanned the worktree the agent has since left, so there is
+		// no baseline here: every untracked file in the worktree would be
+		// misreported as created by this turn.
+		logging.Warn(logCtx, "skipping new-file detection: no pre-prompt untracked baseline for this worktree")
 		changes.New = nil
 	}
 	detectSpan.End()
@@ -1965,7 +1986,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// which is worse and harder to notice.
 	var changes *FileChanges
 	if !opts.analyzerFilesOnly {
-		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
+		preState, preErr := LoadSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID)
 		if preErr != nil {
 			logging.Warn(logCtx, "failed to load pre-task state",
 				slog.String("error", preErr.Error()))
@@ -1979,10 +2000,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		if changesErr != nil {
 			logStatusDegrade(logCtx, "failed to compute file changes", changesErr)
 		}
-		if changes != nil && preState != nil && preState.UntrackedScanSkipped {
-			// Same degradation as turn-end: without a pre-task baseline, every
-			// untracked file would be misreported as created by this task.
-			logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+		if changes != nil && preState.NewFilesUndetectable() {
+			// Same degradation as turn-end: without a pre-task baseline for this
+			// tree, every untracked file would be misreported as created by this task.
+			logging.Warn(logCtx, "skipping new-file detection: no pre-task untracked baseline for this worktree")
 			changes.New = nil
 		}
 	}
@@ -2022,7 +2043,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		if !opts.bypassNoChangesSkip {
 			logging.Info(logCtx, "no file changes detected, skipping task record")
-			_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+			_ = CleanupSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 			return nil
 		}
 		logging.Info(logCtx, "no file changes detected but completing record anyway (final subagent-stop capture)")
@@ -2055,7 +2076,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		if err := strategy.UpsertCompletedTaskRecord(logCtx, event.SessionID, rec); err != nil {
 			return fmt.Errorf("failed to record uncorrelated task: %w", err)
 		}
-		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+		_ = CleanupSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
 	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
@@ -2070,7 +2091,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			slog.String("tool_use_id", event.ToolUseID))
 	}
 
-	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	_ = CleanupSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
 }
 

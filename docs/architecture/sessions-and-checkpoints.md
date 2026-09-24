@@ -224,16 +224,36 @@ the directory they work in on every hook payload (`Event.CWD`; Claude Code's
 `cwd` follows `EnterWorktree` and `cd`), and when that is another worktree of
 the same repository, and Entire is enabled there, the hook process moves there
 before anything is resolved, and its log sink moves with it, so the rest of the hook logs in the worktree
-where the work happens.
+where the work happens. Subagent-start, subagent-end and tool-use events
+follow too, so a subagent's work is detected and normalized in the worktree it
+ran in, but they do not confirm that the parent session moved; only turn-start
+and turn-end payloads provide that signal.
+
+A start hook and its end hook can therefore run in different worktrees. The
+pre-prompt and pre-task baselines live in the `.entire/tmp` of the tree whose
+hook captured them, so the end hook looks for them where the turn started
+(`SessionState.TurnWorktreePath`, recorded at turn start) and at the session's
+home, consumes them there, and carries the turn's `prompt.txt` over. A baseline
+from another tree cannot tell this tree's pre-existing untracked files from new
+ones, so new-file detection then falls back to the transcript, exactly as when
+the untracked scan was skipped: shell-created files the transcript never names
+are missed rather than claiming files that were already there.
+
 At turn-start and turn-end `rehomeSessionToCurrentWorktree` then applies the
-same re-home under the same pending-content guard, so the first commit after
+same re-home — at a turn end that saved no step as well, such as one whose only
+work was a subagent's — under the same pending-content guard. The guard knows
+where pending content came from: every `MutateSessionState` that adds files or
+task records stamps `SessionState.PendingContentWorktree` with the hook's tree
+(or marks content from several trees). Files and task records recorded in the
+tree the session moves to do not pin it to its old home; shadow-branch steps,
+which are keyed to the home worktree, always do. So the first commit after
 the move already finds a correctly homed session with no process ancestry
 involved — which is what covers Windows, where ancestry cannot be read. A hook
 re-homes only on a strong signal: the payload named the tree it now runs in
 (`strategy.WithAgentWorkingTree`, set by the dispatcher) or the turn-end
 capture found edits there. A hook that merely runs in the launch directory
 never moves a session, so agents whose payloads carry no working directory
-(Cursor, Factory Droid, OpenCode, external agents) keep the home their own
+(Cursor, OpenCode, external agents) keep the home their own
 commit chose instead of oscillating between the launch directory and the
 worktree; for them the own-commit and captured-edit signals are what re-home.
 

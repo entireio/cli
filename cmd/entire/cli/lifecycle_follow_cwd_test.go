@@ -44,17 +44,21 @@ func TestFollowAgentWorkingDirectory(t *testing.T) {
 	require.NoError(t, err)
 
 	cases := map[string]struct {
+		eventType agent.EventType
 		cwd       string
 		want      string // process directory afterwards
 		confirmed bool   // the payload named the tree the hook now runs in
 	}{
-		"another worktree of the repo":           {cwd: worktree, want: worktree, confirmed: true},
-		"a subdirectory of that worktree":        {cwd: filepath.Join(worktree, "src", "pkg"), want: worktree, confirmed: true},
-		"a subdirectory of the current tree":     {cwd: filepath.Join(parent, ".git"), want: parent, confirmed: true},
-		"a worktree where entire is not enabled": {cwd: plain, want: parent},
-		"a different repository":                 {cwd: other, want: parent},
-		"a directory that does not exist":        {cwd: filepath.Join(parent, "nope"), want: parent},
-		"no cwd in the payload":                  {cwd: "", want: parent},
+		"another worktree of the repo":           {eventType: agent.TurnStart, cwd: worktree, want: worktree, confirmed: true},
+		"a subdirectory of that worktree":        {eventType: agent.TurnStart, cwd: filepath.Join(worktree, "src", "pkg"), want: worktree, confirmed: true},
+		"a subdirectory of the current tree":     {eventType: agent.TurnStart, cwd: filepath.Join(parent, ".git"), want: parent, confirmed: true},
+		"subagent task worktree":                 {eventType: agent.SubagentStart, cwd: worktree, want: worktree},
+		"subagent completion worktree":           {eventType: agent.SubagentEnd, cwd: worktree, want: worktree},
+		"tool use worktree":                      {eventType: agent.ToolUse, cwd: worktree, want: worktree},
+		"a worktree where entire is not enabled": {eventType: agent.TurnStart, cwd: plain, want: parent},
+		"a different repository":                 {eventType: agent.TurnStart, cwd: other, want: parent},
+		"a directory that does not exist":        {eventType: agent.TurnStart, cwd: filepath.Join(parent, "nope"), want: parent},
+		"no cwd in the payload":                  {eventType: agent.TurnStart, cwd: "", want: parent},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -63,9 +67,9 @@ func TestFollowAgentWorkingDirectory(t *testing.T) {
 			launchLogger, err := newLogger(context.Background())
 			require.NoError(t, err)
 			defer launchLogger.Close()
-			ctx := followAgentWorkingDirectory(logging.WithLogger(context.Background(), launchLogger), ag, &agent.Event{Type: agent.TurnStart, CWD: tc.cwd})
+			ctx := followAgentWorkingDirectory(logging.WithLogger(context.Background(), launchLogger), ag, &agent.Event{Type: tc.eventType, CWD: tc.cwd})
 			require.Equal(t, tc.confirmed, strategy.AgentWorkingTreeConfirmed(ctx),
-				"only a payload naming the current tree lets a hook re-home a session")
+				"only a turn boundary naming the current tree lets a hook re-home a session")
 			moved := tc.want != parent
 			require.Equal(t, moved, logging.LoggerFromContext(ctx) != launchLogger, "the log sink follows only when the hook moved")
 			if moved {
