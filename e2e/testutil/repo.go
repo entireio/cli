@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -513,6 +514,20 @@ func (s *RepoState) Git(t *testing.T, args ...string) {
 // mode. The session is closed automatically during test cleanup.
 func (s *RepoState) StartSession(t *testing.T, ctx context.Context) agents.Session {
 	t.Helper()
+	// Every agent's interactive driver is tmux-backed (agents/tmux.go), and
+	// Windows has no tmux. main_test.go's preflight already states that
+	// interactive tests are skipped there -- which is why it does not require
+	// the tmux binary on Windows -- but nothing enforced it, so the tests ran
+	// and every one failed with `exec: "tmux": executable file not found in
+	// %PATH%`. Only claude carried a guard of its own, so antigravity and
+	// droid, the other two agents on the Windows matrix, hit it.
+	//
+	// The guard belongs here rather than in each agent: the reason is the
+	// platform, not the agent, and one place means the next tmux-driven agent
+	// inherits it instead of having to remember.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	session, err := s.Agent.StartSession(ctx, s.Dir)
 	if err != nil {
 		t.Fatalf("start session: %v", err)
