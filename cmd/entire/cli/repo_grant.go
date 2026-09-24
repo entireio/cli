@@ -243,9 +243,8 @@ func mirrorReadTarget(cmd *cobra.Command, owner, repo string) (clusterHost strin
 	// runCore's own, which is the active login failing to dial its control
 	// plane rather than anything about this repo.
 	if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		// The pull-gated placement lookup, the same authority `repo clone`,
-		// `remote use` and `remote url` resolve through, so a public mirror
-		// resolves too.
+		// The pull-gated placement lookup, the same authority `repo clone` and
+		// `repo remote add` resolve through, so a public mirror resolves too.
 		// Bounded on its own: coreapi's client sets no timeout, so a core that
 		// hangs would make a hint the answer does not depend on outlast the
 		// read that does — a gate by latency, which is what this is not.

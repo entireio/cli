@@ -130,10 +130,9 @@ func TestAwaitMirrorReady(t *testing.T) {
 // TestRepoMirrorAdd_Flags pins the one-shot flags: the wait bound is
 // TestTargetingClusterFlagsTakeAHost pins the one spelling --cluster takes
 // wherever it names a cluster to ACT on. These verbs do not share a flag
-// registration — each declares its own — and `repo remote url` declares one but
-// delegates the logic to repo clone's resolver, so its help drifted to
-// promising a slug the shared resolver then rejected. Nothing caught it,
-// because its behaviour test passed a host.
+// registration — each declares its own — and one that delegates its logic to
+// repo clone's shared resolver can drift into promising a slug that resolver
+// then rejects, with nothing to catch it when its behaviour test passes a host.
 //
 // `repo mirror list --cluster` is deliberately absent: it is a server-side
 // filter that takes either spelling, not a target.
@@ -143,8 +142,7 @@ func TestTargetingClusterFlagsTakeAHost(t *testing.T) {
 		"repo mirror add":    newRepoMirrorAddCmd,
 		"repo mirror remove": newRepoMirrorRemoveCmd,
 		"repo clone":         newRepoCloneCmd,
-		"repo remote use":    newRepoRemoteUseCmd,
-		"repo remote url":    newRepoRemoteURLCmd,
+		"repo remote add":    newRepoRemoteAddCmd,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

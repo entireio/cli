@@ -119,16 +119,16 @@ func TestParseMirrorRepoRef_UnservedForgeIsRefusedUnparsed(t *testing.T) {
 	require.ErrorContains(t, err, "supports Entire repositories only")
 }
 
-// TestResolveMirrorUseUpstream_BothForges pins that `repo remote use` now reads
+// TestResolveRemoteRepoRef_BothForges pins that `repo remote add` reads
 // a native ref as readily as a GitHub one — a clone of either kind can have its
 // remote repointed at another cluster.
-func TestResolveMirrorUseUpstream_BothForges(t *testing.T) {
+func TestResolveRemoteRepoRef_BothForges(t *testing.T) {
 	t.Parallel()
-	native, err := resolveMirrorUseUpstream(t.Context(), t.TempDir(), "origin", "/et/project/widget")
+	native, err := resolveRemoteRepoRef(t.Context(), t.TempDir(), "origin", "/et/project/widget")
 	require.NoError(t, err)
 	require.Equal(t, mirrorRepoRef{forge: nativeCloneForge, owner: "project", repo: "widget"}, native)
 
-	mirror, err := resolveMirrorUseUpstream(t.Context(), t.TempDir(), "origin", "/gh/Acme/Widget")
+	mirror, err := resolveRemoteRepoRef(t.Context(), t.TempDir(), "origin", "/gh/Acme/Widget")
 	require.NoError(t, err)
 	require.Equal(t, mirrorRepoRef{forge: mirrorCloneForge, owner: "acme", repo: "widget"}, mirror)
 }

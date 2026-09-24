@@ -37,8 +37,8 @@ import (
 // the picker is this value once, whatever the placement count.
 //
 // It is deliberately short. The probe is an optimisation with a working
-// fallback, and `repo remote url` exists to have its stdout captured by
-// `$(…)`, where a second of silence reads as a hung shell.
+// fallback, and it runs before a clone the user is waiting on, where a second
+// of silence reads as a hung command.
 const placementProbeBudget = 400 * time.Millisecond
 
 // placementProbePort is the port dialled to time a cluster that does not name

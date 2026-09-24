@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,10 +14,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 )
 
 func TestParseMirrorCloneRef(t *testing.T) {
@@ -1080,4 +1086,232 @@ func TestListMirrorsForRepo_FiltersByRepo(t *testing.T) {
 	for _, m := range got {
 		require.Equal(t, "entire-api", m.Repo)
 	}
+}
+
+// testGitHubRef is the /gh/ ref every placement-routing case resolves; the
+// routing under test does not vary with the owner or repo.
+const testGitHubRef = "/gh/owner/repo"
+
+// resolveCloneURLAgainst runs repo clone's ref resolution against srvURL,
+// returning what it would hand to `git clone`. It drives resolveRepoRemoteURL
+// rather than the command so the resolution is observable without execing git.
+//
+// Not parallel-safe: replaces the package-global activeCoreClient.
+func resolveCloneURLAgainst(t *testing.T, srvURL, cluster string) (string, error) {
+	t.Helper()
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srvURL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+	return resolveRepoRemoteURL(cloneTestCmdWithContext(t), testGitHubRef, cluster, clonePlacementPicker())
+}
+
+// cloneTestCmdWithContext is newCloneTestCmd plus the context the resolver
+// reads directly, which cobra would otherwise only set via ExecuteContext.
+func cloneTestCmdWithContext(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := newCloneTestCmd()
+	cmd.SetContext(t.Context())
+	return cmd
+}
+
+// servePlacements answers the pull-gated placements endpoint with placements
+// and nothing else.
+func servePlacements(t *testing.T, placements []coreapi.ResolvedPlacement) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, "/api/v1/mirrors/placements", r.URL.Path)
+		assert.NoError(t, printJSON(w, &coreapi.ResolvePlacementsOutputBody{Placements: placements}))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// unreachableCluster makes the cluster-fronting dial fail the way discovery
+// really fails, with a genuine *net.DNSError under the sentinel the fallback
+// keys on. notFound distinguishes a name that does not exist (a typo) from one
+// that exists but did not answer.
+func unreachableCluster(t *testing.T, notFound bool) {
+	t.Helper()
+	prev := clusterCoreClient
+	clusterCoreClient = func(_ context.Context, host string) (*coreapi.Client, error) {
+		dns := &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}
+		if notFound {
+			dns = &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+		}
+		return nil, fmt.Errorf("%w: dial tcp: %w", clusterdiscovery.ErrUnreachable, dns)
+	}
+	t.Cleanup(func() { clusterCoreClient = prev })
+}
+
+// TestRepoClone_UnknownClusterNamesTheClustersTheRepoIsOn covers the fallback
+// for a --cluster that does not resolve: the name cannot be a cluster, so the
+// active context's list is allowed to answer, and the user is told which
+// clusters the repo is actually on rather than shown a DNS failure.
+//
+// Not parallel: swaps package-global client seams.
+func TestRepoClone_UnknownClusterNamesTheClustersTheRepoIsOn(t *testing.T) {
+	const unknown = "wrongcluster"
+	srvURL := servePlacements(t, []coreapi.ResolvedPlacement{
+		{ClusterHost: defaultClusterHost},
+		{ClusterHost: "aws-eu-central-1.entire.io"},
+	})
+	unreachableCluster(t, true)
+
+	_, err := resolveCloneURLAgainst(t, srvURL, unknown)
+	require.ErrorContains(t, err, `repo is not mirrored on "`+unknown+`"`)
+	require.Contains(t, err.Error(), defaultClusterHost, "the answer names the clusters the repo is actually on")
+	require.NotContains(t, err.Error(), "no such host", "the dial failure is a debug detail, not the user's answer")
+}
+
+// The other half of the rule. Only an unreachable host may be answered from the
+// active context; a cluster that exists but rejects the selected login is
+// serving the repo perfectly well, so replacing its "pick another context"
+// instruction with "not mirrored" would state the opposite of the truth.
+//
+// Not parallel: swaps package-global client seams.
+func TestRepoClone_ReachableClusterKeepsItsOwnError(t *testing.T) {
+	srvURL := servePlacements(t, []coreapi.ResolvedPlacement{{ClusterHost: defaultClusterHost}})
+	prev := clusterCoreClient
+	clusterCoreClient = func(context.Context, string) (*coreapi.Client, error) {
+		return nil, errors.New("cluster other.example does not accept the login selected by --context")
+	}
+	t.Cleanup(func() { clusterCoreClient = prev })
+
+	_, err := resolveCloneURLAgainst(t, srvURL, "other.example")
+	require.ErrorContains(t, err, "does not accept the login")
+	require.NotContains(t, err.Error(), "not mirrored")
+}
+
+// The one path where the fallback has nothing to offer. The named cluster did
+// not answer and the active context could not stand in, and the two failures
+// are independent things to fix — reporting only the first would have the user
+// correct the host, re-run, and only then discover their login is gone.
+//
+// Not parallel: swaps package-global client seams.
+func TestRepoClone_BothLookupsFailingReportsBoth(t *testing.T) {
+	unreachableCluster(t, true)
+	prevActive := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return nil, errors.New("active login has expired")
+	}
+	t.Cleanup(func() { activeCoreClient = prevActive })
+
+	_, err := resolveRepoRemoteURL(cloneTestCmdWithContext(t), testGitHubRef, "wrongcluster", clonePlacementPicker())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no such host", "the host the user named did not answer")
+	require.Contains(t, err.Error(), "active login has expired", "and the fallback says why it could not answer either")
+}
+
+// The failure that looks like a typo and is not one. A cluster in another
+// federation that times out is unreachable, but nothing about that says the
+// repo is not mirrored there — and the active context cannot see that
+// federation, so its list is not evidence of absence. Answering from it would
+// resurrect the bug the cluster-addressed dial exists to fix.
+//
+// Not parallel: swaps package-global client seams.
+func TestRepoClone_UnreachableClusterIsNotTreatedAsAbsent(t *testing.T) {
+	const elsewhere = "royalcanin.partial.to"
+	for _, tc := range []struct {
+		name     string
+		fallback []coreapi.ResolvedPlacement
+	}{
+		// The active context answers, but about its own federation only.
+		{"fallback lists other clusters", []coreapi.ResolvedPlacement{{ClusterHost: defaultClusterHost}}},
+		// And when it holds nothing, silence is not proof either.
+		{"fallback lists nothing", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srvURL := servePlacements(t, tc.fallback)
+			unreachableCluster(t, false)
+
+			_, err := resolveCloneURLAgainst(t, srvURL, elsewhere)
+			require.ErrorContains(t, err, "i/o timeout", "the connectivity failure is the answer")
+			require.NotContains(t, err.Error(), "not mirrored", "we never reached the federation that would know")
+			require.NotContains(t, err.Error(), "mirror add", "and must not tell the user to onboard what may already exist")
+		})
+	}
+}
+
+// TestRepoClone_PickerRendersOnTheTerminal pins that the placement picker
+// reaches a terminal. Without the seam the path is untestable —
+// CanPromptInteractively() is false under go test, so the form is never
+// constructed and the routing could be deleted with every other test still
+// green. So it forces interactivity, hands runPromptForm a fake terminal, and
+// asserts the prompt landed there rather than on the command's own streams.
+//
+// Not parallel: sets process-global env and replaces two package-level seams.
+func TestRepoClone_PickerRendersOnTheTerminal(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1") // make CanPromptInteractively() true
+	t.Setenv("ACCESSIBLE", "1")      // line-based form, so input can be scripted
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// The picker labels clusters by slug, so it reads the catalog.
+		if r.URL.Path == testClustersPath {
+			assert.NoError(t, printJSON(w, &coreapi.ListClustersOutputBody{Clusters: []coreapi.Cluster{
+				{Slug: "aws-us-east-2", PublicUrl: "https://aws-us-east-2.entire.io"},
+				{Slug: "aws-eu-west-1", PublicUrl: "https://aws-eu-west-1.entire.io"},
+			}}))
+			return
+		}
+		assert.Equal(t, "/api/v1/mirrors/placements", r.URL.Path)
+		assert.NoError(t, printJSON(w, &coreapi.ResolvePlacementsOutputBody{Placements: []coreapi.ResolvedPlacement{
+			{ClusterHost: "aws-us-east-2.entire.io"},
+			{ClusterHost: "aws-eu-west-1.entire.io"},
+		}}))
+	}))
+	t.Cleanup(srv.Close)
+
+	// Hosts are offered case-folded and sorted, so 1 = eu-west, 2 = us-east.
+	var terminal bytes.Buffer
+	prevTerm := openPromptTerminal
+	openPromptTerminal = func() (promptTerminal, error) {
+		return promptTerminal{in: strings.NewReader("2\n"), out: &terminal}, nil
+	}
+	t.Cleanup(func() { openPromptTerminal = prevTerm })
+
+	got, err := resolveCloneURLAgainst(t, srv.URL, "")
+	require.NoError(t, err)
+	require.Equal(t, "entire://aws-us-east-2.entire.io/gh/owner/repo", got)
+
+	// The prompt really did render — on the terminal, not the command's streams.
+	// Clusters are offered by slug, which is what --cluster takes.
+	require.Contains(t, terminal.String(), "pick one to clone from")
+	require.Contains(t, terminal.String(), "aws-eu-west-1")
+}
+
+// TestRepoClone_GitHubNoTerminalResolvesTheDefaultCluster pins the /gh/ half of
+// the no-terminal default. selectPlacement's own tests cover the mechanism with
+// a default passed in; this covers the wiring — that the GitHub branch passes
+// defaultClusterHost — which is the whole of the GitHub primary story now that
+// the placement list carries no primary of its own.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_GitHubNoTerminalResolvesTheDefaultCluster(t *testing.T) {
+	// go test is non-interactive, so this is the path a script or CI run takes.
+	srvURL := servePlacements(t, []coreapi.ResolvedPlacement{
+		{ClusterHost: "aws-eu-central-1.entire.io"},
+		{ClusterHost: defaultClusterHost},
+	})
+	got, err := resolveCloneURLAgainst(t, srvURL, "")
+	require.NoError(t, err)
+	require.Equal(t, entireCloneURLScheme+defaultClusterHost+"/gh/owner/repo", got)
+}
+
+// And the limit of that assumption, stated outright: a repo mirrored only
+// elsewhere has no placement matching the constant, so it still has to be told
+// which cluster to use rather than being sent to one it is not on.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_GitHubWithoutTheDefaultClusterStillAsks(t *testing.T) {
+	srvURL := servePlacements(t, []coreapi.ResolvedPlacement{
+		{ClusterHost: "aws-eu-central-1.entire.io"},
+		{ClusterHost: "aws-ap-south-1.entire.io"},
+	})
+	_, err := resolveCloneURLAgainst(t, srvURL, "")
+	require.ErrorContains(t, err, "none of them is "+defaultClusterHost)
+	require.ErrorContains(t, err, clusterSelectorFlag)
 }
