@@ -77,6 +77,10 @@ func hasRunInBackgroundFlag(ctx context.Context, toolInput json.RawMessage) bool
 
 const asyncLaunchedStatus = "async_launched"
 
+// isBackgroundLaunch distinguishes a background launch stub (defer to
+// SubagentStop) from a finished foreground PostToolUse. Async response
+// (isAsync/"async_launched") or run_in_background: true; Claude Code omits the
+// flag by default, so tool_response wins over an explicit false.
 func isBackgroundLaunch(ctx context.Context, event *agent.Event) bool {
 	if hasRunInBackgroundFlag(ctx, event.ToolInput) {
 		return true

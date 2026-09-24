@@ -171,7 +171,7 @@ type PostTaskInput struct {
 	RunInBackground bool
 	OmitRunInBackground bool
 	AsyncStatus string
-	AsyncLaunch bool
+	IsAsync     bool
 }
 
 // SimulatePostTask simulates the PostToolUse[Task] hook.
@@ -189,7 +189,7 @@ func (r *HookRunner) SimulatePostTask(input PostTaskInput) error {
 	if input.AsyncStatus != "" {
 		toolResponse["status"] = input.AsyncStatus
 	}
-	if input.AsyncLaunch {
+	if input.IsAsync {
 		toolResponse["isAsync"] = true
 	}
 

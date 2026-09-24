@@ -709,7 +709,7 @@ func TestSubagentCheckpoints_AsyncLaunchResponse_DefersToSubagentStop(t *testing
 		AgentID:             subagentID,
 		OmitRunInBackground: true,
 		AsyncStatus:         "async_launched",
-		AsyncLaunch:         true,
+		IsAsync:             true,
 	}); err != nil {
 		t.Fatalf("SimulatePostTask (async launch stub) failed: %v", err)
 	}
