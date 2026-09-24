@@ -55,7 +55,7 @@ const (
 
 // antigravityAuthMode is how the spawned agy authenticates. Resolution order
 // is deliberate: explicit ADC credentials are an antigravity-specific choice
-// and win; GEMINI_API_KEY is ambient in CI (shared with gemini-cli) and is the
+// and win; GEMINI_API_KEY is wired into the antigravity leg in CI and is the
 // default there; with neither, the developer's real HOME (interactive OAuth
 // login) is used so local runs work without extra setup.
 type antigravityAuthMode int
