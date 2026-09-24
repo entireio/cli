@@ -332,7 +332,10 @@ func CheckoutBranch(ctx context.Context, ref string) error {
 // Reflog expressions retain native --branch interpretation (notably @{-1}),
 // which depends on repository state and is not part of go-git's name validator.
 func ValidateBranchName(ctx context.Context, branchName string) error {
-	if ctx.Err() != nil || strings.HasPrefix(branchName, "-") {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("validate branch name: %w", err)
+	}
+	if strings.HasPrefix(branchName, "-") {
 		return fmt.Errorf("invalid branch name %q", branchName)
 	}
 	var err error
@@ -340,6 +343,11 @@ func ValidateBranchName(ctx context.Context, branchName string) error {
 		err = exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branchName).Run()
 	} else {
 		err = plumbing.ValidateBranchName(branchName)
+	}
+	// CommandContext can return a killed-process error when cancellation arrives
+	// during native interpretation. Preserve the context cause, not invalidity.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("validate branch name: %w", ctxErr)
 	}
 	if err != nil {
 		return fmt.Errorf("invalid branch name %q", branchName)

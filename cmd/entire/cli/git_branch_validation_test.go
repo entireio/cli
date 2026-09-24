@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -76,12 +78,30 @@ func TestValidateBranchName_LiteralsDoNotNeedGit(t *testing.T) {
 	require.Error(t, ValidateBranchName(t.Context(), "@{-1}"))
 }
 
-func TestValidateBranchName_Canceled(t *testing.T) {
+func TestValidateBranchName_ContextErrors(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	for _, name := range []string{"main", "-topic", "@{-1}"} {
-		require.EqualError(t, ValidateBranchName(ctx, name), fmt.Sprintf("invalid branch name %q", name))
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			if errors.Is(cause, context.DeadlineExceeded) {
+				ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+				defer cancel()
+			}
+			for _, name := range []string{"main", "-topic", "@{-1}"} {
+				err := ValidateBranchName(ctx, name)
+				require.ErrorIs(t, err, cause)
+				require.NotContains(t, err.Error(), "invalid branch name")
+			}
+			// Public callers must keep the context cause in their error chains.
+			require.ErrorIs(t, CheckoutBranch(ctx, "main"), cause)
+			require.ErrorIs(t, FetchAndCheckoutRemoteBranch(ctx, "main"), cause)
+			_, err := BranchExistsLocally(ctx, "main")
+			require.ErrorIs(t, err, cause)
+			_, err = BranchExistsOnRemote(ctx, "main")
+			require.ErrorIs(t, err, cause)
+		})
 	}
 }
 

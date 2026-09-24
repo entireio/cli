@@ -184,7 +184,10 @@ Names containing `@{` retain native `git check-ref-format --branch` interpretati
 including repository-dependent checkout history such as `@{-1}`. Validation does
 not expand the string returned to callers, check that a branch exists, or make
 checkout safe from pathspec fallback; `CheckoutBranch` must still pass the
-trailing `--`. A canceled context is still rejected before literal validation.
+trailing `--`. Cancellation and deadline expiry are returned as wrapped context
+errors, not invalid-name errors. Check context state both before validation and
+after native interpretation, since a killed subprocess can otherwise hide the
+context cause behind its exit error.
 
 #### Repo Root vs Current Working Directory
 
