@@ -497,6 +497,12 @@ func newRepoEditCmd() *cobra.Command {
 	return cmd
 }
 
+// projectFlagName is the --project flag's name, in the one place the repo
+// commands register, require, group and read it. The same word is also a NOUN
+// in `entire project` and in the grant family's messages; those are a different
+// thing that happens to be spelled alike, so they keep their own literals.
+const projectFlagName = "project"
+
 // bindRepoProjectFlag wires the shared --project scope used to resolve a repo
 // addressed by a BARE NAME. That is the only form it serves: a repo name is
 // unique only within its project, and the control plane has no by-name route
@@ -510,12 +516,6 @@ func newRepoEditCmd() *cobra.Command {
 // short-circuits resolveRepoRef before projectRef is ever read, so a flatly
 // wrong project was accepted in silence; warnRedundantProjectFlag is what ends
 // that.
-// projectFlagName is the --project flag's name, in the one place the repo
-// commands register, require, group and read it. The same word is also a NOUN
-// in `entire project` and in the grant family's messages; those are a different
-// thing that happens to be spelled alike, so they keep their own literals.
-const projectFlagName = "project"
-
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
 	cmd.Flags().StringVar(project, projectFlagName, "", "Owning project (name or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
 	warnRedundantProjectFlag(cmd, project)
@@ -537,23 +537,6 @@ func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
 // ref as args[0]. An existing PreRunE is chained rather than clobbered, so a
 // command that grows one later does not silently lose the warning (or its own
 // hook).
-// warnFlagsGitHubViewIgnores reports the flags that mean nothing on the GitHub
-// half of `repo view`. Entire holds no repo record for an upstream, so there is
-// no owning project to agree with and no provisioning state to confirm: the
-// directory lookup takes neither value.
-//
-// --authoritative matters most. Its help promises to fail if the server cannot
-// confirm provisioning state, so a script gating on that guarantee otherwise
-// gets exit 0 with no check performed. Warning rather than erroring keeps a
-// `for repo in ...` loop over mixed forges working.
-func warnFlagsGitHubViewIgnores(cmd *cobra.Command) {
-	for _, name := range []string{"authoritative", projectFlagName} {
-		if cmd.Flags().Changed(name) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Note: --%s is ignored for a GitHub repository; Entire holds no repository record for an upstream, only the mirrors of it.\n", name)
-		}
-	}
-}
-
 func warnRedundantProjectFlag(cmd *cobra.Command, project *string) {
 	prev := cmd.PreRunE
 	cmd.PreRunE = func(c *cobra.Command, args []string) error {
@@ -568,5 +551,22 @@ func warnRedundantProjectFlag(cmd *cobra.Command, project *string) {
 			fmt.Fprintf(c.ErrOrStderr(), "Note: --project %q is ignored — %s is a repo ULID, which identifies the repo on its own.\n", *project, args[0])
 		}
 		return nil
+	}
+}
+
+// warnFlagsGitHubViewIgnores reports the flags that mean nothing on the GitHub
+// half of `repo view`. Entire holds no repo record for an upstream, so there is
+// no owning project to agree with and no provisioning state to confirm: the
+// directory lookup takes neither value.
+//
+// --authoritative matters most. Its help promises to fail if the server cannot
+// confirm provisioning state, so a script gating on that guarantee otherwise
+// gets exit 0 with no check performed. Warning rather than erroring keeps a
+// `for repo in ...` loop over mixed forges working.
+func warnFlagsGitHubViewIgnores(cmd *cobra.Command) {
+	for _, name := range []string{"authoritative", projectFlagName} {
+		if cmd.Flags().Changed(name) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Note: --%s is ignored for a GitHub repository; Entire holds no repository record for an upstream, only the mirrors of it.\n", name)
+		}
 	}
 }
