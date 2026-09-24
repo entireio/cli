@@ -207,15 +207,19 @@ shadow-branch realignment) — those follow only the session's own worktree HEAD
 commit made while `git merge --squash` is in progress (SQUASH_MSG present in
 the per-worktree git dir) contains the squashed commits' work, so every
 `Entire-Checkpoint` trailer in SQUASH_MSG is carried into the message when
-missing. git only reports source `squash` when its seeded message is accepted;
+missing only when the staged state matches a commit hash Git recorded there.
+An abandoned squash can leave SQUASH_MSG behind; mismatched staged content
+therefore inherits nothing, and inherited trailers in Git's seeded message are
+removed. git only reports source `squash` when its seeded message is accepted;
 a squash committed with `-m` reports `message`, which used to run ordinary
 matching and either refuse or mint a fresh, empty checkpoint. Inherited
 trailers are links to checkpoints that already exist. Matching still runs, so
 work a session holds at squash time is stamped as its own trailer after the
 inherited ones, and post-commit condenses only into the trailer that has no
-checkpoint yet (`pickCondensationTarget`), never into an inherited one; a
+checkpoint yet (`pickCondensationTarget`), rechecks whether that target appeared
+between selection and condensation, and never writes into an inherited one; a
 write into a checkpoint the session did not stamp for this commit is refused
-(`checkpointBelongsElsewhere`). Merge commits stay unlinked by design; the
+(`stampedByAnotherCommit`). Merge commits stay unlinked by design; the
 merged commits keep their own trailers.
 
 **Worktree matching** (always computed; the sole mechanism for commits with

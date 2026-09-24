@@ -355,8 +355,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
 
 	// A merge commit is skipped: the merged commits keep their own trailers.
-	switch source {
-	case "merge":
+	if source == "merge" {
 		logging.Debug(logCtx, "prepare-commit-msg: skipped for source",
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
@@ -545,8 +544,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 // inheritSquashedCheckpointTrailers handles a commit made while `git merge
 // --squash` is in progress (SQUASH_MSG present): the squashed commits'
-// Entire-Checkpoint trailers are carried into the message and no session is
-// matched. `commit -m` reports source "message", not "squash", so this runs
+// Entire-Checkpoint trailers are carried into the message when staged content
+// matches the recorded commits. `commit -m` reports source "message", not "squash", so this runs
 // before the source switch — but only for those two sources: an amend must
 // keep its own logic even when an abandoned squash left SQUASH_MSG behind.
 // Reports whether it took over; no trailers or an unusable message fall
@@ -573,6 +572,18 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 
 	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
 	if len(inherited) == 0 {
+		return nil
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil
+	}
+	defer repo.Close()
+	if !squashStagedContentMatches(ctx, repo, squashMsg) {
+		stripInheritedCheckpointTrailers(commitMsgFile, inherited)
+		logging.Debug(logCtx, "prepare-commit-msg: ignored stale squash message whose commits do not match staged content",
+			slog.String("source", source),
+			slog.Int("inherited", len(inherited)))
 		return nil
 	}
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
@@ -607,6 +618,56 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		slog.Int("inherited", len(inherited)),
 		slog.Int("added", added))
 	return inherited
+}
+
+// squashStagedContentMatches reports whether the index contains the final state
+// of a path changed by one of the commits Git recorded in SQUASH_MSG. Git leaves
+// SQUASH_MSG behind when a squash is abandoned, so the file alone is not proof
+// that the current staged work belongs to those commits.
+func squashStagedContentMatches(ctx context.Context, repo *git.Repository, squashMsg []byte) bool {
+	staged, err := stagedBlobs(ctx, repo)
+	if err != nil || len(staged) == 0 {
+		return false
+	}
+	for _, line := range strings.Split(string(squashMsg), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "commit" || !plumbing.IsHash(fields[1]) {
+			continue
+		}
+		commit, err := repo.CommitObject(plumbing.NewHash(fields[1]))
+		if err != nil {
+			continue
+		}
+		commitTree, err := commit.Tree()
+		if err != nil {
+			continue
+		}
+		if recommitsFilesOf(commit, commitTree, staged) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripInheritedCheckpointTrailers(commitMsgFile string, inherited []id.CheckpointID) {
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return
+	}
+	remove := make(map[string]bool, len(inherited))
+	for _, cpID := range inherited {
+		remove[trailers.CheckpointTrailerKey+": "+cpID.String()] = true
+	}
+	lines := strings.Split(string(content), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !remove[strings.TrimSpace(line)] {
+			kept = append(kept, line)
+		}
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(strings.Join(kept, "\n")), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return // hooks stay silent on failure
+	}
 }
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
@@ -1006,18 +1067,17 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
 	stamped := trailers.ParseAllCheckpoints(commit.Message)
-	checkpointID, found := s.condensationTarget(ctx, repo, stamped)
+	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, stamped)
 	openRepoSpan.End()
 
 	if !found {
-		if len(stamped) > 0 {
-			logging.Debug(logCtx, "post-commit: every trailer links an existing checkpoint; nothing to condense",
-				slog.Int("trailers", len(stamped)))
-		}
 		// No trailer — user removed it or it was never added (mid-turn commit).
 		// Still update BaseCommit for active sessions so future commits can match.
 		s.postCommitUpdateBaseCommitOnly(ctx, head)
 		return nil
+	}
+	if targetPreexisting {
+		ctx = withPreexistingTarget(ctx)
 	}
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
@@ -1616,7 +1676,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	opts condenseOpts,
 ) (condensed bool, newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
-	if s.checkpointBelongsElsewhere(ctx, repo, checkpointID, state) {
+	if stampedByAnotherCommit(ctx, checkpointID, state) {
 		logging.Warn(logCtx, "refusing to condense into a checkpoint this session did not stamp",
 			slog.String("session_id", state.SessionID),
 			slog.String("checkpoint_id", checkpointID.String()))
@@ -2971,7 +3031,7 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
@@ -2979,12 +3039,9 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 	}
 
 	staged := []string{}
-	trimmed := strings.TrimSpace(string(output))
-	// Normalize Windows line endings (\r\n) to Unix (\n) for cross-platform git output
-	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
-	for _, line := range strings.Split(trimmed, "\n") {
-		if line != "" {
-			staged = append(staged, filepath.ToSlash(line))
+	for _, name := range bytes.Split(output, []byte{0}) {
+		if len(name) != 0 {
+			staged = append(staged, filepath.ToSlash(string(name)))
 		}
 	}
 	return staged, nil

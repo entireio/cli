@@ -46,3 +46,23 @@ func TestPickCondensationTarget(t *testing.T) {
 	_, ok = pickCondensationTarget(nil, exists)
 	assert.False(t, ok)
 }
+
+func TestPickCondensationTargetState_RechecksSelectedTarget(t *testing.T) {
+	t.Parallel()
+	linked := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J3A")
+	target := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J3B")
+	targetChecks := 0
+	exists := func(cpID id.CheckpointID) bool {
+		if cpID == linked {
+			return true
+		}
+		targetChecks++
+		return targetChecks > 1
+	}
+
+	got, preexisting, found := pickCondensationTargetState([]id.CheckpointID{linked, target}, exists)
+	assert.True(t, found)
+	assert.Equal(t, target, got)
+	assert.True(t, preexisting,
+		"a target created after selection must be treated as preexisting before condensation")
+}

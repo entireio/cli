@@ -123,3 +123,37 @@ func TestInheritSquashedCheckpointTrailers_AmendIgnoresStaleSquashMsg(t *testing
 	require.NoError(t, err)
 	require.NotContains(t, string(got), branchCheckpoint)
 }
+
+func TestPrepareCommitMsg_StaleSquashMsgDoesNotLinkUnrelatedMessageCommit(t *testing.T) {
+	dir, branchCheckpoint := squashFixture(t)
+	testutil.RunGit(t, dir, "restore", "--staged", ".")
+	testutil.WriteFile(t, dir, "README.md", "unrelated change\n")
+	testutil.GitAdd(t, dir, "README.md")
+
+	msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(msgFile, []byte("Unrelated fix\n"), 0o600))
+	require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(context.Background(), msgFile, "message"))
+
+	got, err := os.ReadFile(msgFile)
+	require.NoError(t, err)
+	require.NotContains(t, string(got), branchCheckpoint,
+		"abandoned squash trailers must not attach to unrelated staged content")
+}
+
+func TestPrepareCommitMsg_StaleSquashMsgRemovesSeededTrailer(t *testing.T) {
+	dir, branchCheckpoint := squashFixture(t)
+	squashMsg, err := os.ReadFile(filepath.Join(dir, ".git", "SQUASH_MSG"))
+	require.NoError(t, err)
+	testutil.RunGit(t, dir, "restore", "--staged", ".")
+	testutil.WriteFile(t, dir, "README.md", "unrelated change\n")
+	testutil.GitAdd(t, dir, "README.md")
+
+	msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(msgFile, squashMsg, 0o600))
+	require.NoError(t, NewManualCommitStrategy().PrepareCommitMsg(context.Background(), msgFile, "squash"))
+
+	got, err := os.ReadFile(msgFile)
+	require.NoError(t, err)
+	require.NotContains(t, string(got), branchCheckpoint,
+		"Git's seeded message must lose trailers from an abandoned squash")
+}

@@ -2,11 +2,13 @@ package strategy
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/go-git/go-git/v6"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -44,32 +46,62 @@ func pickCondensationTarget(ids []id.CheckpointID, exists func(id.CheckpointID) 
 	return id.EmptyCheckpointID, false
 }
 
-func (s *ManualCommitStrategy) condensationTarget(ctx context.Context, repo *git.Repository, ids []id.CheckpointID) (id.CheckpointID, bool) {
-	if len(ids) <= 1 {
-		return pickCondensationTarget(ids, nil)
+func pickCondensationTargetState(ids []id.CheckpointID, exists func(id.CheckpointID) bool) (target id.CheckpointID, preexisting, found bool) {
+	if len(ids) == 0 {
+		return id.EmptyCheckpointID, false, false
 	}
-	store, err := s.getPersistentStore(ctx, repo)
-	if err != nil {
-		// Without a store nothing can be told apart; keep the last trailer,
-		// which is where prepare stamps.
-		return ids[len(ids)-1], true
+	if len(ids) == 1 {
+		return ids[0], exists(ids[0]), true
 	}
-	return pickCondensationTarget(ids, func(cpID id.CheckpointID) bool { return checkpointExists(ctx, store, cpID) })
+	target, found = pickCondensationTarget(ids, exists)
+	if !found {
+		return id.EmptyCheckpointID, false, false
+	}
+	// Recheck after selection: another session may have created the checkpoint
+	// between the first store read and condensation.
+	return target, exists(target), true
 }
 
-// checkpointBelongsElsewhere reports whether checkpointID already holds a
-// checkpoint that this session did not stamp for this commit: neither the one
-// it is amending (LastCheckpointID) nor its pending reservation. Writing there
-// would fold new work into another commit's record.
-func (s *ManualCommitStrategy) checkpointBelongsElsewhere(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID, state *SessionState) bool {
-	if checkpointID == state.LastCheckpointID || checkpointID == state.PendingCondensationID() {
-		return false
+// condensationTarget picks the trailer this commit condenses into and reports
+// whether that checkpoint already existed before this post-commit began. Read
+// once per commit: sessions condensing into the same fresh checkpoint later in
+// this hook must not look like writes into someone else's.
+func (s *ManualCommitStrategy) condensationTarget(ctx context.Context, repo *git.Repository, ids []id.CheckpointID) (target id.CheckpointID, preexisting, found bool) {
+	if len(ids) == 0 {
+		return id.EmptyCheckpointID, false, false
 	}
 	store, err := s.getPersistentStore(ctx, repo)
 	if err != nil {
+		// Nothing can be told apart without a store; the last trailer is
+		// where prepare stamps.
+		return ids[len(ids)-1], false, true
+	}
+	exists := func(cpID id.CheckpointID) bool { return checkpointExists(ctx, store, cpID) }
+	target, preexisting, ok := pickCondensationTargetState(ids, exists)
+	if !ok {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: every trailer links an existing checkpoint; nothing to condense",
+			slog.Int("trailers", len(ids)))
+	}
+	return target, preexisting, ok
+}
+
+type preexistingTargetKey struct{}
+
+// withPreexistingTarget marks a post-commit whose condensation target already
+// had a checkpoint when the hook began.
+func withPreexistingTarget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, preexistingTargetKey{}, true)
+}
+
+// stampedByAnotherCommit reports whether checkpointID is a preexisting
+// checkpoint this session did not stamp for this commit: neither the one it is
+// amending (LastCheckpointID) nor its pending reservation. Writing there would
+// fold new work into another commit's record.
+func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, state *SessionState) bool {
+	if ctx.Value(preexistingTargetKey{}) != true {
 		return false
 	}
-	return checkpointExists(ctx, store, checkpointID)
+	return checkpointID != state.LastCheckpointID && checkpointID != state.PendingCondensationID()
 }
 
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {
