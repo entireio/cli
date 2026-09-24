@@ -228,21 +228,25 @@ func rewriteCollectedCheckpointRefWithOPF(
 	}
 
 	// CAS prevents a concurrent checkpoint generation from being overwritten;
-	// EnqueueRef then replaces the queue token with the rewritten generation.
+	// the exact installed generation then replaces the old queue token.
 	return updateOPFRewrittenRef(ctx, repo, queue, pending.ref, parent, pending.old)
+}
+
+type opfRefQueue interface {
+	EnqueueEntry(entry checkpoint.PushQueueEntry) error
 }
 
 func updateOPFRewrittenRef(
 	ctx context.Context,
 	repo *git.Repository,
-	queue *checkpoint.PushQueue,
+	queue opfRefQueue,
 	refName plumbing.ReferenceName,
 	newHash, oldHash plumbing.Hash,
 ) error {
 	if err := checkpoint.CASPersistentRef(ctx, repo, refName, newHash, oldHash); err != nil {
 		return fmt.Errorf("update checkpoint ref %s: %w", refName, err)
 	}
-	if err := queue.EnqueueRef(repo, refName); err != nil {
+	if err := queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: refName, Hash: newHash}); err != nil {
 		return fmt.Errorf("enqueue rewritten checkpoint ref %s: %w", refName, err)
 	}
 	return nil
