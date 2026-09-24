@@ -304,9 +304,9 @@ func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
 // ValidateBranchName replaces a leading-dash check that was the narrowest part
 // of the problem: the ref arrives from `entire resume <branch>` and from a
 // trail's branch field, and `git checkout` also reads `@{-1}` and a name
-// carrying a newline. It still admits an object id, since `check-ref-format
-// --branch` accepts a hex string, so the "or commit" half of the old contract
-// survives even though no caller uses it.
+// carrying a newline. It still admits an object id, since Git's branch-name
+// rules accept a hex string, so the "or commit" half of the old contract survives
+// even though no caller uses it.
 //
 // The trailing `--` covers what validation cannot, and validation cannot cover
 // it in principle: `git checkout <name>` falls back to treating <name> as a
@@ -359,7 +359,7 @@ func ValidateBranchName(ctx context.Context, branchName string) error {
 // Uses git CLI instead of go-git for fetch because go-git doesn't use credential helpers,
 // which breaks HTTPS URLs that require authentication.
 func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error {
-	// Validate branch name before using in shell command (branchName comes from user CLI input)
+	// Validate the user-supplied branch name before constructing the fetch refspec.
 	if err := ValidateBranchName(ctx, branchName); err != nil {
 		return err
 	}

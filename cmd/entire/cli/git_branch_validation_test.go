@@ -83,12 +83,7 @@ func TestValidateBranchName_ContextErrors(t *testing.T) {
 	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
 		t.Run(cause.Error(), func(t *testing.T) {
 			t.Parallel()
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-			if errors.Is(cause, context.DeadlineExceeded) {
-				ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
-				defer cancel()
-			}
+			ctx := branchValidationErrorContext(t, cause)
 			for _, name := range []string{"main", "-topic", "@{-1}"} {
 				err := ValidateBranchName(ctx, name)
 				require.ErrorIs(t, err, cause)
@@ -103,6 +98,18 @@ func TestValidateBranchName_ContextErrors(t *testing.T) {
 			require.ErrorIs(t, err, cause)
 		})
 	}
+}
+
+func branchValidationErrorContext(t *testing.T, cause error) context.Context {
+	t.Helper()
+	if errors.Is(cause, context.DeadlineExceeded) {
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	return ctx
 }
 
 func TestValidateBranchName_ASCIIParity(t *testing.T) {

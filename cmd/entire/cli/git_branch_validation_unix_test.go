@@ -18,8 +18,8 @@ func TestValidateBranchName_CanceledDuringNativeInterpretation(t *testing.T) {
 	gitenv.IsolateRepository(t)
 	bin := t.TempDir()
 	ready := filepath.Join(t.TempDir(), "ready")
-	// exec replaces the shell, so CommandContext kills the only child and no
-	// descendant retains its pipes. The marker proves cancellation happens after
+	// exec replaces the shell, so CommandContext kills sleep itself rather than
+	// leaving it running as an orphan. The marker proves cancellation happens after
 	// the native fallback starts, rather than exercising only the entry guard.
 	script := "#!/bin/sh\nprintf ready > \"$ENTIRE_TEST_VALIDATION_READY\"\nexec /bin/sleep 60\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755))

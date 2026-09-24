@@ -18,12 +18,12 @@ require (
 	github.com/go-faster/jx v1.2.0
 	github.com/go-git/go-billy/v6 v6.0.0-alpha.2
 	// Floor, not just a bump: c15a9478 adds plumbing.ValidateBranchName with
-	// native branch-creation rules (including HEAD and @ components).
-	// Also retain go-git#2309 (per-directory
-	// ignore Scope): the root-level e2e/artifacts/ rule only prunes the status
-	// walk from that commit onward. go-git#2312 (record partial clones): a
-	// go-git filtered fetch used to write no promisor bookkeeping, leaving a
-	// repository git calls corrupt and can never gc again; the same commits
+	// native branch-creation rules (including HEAD and @ components). Also
+	// retain go-git#2309 (per-directory ignore Scope): the root-level
+	// e2e/artifacts/ rule only prunes the status walk from that commit onward.
+	// go-git#2312 (record partial clones): filtered fetches used to write no
+	// promisor bookkeeping, leaving a repository git calls corrupt and can
+	// never gc again; the same commits
 	// also fix RepackObjects/Prune failing with "object not found" on any
 	// partial clone, including one made by the git binary.
 	// Move to a plain tag once alpha.6 ships.
