@@ -9,7 +9,8 @@ import (
 )
 
 // TrailsEnabled probes trail availability: 2xx=true, 403/404/410=false,
-// everything else ambiguous.
+// everything else ambiguous. An ambiguous status is returned as an *HTTPError
+// so callers can tell a rejected credential (401) from a transient failure.
 func (c *Client) TrailsEnabled(ctx context.Context, forge, owner, repo string) (bool, error) {
 	resp, err := c.Get(ctx, fmt.Sprintf("/api/v1/trails/%s/%s/%s?per_page=1",
 		url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo)))
@@ -26,6 +27,6 @@ func (c *Client) TrailsEnabled(ctx context.Context, forge, owner, repo string) (
 	case http.StatusForbidden, http.StatusNotFound, http.StatusGone:
 		return false, nil
 	default:
-		return false, fmt.Errorf("probe trails enablement: unexpected status %s", resp.Status)
+		return false, fmt.Errorf("probe trails enablement: %w", &HTTPError{StatusCode: resp.StatusCode})
 	}
 }

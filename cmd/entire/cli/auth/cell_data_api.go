@@ -162,7 +162,37 @@ func (f *CellClientFactory) cellBaseURLFor(ctx context.Context, target *CellTarg
 	if err := requireSafeExchangeURL("entire-api cell", cellBaseURL); err != nil {
 		return "", err
 	}
+	if err := requireSameSite(cellBaseURL, f.subject.discoveredCore); err != nil {
+		return "", err
+	}
 	return cellBaseURL, nil
+}
+
+// ErrCellSiteMismatch reports a cell that belongs to a different Entire site
+// than the login about to be sent to it.
+var ErrCellSiteMismatch = errors.New("entire-api cell and login belong to different Entire sites")
+
+// requireSameSite refuses to send a login issued by one Entire site to another
+// site's cell. The cell would reject it anyway, so the request can only leak
+// the credential across environments; this happens when the cell address and
+// the token come from different logins (ENT-2573). Loopback and custom hosts
+// have no site and are not checked.
+//
+// The hint names the override's value rather than a site to switch to: it can
+// sit on either side of the mismatch (a staging login with a prod override
+// picks the token from prod, while a prod ENTIRE_TOKEN with a staging cell
+// override picks the cell from staging).
+func requireSameSite(cellBaseURL, loginCore string) error {
+	cellSite, loginSite := EntireSite(cellBaseURL), EntireSite(loginCore)
+	if cellSite == "" || loginSite == "" || cellSite == loginSite {
+		return nil
+	}
+	hint := "select a login for " + cellSite + " with `entire auth switch`"
+	if override, ok := api.BaseURLOverride(); ok {
+		hint = fmt.Sprintf("%s=%s and the selected login name different Entire sites; unset it, or select a matching login with `entire auth switch`", api.BaseURLEnvVar, override)
+	}
+	return fmt.Errorf("refusing to send a login issued by %s to the %s cell %s: %w; %s",
+		strings.TrimRight(loginCore, "/"), cellSite, cellBaseURL, ErrCellSiteMismatch, hint)
 }
 
 // JurisdictionToken mints and returns a jurisdictional identity token
@@ -544,7 +574,9 @@ func EntireSite(coreURL string) string {
 	if err != nil {
 		return ""
 	}
-	host := strings.ToLower(u.Hostname())
+	// A fully qualified name ("host.partial.to.") resolves and verifies like
+	// the bare one, so it must classify the same.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	switch {
 	case host == "partial.to" || strings.HasSuffix(host, ".partial.to"):
 		return "partial.to"

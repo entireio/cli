@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -306,26 +307,28 @@ var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, forge, 
 }
 
 // trailsCellClient resolves the entire-api cell client for ownerRepo via
-// trailRefreshAPIClient, classifying the one failure every caller must treat
-// specially instead of leaving each to re-derive it.
+// trailRefreshAPIClient, classifying the failures every caller must treat
+// specially instead of leaving each to re-derive them.
 //
-// notOnboarded reports errRepoNotOnboarded (cell_target.go): a DEFINITIVE, not
-// transient, negative — the repo has no processing placement — which callers
+// definitiveNegative reports a failure that retrying cannot fix, which callers
 // must PERSIST rather than treat as an ordinary client-construction failure,
 // because leaving the cache unknown means every future refresh re-attempts
-// (and re-fails) the same client build forever.
+// (and re-fails) the same client build forever:
+//   - errRepoNotOnboarded (cell_target.go): the repo has no processing placement;
+//   - auth.ErrCellSiteMismatch: the repo's cell belongs to a different Entire
+//     site than the login, so it would reject the token.
 //
 // The save itself stays with the caller because its key differs (scope- vs
 // remote-keyed), and err always describes the client build — never a save — so
 // a caller can log it without having to know which of the two it got. When
-// notOnboarded is true, err is the sentinel-wrapping error, kept for logging;
-// callers must act on notOnboarded, not propagate err.
-func trailsCellClient(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (client *api.Client, notOnboarded bool, err error) {
+// definitiveNegative is true, err is the sentinel-wrapping error, kept for
+// logging; callers must act on definitiveNegative, not propagate err.
+func trailsCellClient(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (client *api.Client, definitiveNegative bool, err error) {
 	client, err = trailRefreshAPIClient(ctx, insecureHTTP, forge, owner, repo)
 	switch {
 	case err == nil:
 		return client, false, nil
-	case errors.Is(err, errRepoNotOnboarded):
+	case errors.Is(err, errRepoNotOnboarded), errors.Is(err, auth.ErrCellSiteMismatch):
 		return nil, true, err
 	default:
 		return nil, false, err
@@ -362,14 +365,15 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 		}
 		return nil
 	}
-	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
-	if notOnboarded {
-		// A definitive, permanent negative: without this, every SessionStart
-		// re-forks a refresh child for this repo forever (see
-		// trailRefreshSpawnThrottle above), because the cache is never
-		// written and so never leaves "unknown".
+	client, definitiveNegative, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
+	if definitiveNegative {
+		// A definitive negative: without this, every SessionStart re-forks a
+		// refresh child for this repo forever (see trailRefreshSpawnThrottle
+		// above), because the cache is never written and so never leaves
+		// "unknown".
+		logging.Debug(logCtx, "trails enablement refresh: caching unavailable", "error", err.Error())
 		if saveErr := saveTrailsEnabledForScope(ctx, scope, false, time.Now()); saveErr != nil {
-			logging.Debug(logCtx, "trails enablement refresh failed to save not-onboarded scope", "error", saveErr.Error())
+			logging.Debug(logCtx, "trails enablement refresh failed to save unavailable scope", "error", saveErr.Error())
 		}
 		return nil
 	}
@@ -523,7 +527,7 @@ func refreshTrailsEnabledCacheForScope(ctx context.Context, client *api.Client, 
 		}
 		return false, nil
 	}
-	enabled, err := client.TrailsEnabled(ctx, scope.Forge, scope.Owner, scope.Repo)
+	enabled, err := probeTrailsEnabled(ctx, client, scope.Forge, scope.Owner, scope.Repo)
 	if err != nil {
 		return false, fmt.Errorf("check trails enablement: %w", err)
 	}
@@ -531,6 +535,21 @@ func refreshTrailsEnabledCacheForScope(ctx context.Context, client *api.Client, 
 		return false, err
 	}
 	return enabled, nil
+}
+
+// probeTrailsEnabled is client.TrailsEnabled with a 401 counted as disabled.
+// The client has already refreshed its login, so a 401 means the cell does not
+// accept this login at all (e.g. one from another Entire environment); retrying
+// cannot fix it, and leaving the cache unknown re-probed on every SessionStart,
+// each attempt raising a security alarm on the cell (ENT-2573). The cache is
+// keyed by the local identity, so switching logins probes again.
+func probeTrailsEnabled(ctx context.Context, client *api.Client, forge, owner, repo string) (bool, error) {
+	enabled, err := client.TrailsEnabled(ctx, forge, owner, repo)
+	if api.IsHTTPErrorStatus(err, http.StatusUnauthorized) {
+		logging.Warn(ctx, "trails enablement probe rejected the login; caching trails as unavailable", "error", err.Error())
+		return false, nil
+	}
+	return enabled, err //nolint:wrapcheck // callers add their own context
 }
 
 func saveTrailsEnabledForRepoBestEffort(ctx context.Context, enabled bool) {
