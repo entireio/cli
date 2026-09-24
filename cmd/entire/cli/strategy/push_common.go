@@ -195,6 +195,12 @@ func recoverCheckpointRef(
 		return checkpointRefPush{}, err
 	}
 	if err := checkpointRefRecoveryCAS(ctx, repo, candidate.name, newTip, candidate.hash); err != nil {
+		// newTip has no unique writer data: it is derived entirely from the
+		// immutable candidate plus the fetched remote. On a CAS conflict the
+		// writer's winning generation remains the live ref and its queue entry
+		// remains untouched. A later delivery recomputes the replay from that
+		// winner; retaining this losing intermediate under another ref would
+		// create a second source of truth for the checkpoint.
 		return checkpointRefPush{}, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
 	}
 	candidate.hash = newTip

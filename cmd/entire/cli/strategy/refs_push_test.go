@@ -283,8 +283,10 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 		runGit := func(args ...string) string {
 			return strings.TrimSpace(testutil.RunGit(t, workDir, args...))
 		}
-		tree := runGit("rev-parse", candidate.String()+"^{tree}")
-		concurrent = plumbing.NewHash(runGit("commit-tree", tree, "-p", candidate.String(), "-m", "concurrent generation"))
+		testutil.WriteFile(t, workDir, "concurrent.txt", "concurrent")
+		testutil.GitAdd(t, workDir, "concurrent.txt")
+		concurrentTree := runGit("write-tree")
+		concurrent = plumbing.NewHash(runGit("commit-tree", concurrentTree, "-p", candidate.String(), "-m", "concurrent generation"))
 		require.NoError(t, casRepo.Storer.SetReference(plumbing.NewHashReference(refName, concurrent)))
 		require.NoError(t, queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: refName, Hash: concurrent}))
 		return checkpoint.CASPersistentRef(casCtx, casRepo, refName, newHash, expectedOld)
@@ -306,6 +308,24 @@ func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflic
 	require.NoError(t, err)
 	require.Len(t, queued, 1)
 	assert.Equal(t, concurrent, queued[0].Hash, "the concurrent generation must remain queued")
+
+	// The losing recovered commit is only a derived intermediate: the next
+	// delivery replays the queued winner onto the remote and preserves all three
+	// sources of data without keeping that stale intermediate under another ref.
+	checkpointRefRecoveryCAS = oldCAS
+	restore = captureStderr(t)
+	pushed, withheld, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
+	restore()
+	require.NoError(t, pushErr)
+	assert.Equal(t, 1, pushed)
+	assert.Zero(t, withheld)
+	queued, err = queue.PeekEntries()
+	require.NoError(t, err)
+	assert.Empty(t, queued)
+	files := remoteRefFiles(t, bareDir, ref)
+	assert.Contains(t, files, "remote.txt")
+	assert.Contains(t, files, "local.txt")
+	assert.Contains(t, files, "concurrent.txt")
 }
 
 // enqueueRefs seeds the repo's push queue with the given refs.
