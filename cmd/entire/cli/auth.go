@@ -241,11 +241,11 @@ func newAuthStatusCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Argument validation has already run, so every failure from here
-			// is a runtime one and a usage dump is noise — and on --json it is
-			// worse than noise, since cobra prints it to stdout and it would
-			// follow the envelope there, leaving nothing parseable. The root
-			// command silences usage too; not depending on that keeps the
-			// promise wherever this command is mounted.
+			// is a runtime one and a usage dump is noise. The root command
+			// silences usage for everything mounted under it, and cobra writes
+			// the dump to OutOrStderr in any case, so neither the --json
+			// envelope on stdout nor today's behaviour depends on this line;
+			// it keeps the command self-contained wherever it is mounted.
 			cmd.SilenceUsage = true
 			// The --json contract covers every way this command can fail, not
 			// just the ones inside runAuthStatus: a caller piping to jq gets a

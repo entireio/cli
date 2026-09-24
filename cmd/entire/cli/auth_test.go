@@ -1417,6 +1417,13 @@ func TestAuthStatusCmd(t *testing.T) {
 
 	// The --json promise has to survive the failures raised before
 	// runAuthStatus is ever reached, or a script cannot rely on it at all.
+	//
+	// Reading stdout as JSON is stricter here than in the real binary, and
+	// deliberately so: this runs the command standalone, so it inherits no
+	// SilenceUsage from the root, and SetOut makes cobra's OutOrStderr resolve
+	// to the same buffer — which in production is os.Stderr. RunE's own
+	// SilenceUsage is what keeps this buffer to the envelope alone, so removing
+	// that line fails here even though production would not notice.
 	assertJSONFailure := func(t *testing.T, cmd *cobra.Command, args ...string) {
 		t.Helper()
 		cmd.SetArgs(args)

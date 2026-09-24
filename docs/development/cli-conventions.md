@@ -142,14 +142,15 @@ the commands are always runnable in every build.
   the bearer came from is settled before `/me` is consulted, so they are emitted
   even for a bearer `/me` rejected — a script told only `logged_in:false` could
   not otherwise see that `ENTIRE_TOKEN` supplied the token and is still winning
-  over every stored context. Every failure reachable once `--json`
+  over every stored context. Every runtime failure reachable once `--json`
   is set likewise prints an envelope carrying `error`, so `--json | jq
   .logged_in` parses: a hard fetch failure (network, DNS, 5xx), an unresolvable
   target (malformed `ENTIRE_TOKEN`, unreadable `contexts.json`, unknown
   `--context`) and the TLS refusal on an `http://` login server all route
-  through one helper. The command keeps its non-zero exit and prints nothing
-  further to stderr; it also silences cobra's usage dump, which goes to stdout
-  and would otherwise follow the envelope there and leave nothing parseable. The JSON carries the provider-qualified
+  through one helper. A usage error is the deliberate exception: `auth status
+  --json sessions` is refused by `cobra.NoArgs` before `RunE` runs, so it exits
+  non-zero with empty stdout and a suggestion on stderr. The command keeps its
+  non-zero exit and prints nothing further to stderr. The JSON carries the provider-qualified
   `user` and deliberately not a split `handle`/`provider`: one directly usable
   field beats two a caller has to rejoin. `auth status` also marks the caller's
   own row `(current)`, matching the login JWT's `fid` (refresh-token family id)
