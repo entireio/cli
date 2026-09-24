@@ -655,14 +655,24 @@ func checkpointRemoteIsInherited(ctx context.Context, config *settings.Checkpoin
 		return OwnershipUnprovable, "no remote to establish ownership"
 	}
 
+	// Every identity votes before deciding: an unreadable owner must not hide a
+	// later remote that disproves ownership, because only Unprovable is offered
+	// for adoption.
+	unprovable := ""
 	for _, id := range identities {
 		info, err := ParseURL(id.url)
 		if err != nil || info.Owner == "" {
-			return OwnershipUnprovable, id.source + " URL owner could not be determined"
+			if unprovable == "" {
+				unprovable = id.source + " URL owner could not be determined"
+			}
+			continue
 		}
 		if !strings.EqualFold(info.Owner, checkpointOwner) {
 			return OwnershipDisproved, fmt.Sprintf("%s owner %q differs from checkpoint owner %q", id.source, info.Owner, checkpointOwner)
 		}
+	}
+	if unprovable != "" {
+		return OwnershipUnprovable, unprovable
 	}
 	return OwnershipOurs, ""
 }

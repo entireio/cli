@@ -186,6 +186,47 @@ func TestEnableOffersOnlyWhenOwnershipCannotBeEstablished(t *testing.T) {
 	assert.Equal(t, checkpointremote.OwnershipUnprovable, verdict)
 }
 
+// TestEnableDoesNotOfferWhenAnyRemoteDisprovesOwnership: an origin with no
+// readable owner must not hide a push remote whose owner is someone else,
+// which is the fork case the offer must never reach.
+//
+// Not parallel: repository CWD and scripted prompt input are process-global.
+func TestEnableDoesNotOfferWhenAnyRemoteDisprovesOwnership(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@mirror.example:app.git")
+	testutil.RunGit(t, dir, "remote", "set-url", "--push", "origin", "git@github.com:contributor/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := t.Context()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, "origin")
+	assert.Equal(t, checkpointremote.OwnershipDisproved, verdict, reason)
+	assert.Contains(t, reason, `"contributor"`)
+
+	withInteractivePromptStdin(t, "y\n")
+	var out bytes.Buffer
+	assert.False(t, reportIgnoredCheckpointRemote(ctx, &out, s, "origin", true))
+	assert.False(t, settings.CheckpointRemoteIsLocalOnly(ctx), "no claim may be written: %s", out.String())
+}
+
+// TestEnableStillOffersWhenNoRemoteDisprovesOwnership is the control: an
+// unreadable origin next to a push remote whose owner matches stays Unprovable.
+func TestEnableStillOffersWhenNoRemoteDisprovesOwnership(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@mirror.example:app.git")
+	testutil.RunGit(t, dir, "remote", "set-url", "--push", "origin", "git@github.com:acme/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(t.Context(), s, "origin")
+	assert.Equal(t, checkpointremote.OwnershipUnprovable, verdict)
+	assert.Equal(t, "origin URL owner could not be determined", reason)
+}
+
 // Not parallel: repository CWD and scripted prompt input are process-global.
 func TestCheckpointClaimReport(t *testing.T) {
 	for _, tc := range []struct {
