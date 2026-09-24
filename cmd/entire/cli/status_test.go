@@ -3345,3 +3345,74 @@ func TestRunStatus_HookDeliveryLine(t *testing.T) {
 		t.Errorf("hooks fields = %+v, want delivering via Lefthook: %s", got, jsonOut.String())
 	}
 }
+
+// #2264 is not Lefthook-specific: whatever makes the native hooks unreachable,
+// status must qualify its checkpoint destination with a capture warning. These
+// cases pin the distinct repo states from the issue's acceptance matrix.
+func TestRunStatus_NativeHookDeliveryFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		arrangeFailure func(t *testing.T, dir string)
+	}{
+		{
+			name: "fresh enabled clone",
+			arrangeFailure: func(*testing.T, string) {
+				// Enabled settings arrived with the clone, but its .git directory
+				// is local and has never had Entire's hooks installed.
+			},
+		},
+		{
+			name: "native hook removed",
+			arrangeFailure: func(t *testing.T, dir string) {
+				if _, err := strategy.ReinstallGitHooks(t.Context()); err != nil {
+					t.Fatalf("ReinstallGitHooks: %v", err)
+				}
+				if err := os.Remove(filepath.Join(dir, ".git", "hooks", "pre-push")); err != nil {
+					t.Fatalf("remove pre-push: %v", err)
+				}
+			},
+		},
+		{
+			name: "core hooks path redirected",
+			arrangeFailure: func(t *testing.T, dir string) {
+				if _, err := strategy.ReinstallGitHooks(t.Context()); err != nil {
+					t.Fatalf("ReinstallGitHooks: %v", err)
+				}
+				testutil.RunGit(t, dir, "config", "core.hooksPath", filepath.Join(dir, "other-hooks"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			dir := setupTestRepo(t)
+			writeSettings(t, testSettingsEnabled)
+			testutil.RunGit(t, dir, "remote", "add", "origin", "https://example.invalid/repo.git")
+			tc.arrangeFailure(t, dir)
+			strategy.ClearHooksDirCache()
+
+			var stdout bytes.Buffer
+			if err := runStatus(t.Context(), &stdout, false, false); err != nil {
+				t.Fatalf("runStatus: %v", err)
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "Checkpoints are NOT being captured") {
+				t.Errorf("status must warn when hooks do not deliver, got:\n%s", out)
+			}
+			if !strings.Contains(out, "Checkpoints sync to: origin") {
+				t.Errorf("status must retain the diagnostic destination, got:\n%s", out)
+			}
+
+			var jsonOut bytes.Buffer
+			if err := runStatusJSON(t.Context(), &jsonOut); err != nil {
+				t.Fatalf("runStatusJSON: %v", err)
+			}
+			var got statusJSON
+			if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+				t.Fatalf("unmarshal status JSON: %v", err)
+			}
+			if got.HooksDeliver || got.HooksManager != "" || got.HooksDeliverReason == "" {
+				t.Errorf("hooks fields = %+v, want failed native delivery: %s", got, jsonOut.String())
+			}
+		})
+	}
+}
