@@ -106,6 +106,15 @@ jobs:
           # bash choked on the binary, while opencode's script could not reach
           # its own version endpoint. Neither reached a test, and main went red.
           #
+          # --compressed on every fetch is not belt-and-braces either. These
+          # endpoints negotiate content-encoding, and from a GitHub runner
+          # something advertises gzip that curl itself did not ask for -- so
+          # curl never decompresses, and bash is handed a gzip stream. Run
+          # 36027752840 failed that way three times with byte-identical
+          # garbage, which is what ruled out a transient blip. --compressed
+          # makes curl both advertise and decompress; it is a no-op wherever
+          # the server sends identity.
+          #
           # pipefail is load-bearing here rather than tidiness. `curl ... | bash`
           # reports BASH's status, so a fetch that fails feeds an empty script to
           # a shell that exits 0 -- the step would pass having installed nothing,
@@ -127,8 +136,8 @@ jobs:
           }
 
           case "${{ matrix.agent }}" in
-            claude-code) retry 'curl -fsSL https://claude.ai/install.sh | bash' ;;
-            opencode)    retry 'curl -fsSL https://opencode.ai/install | bash' ;;
+            claude-code) retry 'curl -fsSL --compressed https://claude.ai/install.sh | bash' ;;
+            opencode)    retry 'curl -fsSL --compressed https://opencode.ai/install | bash' ;;
             antigravity)
               # Deliberately NOT pinned, because pinning agy does not work.
               # agy self-updates IN PLACE — the updater replaces the executable
@@ -153,11 +162,11 @@ jobs:
               #
               # nightly-e2e.yml also tracks latest, but for its own reason:
               # that job exists to report agy drift.
-              retry 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
+              retry 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
               ;;
             codex)       retry 'npm install -g @openai/codex' ;;
-            cursor-cli)  retry 'curl https://cursor.com/install -fsS | bash' ;;
-            factoryai-droid) retry 'curl -fsSL https://app.factory.ai/cli | sh' ;;
+            cursor-cli)  retry 'curl https://cursor.com/install -fsS --compressed | bash' ;;
+            factoryai-droid) retry 'curl -fsSL --compressed https://app.factory.ai/cli | sh' ;;
             copilot-cli) retry 'npm install -g @github/copilot' ;;
             roger-roger) ;; # installed by mise (see mise.toml)
           esac

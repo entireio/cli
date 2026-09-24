@@ -85,7 +85,7 @@ jobs:
             done
           }
 
-          retry 'curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly'
+          retry 'curl -fsSL --compressed https://entire.io/install.sh | bash -s -- --channel nightly'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly CLI (macOS)
@@ -263,9 +263,9 @@ jobs:
             done
           }
 
-          retry 'curl -fsSL https://claude.ai/install.sh | bash'
-          retry 'curl https://cursor.com/install -fsS | bash'
-          retry 'curl -fsSL https://app.factory.ai/cli | sh'
+          retry 'curl -fsSL --compressed https://claude.ai/install.sh | bash'
+          retry 'curl https://cursor.com/install -fsS --compressed | bash'
+          retry 'curl -fsSL --compressed https://app.factory.ai/cli | sh'
           # opencode by npm: its install script resolves its version through an
           # unauthenticated api.github.com call it gives no way to authenticate,
           # so it is rate-limited at random.
@@ -273,7 +273,7 @@ jobs:
           # agy's official installer: it resolves OS and architecture itself,
           # verifies a SHA-512 from the release manifest, and installs latest
           # into ~/.local/bin, which the line below puts on PATH.
-          retry 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
+          retry 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "AGENTS=claude-code opencode codex cursor-cli factoryai-droid copilot-cli antigravity" >> "$GITHUB_ENV"
 
