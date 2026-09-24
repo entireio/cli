@@ -657,6 +657,9 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 				}
 			}
 			fmt.Fprintf(w, "✓ Git hooks: OK (via %s)\n", delivery.Manager)
+			if delivery.SkippedBy != "" {
+				fmt.Fprintf(w, "  Warning: %s %s.\n", delivery.SkippedBy, hooksSkippedByEnvSuffix)
+			}
 			return nil
 		}
 		fmt.Fprintf(w, "Git hooks: NOT DELIVERING (%s)\n", delivery.Manager)

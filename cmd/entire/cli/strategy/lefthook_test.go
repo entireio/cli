@@ -421,6 +421,36 @@ func TestCheckHookDelivery_Lefthook(t *testing.T) {
 	require.Contains(t, got.Reason, "pre-push")
 }
 
+// LEFTHOOK=0 makes Lefthook's launcher exit before it reads any config, so
+// Entire's registration is skipped with everything else. The registration is
+// still correct, so delivery stays OK; what changes is that this environment
+// bypasses it, which is reported separately.
+func TestCheckHookDelivery_LefthookDisabledByEnv(t *testing.T) {
+	dir := newLefthookRepo(t, "")
+	_, err := EnsureLefthookIntegration(t.Context())
+	require.NoError(t, err)
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	for _, hook := range gitHookNames {
+		require.NoError(t, os.WriteFile(filepath.Join(hooksDir, hook), lefthookLauncher(hook), 0o755))
+	}
+	ClearHooksDirCache()
+
+	for _, tc := range []struct {
+		value, want string
+	}{
+		{"0", "LEFTHOOK=0"},
+		{"1", ""},
+		{"", ""},
+	} {
+		t.Setenv("LEFTHOOK", tc.value)
+		got := CheckHookDelivery(t.Context())
+		require.True(t, got.OK, "LEFTHOOK=%q reason: %s", tc.value, got.Reason)
+		require.Equal(t, LefthookManagerName, got.Manager)
+		require.Equal(t, tc.want, got.SkippedBy, "LEFTHOOK=%q", tc.value)
+	}
+}
+
 // In a repo with no hook manager, delivery is the native hook state.
 func TestCheckHookDelivery_Native(t *testing.T) {
 	dir := t.TempDir()

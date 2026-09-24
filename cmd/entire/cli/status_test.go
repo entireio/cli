@@ -3369,6 +3369,53 @@ func TestRunStatus_HookDeliveryLine(t *testing.T) {
 	}
 }
 
+// With LEFTHOOK=0 set, Lefthook skips Entire's registered hooks along with the
+// user's, so status must say so — and must not promise that the next push
+// syncs checkpoints, since that push would skip Entire's pre-push too.
+func TestRunStatus_LefthookDisabledByEnv(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	if err := os.WriteFile("lefthook.yml", []byte("pre-commit: {}\n"), 0o644); err != nil {
+		t.Fatalf("write lefthook.yml: %v", err)
+	}
+	if _, err := strategy.EnsureLefthookIntegration(context.Background()); err != nil {
+		t.Fatalf("EnsureLefthookIntegration() error = %v", err)
+	}
+	installStatusTestGitHooks(t)
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+	t.Setenv("LEFTHOOK", "0")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Git hooks · via Lefthook") {
+		t.Errorf("registration is still correct and must be reported, got:\n%s", out)
+	}
+	if !strings.Contains(out, "LEFTHOOK=0 is set") {
+		t.Errorf("status must warn that LEFTHOOK=0 skips Entire's hooks, got:\n%s", out)
+	}
+	if !strings.Contains(out, "won't sync until Entire's Git hooks run again") {
+		t.Errorf("status must not promise the next push syncs checkpoints, got:\n%s", out)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runStatusJSON(context.Background(), &jsonOut); err != nil {
+		t.Fatalf("runStatusJSON() error = %v", err)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status JSON: %v", err)
+	}
+	if !got.HooksDeliver || got.HooksManager != "Lefthook" || got.HooksSkippedBy != "LEFTHOOK=0" {
+		t.Errorf("hooks fields = %+v, want delivering via Lefthook, skipped by LEFTHOOK=0: %s", got, jsonOut.String())
+	}
+}
+
 // #2264 is not Lefthook-specific: whatever makes the native hooks unreachable,
 // status must qualify its checkpoint destination with a capture warning. These
 // cases pin the distinct repo states from the issue's acceptance matrix.

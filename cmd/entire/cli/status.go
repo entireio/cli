@@ -573,21 +573,30 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 // reach it, which is issue #2264. The destination line below is still shown —
 // it is true, and status is the only place it appears — but this line above it
 // removes the claim that delivery is working. It returns whether the hooks
-// deliver, so the counter below can drop its promise about the next push.
+// deliver in this environment — LEFTHOOK=0 skips them — so the counter below
+// can drop its promise about the next push.
 func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusStyles) bool {
 	delivery := strategy.CheckHookDelivery(ctx)
 	b.WriteString("\n")
 	switch {
 	case delivery.OK && delivery.Manager != "":
 		b.WriteString(sty.render(sty.dim, "  Git hooks · via "+delivery.Manager))
+		if delivery.SkippedBy != "" {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+delivery.SkippedBy+" "+hooksSkippedByEnvSuffix))
+		}
 	case delivery.OK:
 		b.WriteString(sty.render(sty.dim, "  Git hooks · installed"))
 	default:
 		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints are NOT being captured: "+delivery.Reason))
 		b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 	}
-	return delivery.OK
+	return delivery.OK && delivery.SkippedBy == ""
 }
+
+// hooksSkippedByEnvSuffix completes the warning for HookDelivery.SkippedBy,
+// shared by status and doctor so the two say the same thing.
+const hooksSkippedByEnvSuffix = "is set: Lefthook skips Entire's hooks too, so commits made with it are not linked to checkpoints"
 
 // writeCheckpointSyncLines reports the checkpoint sync destination (and the
 // unpushed counter, when non-zero) in the enabled status block, prefixed by the
@@ -1106,6 +1115,9 @@ type statusJSON struct {
 	// HooksLefthookDeclined names a Lefthook local config Entire will not
 	// write to, which is why Lefthook is not the one delivering.
 	HooksLefthookDeclined string `json:"hooks_lefthook_declined,omitempty"`
+	// HooksSkippedBy names an environment setting (LEFTHOOK=0) under which the
+	// hook manager skips Entire's otherwise working hooks.
+	HooksSkippedBy string `json:"hooks_skipped_by,omitempty"`
 	// CheckpointReadSourceUnknown reports that the read-source probe failed,
 	// so no read source could be determined. Emitted only alongside
 	// checkpoint_push_disabled, and checkpoint_sync_remote is then absent
@@ -1225,6 +1237,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.HooksManager = delivery.Manager
 		result.HooksDeliverReason = delivery.Reason
 		result.HooksLefthookDeclined = delivery.Declined
+		result.HooksSkippedBy = delivery.SkippedBy
 		result.CheckpointReadFallback = syncInfo.ReadFallback
 		result.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
 		result.UnpushedCheckpoints = syncInfo.Unpushed

@@ -171,6 +171,14 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
   installed natively — in a repo where nobody ran `lefthook install`, Entire's
   own hooks are the only delivery there is. This is also why `EnsureSetup`
   runs the Lefthook step *before* the native install.
+  **`LEFTHOOK=0` skips Entire too**, and nothing can prevent it while Entire
+  runs as a Lefthook job: Lefthook's launcher exits on it before reading any
+  config (its `rc:` file is sourced after that exit), and escaping it would
+  mean owning the hook files again, which is the fight above. A commit made
+  under it gets no checkpoint trailer and its turn is attributed to no commit; a push
+  made under it leaves checkpoints for the next push. `CheckHookDelivery`
+  reports it as `SkippedBy` — delivery stays OK because nothing is broken —
+  and `status` / `doctor` warn while it is set in their environment.
 
 Note: `checkpoint/configloader.go` overrides go-git's default config loader with a symlink-following `billy.Basic` (`osSymlinkFS`) — go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool), silently dropping global config so author identity fell back to "Unknown" and signing was skipped.
 

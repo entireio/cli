@@ -816,6 +816,15 @@ func reconcileHookFiles(ctx context.Context) error {
 	return nil
 }
 
+// lefthookDisabledByEnv reports LEFTHOOK=0, the one value Lefthook's launcher
+// exits on (`if [ "$LEFTHOOK" = "0" ]; then exit 0; fi`), or "".
+func lefthookDisabledByEnv() string {
+	if os.Getenv("LEFTHOOK") == "0" {
+		return "LEFTHOOK=0"
+	}
+	return ""
+}
+
 func fileContains(root *os.Root, name, marker string) bool {
 	data, err := osroot.ReadFileNoFollow(root, name)
 	return err == nil && strings.Contains(string(data), marker)
@@ -889,6 +898,12 @@ type HookDelivery struct {
 	// OK is true, because it is the answer to "why is Entire not in Lefthook's
 	// config" in a repository whose hooks are working fine without it.
 	Declined string
+	// SkippedBy names an environment setting that makes the hook manager skip
+	// Entire's hooks in this environment even though they are wired up
+	// correctly — so OK stays true and the fix is not a repair. Today that is
+	// only LEFTHOOK=0: Lefthook's launcher exits on it before reading any
+	// config, so no registration can opt out of it.
+	SkippedBy string
 }
 
 // CheckHookDelivery reports whether Entire's hooks will fire in this
@@ -917,7 +932,7 @@ func CheckHookDelivery(ctx context.Context) HookDelivery {
 					Reason: fmt.Sprintf("Lefthook has no hook file for %s, so nothing runs Entire there.",
 						strings.Join(uncovered, ", "))}
 			}
-			return HookDelivery{OK: true, Manager: LefthookManagerName}
+			return HookDelivery{OK: true, Manager: LefthookManagerName, SkippedBy: lefthookDisabledByEnv()}
 		}
 		// A declined integration is permanent, not a repair pending: Entire's
 		// own hooks are the arrangement in such a repo, so the answer is the
