@@ -2067,11 +2067,13 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		Files:                  files,
 		TokenUsage:             event.TokenUsage,
 	}
-	// Exactly-once needs an identity to be "once" about. Copilot CLI's
-	// SubagentEnd carries no correlation ID at all, so every one of its
-	// subagents keys on "" — the claim would match the first one's completed
-	// record and silently drop each later subagent's files. Merge instead, the
-	// same shape multi-turn Droid Workers use.
+	// Exactly-once needs an identity to be "once" about. A SubagentEnd with no
+	// correlation ID (an external agent that sends none) keys every subagent on
+	// "" — the claim would match the first one's completed record and silently
+	// drop each later subagent's files. Merge instead, the same shape
+	// multi-turn Droid Workers use. Copilot CLI no longer lands here: it joins
+	// its stop to the launch in the parent transcript and drops the event
+	// when that fails.
 	if event.ToolUseID == "" && event.SubagentID == "" {
 		if err := strategy.UpsertCompletedTaskRecord(logCtx, event.SessionID, rec); err != nil {
 			return fmt.Errorf("failed to record uncorrelated task: %w", err)
