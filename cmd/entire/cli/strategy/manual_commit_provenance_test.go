@@ -96,3 +96,19 @@ func TestInheritedTrailersMarker_TiedToParentAndConsumed(t *testing.T) {
 	recordInheritedTrailers(ctx, nil)
 	require.Empty(t, takeInheritedTrailers(ctx, parent), "a later prepare that inherited nothing clears the marker")
 }
+
+// Git discards everything below the scissors line of a `commit -v` message; an
+// inherited trailer must land above git's comment block to survive.
+func TestAddInheritedCheckpointTrailer_StaysAboveGitComments(t *testing.T) {
+	t.Parallel()
+	inherited := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J51")
+	msg := "Subject\n\n# Please enter the commit message.\n# ------------------------ >8 ------------------------\ndiff --git a/f b/f\n"
+	got := addInheritedCheckpointTrailer(msg, inherited)
+	trailerAt := strings.Index(got, "Entire-Checkpoint: "+inherited.String())
+	require.GreaterOrEqual(t, trailerAt, 0, "%q", got)
+	require.Less(t, trailerAt, strings.Index(got, "# Please enter"), "%q", got)
+	require.True(t, strings.HasSuffix(got, "# ------------------------ >8 ------------------------\ndiff --git a/f b/f\n"), "git's block is kept intact: %q", got)
+
+	require.Equal(t, addCheckpointTrailer("Subject\n", inherited), addInheritedCheckpointTrailer("Subject\n", inherited),
+		"a message without git comments is unchanged in behaviour")
+}
