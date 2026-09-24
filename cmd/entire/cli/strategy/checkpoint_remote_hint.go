@@ -54,13 +54,17 @@ func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
 	fmt.Fprintf(stderrWriter,
 		"[entire] Checkpoints are going to %q, not to the configured checkpoint_remote %s: %s.\n",
 		ps.remote, shown, reason)
+	// Promise only new checkpoints: on git-refs, refs already pushed to the
+	// fallback have left the push queue and stay there. Only the git-branch
+	// backend would move them (it pushes the whole v1 branch), and it is legacy
+	// and will lose support soon, so the wording follows git-refs.
 	if claim := remote.ClaimCheckpointRemoteCommand(s.GetCheckpointRemote()); claim != "" {
 		fmt.Fprintf(stderrWriter,
-			"[entire] If %s is yours, run: %s — checkpoints already pushed follow it on the next push.\n",
+			"[entire] If %s is yours, run: %s — new checkpoints go there from your next push.\n",
 			shown, claim)
 	} else {
 		fmt.Fprintf(stderrWriter,
-			"[entire] If %s is yours, declare it in .entire/settings.local.json — checkpoints already pushed follow it on the next push.\n",
+			"[entire] If %s is yours, declare it in .entire/settings.local.json — new checkpoints go there from your next push.\n",
 			shown)
 	}
 	logging.Info(ctx, "ignored checkpoint_remote surfaced at pre-push",
