@@ -1,14 +1,14 @@
 # Testing and development tools
 
-Test harness safety, platform-specific testing, and source guards. Repository-wide verification requirements live in [CLAUDE.md](../../CLAUDE.md#verification).
+Test harness safety, platform-specific testing, and source guards. Repository-wide verification requirements live in [AGENTS.md](../../AGENTS.md#verification).
 
 Repository paths in code spans are relative to the repository root unless stated otherwise.
 
 ### Instruction documentation guard
 
 `go test ./docs/development` (also included in unit/CI tests) enforces the 20 KiB
-`CLAUDE.md` budget and checks local inline Markdown links and heading anchors in
-`CLAUDE.md`, `CONTRIBUTING.md`, and `docs/development/*.md`, including unstaged files.
+`AGENTS.md` budget and checks local inline Markdown links and heading anchors in
+`AGENTS.md`, `CONTRIBUTING.md`, and `docs/development/*.md`, including unstaged files.
 It ignores fenced examples and does not fetch external URLs. Keep links in these
 instruction docs inline and use ATX (`#`) headings; reference-style links and HTML
 IDs are outside this small guard's scope. It does not validate prose pointers in

@@ -13,7 +13,7 @@ import (
 // whether it is too large to store, mirroring what the session-transcript path does
 // a few lines away in each store.
 //
-// Sanitize-before-redact is the same load-bearing order CLAUDE.md documents for the
+// Sanitize-before-redact is the same load-bearing order AGENTS.md documents for the
 // session transcript, and it matters most for exactly the agent that reaches this
 // path most: Codex rollouts carry base64 encrypted_content — measured up to 20% of
 // file bytes — which is bound to the originating session and cannot be replayed out

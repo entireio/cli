@@ -392,7 +392,7 @@ func (a *YourAgent) HookConfigRelPath() string { return ".youragent/settings.jso
 func (a *YourAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
     // 1. Open the config file through its root. Never filepath.Join the path
     // and hand the result to os.ReadFile/os.WriteFile: an agent's hook config
-    // is one of the trees CLAUDE.md's "Root Anchors" gives an owner, because a
+    // is one of the trees AGENTS.md's "Root Anchors" gives an owner, because a
     // symlinked `.youragent` supplied by the checkout would otherwise be
     // resolved before any boundary exists — and this file names the command
     // Entire executes on every agent turn.

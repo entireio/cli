@@ -119,7 +119,7 @@ mise run build
 mise run test
 ```
 
-> See the [reference map](CLAUDE.md#read-when-relevant) for architecture and development documentation.
+> See the [reference map](AGENTS.md#read-when-relevant) for architecture and development documentation.
 
 ---
 
@@ -143,7 +143,7 @@ mise run test
 
 ## Code Style
 
-Follow standard Go idioms and conventions. See the [verification requirements](CLAUDE.md#verification) and [CLI conventions](docs/development/cli-conventions.md) for repository-specific guidance.
+Follow standard Go idioms and conventions. See the [verification requirements](AGENTS.md#verification) and [CLI conventions](docs/development/cli-conventions.md) for repository-specific guidance.
 
 ### Key Points
 
@@ -221,7 +221,7 @@ These are Go implementations that integrate Entire with different AI coding tool
    2. Register your agent in the agent registry
    3. Add setup and hook configuration as needed
    4. Ensure session and checkpoint tracking is handled per the abstraction
-- **Reference:** Use the [reference map](CLAUDE.md#read-when-relevant) to find architecture and code examples.
+- **Reference:** Use the [reference map](AGENTS.md#read-when-relevant) to find architecture and code examples.
 
 ---
 
@@ -344,8 +344,7 @@ Join the Entire community:
 ## Additional Resources
 
 - [README](README.md) - Setup and usage documentation
-- [CLAUDE.md](CLAUDE.md) - Repository rules and task-specific reference map (Claude Code)
-- [AGENTS.md](AGENTS.md) - Same instructions via symlink (Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
+- [AGENTS.md](AGENTS.md) - Repository rules and task-specific reference map (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI)
 - [Code of Conduct](CODE_OF_CONDUCT.md) - Community guidelines
 - [Security Policy](SECURITY.md) - Reporting security vulnerabilities
 

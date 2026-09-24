@@ -15,7 +15,7 @@ const installerAutoRuns = true
 // realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
 // so password prompts and progress output reach the user.
 //
-// The shell stays, and this is the reason it is allowed to. CLAUDE.md's rule is
+// The shell stays, and this is the reason it is allowed to. AGENTS.md's rule is
 // "never put a dynamic value on a cmd.exe line", and the argument generalises to
 // `sh -c`: Go's argv escaping does not protect a string a shell then re-parses.
 // What makes this call site different is that there IS no dynamic value.

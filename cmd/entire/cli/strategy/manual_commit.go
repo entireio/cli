@@ -32,7 +32,7 @@ type ManualCommitStrategy struct {
 	// blobFetchBudget bounds one blob fetch on a git-hook path. Zero means
 	// remote.WriteProbeFetchBudget. Per-instance rather than a package var so
 	// tests can shorten it without mutating process-global state, which
-	// t.Parallel() makes a data race (CLAUDE.md: "Tests that modify
+	// t.Parallel() makes a data race (AGENTS.md: "Tests that modify
 	// process-global state cannot be parallelized").
 	blobFetchBudget time.Duration
 }
