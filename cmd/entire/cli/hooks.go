@@ -58,23 +58,33 @@ type backgroundTaskToolInput struct {
 	RunInBackground bool `json:"run_in_background"`
 }
 
-// isBackgroundLaunch reports whether a Task tool invocation requested
-// run_in_background: true. Mirrors ParseSubagentTypeAndDescription's
-// ToolInput parsing. Returns false (foreground) when toolInput is empty or
-// invalid — defaulting to the existing foreground behavior is always safe.
-func isBackgroundLaunch(ctx context.Context, toolInput json.RawMessage) bool {
+// hasRunInBackgroundFlag reports whether tool_input requested a background
+// Task launch via run_in_background: true.
+func hasRunInBackgroundFlag(ctx context.Context, toolInput json.RawMessage) bool {
 	if len(toolInput) == 0 {
 		return false
 	}
 
 	var input backgroundTaskToolInput
 	if err := json.Unmarshal(toolInput, &input); err != nil {
-		logging.Debug(ctx, "failed to parse tool_input for background-launch detection; treating as foreground",
+		logging.Debug(ctx, "failed to parse tool_input for background-launch detection; treating as non-flagged",
 			slog.String("error", err.Error()))
 		return false
 	}
 
 	return input.RunInBackground
+}
+
+const asyncLaunchedStatus = "async_launched"
+
+func isBackgroundLaunch(ctx context.Context, event *agent.Event) bool {
+	if hasRunInBackgroundFlag(ctx, event.ToolInput) {
+		return true
+	}
+	if event.ToolResponseIsAsync {
+		return true
+	}
+	return event.ToolResponseStatus == asyncLaunchedStatus
 }
 
 // todoWriteToolInput represents the tool_input structure for the TodoWrite tool.

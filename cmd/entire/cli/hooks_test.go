@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 func TestParseSubagentCheckpointHookInput(t *testing.T) {
@@ -160,9 +163,11 @@ func TestParseSubagentTypeAndDescription(t *testing.T) {
 func TestIsBackgroundLaunch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		toolInput string
-		want      bool
+		name       string
+		toolInput  string
+		respStatus string
+		respAsync  bool
+		want       bool
 	}{
 		{
 			name:      "run_in_background true",
@@ -170,32 +175,57 @@ func TestIsBackgroundLaunch(t *testing.T) {
 			want:      true,
 		},
 		{
-			name:      "run_in_background false",
+			name:      "run_in_background false without async response",
 			toolInput: `{"subagent_type": "dev", "run_in_background": false}`,
 			want:      false,
 		},
 		{
-			name:      "run_in_background absent",
+			name:       "run_in_background false with async response (response wins)",
+			toolInput:  `{"subagent_type": "dev", "run_in_background": false}`,
+			respStatus: "async_launched",
+			respAsync:  true,
+			want:       true,
+		},
+		{
+			name:       "flag omitted with async_launched status",
+			toolInput:  `{"subagent_type": "dev"}`,
+			respStatus: "async_launched",
+			want:       true,
+		},
+		{
+			name:      "flag omitted with isAsync true",
+			toolInput: `{"subagent_type": "dev"}`,
+			respAsync: true,
+			want:      true,
+		},
+		{
+			name:      "flag omitted without async response (foreground)",
 			toolInput: `{"subagent_type": "dev"}`,
 			want:      false,
 		},
 		{
-			name:      "empty input",
-			toolInput: ``,
-			want:      false,
+			name: "empty input",
+			want: false,
 		},
 		{
-			name:      "invalid json",
-			toolInput: `not valid json`,
-			want:      false,
+			name:       "invalid json tool_input with async response",
+			toolInput:  `not valid json`,
+			respStatus: "async_launched",
+			want:       true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := isBackgroundLaunch(context.Background(), []byte(tt.toolInput)); got != tt.want {
-				t.Errorf("isBackgroundLaunch(%q) = %v, want %v", tt.toolInput, got, tt.want)
+			event := &agent.Event{
+				ToolInput:           json.RawMessage(tt.toolInput),
+				ToolResponseStatus:  tt.respStatus,
+				ToolResponseIsAsync: tt.respAsync,
+			}
+			if got := isBackgroundLaunch(context.Background(), event); got != tt.want {
+				t.Errorf("isBackgroundLaunch(input=%q, status=%q, isAsync=%v) = %v, want %v",
+					tt.toolInput, tt.respStatus, tt.respAsync, got, tt.want)
 			}
 		})
 	}

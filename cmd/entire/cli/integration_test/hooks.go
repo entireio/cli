@@ -169,22 +169,36 @@ type PostTaskInput struct {
 	// hook is parsed as a background subagent launch stub (isBackgroundLaunch)
 	// instead of a foreground completion.
 	RunInBackground bool
+	OmitRunInBackground bool
+	AsyncStatus string
+	AsyncLaunch bool
 }
 
 // SimulatePostTask simulates the PostToolUse[Task] hook.
 func (r *HookRunner) SimulatePostTask(input PostTaskInput) error {
 	r.T.Helper()
 
+	toolInput := map[string]interface{}{}
+	if !input.OmitRunInBackground {
+		toolInput["run_in_background"] = input.RunInBackground
+	}
+
+	toolResponse := map[string]interface{}{
+		"agentId": input.AgentID,
+	}
+	if input.AsyncStatus != "" {
+		toolResponse["status"] = input.AsyncStatus
+	}
+	if input.AsyncLaunch {
+		toolResponse["isAsync"] = true
+	}
+
 	hookInput := map[string]interface{}{
 		"session_id":      input.SessionID,
 		"transcript_path": input.TranscriptPath,
 		"tool_use_id":     input.ToolUseID,
-		"tool_input": map[string]interface{}{
-			"run_in_background": input.RunInBackground,
-		},
-		"tool_response": map[string]string{
-			"agentId": input.AgentID,
-		},
+		"tool_input":      toolInput,
+		"tool_response":   toolResponse,
 	}
 
 	return r.runHookWithInput("post-task", hookInput)

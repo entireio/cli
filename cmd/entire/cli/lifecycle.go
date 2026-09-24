@@ -1480,10 +1480,10 @@ func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string 
 //
 //   - event.Final == true (SubagentStop): the authoritative final capture.
 //     See handleSubagentStopFinal.
-//   - event.Final == false, background launch (run_in_background: true in
-//     ToolInput): post-task fires seconds after launch, before any real work
-//     happens. Records an in-flight marker and defers the real capture to
-//     SubagentStop instead of completing the record from the stub.
+//   - event.Final == false, background launch (run_in_background: true, or an
+//     async response — status "async_launched" / isAsync true). Post-task
+//     fires before any real work happens, so an in-flight marker is recorded
+//     and the real capture defers to SubagentStop.
 //   - event.Final == false, foreground: post-task fires at true completion, so
 //     the record is completed immediately via completeSubagentTaskRecord.
 //     ensureSessionState preserves SaveTaskStep's old create-if-missing parent
@@ -1526,7 +1526,7 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		return handleSubagentStopFinal(logCtx, ag, event)
 	}
 
-	if isBackgroundLaunch(logCtx, event.ToolInput) {
+	if isBackgroundLaunch(logCtx, event) {
 		return recordInFlightTaskLaunch(logCtx, event)
 	}
 
