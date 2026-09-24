@@ -601,7 +601,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		if present[cpID.String()] {
 			continue
 		}
-		message = addCheckpointTrailer(message, cpID)
+		message = addInheritedCheckpointTrailer(message, cpID)
 		added++
 	}
 	if added == 0 {
@@ -2599,6 +2599,20 @@ func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.Ch
 // Delegates to trailers.AppendCheckpointTrailer for trailer-aware formatting.
 func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
 	return trailers.AppendCheckpointTrailer(message, checkpointID.String())
+}
+
+// addInheritedCheckpointTrailer adds an inherited trailer above git's comment
+// block rather than after it: with `commit -v` git discards everything below
+// the scissors line, and the trailer with it.
+func addInheritedCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
+	lines := strings.Split(message, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "#") {
+			head := strings.TrimRight(addCheckpointTrailer(strings.Join(lines[:i], "\n"), checkpointID), "\n")
+			return head + "\n\n" + strings.Join(lines[i:], "\n")
+		}
+	}
+	return addCheckpointTrailer(message, checkpointID)
 }
 
 // addCheckpointTrailerWithComment adds the Entire-Checkpoint trailer with an explanatory comment.
