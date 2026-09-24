@@ -2470,7 +2470,7 @@ func assertCheckpointPushDisabledStatus(t *testing.T, jsonOutput, detailed bool,
 	}
 }
 
-// formatUnpushedCheckpointsLine is pure, so its four branches are pinned here
+// formatUnpushedCheckpointsLine is pure, so its branches are pinned here
 // rather than through a repo fixture. What the counter must never say with
 // pushing disabled is that the data is local-only: Unpushed compares against
 // the elected destination alone, so it cannot establish that checkpoints exist
@@ -2491,6 +2491,16 @@ func TestFormatUnpushedCheckpointsLine(t *testing.T) {
 			"1 checkpoint not on origin"},
 		{"pushing_disabled_dedicated", checkpointSyncInfo{PushDisabled: true, Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 2},
 			"2 checkpoints not pushed to the checkpoint remote"},
+		// #2264: with no hook to run pre-push, "your next push" syncs nothing.
+		{"hooks_not_delivering", checkpointSyncInfo{Remote: "origin", Source: "default", Unpushed: 2, HooksNotDelivering: true},
+			"2 checkpoints not yet on origin — they won't sync until Entire's Git hooks run again"},
+		{"hooks_not_delivering_singular", checkpointSyncInfo{Remote: "origin", Source: "default", Unpushed: 1, HooksNotDelivering: true},
+			"1 checkpoint not yet on origin — it won't sync until Entire's Git hooks run again"},
+		{"hooks_not_delivering_dedicated", checkpointSyncInfo{Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 2, HooksNotDelivering: true},
+			"2 checkpoints not yet pushed — they won't sync until Entire's Git hooks run again"},
+		// Pushing disabled already promises nothing, so the hooks change nothing.
+		{"hooks_not_delivering_pushing_disabled", checkpointSyncInfo{PushDisabled: true, Remote: "origin", Source: "default", Unpushed: 1, HooksNotDelivering: true},
+			"1 checkpoint not on origin"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2786,6 +2796,7 @@ func TestRunStatus_CheckpointPushDisabledSettingsPrecedence(t *testing.T) {
 				testutil.WriteFile(t, ".", ".entire/settings.local.json", tc.local)
 			}
 			testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+			installStatusTestGitHooks(t)
 			head := checkpointSyncTestCommit(t, "a.txt", "one")
 			testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
 			for _, jsonOutput := range []bool{false, true} {
@@ -2854,6 +2865,17 @@ func TestRunStatus_CheckpointPushDisabledAbsentWithoutEnabledEntire(t *testing.T
 // checkpointSyncTestCommit creates a commit in the cwd test repo and returns
 // its hash. setupTestRepo leaves the repo without commits, and both the v1
 // counter and ref updates need at least one.
+// installStatusTestGitHooks installs Entire's Git hooks in the current test
+// repo. The unpushed counter promises the next push only while a pre-push hook
+// will run it, so a fixture asserting that promise needs the hooks.
+func installStatusTestGitHooks(t *testing.T) {
+	t.Helper()
+	if _, err := strategy.ReinstallGitHooks(t.Context()); err != nil {
+		t.Fatalf("ReinstallGitHooks: %v", err)
+	}
+	strategy.ClearHooksDirCache()
+}
+
 func checkpointSyncTestCommit(t *testing.T, name, content string) string {
 	t.Helper()
 	testutil.WriteFile(t, ".", name, content)
@@ -2986,6 +3008,7 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	installStatusTestGitHooks(t)
 	checkpointSyncTestCommit(t, "a.txt", "one")
 	second := checkpointSyncTestCommit(t, "b.txt", "two")
 	// Local v1 with no origin-tracking ref: every v1 commit counts as unpushed
@@ -3389,6 +3412,10 @@ func TestRunStatus_NativeHookDeliveryFailures(t *testing.T) {
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://example.invalid/repo.git")
 			tc.arrangeFailure(t, dir)
 			strategy.ClearHooksDirCache()
+			// Unpushed checkpoints: the counter must not promise that a push
+			// no hook will run is going to sync them.
+			checkpointSyncTestCommit(t, "a.txt", "one")
+			testutil.GitUpdateRef(t, dir, "refs/heads/"+paths.MetadataBranchName, checkpointSyncTestCommit(t, "b.txt", "two"))
 
 			var stdout bytes.Buffer
 			if err := runStatus(t.Context(), &stdout, false, false); err != nil {
@@ -3400,6 +3427,9 @@ func TestRunStatus_NativeHookDeliveryFailures(t *testing.T) {
 			}
 			if !strings.Contains(out, "Checkpoints sync to: origin") {
 				t.Errorf("status must retain the diagnostic destination, got:\n%s", out)
+			}
+			if !strings.Contains(out, "2 checkpoints not yet on origin — they won't sync until Entire's Git hooks run again") {
+				t.Errorf("status must not promise the next push syncs checkpoints, got:\n%s", out)
 			}
 
 			var jsonOut bytes.Buffer

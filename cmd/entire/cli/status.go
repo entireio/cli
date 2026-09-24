@@ -247,8 +247,8 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	// Where checkpoint data syncs (the single elected remote), and how many
 	// checkpoints have not reached it yet. Local-only computation.
 	if s.Enabled {
-		writeHookDeliveryLine(ctx, &b, sty)
-		writeCheckpointSyncLines(ctx, &b, s, sty)
+		hooksDeliver := writeHookDeliveryLine(ctx, &b, sty)
+		writeCheckpointSyncLines(ctx, &b, s, sty, hooksDeliver)
 	}
 
 	if s.Enabled {
@@ -393,6 +393,10 @@ type checkpointSyncInfo struct {
 	// where a user finds out why — the hooks only log the rejection.
 	IgnoredRemote string
 	IgnoredReason string
+	// HooksNotDelivering reports that no Git hook will run Entire, so a push
+	// syncs nothing and the unpushed counter must not say it will (#2264).
+	// Text path only: JSON reports delivery through its own hooks_* fields.
+	HooksNotDelivering bool
 }
 
 // resolveDedicatedReadSource records where checkpoint READS land when the
@@ -568,8 +572,9 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 // Without it status named a checkpoint destination while no hook existed to
 // reach it, which is issue #2264. The destination line below is still shown —
 // it is true, and status is the only place it appears — but this line above it
-// removes the claim that delivery is working.
-func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusStyles) {
+// removes the claim that delivery is working. It returns whether the hooks
+// deliver, so the counter below can drop its promise about the next push.
+func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusStyles) bool {
 	delivery := strategy.CheckHookDelivery(ctx)
 	b.WriteString("\n")
 	switch {
@@ -581,6 +586,7 @@ func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusSt
 		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints are NOT being captured: "+delivery.Reason))
 		b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 	}
+	return delivery.OK
 }
 
 // writeCheckpointSyncLines reports the checkpoint sync destination (and the
@@ -592,8 +598,9 @@ func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusSt
 // pushing off the elected remote is still the read source and the counter still
 // reports local-only data, so the lines are reworded rather than dropped —
 // status is the only surface that names either.
-func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
+func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles, hooksDeliver bool) {
 	info := computeCheckpointSyncInfo(ctx, s)
+	info.HooksNotDelivering = !hooksDeliver
 	destination := "\n  Checkpoints sync to: "
 	if info.PushDisabled {
 		b.WriteString("\n  Automatic checkpoint pushing: disabled")
@@ -672,18 +679,29 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 // destination — and never that the data exists nowhere else. Getting this
 // backwards would falsely reassure someone asking whether checkpoint data has
 // left the machine.
+//
+// With pushing enabled but no hook delivering, the future tense is false for a
+// different reason: no pre-push hook will run, so the next push syncs nothing.
 func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
 	noun := nounCheckpoints
-	pronoun := "they sync"
+	pronoun, notPronoun := "they sync", "they won't sync"
 	if info.Unpushed == 1 {
 		noun = nounCheckpoint
-		pronoun = "it syncs"
+		pronoun, notPronoun = "it syncs", "it won't sync"
 	}
 	if info.PushDisabled {
 		if info.Source == checkpointSyncSourceDedicated {
 			return fmt.Sprintf("%d %s not pushed to the checkpoint remote", info.Unpushed, noun)
 		}
 		return fmt.Sprintf("%d %s not on %s", info.Unpushed, noun, info.Remote)
+	}
+	if info.HooksNotDelivering {
+		// The warning above names the cause; here only the promise goes.
+		pending := fmt.Sprintf("%d %s not yet on %s", info.Unpushed, noun, info.Remote)
+		if info.Source == checkpointSyncSourceDedicated {
+			pending = fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
+		}
+		return fmt.Sprintf("%s — %s until Entire's Git hooks run again", pending, notPronoun)
 	}
 	if info.Source == checkpointSyncSourceDedicated {
 		return fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
