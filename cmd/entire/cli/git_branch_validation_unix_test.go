@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,15 +17,22 @@ import (
 func TestValidateBranchName_CanceledDuringNativeInterpretation(t *testing.T) {
 	// Process-global PATH and environment changes make this test serial.
 	gitenv.IsolateRepository(t)
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skipf("sleep not available: %v", err)
+	}
+	sleepPath, err = filepath.Abs(sleepPath)
+	require.NoError(t, err)
 	bin := t.TempDir()
 	ready := filepath.Join(t.TempDir(), "ready")
 	// exec replaces the shell, so CommandContext kills sleep itself rather than
 	// leaving it running as an orphan. The marker proves cancellation happens after
 	// the native fallback starts, rather than exercising only the entry guard.
-	script := "#!/bin/sh\nprintf ready > \"$ENTIRE_TEST_VALIDATION_READY\"\nexec /bin/sleep 60\n"
+	script := "#!/bin/sh\nprintf ready > \"$ENTIRE_TEST_VALIDATION_READY\"\nexec \"$ENTIRE_TEST_VALIDATION_SLEEP\" 60\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", bin)
 	t.Setenv("ENTIRE_TEST_VALIDATION_READY", ready)
+	t.Setenv("ENTIRE_TEST_VALIDATION_SLEEP", sleepPath)
 	t.Chdir(t.TempDir())
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
