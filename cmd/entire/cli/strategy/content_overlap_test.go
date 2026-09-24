@@ -304,10 +304,14 @@ func TestFilesWithRemainingAgentChanges_AlreadyInHeadFromEarlierCommit(t *testin
 	for _, tc := range []struct {
 		name       string
 		earlierB   string
+		worktreeB  string // "" leaves the working tree as committed
 		wantRemain []string
 	}{
-		{"same content as shadow", "content B", nil},
-		{"different content from shadow", "user's B", []string{"fileB.txt"}},
+		{"same content as shadow", "content B", "", nil},
+		{"different content from shadow", "user's B", "", []string{"fileB.txt"}},
+		// Edited again since the shadow snapshot (e.g. mid-turn): HEAD
+		// matching the shadow says nothing about those newer edits.
+		{"same content but newer edits on disk", "content B", "content B, edited again", []string{"fileB.txt"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -335,6 +339,9 @@ func TestFilesWithRemainingAgentChanges_AlreadyInHeadFromEarlierCommit(t *testin
 			commitFile("fileB.txt", tc.earlierB, "B, hooks skipped")
 			commit, err := repo.CommitObject(commitFile("fileA.txt", "content A", "A"))
 			require.NoError(t, err)
+			if tc.worktreeB != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "fileB.txt"), []byte(tc.worktreeB), 0o644))
+			}
 
 			shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
 			remaining := filesWithRemainingAgentChanges(t.Context(), repo, shadowBranch, commit,
