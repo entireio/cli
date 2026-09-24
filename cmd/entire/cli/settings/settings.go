@@ -1981,6 +1981,25 @@ func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
 	return classifyLocalSettingsDeep(ctx, path) == localOwn
 }
 
+// CheckpointRemoteLocalClaimRejection explains why writing a local declaration
+// cannot establish ownership. Check both index and HEAD, even before the local
+// file exists, so a staged removal cannot turn inherited settings into consent.
+func CheckpointRemoteLocalClaimRejection(ctx context.Context) string {
+	path, _, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return "Cannot read .entire/settings.local.json; fix the local settings file before confirming this checkpoint store"
+	}
+	switch classifyLocalSettingsDeep(ctx, path) {
+	case localTracked:
+		return ".entire/settings.local.json is tracked in the index or HEAD, so it is not your own untracked settings file. Untrack it, commit its removal from Git, and keep your local copy ignored before confirming this checkpoint store"
+	case localUnverifiable:
+		return "Cannot verify that .entire/settings.local.json is your own untracked settings file; fix repository access before confirming this checkpoint store"
+	case localOwn:
+		return ""
+	}
+	return ""
+}
+
 // GetCheckpointRemote returns the configured checkpoint remote.
 // Expects a structured object: {"provider": "github", "repo": "org/repo"}.
 // Returns nil if not configured, wrong type, or missing required fields.

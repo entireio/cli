@@ -533,10 +533,9 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// lives only in the elected remote's push URL shows "not in use" here
 	// even though such a lead-less fetch still resolves the checkpoint remote.
 	if cr := s.GetCheckpointRemote(); cr != nil {
-		if repo, reason, inherited := checkpointremote.InheritedCheckpointRemote(ctx, s, elected.Name); inherited {
-			info.IgnoredRemote = repo
-			info.IgnoredReason = reason
-			info.IgnoredRemedy = checkpointremote.ClaimCheckpointRemoteCommand(cr)
+		if verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, elected.Name); verdict.Refused() {
+			info.IgnoredRemote = cr.Repo
+			info.IgnoredReason, info.IgnoredRemedy = checkpointremote.IgnoredCheckpointRemoteGuidance(ctx, cr, verdict, reason)
 		} else if info.PushDisabled {
 			// That verdict is ownership only, so it accepts a store the fetch
 			// side declined for another reason (an unparseable origin URL, an
@@ -633,14 +632,14 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString(sty.render(sty.dim, " (fallback; nothing was elected)"))
 	}
 	if info.IgnoredRemote != "" {
-		fix := "set checkpoint_remote in .entire/settings.local.json"
+		fix := ""
 		if info.IgnoredRemedy != "" {
-			fix = "run `" + info.IgnoredRemedy + "`"
+			fix = ". If this checkpoint repo is yours, confirm it for this clone: `" + info.IgnoredRemedy + "`"
 		}
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.yellow,
 			"  ! checkpoint_remote "+info.IgnoredRemote+" is not in use: "+info.IgnoredReason+
-				". If this checkpoint repo is yours, "+fix+"."))
+				fix+"."))
 	}
 	if info.Unpushed > 0 {
 		b.WriteString("\n  ")

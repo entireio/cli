@@ -50,13 +50,13 @@ func captureHintStderr(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote is the point of
+// TestPrePushWarnsAgainstClaimingAnotherOwnersCheckpointRemote is the point of
 // the warning: before it, the ownership rejection reached the user only as a
 // Warn in .entire/logs, and the visible symptom — checkpoints landing in the
 // code repository — looks like a working setup.
 //
 // Not parallel: t.Chdir.
-func TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote(t *testing.T) {
+func TestPrePushWarnsAgainstClaimingAnotherOwnersCheckpointRemote(t *testing.T) {
 	dir := hintRepo(t, "alice")
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
@@ -70,8 +70,8 @@ func TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote(t *testing.T)
 	got := out.String()
 	assert.Contains(t, got, "acme/checkpoints", "the store the user configured is named")
 	assert.Contains(t, got, `"origin"`, "so is the store their checkpoints are actually going to")
-	assert.Contains(t, got, "entire enable --local --checkpoint-remote github:acme/checkpoints",
-		"the remedy is a command to run, not a file to go and edit")
+	assert.NotContains(t, got, "entire enable --local --checkpoint-remote")
+	assert.Contains(t, got, "If this is a fork")
 }
 
 // TestPrePushSaysNothingWhenTheCheckpointRemoteIsInUse is the control: the

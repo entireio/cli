@@ -100,11 +100,12 @@ func TestEnableReportsAnIgnoredCheckpointRemote(t *testing.T) {
 	require.NoError(t, err)
 
 	var out bytes.Buffer
-	reportIgnoredCheckpointRemote(ctx, &out, s, "origin")
+	reportIgnoredCheckpointRemote(ctx, &out, s, "origin", false)
 
 	got := out.String()
 	assert.Contains(t, got, "acme/checkpoints is not in use")
-	assert.Contains(t, got, "entire enable --local --checkpoint-remote github:acme/checkpoints")
+	assert.NotContains(t, got, "entire enable --local --checkpoint-remote")
+	assert.Contains(t, got, "If this is a fork")
 }
 
 // TestEnableSaysNothingAboutACheckpointRemoteInUse is the control: the report
@@ -120,7 +121,7 @@ func TestEnableSaysNothingAboutACheckpointRemoteInUse(t *testing.T) {
 	require.NoError(t, err)
 
 	var out bytes.Buffer
-	reportIgnoredCheckpointRemote(ctx, &out, s, "origin")
+	reportIgnoredCheckpointRemote(ctx, &out, s, "origin", false)
 	assert.Empty(t, out.String(), "a store whose owner matches every remote is the developer's own")
 }
 
@@ -142,7 +143,8 @@ func TestEnableCommandSurfacesAnIgnoredCheckpointRemote(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 
 	assert.Contains(t, output.String(), "checkpoint_remote acme/checkpoints is not in use")
-	assert.Contains(t, output.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
+	assert.NotContains(t, output.String(), "entire enable --local --checkpoint-remote")
+	assert.Contains(t, output.String(), "If this is a fork")
 }
 
 // TestEnableDoesNotOfferAStoreAnotherOwnerHolds is the guard on the offer: it
@@ -183,4 +185,96 @@ func TestEnableOffersOnlyWhenOwnershipCannotBeEstablished(t *testing.T) {
 	verdict, _ := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, "origin")
 	require.True(t, verdict.Refused(), "an unprovable store is still refused non-interactively")
 	assert.Equal(t, checkpointremote.OwnershipUnprovable, verdict)
+}
+
+// Not parallel: repository CWD and scripted prompt input are process-global.
+func TestCheckpointClaimReport(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		args             []string
+		yes              bool
+		localState       string
+		wantClaim        bool
+		invalidTransport bool
+	}{
+		{name: "confirmed", wantClaim: true},
+		{name: "confirmed but transport cannot resolve", wantClaim: true, invalidTransport: true},
+		{name: "yes skips claim", args: []string{"--yes"}, yes: true},
+		{name: "agent skips claim", args: []string{"--agent", "claude-code"}},
+		{name: "tracked local", localState: "tracked"},
+		{name: "removed from index only", localState: "head"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestRepo(t)
+			testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+			writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+			if !tc.invalidTransport {
+				testutil.RunGit(t, dir, "remote", "set-url", "--push", "origin", "git@github.com:acme/app.git")
+			}
+			if tc.localState != "" {
+				testutil.WriteFile(t, dir, settings.EntireSettingsLocalFile, `{}`)
+				testutil.RunGit(t, dir, "add", "-f", settings.EntireSettingsLocalFile)
+				testutil.GitCommit(t, dir, "track local settings")
+				if tc.localState == "head" {
+					testutil.RunGit(t, dir, "rm", "--cached", settings.EntireSettingsLocalFile)
+				}
+			}
+			withInteractivePromptStdin(t, "y\n")
+			cmd := newEnableCmd()
+			cmd.SetContext(t.Context())
+			require.NoError(t, cmd.ParseFlags(tc.args))
+			opts := EnableOptions{Yes: tc.yes}
+			require.NoError(t, prepareEnableCheckpointRemoteCommand(cmd, &opts))
+			opts.checkpointRemoteChoice.name = "origin"
+			var out bytes.Buffer
+			opts.checkpointRemoteChoice.report(t.Context(), &out, nil)
+			assert.Equal(t, tc.wantClaim, settings.CheckpointRemoteIsLocalOnly(t.Context()), out.String())
+			switch {
+			case tc.wantClaim && tc.invalidTransport:
+				assert.Contains(t, out.String(), "uploaded when you push to origin")
+				assert.NotContains(t, out.String(), "Checkpoints will use acme/checkpoints")
+			case tc.wantClaim:
+				assert.NotContains(t, out.String(), "No checkpoint destination settings changed")
+				assert.Contains(t, out.String(), "Checkpoint uploads use the dedicated destination:")
+				assert.NotContains(t, out.String(), "Keeping checkpoint destination: origin")
+				assert.NotContains(t, out.String(), "uploaded when you push to origin")
+			case tc.localState != "":
+				assert.Contains(t, out.String(), "Untrack it, commit its removal")
+				assert.NotContains(t, out.String(), "entire enable --local --checkpoint-remote")
+				err := updateStrategyOptions(t.Context(), &out, EnableOptions{UseLocalSettings: true, CheckpointRemote: "github:acme/checkpoints"})
+				require.ErrorContains(t, err, "Untrack it, commit its removal")
+			default:
+				assert.Contains(t, out.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
+			}
+		})
+	}
+}
+
+func TestStatusUnprovableCheckpointClaim(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+	info := computeCheckpointSyncInfo(t.Context(), s)
+	assert.Equal(t, "entire enable --local --checkpoint-remote github:acme/checkpoints", info.IgnoredRemedy)
+	assert.Contains(t, info.IgnoredReason, "may be inherited from another project")
+	assert.Contains(t, info.IgnoredReason, "skips the owner check")
+}
+
+func TestStatusTrackedLocalCheckpointClaim(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	testutil.WriteFile(t, dir, settings.EntireSettingsLocalFile, `{}`)
+	testutil.RunGit(t, dir, "add", "-f", settings.EntireSettingsLocalFile)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+	info := computeCheckpointSyncInfo(t.Context(), s)
+	assert.Empty(t, info.IgnoredRemedy)
+	assert.Contains(t, info.IgnoredReason, "Untrack it, commit its removal")
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, false))
+	assert.NotContains(t, out.String(), "entire enable --local --checkpoint-remote")
+	assert.NotContains(t, out.String(), "set checkpoint_remote")
 }

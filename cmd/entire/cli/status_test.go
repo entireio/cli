@@ -2748,12 +2748,8 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_reason"]), "differs from checkpoint owner") {
 								t.Errorf("missing rejection reason: %s", out.String())
 							}
-							// An agent reading --json has to be able to ACT on
-							// the rejection, not only report it, which is the
-							// whole reason the remedy is carried rather than
-							// left for the reader to assemble.
-							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_remedy"]), inheritedClaimCommand) {
-								t.Errorf("missing remedy: %s", out.String())
+							if tc.name == "inherited" && len(result["checkpoint_remote_ignored_remedy"]) != 0 {
+								t.Errorf("mismatched ownership must not offer a claim command: %s", out.String())
 							}
 							if disabled {
 								var pushDisabled bool
@@ -2766,8 +2762,8 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "is not in use:")) {
 							t.Errorf("missing remote diagnostic: %s", out.String())
 						}
-						if tc.name == "inherited" && !strings.Contains(out.String(), inheritedClaimCommand) {
-							t.Errorf("rejection named no command to fix it: %s", out.String())
+						if tc.name == "inherited" && (strings.Contains(out.String(), inheritedClaimCommand) || !strings.Contains(out.String(), "If this is a fork")) {
+							t.Errorf("rejection must warn about forks without a claim command: %s", out.String())
 						}
 						if disabled && (!strings.Contains(out.String(), "Automatic checkpoint pushing: disabled") || strings.Contains(out.String(), "Checkpoints NOT syncing:")) {
 							t.Errorf("diagnostic must coexist with disabled pushing, not claim a push failure: %s", out.String())

@@ -29,6 +29,7 @@ type enableCheckpointRemoteChoice struct {
 	changed            bool
 	saved              bool
 	dedicatedRequested bool
+	suppressClaim      bool
 	// pending marks a fresh setup, the only path that opens the picker: it
 	// asks after agent selection, before installing hooks. A bare re-enable in
 	// a configured repo never prompts — "Keep current destination" writes
@@ -56,6 +57,7 @@ func prepareEnableCheckpointRemoteCommand(cmd *cobra.Command, opts *EnableOption
 		return err
 	}
 	choice.pending = pending
+	choice.suppressClaim = opts.Yes || cmd.Flags().Changed(agentFlagName)
 	opts.checkpointRemoteChoice = choice
 	cmd.SetContext(context.WithValue(cmd.Context(), enableCheckpointRemoteKey{}, choice))
 	return nil
@@ -70,6 +72,7 @@ func (c *enableCheckpointRemoteChoice) selectAfterAgents(ctx context.Context, op
 		return err
 	}
 	// Keep the pointer shared with the command's deferred destination report.
+	choice.suppressClaim = c.suppressClaim
 	*c = *choice
 	return nil
 }
@@ -340,6 +343,11 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 		return
 	}
+	// Resolve a possible local claim before computing the destination summary.
+	if reportIgnoredCheckpointRemote(ctx, w, s, resolved.Name, !c.suppressClaim) {
+		c.changed = true
+		touched = true
+	}
 	destination := resolved.Name
 	url, dedicated, err := remote.PushURL(ctx, resolved.Name)
 	if err != nil {
@@ -361,18 +369,6 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			fmt.Fprintf(w, "Choose a configured remote with `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
 			return
 		}
-	}
-	// Reported whether or not this run asked about destinations, and so above
-	// the `touched` gate: a configured checkpoint_remote that is not the
-	// destination is the same class as a broken one, which the comment at the
-	// top of this function already exempts for the same reason — the user
-	// cannot otherwise learn it. `entire enable` is where checkpoint
-	// configuration is fixed, so saying nothing here left the one command that
-	// resolves it findable only by reading .entire/logs.
-	//
-	// Skipped when the store IS the destination: there is nothing to claim.
-	if !dedicated {
-		reportIgnoredCheckpointRemote(ctx, w, s, resolved.Name)
 	}
 
 	if !touched {
@@ -430,9 +426,9 @@ func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
 	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
 }
 
-// reportIgnoredCheckpointRemote says that a configured checkpoint_remote is not
-// the store checkpoints go to, and names the single command that claims it for
-// this clone.
+// reportIgnoredCheckpointRemote explains a refused checkpoint_remote and offers
+// a local claim only when it can safely confirm ownership. Reports whether it
+// saved a claim, so the caller can describe the resulting destination.
 //
 // The rejection is deliberate — checkpointRemoteIsInherited refuses a committed
 // checkpoint_remote whose owner does not match every remote identifying this
@@ -440,14 +436,14 @@ func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
 // checkpoint store. What was missing is the other half: when the store really
 // is the developer's own, nothing told them how to say so, and the symptom
 // (checkpoints arriving in the code repository) looks like a working setup.
-func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings.EntireSettings, electedRemote string) {
+func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings.EntireSettings, electedRemote string, allowPrompt bool) bool {
 	cr := s.GetCheckpointRemote()
 	if cr == nil {
-		return
+		return false
 	}
 	verdict, reason := remote.InheritedCheckpointRemoteVerdict(ctx, s, electedRemote)
 	if !verdict.Refused() {
-		return
+		return false
 	}
 	repo := cr.Repo
 	// The verdict above votes with ONE remote — the elected one — and a repo can
@@ -459,10 +455,11 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 	// broken state this message describes.
 	for _, d := range inspectRemoteTopology(ctx).destinations {
 		if d.pinned {
-			return
+			return false
 		}
 	}
-	fmt.Fprintf(w, "checkpoint_remote %s is not in use: %s.\n", repo, reason)
+	explanation, command := remote.IgnoredCheckpointRemoteGuidance(ctx, cr, verdict, reason)
+	fmt.Fprintf(w, "checkpoint_remote %s is not in use: %s.\n", repo, explanation)
 
 	// Ownership merely UNPROVABLE is the one case a human can settle that local
 	// git config cannot: a single-segment or non-forge origin
@@ -480,16 +477,16 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 	// --checkpoint-remote <provider>:<owner>/<repo>` already performs exactly
 	// this write in one command; the prompt makes the existing remedy
 	// discoverable to someone who does not know it exists.
-	if verdict == remote.OwnershipUnprovable &&
+	if allowPrompt && verdict == remote.OwnershipUnprovable &&
+		settings.CheckpointRemoteLocalClaimRejection(ctx) == "" &&
 		offerToClaimCheckpointRemote(ctx, w, remote.ClaimCheckpointRemoteFlagValue(cr), repo) {
-		return
+		return true
 	}
 
-	if claim := remote.ClaimCheckpointRemoteCommand(cr); claim != "" {
-		fmt.Fprintf(w, "If %s is yours, run `%s` to use it from this clone.\n", repo, claim)
-	} else {
-		fmt.Fprintf(w, "If %s is yours, declare checkpoint_remote in .entire/settings.local.json.\n", repo)
+	if command != "" {
+		fmt.Fprintf(w, "If %s is yours, confirm it for this clone: `%s`.\n", repo, command)
 	}
+	return false
 }
 
 // offerToClaimCheckpointRemote asks whether the configured store belongs to this
@@ -538,6 +535,10 @@ func offerToClaimCheckpointRemote(ctx context.Context, w io.Writer, claimValue, 
 		fmt.Fprintf(w, "Could not save the checkpoint destination: %v\n", err)
 		return false
 	}
-	fmt.Fprintf(w, "Checkpoints will use %s for this clone (saved to .entire/settings.local.json).\n", repo)
+	if !settings.CheckpointRemoteIsLocalOnly(ctx) {
+		fmt.Fprintln(w, "The saved checkpoint destination could not be confirmed as your own untracked local setting; check `entire status` before pushing.")
+		return false
+	}
+	fmt.Fprintf(w, "Confirmed %s for this clone (saved to .entire/settings.local.json).\n", repo)
 	return true
 }
