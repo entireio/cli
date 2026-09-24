@@ -328,14 +328,20 @@ func CheckoutBranch(ctx context.Context, ref string) error {
 	return nil
 }
 
-// ValidateBranchName checks if a branch name is valid using git check-ref-format.
-// Returns an error if the name is invalid or contains unsafe characters.
+// ValidateBranchName validates literal branch names without starting Git.
+// Reflog expressions retain native --branch interpretation (notably @{-1}),
+// which depends on repository state and is not part of go-git's name validator.
 func ValidateBranchName(ctx context.Context, branchName string) error {
-	if strings.HasPrefix(branchName, "-") {
+	if ctx.Err() != nil || strings.HasPrefix(branchName, "-") {
 		return fmt.Errorf("invalid branch name %q", branchName)
 	}
-	cmd := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branchName)
-	if err := cmd.Run(); err != nil {
+	var err error
+	if strings.Contains(branchName, "@{") {
+		err = exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branchName).Run()
+	} else {
+		err = plumbing.ValidateBranchName(branchName)
+	}
+	if err != nil {
 		return fmt.Errorf("invalid branch name %q", branchName)
 	}
 	return nil
