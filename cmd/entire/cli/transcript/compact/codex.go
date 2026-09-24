@@ -58,8 +58,11 @@ type codexLine struct {
 
 // codexPayload captures the common fields across Codex payload types.
 type codexPayload struct {
-	Type      string          `json:"type"`
-	Role      string          `json:"role"`
+	Type   string `json:"type"`
+	Role   string `json:"role"`
+	Author struct {
+		Role string `json:"role"`
+	} `json:"author"`
 	Content   json.RawMessage `json:"content"`
 	Phase     string          `json:"phase"`
 	Name      string          `json:"name"`
@@ -122,7 +125,8 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 			line.Content = contentJSON
 			appendLine(&result, line)
 
-		case p.Type == transcriptTypeMessage && p.Role == transcript.TypeAssistant:
+		case (p.Type == transcriptTypeMessage && p.Role == transcript.TypeAssistant) ||
+			(p.Type == "agent_message" && p.Author.Role == transcript.TypeAssistant):
 			text := codexAssistantText(p.Content)
 			if text == "" {
 				continue
@@ -292,7 +296,7 @@ func codexAssistantText(raw json.RawMessage) string {
 	}
 	var texts []string
 	for _, b := range blocks {
-		if b.Type == "output_text" && b.Text != "" {
+		if (b.Type == "output_text" || b.Type == "input_text") && b.Text != "" {
 			texts = append(texts, b.Text)
 		}
 	}
@@ -356,7 +360,7 @@ func codexConsumeToolCall(p codexPayload, lines []codexLine, i *int, inTok, outT
 
 // codexToolOutputText extracts the output text from a tool call output payload.
 // For function_call_output, the output field is a plain string.
-// For custom_tool_call_output, it is an object {"type":"text","text":"..."}.
+// For custom_tool_call_output, it may also be a text block or array of blocks.
 func codexToolOutputText(payload json.RawMessage, outputType string) string {
 	if outputType == codexTypeCustomToolCallOutput {
 		return codexCustomOutputText(payload)
@@ -402,7 +406,7 @@ func codexCustomToolUseBlock(p codexPayload) map[string]json.RawMessage {
 }
 
 // codexCustomOutputText extracts the output text from a custom_tool_call_output payload.
-// The output field is an object {"type":"text","text":"..."} rather than a plain string.
+// The output field may be a string, a text block, or an array of text blocks.
 func codexCustomOutputText(payload json.RawMessage) string {
 	var p struct {
 		Output json.RawMessage `json:"output"`
@@ -421,6 +425,19 @@ func codexCustomOutputText(payload json.RawMessage) string {
 	}
 	if json.Unmarshal(p.Output, &obj) == nil {
 		return obj.Text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(p.Output, &blocks) == nil {
+		var texts []string
+		for _, block := range blocks {
+			if block.Type == "text" && block.Text != "" {
+				texts = append(texts, block.Text)
+			}
+		}
+		return strings.Join(texts, "\n\n")
 	}
 	return ""
 }

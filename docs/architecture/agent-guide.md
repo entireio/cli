@@ -643,6 +643,17 @@ Key difference: OpenCode stores transcripts in a database, not files. The transc
 **Position:** Message count (`len(session.Messages)`).
 **Offset:** Start iterating messages at index N.
 
+### JSONL Format (Codex rollout)
+
+Codex implements `ModelExtractor`: manual attachment and missing-model
+backfill use the latest non-empty `turn_context.payload.model`, skipping malformed
+records. Its compact transcript reader accepts desktop `agent_message` assistant
+response items and custom-tool text-block arrays; event mirrors and encrypted
+reasoning are excluded. The readable condensed view shows custom-tool `input`
+as a fallback detail. Tool outputs remain in compact/raw transcripts;
+`checkpoint explain --full` expands session scope while retaining the condensed
+tool-call presentation.
+
 ### JSONL Format (Pi pattern)
 
 Pi uses JSONL (one JSON object per line) with a tree-shaped entry model. Every entry has `id` and optional `parentId`, enabling Pi's `/fork` and `/clone` branching. Each entry has `type` (`"message"` for conversational entries), `timestamp`, and (for message entries) a `message` object with `role`, `content`, and optional `usage`:

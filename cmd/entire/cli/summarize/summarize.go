@@ -419,7 +419,7 @@ func extractGenericToolDetail(input map[string]interface{}) string {
 	if input == nil {
 		return ""
 	}
-	for _, key := range []string{"description", "command", "cmd", "file_path", "path", "pattern"} {
+	for _, key := range []string{"description", "command", "cmd", "file_path", "path", "pattern", "input"} {
 		if v, ok := input[key].(string); ok && v != "" {
 			return v
 		}

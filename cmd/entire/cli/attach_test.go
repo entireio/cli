@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -1033,6 +1034,7 @@ func TestAttach_CodexSuccess(t *testing.T) {
 
 	sessionID := "019d6c43-1537-7343-9691-1f8cee04fe59"
 	transcriptContent := `{"timestamp":"2026-04-08T10:43:48.000Z","type":"session_meta","payload":{"id":"019d6c43-1537-7343-9691-1f8cee04fe59","timestamp":"2026-04-08T10:43:48.000Z"}}
+{"type":"turn_context","payload":{"model":"gpt-6-astra"}}
 {"timestamp":"2026-04-08T10:43:49.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"investigate attach failure"}]}}
 {"timestamp":"2026-04-08T10:43:50.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Looking into it."}]}}
 `
@@ -1069,11 +1071,29 @@ func TestAttach_CodexSuccess(t *testing.T) {
 	if state.AgentType != agent.AgentTypeCodex {
 		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeCodex)
 	}
+	if state.ModelName != "gpt-6-astra" {
+		t.Errorf("ModelName = %q, want gpt-6-astra", state.ModelName)
+	}
+
 	if state.TranscriptPath != sessionFile {
 		t.Errorf("TranscriptPath = %q, want %q", state.TranscriptPath, sessionFile)
 	}
 	if state.LastCheckpointID.IsEmpty() {
 		t.Error("expected LastCheckpointID to be set after attach")
+	}
+	repo, err := gitrepo.OpenCurrent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := cpkg.NewGitStore(repo, cpkg.DefaultV1Refs()).ReadSessionMetadata(context.Background(), state.LastCheckpointID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata == nil {
+		t.Fatal("missing checkpoint session metadata")
+	}
+	if metadata.Model != "gpt-6-astra" {
+		t.Errorf("stored model = %q, want gpt-6-astra", metadata.Model)
 	}
 }
 
