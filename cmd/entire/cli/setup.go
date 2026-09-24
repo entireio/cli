@@ -2566,6 +2566,22 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 		return nil
 	}
 
+	// Without this guard the confirm below reaches huh, whose bubbletea program
+	// opens /dev/tty directly: in CI, in an agent subprocess, or over a
+	// non-interactive ssh, `entire enable` died with a raw bubbletea error and
+	// exit 1 *after* it had already installed the hooks and written settings —
+	// a false failure that aborts a pipeline on a repo that is in fact enabled.
+	//
+	// Leaving settings.Telemetry nil is deliberate: nil means "not asked yet",
+	// so telemetry stays off (IsTelemetryEnabled reads an absent key as no)
+	// and the question is still put to the user on a later interactive run,
+	// rather than this process answering consent on their behalf. --telemetry,
+	// --telemetry=false, --yes and ENTIRE_TELEMETRY_OPTOUT all still decide it
+	// explicitly; they are handled above and by the caller.
+	if !interactive.CanPromptInteractively() {
+		return nil
+	}
+
 	consent := true // Default to Yes
 	form := NewAccessibleForm(
 		huh.NewGroup(
