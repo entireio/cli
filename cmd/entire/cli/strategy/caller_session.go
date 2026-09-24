@@ -33,9 +33,9 @@ const (
 	// is the opposite of what it looks like it should do. An environment
 	// variable says only that some ancestor published it, not that the
 	// publisher is our caller: agents nest, and an inner agent that publishes
-	// nothing of its own (Gemini CLI, opencode) passes the OUTER agent's
+	// nothing of its own (opencode, for one) passes the OUTER agent's
 	// variable straight through to us. Depth is the only signal that
-	// distinguishes "Codex ran me" from "Codex ran Gemini ran me", so the
+	// distinguishes "Codex ran me" from "Codex ran opencode ran me", so the
 	// nearest owner wins wherever ancestry can rank at all.
 	ResolutionAncestry SessionResolution = "ancestry"
 

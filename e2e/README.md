@@ -1,13 +1,12 @@
 # E2E Tests
 
-End-to-end tests for the `entire` CLI against real agents (Claude Code, Gemini CLI, OpenCode, Codex, Cursor, Factory AI Droid, Copilot CLI).
+End-to-end tests for the `entire` CLI against real agents (Claude Code, OpenCode, Codex, Cursor, Factory AI Droid, Copilot CLI).
 
 ## Commands
 
 ```bash
 mise run test:e2e [filter]                          # run filtered (or omit filter for all agents)
 mise run test:e2e --agent claude-code [filter]       # Claude Code only
-mise run test:e2e --agent gemini-cli [filter]        # Gemini CLI only
 mise run test:e2e --agent opencode [filter]          # OpenCode only
 mise run test:e2e --agent codex [filter]             # Codex only
 mise run test:e2e --agent cursor [filter]            # Cursor only
@@ -60,14 +59,13 @@ Run it with `mise run test:e2e:controlplane [filter]`; the task installs the Pla
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `E2E_AGENT` | Runner filter (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor-cli`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`, `roger-roger`) | all registered |
+| `E2E_AGENT` | Runner filter (`claude-code`, `opencode`, `codex`, `cursor-cli`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`, `roger-roger`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
-| `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. | per runner: 60s (codex, copilot-cli, gemini), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
+| `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. | per runner: 60s (codex, copilot-cli), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |
 | `E2E_CHECKPOINT_STORE` | Checkpoint backend to run the suite against (`git-branch`, `git-refs`). Maps to the `ENTIRE_CHECKPOINTS_PRIMARY` override that every spawned binary/hook honors. | `git-branch` |
 | `E2E_ARTIFACT_DIR` | Override artifact output directory | `e2e/artifacts/<timestamp>` |
 | `ANTHROPIC_API_KEY` | Required for Claude Code | — |
-| `GEMINI_API_KEY` | Required for Gemini CLI | — |
 | `OPENAI_API_KEY` | Required for Codex | — |
 | `COPILOT_GITHUB_TOKEN` | Required for Copilot CLI, unless a `copilot login` credential is already stored. `GH_TOKEN` and `GITHUB_TOKEN` also work — Copilot reads all three, in that order of precedence. A `gh auth login` alone is not enough: Copilot does not read gh's config. | — |
 | `E2E_KEEP_AGENT_HOME` | Set to `1` to preserve the isolated `COPILOT_HOME` a session ran under (holds Copilot's own logs) | unset |
@@ -101,7 +99,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** runs the standard agent suite on pushes to main. Gemini remains opt-in through manual dispatch.
+- **`.github/workflows/e2e.yml`** runs the standard agent suite on pushes to main.
 - For debugging a single test, dispatch **`.github/workflows/e2e.yml`** with an agent and the optional `test` regex. An empty regex keeps the normal suite. The filter also reaches Windows when running Claude; selecting another agent skips the Windows Claude job.
 - **`.github/workflows/e2e-controlplane.yml`** runs the control-plane tests on pushes to main and on manual dispatch. Runs are serialized and never cancelled mid-flight, because the shared test account's resources are cleaned up by the test itself.
 

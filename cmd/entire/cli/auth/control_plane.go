@@ -64,7 +64,7 @@ func errNoLogin() error {
 
 // ResolveControlPlaneTargetForCluster chooses which core a *resource-provider*
 // control-plane command should dial — one whose subject is a mirror on a
-// specific cluster (mirror add/remove, access list)
+// specific cluster (mirror add/remove, reading a mirror's collaborators)
 // rather than the caller's own account.
 //
 // Unlike ResolveControlPlaneTarget, the core is NOT taken from the active

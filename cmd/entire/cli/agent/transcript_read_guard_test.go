@@ -43,7 +43,6 @@ var unconfinedTranscriptReads = map[string]int{
 	"cmd/entire/cli/agent/cursor/transcript.go":             1,
 	"cmd/entire/cli/agent/factoryaidroid/factoryaidroid.go": 1,
 	"cmd/entire/cli/agent/factoryaidroid/lifecycle.go":      1,
-	"cmd/entire/cli/agent/geminicli/lifecycle.go":           1,
 	"cmd/entire/cli/agent/vogon/vogon.go":                   1,
 
 	// The integration harness reads a transcript it wrote itself, in a temp

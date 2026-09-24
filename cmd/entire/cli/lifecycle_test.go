@@ -724,7 +724,7 @@ func TestHandleLifecycleSessionStart_StoresAgentTypeHint(t *testing.T) {
 // TestHandleLifecycleSessionStart_AgentTypeHintFirstWriterWins verifies that
 // when multiple agents fire SessionStart for the same session ID, only the
 // first agent's claim is recorded AND only the first emits the banner. This
-// matches both the Cursor cross-agent and the Gemini repeat-source
+// matches both the Cursor cross-agent and the repeat-source
 // (startup → resume) cases — the user must see the banner only once.
 func TestHandleLifecycleSessionStart_AgentTypeHintFirstWriterWins(t *testing.T) {
 	setupStopTestRepo(t)
@@ -800,7 +800,7 @@ func TestHandleLifecycleSessionStart_BannerClaimedOnce(t *testing.T) {
 	require.NotEmpty(t, first.lastMessage)
 
 	second := newMockHookResponseAgent()
-	second.agentType = agent.AgentTypeGemini
+	second.agentType = agent.AgentTypeCodex
 	require.NoError(t, handleLifecycleSessionStart(ctx, second, &agent.Event{
 		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
 	}))
@@ -808,18 +808,17 @@ func TestHandleLifecycleSessionStart_BannerClaimedOnce(t *testing.T) {
 		"banner must not be re-emitted once a writer agent has shown it")
 }
 
-// TestHandleLifecycleSessionStart_GeminiRepeatSourceDoesNotDuplicate covers
-// the specific case the user reported: Gemini fires SessionStart twice for
-// the same session (e.g., source=startup followed by source=resume) and we
-// were emitting the banner both times.
-func TestHandleLifecycleSessionStart_GeminiRepeatSourceDoesNotDuplicate(t *testing.T) {
+// TestHandleLifecycleSessionStart_RepeatSourceDoesNotDuplicate covers an
+// agent firing SessionStart twice for the same session (e.g., source=startup
+// followed by source=resume): the banner must be emitted only the first time.
+func TestHandleLifecycleSessionStart_RepeatSourceDoesNotDuplicate(t *testing.T) {
 	setupStopTestRepo(t)
 
 	ctx := context.Background()
-	sessionID := "test-gemini-repeat"
+	sessionID := "test-repeat-source"
 
 	ag := newMockHookResponseAgent()
-	ag.agentType = agent.AgentTypeGemini
+	ag.agentType = agent.AgentTypeClaudeCode
 
 	require.NoError(t, handleLifecycleSessionStart(ctx, ag, &agent.Event{
 		Type: agent.SessionStart, SessionID: sessionID, Timestamp: time.Now(),
@@ -1465,7 +1464,7 @@ func TestHandleLifecycleCompaction_PreservesTranscriptOffset(t *testing.T) {
 	}
 
 	// Compaction should NOT reset the transcript offset.
-	// Many agents (e.g., Gemini) fire pre-compress as a no-op after every tool call;
+	// Some agents fire pre-compress as a no-op after every tool call;
 	// resetting the offset causes stale files to re-appear in carry-forward.
 	err := handleLifecycleCompaction(context.Background(), ag, event)
 	if err != nil {

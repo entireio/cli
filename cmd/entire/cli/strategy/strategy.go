@@ -156,7 +156,7 @@ type StepContext struct {
 	AgentType types.AgentType
 
 	// Transcript position at step/turn start - tracks what was added during this step
-	StepTranscriptIdentifier string // Last identifier when step started (UUID for Claude, message ID for Gemini)
+	StepTranscriptIdentifier string // Last identifier when step started (e.g., message UUID for Claude Code)
 	StepTranscriptStart      int    // Transcript line count when this step/turn started
 
 	// TokenUsage contains the token usage for this checkpoint

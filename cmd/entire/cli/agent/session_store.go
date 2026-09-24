@@ -382,10 +382,9 @@ func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 // layouts nest (Copilot `<id>/events.jsonl`, Cursor `<id>/<id>.jsonl`, Codex
 // `YYYY/MM/DD/`), so the parents are made here rather than at each call site.
 //
-// Not Gemini or Pi, which this comment used to cite: both resolve to a flat
-// name and put their project component in GetSessionDir, i.e. in the store root
-// — so they are precisely the two agents for which the MkdirAll below never
-// fires.
+// Not Pi, which this comment used to cite: it resolves to a flat name and puts
+// its project component in GetSessionDir, i.e. in the store root — so it is an
+// agent for which the MkdirAll below never fires.
 func (s *SessionStore) WriteFile(name string, data []byte, perm os.FileMode) error {
 	if err := validateWriteName(name); err != nil {
 		return err

@@ -10,7 +10,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -73,21 +72,17 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 // Hook categories reported by getHookType.
 const (
 	hookTypeAgent    = "agent"
-	hookTypeTool     = "tool"
 	hookTypeSubagent = "subagent"
 )
 
 // getHookType returns the hook type based on the hook name.
 // Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
-// subagent-stop), "tool" for tool-related hooks (before-tool, after-tool),
-// "agent" for all other agent hooks.
+// subagent-stop) and "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
 		claudecode.HookNameSubagentStop:
 		return hookTypeSubagent
-	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
-		return hookTypeTool
 	default:
 		return hookTypeAgent
 	}

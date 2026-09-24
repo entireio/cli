@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 
 	// Import agents to ensure they are registered before we iterate
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -14,7 +15,6 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/vogon"
@@ -49,6 +49,16 @@ func newHooksCmd() *cobra.Command {
 
 			// Verify the agent was discovered
 			if _, err := agent.Get(agentName); err != nil {
+				// Hooks left behind by a retired built-in agent must not fail
+				// every event in the agent that still runs them. Checked after
+				// discovery so an external plugin may claim the name, and not
+				// taken when that plugin is installed but discovery missed it
+				// (a timeout): its hook should fail loudly, not vanish.
+				if agentName == retiredGeminiAgentName && !retiredGeminiNameClaimed() {
+					logging.Debug(cmd.Context(), "ignoring hook for retired agent",
+						"agent", string(agentName), "hook", hookName)
+					return nil
+				}
 				return fmt.Errorf("unknown agent %q (not found as built-in or external plugin)", agentName)
 			}
 

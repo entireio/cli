@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Breaking changes and migrations
+
+- Gemini CLI support is removed: `entire configure --agent gemini`, Gemini hook capture, the Gemini review runner and summary provider, session import and resume, and Gemini skill setup are gone. Entire hooks already installed in `.gemini/settings.json` now exit silently without recording anything; `entire doctor` and `entire disable --uninstall` remove them. Checkpoints recorded from earlier Gemini CLI sessions remain readable by `entire explain` and summaries
+
+## [0.11.2] - 2026-09-23
+
+### Changed
+
+- Trail, review, thread and watch requests follow the RFD-026 cell contract (snake_case payloads, bracket filters, cursor pagination, dotted watch event names). `--json` output keeps its existing keys. `entire trail finding list` replaces `--offset` with `--cursor` and returns `next_cursor` alongside `has_more` when another page exists ([#2507](https://github.com/entireio/cli/pull/2507))
+
+### Fixed
+
+- A trailing `.git` in a native repository reference is now part of the repo name instead of being stripped. Previously `entire repo delete /et/<project>/foo.git` could delete a sibling repo named `foo`, and repo-scoped commands inside a clone of `foo.git` targeted `foo`. Confirmation lines now show the repository the server resolved, `repo create` accepts `.git` names as the API does, and dot-only owner or repo names are rejected ([#2557](https://github.com/entireio/cli/pull/2557))
+- `ENTIRE_CHECKPOINT_TOKEN` is only attached when the checkpoint remote uses a direct git transport. `entire://` and `file://` remotes are used as configured and are never rewritten into credentialed HTTPS URLs ([#2558](https://github.com/entireio/cli/pull/2558))
+- Session IDs containing surrounding whitespace, trailing periods, ASCII control characters or Windows reserved device names are rejected on every OS. Unsafe checkpoint metadata is refused before session files are resolved or restored, and external-agent session references are checked against the repository session store before `write-session` runs ([#2405](https://github.com/entireio/cli/pull/2405))
+
+### Housekeeping
+
+- Removed `filtered_fetches` from this repository's `.entire/settings.json` ([#2560](https://github.com/entireio/cli/pull/2560))
+
+### Thanks
+
+Thanks to @wernerkasselman-au for responsibly reporting the session ID path validation issue!
+
 ## [0.11.0] - 2026-09-22
 
 ### Breaking changes and migrations

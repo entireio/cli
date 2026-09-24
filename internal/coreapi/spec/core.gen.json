@@ -1,6 +1,57 @@
 {
   "components": {
     "schemas": {
+      "AcceptInvitationInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/AcceptInvitationInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "token": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "AcceptedInvitation": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/AcceptedInvitation.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "membership": {
+            "$ref": "#/components/schemas/Membership"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "orgName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orgId",
+          "orgName",
+          "membership"
+        ],
+        "type": "object"
+      },
       "AddOrgMemberInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -197,6 +248,23 @@
         ],
         "type": "object"
       },
+      "BranchRuleUpdate": {
+        "additionalProperties": true,
+        "properties": {
+          "ref": {
+            "description": "\"HEAD\" or a refs/heads/ name, fnmatch wildcards allowed.",
+            "type": "string"
+          },
+          "serverSideMergeOnly": {
+            "description": "Sets the level: true for server-side merge only, false for protected. Omit to keep an existing rule's level.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "type": "object"
+      },
       "CIBuildView": {
         "additionalProperties": true,
         "properties": {
@@ -280,6 +348,279 @@
           "stale",
           "updated_at",
           "jobs"
+        ],
+        "type": "object"
+      },
+      "CIDeliveryDetailView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CIDeliveryDetailView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "description": "Vendor account (Buildkite org, Depot org)",
+            "type": "string"
+          },
+          "at": {
+            "description": "When the delivery started or arrived (UTC)",
+            "format": "date-time",
+            "type": "string"
+          },
+          "attempt_count": {
+            "description": "Attempts made; outbound only",
+            "format": "int64",
+            "type": "integer"
+          },
+          "completed_at": {
+            "description": "When an outbound delivery reached a terminal state (UTC)",
+            "format": "date-time",
+            "type": "string"
+          },
+          "direction": {
+            "description": "outbound or inbound",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "Subscription display name",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "How long the delivery took, milliseconds",
+            "format": "int64",
+            "type": "integer"
+          },
+          "event": {
+            "description": "Vendor event type, e.g. build.finished",
+            "type": "string"
+          },
+          "http_status": {
+            "description": "HTTP status, absent when no request was made",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Opaque delivery id; pass to the delivery detail route",
+            "type": "string"
+          },
+          "new_target": {
+            "description": "Content identity after the change",
+            "type": "string"
+          },
+          "old_target": {
+            "description": "Content identity before the change",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Five-valued outcome; the vocabularies differ by direction",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/CIDeliveryPayloadView",
+            "description": "Absent when swept or never stored"
+          },
+          "payload_absent": {
+            "description": "swept or no_request; empty when a payload is present",
+            "type": "string"
+          },
+          "provider": {
+            "description": "CI provider registry name",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Ref that moved",
+            "type": "string"
+          },
+          "ref_op": {
+            "description": "Ref operation. Empty means unknown — never guess it from the targets",
+            "type": "string"
+          },
+          "repo_id": {
+            "description": "Repository ULID, empty when the delivery resolved to no enrolment",
+            "type": "string"
+          },
+          "state": {
+            "description": "Outbound dispatch state",
+            "type": "string"
+          },
+          "subscription_id": {
+            "description": "Subscription ULID, empty when none was resolved",
+            "type": "string"
+          },
+          "target": {
+            "description": "Vendor target (Buildkite pipeline, Depot run label)",
+            "type": "string"
+          },
+          "wire_request_id": {
+            "description": "The vendor's own id for this delivery",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "direction",
+          "provider",
+          "outcome",
+          "at"
+        ],
+        "type": "object"
+      },
+      "CIDeliveryPayloadView": {
+        "additionalProperties": true,
+        "properties": {
+          "endpoint": {
+            "description": "Where the request went, or the path it arrived on",
+            "type": "string"
+          },
+          "from_attempt": {
+            "description": "Which attempt these bytes came from; compare with attempt_count",
+            "format": "int64",
+            "type": "integer"
+          },
+          "request_body": {
+            "description": "Request body as stored",
+            "type": "string"
+          },
+          "request_headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Stored request headers; an allowlist, signatures truncated",
+            "type": "object"
+          },
+          "request_truncated": {
+            "description": "Request body is at the 16 KiB cap and may be cut",
+            "type": "boolean"
+          },
+          "response_body": {
+            "description": "Response body as stored",
+            "type": "string"
+          },
+          "response_present": {
+            "description": "False means no response arrived, not that it was empty",
+            "type": "boolean"
+          },
+          "response_truncated": {
+            "description": "Response body is at the 16 KiB cap and may be cut",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "endpoint",
+          "request_headers",
+          "request_body",
+          "response_body",
+          "response_present",
+          "request_truncated",
+          "response_truncated",
+          "from_attempt"
+        ],
+        "type": "object"
+      },
+      "CIDeliveryView": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "description": "Vendor account (Buildkite org, Depot org)",
+            "type": "string"
+          },
+          "at": {
+            "description": "When the delivery started or arrived (UTC)",
+            "format": "date-time",
+            "type": "string"
+          },
+          "attempt_count": {
+            "description": "Attempts made; outbound only",
+            "format": "int64",
+            "type": "integer"
+          },
+          "completed_at": {
+            "description": "When an outbound delivery reached a terminal state (UTC)",
+            "format": "date-time",
+            "type": "string"
+          },
+          "direction": {
+            "description": "outbound or inbound",
+            "type": "string"
+          },
+          "display_name": {
+            "description": "Subscription display name",
+            "type": "string"
+          },
+          "duration_ms": {
+            "description": "How long the delivery took, milliseconds",
+            "format": "int64",
+            "type": "integer"
+          },
+          "event": {
+            "description": "Vendor event type, e.g. build.finished",
+            "type": "string"
+          },
+          "http_status": {
+            "description": "HTTP status, absent when no request was made",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Opaque delivery id; pass to the delivery detail route",
+            "type": "string"
+          },
+          "new_target": {
+            "description": "Content identity after the change",
+            "type": "string"
+          },
+          "old_target": {
+            "description": "Content identity before the change",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Five-valued outcome; the vocabularies differ by direction",
+            "type": "string"
+          },
+          "provider": {
+            "description": "CI provider registry name",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Ref that moved",
+            "type": "string"
+          },
+          "ref_op": {
+            "description": "Ref operation. Empty means unknown — never guess it from the targets",
+            "type": "string"
+          },
+          "repo_id": {
+            "description": "Repository ULID, empty when the delivery resolved to no enrolment",
+            "type": "string"
+          },
+          "state": {
+            "description": "Outbound dispatch state",
+            "type": "string"
+          },
+          "subscription_id": {
+            "description": "Subscription ULID, empty when none was resolved",
+            "type": "string"
+          },
+          "target": {
+            "description": "Vendor target (Buildkite pipeline, Depot run label)",
+            "type": "string"
+          },
+          "wire_request_id": {
+            "description": "The vendor's own id for this delivery",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "direction",
+          "provider",
+          "outcome",
+          "at"
         ],
         "type": "object"
       },
@@ -579,6 +920,9 @@
           "provider": {
             "type": "string"
           },
+          "provider_account": {
+            "type": "string"
+          },
           "publish_checks": {
             "type": "boolean"
           },
@@ -586,6 +930,12 @@
             "type": "string"
           },
           "repo_id": {
+            "type": "string"
+          },
+          "repo_write": {
+            "type": "boolean"
+          },
+          "target_ref": {
             "type": "string"
           },
           "updated_at": {
@@ -600,10 +950,13 @@
           "display_name",
           "bk_organization",
           "bk_pipeline",
+          "provider_account",
+          "target_ref",
           "ref_filter",
           "events",
           "enabled",
           "publish_checks",
+          "repo_write",
           "created_at",
           "updated_at"
         ],
@@ -685,6 +1038,29 @@
         ],
         "type": "object"
       },
+      "ConnectOrgCIDepotOrganizationInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ConnectOrgCIDepotOrganizationInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "description": "Depot organisation id, as Depot's provisioning call returns it",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "type": "object"
+      },
       "CreateBindingInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -707,46 +1083,6 @@
         },
         "required": [
           "providerId"
-        ],
-        "type": "object"
-      },
-      "CreateMirrorInputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/CreateMirrorInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "clusterHost": {
-            "description": "Destination cluster, as either a bare DNS host or the publicUrl returned by GET /api/v1/clusters.",
-            "minLength": 1,
-            "type": "string"
-          },
-          "owner": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "provider": {
-            "enum": [
-              "github"
-            ],
-            "type": "string"
-          },
-          "repo": {
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider",
-          "owner",
-          "repo",
-          "clusterHost"
         ],
         "type": "object"
       },
@@ -837,6 +1173,38 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "CreateOrgInvitationInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateOrgInvitationInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "email": {
+            "format": "email",
+            "type": "string"
+          },
+          "role": {
+            "default": "member",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "role"
         ],
         "type": "object"
       },
@@ -931,6 +1299,9 @@
           "provider": {
             "type": "string"
           },
+          "provider_account": {
+            "type": "string"
+          },
           "publish_checks": {
             "type": "boolean"
           },
@@ -940,9 +1311,15 @@
           "repo_id": {
             "type": "string"
           },
+          "repo_write": {
+            "type": "boolean"
+          },
           "setup": {
             "$ref": "#/components/schemas/CISetupBlock",
             "description": "What to do next, rendered ready to use. Present on a self-managed enrolment."
+          },
+          "target_ref": {
+            "type": "string"
           },
           "updated_at": {
             "format": "date-time",
@@ -959,10 +1336,13 @@
           "display_name",
           "bk_organization",
           "bk_pipeline",
+          "provider_account",
+          "target_ref",
           "ref_filter",
           "events",
           "enabled",
           "publish_checks",
+          "repo_write",
           "created_at",
           "updated_at"
         ],
@@ -1054,7 +1434,7 @@
             "type": "string"
           },
           "clusterHost": {
-            "description": "Public host of the cluster to pin the repo to (e.g. royalcanin.partial.to); empty lands on the jurisdiction default.",
+            "description": "Public host of the cluster to pin the repo to (e.g. royalcanin.partial.to); must be in the project's processing cell. Empty takes that cell's cluster.",
             "type": "string"
           },
           "name": {
@@ -1107,47 +1487,212 @@
         ],
         "type": "object"
       },
-      "CreatedMirror": {
+      "CreatedOrg": {
         "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
             "examples": [
-              "/api/v1/schemas/CreatedMirror.json"
+              "/api/v1/schemas/CreatedOrg.json"
             ],
             "format": "uri",
             "readOnly": true,
             "type": "string"
           },
-          "created": {
-            "description": "true on fresh creation; false when an existing mirror was returned.",
-            "type": "boolean"
+          "capabilities": {
+            "$ref": "#/components/schemas/OrgCapabilities"
           },
-          "empty": {
-            "description": "Deprecated: always false. Poll the mirror status instead — an empty upstream still reaches 'ready'.",
-            "type": "boolean"
-          },
-          "mirrorId": {
+          "commitToken": {
+            "deprecated": true,
+            "description": "Deprecated: read the X-Entire-Commit-Token response header instead.",
             "type": "string"
           },
-          "mirrorUrl": {
+          "createdAt": {
+            "format": "date-time",
             "type": "string"
           },
-          "publicUrl": {
+          "id": {
             "type": "string"
           },
-          "suspended": {
-            "description": "true when an existing placement was returned that an admin suspended.",
-            "type": "boolean"
+          "name": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "workosOrganizationId": {
+            "type": "string"
           }
         },
         "required": [
-          "mirrorId",
-          "mirrorUrl",
-          "publicUrl",
-          "created",
-          "empty",
-          "suspended"
+          "id",
+          "name",
+          "region",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "CreatedProject": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreatedProject.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "apiUrl": {
+            "description": "Public entire-api base URL for the assigned cell. Empty when unassigned or routing is unavailable; do not fall back to another cell.",
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ProjectCapabilities"
+          },
+          "commitToken": {
+            "deprecated": true,
+            "description": "Deprecated: read the X-Entire-Commit-Token response header instead.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ownerId": {
+            "type": "string"
+          },
+          "ownerName": {
+            "type": "string"
+          },
+          "ownerType": {
+            "enum": [
+              "org",
+              "account"
+            ],
+            "type": "string"
+          },
+          "primaryProcessingCell": {
+            "description": "Stored processing cell ID, not a cluster slug. Empty when the project is unassigned.",
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "repositoryCount": {
+            "description": "Published logical repositories in paginated project listings. Omitted without project-wide view permission or when unavailable.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "ownerType",
+          "ownerId",
+          "region",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "CreatedRepo": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreatedRepo.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/RepoCapabilities"
+          },
+          "clusterHost": {
+            "type": "string"
+          },
+          "clusterSlug": {
+            "type": "string"
+          },
+          "commitToken": {
+            "deprecated": true,
+            "description": "Deprecated: read the X-Entire-Commit-Token response header instead.",
+            "type": "string"
+          },
+          "foreign": {
+            "type": "boolean"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "mirrorSuspended": {
+            "type": "boolean"
+          },
+          "mirrorSuspendedAt": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "objectFormat": {
+            "type": "string"
+          },
+          "owningProjectId": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/RepoPlacement"
+            },
+            "type": "array"
+          },
+          "primaries": {
+            "$ref": "#/components/schemas/RepoPrimaries"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "provisionAttempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "provisionReason": {
+            "type": "string"
+          },
+          "repoGroupId": {
+            "type": "string"
+          },
+          "state": {
+            "description": "Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.",
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "owningProjectId",
+          "name"
         ],
         "type": "object"
       },
@@ -1467,52 +2012,6 @@
         ],
         "type": "object"
       },
-      "GetPermissionsOutputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/GetPermissionsOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "explain": {
-            "additionalProperties": {},
-            "type": "object"
-          },
-          "permissions": {
-            "items": {
-              "enum": [
-                "manage",
-                "view",
-                "read",
-                "write",
-                "push",
-                "pull",
-                "create_repo",
-                "admin",
-                "admin_read"
-              ],
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "resourceId": {
-            "type": "string"
-          },
-          "resourceType": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "resourceType",
-          "resourceId"
-        ],
-        "type": "object"
-      },
       "GetRepoVisibilityOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -1592,16 +2091,75 @@
         ],
         "type": "object"
       },
-      "GrantProjectAccessInputBody": {
+      "GitHubInstallation": {
+        "additionalProperties": true,
+        "properties": {
+          "accountLogin": {
+            "type": "string"
+          },
+          "accountType": {
+            "enum": [
+              "user",
+              "organization"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "suspended"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "accountLogin",
+          "accountType",
+          "state"
+        ],
+        "type": "object"
+      },
+      "GitHubInstallations": {
+        "additionalProperties": true,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/GitHubInstallation"
+            },
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "GrantAccessBody": {
         "additionalProperties": true,
         "properties": {
           "$schema": {
             "description": "A URL to the JSON Schema for this object.",
             "examples": [
-              "/api/v1/schemas/GrantProjectAccessInputBody.json"
+              "/api/v1/schemas/GrantAccessBody.json"
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "accountId": {
+            "description": "Entire account ULID to grant directly. Mutually exclusive with provider/providerUserId; the account must exist.",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           },
           "granteeType": {
@@ -1612,10 +2170,12 @@
             "type": "string"
           },
           "provider": {
+            "description": "Legacy identity selector; requires providerUserId and must not be combined with accountId.",
             "minLength": 1,
             "type": "string"
           },
           "providerUserId": {
+            "description": "Legacy provider user ID; requires provider and must not be combined with accountId.",
             "minLength": 1,
             "type": "string"
           },
@@ -1629,8 +2189,6 @@
           }
         },
         "required": [
-          "provider",
-          "providerUserId",
           "role"
         ],
         "type": "object"
@@ -1653,49 +2211,6 @@
         },
         "required": [
           "status"
-        ],
-        "type": "object"
-      },
-      "GrantRepoAccessInputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/GrantRepoAccessInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "granteeType": {
-            "default": "account",
-            "enum": [
-              "account"
-            ],
-            "type": "string"
-          },
-          "provider": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "providerUserId": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "role": {
-            "enum": [
-              "reader",
-              "writer",
-              "admin"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider",
-          "providerUserId",
-          "role"
         ],
         "type": "object"
       },
@@ -1780,6 +2295,68 @@
         ],
         "type": "object"
       },
+      "Invitation": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/Invitation.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "acceptedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "acceptedBy": {
+            "description": "Account ID that used the token. Empty until the invitation is accepted.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "email": {
+            "description": "The invited address, normalized to lowercase.",
+            "type": "string"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invitedBy": {
+            "description": "Account ID of the manager who created the invitation.",
+            "type": "string"
+          },
+          "revokedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "status": {
+            "description": "Derived from the outcome columns at read time.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "status",
+          "invitedBy",
+          "createdAt",
+          "expiresAt"
+        ],
+        "type": "object"
+      },
       "ListAuditEventsOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -1825,10 +2402,14 @@
               "$ref": "#/components/schemas/AvailableMirror"
             },
             "type": "array"
+          },
+          "githubInstallations": {
+            "$ref": "#/components/schemas/GitHubInstallations"
           }
         },
         "required": [
-          "available"
+          "available",
+          "githubInstallations"
         ],
         "type": "object"
       },
@@ -2036,6 +2617,58 @@
         ],
         "type": "object"
       },
+      "ListOrgCIDepotOrganizationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListOrgCIDepotOrganizationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/OrgCIDepotConnectionView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "connections"
+        ],
+        "type": "object"
+      },
+      "ListOrgInvitationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListOrgInvitationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "invitations": {
+            "items": {
+              "$ref": "#/components/schemas/Invitation"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invitations"
+        ],
+        "type": "object"
+      },
       "ListOrgMembersOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -2061,6 +2694,39 @@
         },
         "required": [
           "members"
+        ],
+        "type": "object"
+      },
+      "ListOrgPeopleOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListOrgPeopleOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OrgPersonSummary"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "totalCount": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "totalCount"
         ],
         "type": "object"
       },
@@ -2225,6 +2891,30 @@
         },
         "required": [
           "builds"
+        ],
+        "type": "object"
+      },
+      "ListRepoCIDeliveriesOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoCIDeliveriesOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "deliveries": {
+            "items": {
+              "$ref": "#/components/schemas/CIDeliveryView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "deliveries"
         ],
         "type": "object"
       },
@@ -2665,6 +3355,7 @@
             "type": "string"
           },
           "status": {
+            "description": "Membership lifecycle status.",
             "type": "string"
           },
           "workosOrgMembershipId": {
@@ -2732,14 +3423,14 @@
             "format": "date-time",
             "type": "string"
           },
-          "installationId": {
-            "format": "int64",
-            "type": "integer"
-          },
           "isArchived": {
             "type": "boolean"
           },
           "isPrivate": {
+            "type": "boolean"
+          },
+          "isProcessingPrimary": {
+            "description": "True when this placement does its repo group's per-event work. Removing it is refused while other placements remain.",
             "type": "boolean"
           },
           "jurisdiction": {
@@ -3136,6 +3827,39 @@
         ],
         "type": "object"
       },
+      "OrgCIDepotConnectionView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/OrgCIDepotConnectionView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "connected_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "account",
+          "owner"
+        ],
+        "type": "object"
+      },
       "OrgCIGitHubActionsCredentialView": {
         "additionalProperties": true,
         "properties": {
@@ -3183,6 +3907,10 @@
       "OrgCapabilities": {
         "additionalProperties": true,
         "properties": {
+          "canChangeOwners": {
+            "description": "Whether the caller holds the direct organization owner relation. Individual mutations still enforce all guards.",
+            "type": "boolean"
+          },
           "canCreateProject": {
             "type": "boolean"
           },
@@ -3196,7 +3924,192 @@
         "required": [
           "canCreateProject",
           "canManageMembers",
-          "canDelete"
+          "canDelete",
+          "canChangeOwners"
+        ],
+        "type": "object"
+      },
+      "OrgPerson": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/OrgPerson.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/OrgPersonGrant"
+            },
+            "type": "array"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "membership": {
+            "$ref": "#/components/schemas/OrgPersonMembership"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "membership",
+          "grants"
+        ],
+        "type": "object"
+      },
+      "OrgPersonGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/OrgPersonGrantCapabilities"
+          },
+          "resourceId": {
+            "description": "Organization ID, project ID, or logical repo-group ID (not a placement ID).",
+            "type": "string"
+          },
+          "resourceName": {
+            "type": "string"
+          },
+          "resourceType": {
+            "enum": [
+              "organization",
+              "project",
+              "repository"
+            ],
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member",
+              "reader",
+              "writer",
+              "mirror_source_admin"
+            ],
+            "type": "string"
+          },
+          "source": {
+            "description": "Origin at this resource level; inherited access is not included.",
+            "enum": [
+              "membership",
+              "direct",
+              "team",
+              "github"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "resourceType",
+          "resourceId",
+          "resourceName",
+          "role",
+          "source",
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "OrgPersonGrantCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "allowedRoles": {
+            "description": "Roles the caller may request. An empty array means read-only.",
+            "items": {
+              "enum": [
+                "owner",
+                "admin",
+                "member",
+                "writer",
+                "reader"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targetId": {
+            "description": "ID for the existing role mutation: membership ID, project ID, or native primary repo placement ID. Present only when roles are editable.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "allowedRoles"
+        ],
+        "type": "object"
+      },
+      "OrgPersonMembership": {
+        "additionalProperties": true,
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "status",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "OrgPersonSummary": {
+        "additionalProperties": true,
+        "properties": {
+          "accessScopes": {
+            "description": "Recorded grant levels, not effective permissions.",
+            "items": {
+              "enum": [
+                "organization",
+                "project",
+                "repository"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "membership": {
+            "$ref": "#/components/schemas/OrgPersonMembership"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "membership",
+          "accessScopes"
         ],
         "type": "object"
       },
@@ -3229,8 +4142,33 @@
           },
           "ref_filter": {
             "type": "string"
+          },
+          "repo_write": {
+            "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "PreviewInvitationInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/PreviewInvitationInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "token": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
         "type": "object"
       },
       "Project": {
@@ -3243,6 +4181,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "apiUrl": {
+            "description": "Public entire-api base URL for the assigned cell. Empty when unassigned or routing is unavailable; do not fall back to another cell.",
             "type": "string"
           },
           "capabilities": {
@@ -3271,8 +4213,18 @@
             ],
             "type": "string"
           },
+          "primaryProcessingCell": {
+            "description": "Stored processing cell ID, not a cluster slug. Empty when the project is unassigned.",
+            "type": "string"
+          },
           "region": {
             "type": "string"
+          },
+          "repositoryCount": {
+            "description": "Published logical repositories in paginated project listings. Omitted without project-wide view permission or when unavailable.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -3333,6 +4285,26 @@
           "granteeId",
           "role",
           "source"
+        ],
+        "type": "object"
+      },
+      "ProjectReference": {
+        "additionalProperties": true,
+        "properties": {
+          "host": {
+            "enum": [
+              "et",
+              "gh"
+            ],
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "project"
         ],
         "type": "object"
       },
@@ -3420,6 +4392,12 @@
           "path": {
             "type": "string"
           },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/RepoPlacement"
+            },
+            "type": "array"
+          },
           "primaries": {
             "$ref": "#/components/schemas/RepoPrimaries"
           },
@@ -3502,6 +4480,12 @@
             "type": "string"
           },
           "role": {
+            "description": "Display tier. Admin includes GitHub settings administrators and does not imply permission to manage grants.",
+            "enum": [
+              "reader",
+              "writer",
+              "admin"
+            ],
             "type": "string"
           }
         },
@@ -3694,6 +4678,9 @@
       "RepoPlacement": {
         "additionalProperties": true,
         "properties": {
+          "apiBaseUrl": {
+            "type": "string"
+          },
           "cell": {
             "type": "string"
           },
@@ -3837,6 +4824,31 @@
         ],
         "type": "object"
       },
+      "ResolveProjectOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResolveProjectOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          },
+          "reference": {
+            "$ref": "#/components/schemas/ProjectReference"
+          }
+        },
+        "required": [
+          "project",
+          "reference"
+        ],
+        "type": "object"
+      },
       "ResolveRepoIDsInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -3897,6 +4909,14 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "commitToken": {
+            "pattern": "^$|^[A-Za-z0-9_-]{60,512}$",
+            "type": "string"
+          },
+          "recheckDeniedPermissions": {
+            "description": "Retry stale permission denials for navigation. Defaults to false for list enrichment. Failed retries retain denials; a commitToken authorization revision takes precedence.",
+            "type": "boolean"
           },
           "repositories": {
             "items": {
@@ -3989,6 +5009,136 @@
         "required": [
           "mirrorId",
           "clusterHost"
+        ],
+        "type": "object"
+      },
+      "ResourcePeopleOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResourcePeopleOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ResourcePerson"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          },
+          "totalCount": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "totalCount"
+        ],
+        "type": "object"
+      },
+      "ResourcePerson": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "directGrant": {
+            "$ref": "#/components/schemas/ResourcePersonDirectGrant"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ResourcePersonSource"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "accountId",
+          "role",
+          "directGrant",
+          "sources"
+        ],
+        "type": "object"
+      },
+      "ResourcePersonDirectGrant": {
+        "additionalProperties": true,
+        "properties": {
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member",
+              "reader",
+              "writer",
+              "mirror_source_admin"
+            ],
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "membership",
+              "direct"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "source"
+        ],
+        "type": "object"
+      },
+      "ResourcePersonSource": {
+        "additionalProperties": true,
+        "properties": {
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member",
+              "reader",
+              "writer",
+              "mirror_source_admin"
+            ],
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "membership",
+              "direct",
+              "team",
+              "organization",
+              "project",
+              "owner",
+              "github"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "role"
         ],
         "type": "object"
       },
@@ -4151,7 +5301,7 @@
         "additionalProperties": true,
         "properties": {
           "host": {
-            "description": "DNS host of this cluster; pass verbatim as clusterHost to POST /api/v1/mirrors.",
+            "description": "DNS host of this cluster; pass verbatim as clusterHost to POST /api/v1/mirror-requests.",
             "type": "string"
           },
           "isDefault": {
@@ -4238,9 +5388,9 @@
             "type": "string"
           },
           "addRules": {
-            "description": "Rules to add or replace by ref: an existing rule keeps its position and takes the new flag.",
+            "description": "Rules to add or edit by ref: an existing rule keeps its position; omit serverSideMergeOnly to keep its level.",
             "items": {
-              "$ref": "#/components/schemas/BranchRule"
+              "$ref": "#/components/schemas/BranchRuleUpdate"
             },
             "maxItems": 64,
             "type": "array"
@@ -4254,6 +5404,33 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "UpdateOrgMemberRoleInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateOrgMemberRoleInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "role": {
+            "description": "Replacement organization role.",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
         "type": "object"
       },
       "WillDeleteStruct": {
@@ -4324,75 +5501,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/access/{resourceType}/{resourceId}": {
-      "get": {
-        "operationId": "getPermissions",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "resourceType",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "resourceId",
-            "required": true,
-            "schema": {
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "description": "If set, return the SpiceDB trace for this permission instead of the permission list.",
-            "explode": false,
-            "in": "query",
-            "name": "explain",
-            "schema": {
-              "description": "If set, return the SpiceDB trace for this permission instead of the permission list.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GetPermissionsOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "List the caller's permissions on a single resource",
-        "tags": [
-          "identity"
-        ]
-      }
-    },
     "/audit": {
       "get": {
         "operationId": "listAuditEvents",
@@ -4559,6 +5667,160 @@
         ]
       }
     },
+    "/invitations/accept": {
+      "post": {
+        "operationId": "acceptInvitation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "membership": {
+                      "$ref": "#/components/schemas/Membership"
+                    },
+                    "orgId": {
+                      "type": "string"
+                    },
+                    "orgName": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "orgId",
+                    "orgName",
+                    "membership"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Accepted; the caller was already an active member"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedInvitation"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Accept an organization invitation",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/invitations/preview": {
+      "post": {
+        "operationId": "previewInvitation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewInvitationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "inviterHandle": {
+                      "type": "string"
+                    },
+                    "orgName": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "owner",
+                        "admin",
+                        "member"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "orgName",
+                    "inviterHandle",
+                    "role"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Preview an organization invitation",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
     "/me": {
       "delete": {
         "operationId": "deleteMe",
@@ -4694,6 +5956,65 @@
           }
         ],
         "summary": "Preview what deleting the calling account will erase, unlink, and block on",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/handles/{provider}/{providerUserId}": {
+      "delete": {
+        "operationId": "detachMyHandle",
+        "parameters": [
+          {
+            "description": "Sign-in provider of the handle to detach.",
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "description": "Sign-in provider of the handle to detach.",
+              "enum": [
+                "google",
+                "github"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The provider's stable user identifier for the handle (handles[].providerUserId from GET /me).",
+            "in": "path",
+            "name": "providerUserId",
+            "required": true,
+            "schema": {
+              "description": "The provider's stable user identifier for the handle (handles[].providerUserId from GET /me).",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Detach a linked sign-in method from the calling account",
         "tags": [
           "identity"
         ]
@@ -5050,53 +6371,6 @@
           }
         ],
         "summary": "List mirrors visible to the caller",
-        "tags": [
-          "mirrors"
-        ]
-      },
-      "post": {
-        "operationId": "createMirror",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateMirrorInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreatedMirror"
-                }
-              }
-            },
-            "description": "Created"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Create GitHub mirror",
         "tags": [
           "mirrors"
         ]
@@ -5472,6 +6746,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Optional: opaque commit token from an org create or delete, to read at a snapshot that contains that write. Applies to both the name lookup and the page.",
+            "explode": false,
+            "in": "query",
+            "name": "commitToken",
+            "schema": {
+              "description": "Optional: opaque commit token from an org create or delete, to read at a snapshot that contains that write. Applies to both the name lookup and the page.",
+              "pattern": "^$|^[A-Za-z0-9_-]{20,512}$",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5543,11 +6828,19 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Org"
+                  "$ref": "#/components/schemas/CreatedOrg"
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-Entire-Commit-Token": {
+                "schema": {
+                  "description": "Opaque token to pass as commitToken on the next org list, so this org appears immediately. Absent when none could be minted; list without it.",
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -5590,7 +6883,15 @@
         ],
         "responses": {
           "204": {
-            "description": "No Content"
+            "description": "No Content",
+            "headers": {
+              "X-Entire-Commit-Token": {
+                "schema": {
+                  "description": "Opaque token to pass as commitToken on the next org list, so this org is gone from it. Absent when none could be minted; list without it.",
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -6063,6 +7364,171 @@
         ]
       }
     },
+    "/orgs/{orgId}/ci/depot/connection": {
+      "post": {
+        "description": "Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because nothing can verify a Depot organisation id. Depot hands Entire no credential, so there is no token to store and no API to check the id against; the operator vouches for it. Records the Depot organisation id the org's repositories enrol against. Returns 201 on a fresh connection and 200 when the same pair is already connected.",
+        "operationId": "connectOrgCIDepotOrganization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectOrgCIDepotOrganizationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCIDepotConnectionView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Connect an org to a Depot organisation",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/depot/connection/{account}": {
+      "delete": {
+        "description": "Operator-only: requires platform#admin, mirroring the connect, because withdrawing an operator's vouch is at least as privileged as granting it. Provider-scoped on ci-webhooks, so it removes only the depot row and never a Buildkite credential of the same name. Removing a connection a subscription still names is allowed and logged; those subscriptions stop dispatching.",
+        "operationId": "disconnectOrgCIDepotOrganization",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Disconnect an org from a Depot organisation",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/depot/connections": {
+      "get": {
+        "description": "Requires org#manage, like the Buildkite credential list. A Depot connection holds no secret: it is the Depot organisation id this org's repositories enrol against.",
+        "operationId": "listOrgCIDepotOrganizations",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgCIDepotOrganizationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List an org's connected Depot organisations",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
     "/orgs/{orgId}/ci/github-actions/credential": {
       "post": {
         "description": "Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because GitHub Actions has no enrolment path yet and a credential minted here cannot be used. Mints the inbound webhook credential for one GitHub account: a fresh webhook secret (returned once, in this 201) and the endpoint URL to configure the GitHub webhook with, plus optionally the outbound dispatch api_token (write-only, never returned; has_api_token confirms storage). With api_token, an already-minted github-actions row gets the token stored/rotated instead (200, no secret re-issued).",
@@ -6121,6 +7587,217 @@
         "summary": "Mint an org's GitHub Actions webhook credential",
         "tags": [
           "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/invitations": {
+      "get": {
+        "operationId": "listOrgInvitations",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Lifecycle state to return; all returns every state.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "default": "open",
+              "description": "Lifecycle state to return; all returns every state.",
+              "enum": [
+                "open",
+                "accepted",
+                "revoked",
+                "expired",
+                "all"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgInvitationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List an organization's invitations",
+        "tags": [
+          "orgs"
+        ]
+      },
+      "post": {
+        "operationId": "createOrgInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrgInvitationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invitation"
+                }
+              }
+            },
+            "description": "Resent; an open invitation for that address already existed. The role in the body is the invitation's stored role, not the request's."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invitation"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Invite an address into an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/invitations/{id}": {
+      "delete": {
+        "operationId": "revokeOrgInvitation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Revoke an organization invitation",
+        "tags": [
+          "orgs"
         ]
       }
     },
@@ -6255,6 +7932,75 @@
         ]
       }
     },
+    "/orgs/{orgId}/members/{membershipId}": {
+      "patch": {
+        "operationId": "updateOrgMemberRole",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "membershipId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOrgMemberRoleInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Membership"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Update an organization member's role",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
     "/orgs/{orgId}/members/{provider}/{providerUserId}": {
       "delete": {
         "operationId": "removeOrgMember",
@@ -6311,6 +8057,228 @@
           }
         ],
         "summary": "Remove a member from an organization",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/people": {
+      "get": {
+        "description": "Requires organization management permission, not repository pull permission. Returns one row per account with membership metadata and recorded accessScopes, without grant details or editing capabilities. Grants retain each distinct role and origin (membership, direct, team, or github), without inherited expansion or strongest-role collapsing. Repository IDs identify published logical repo groups, not placements. Membership grants include pending and inactive memberships; membership.status describes their lifecycle. GitHub grants use the collaborator read model and can differ from live SpiceDB permissions during reconciliation. This is a roster read model, not an authorization check or complete SpiceDB audit. Management does not imply Git read permission. Snapshot readiness uses the shared GitHub discovery eligibility and 15-minute grace policy. Detached, suspended, sync-blocked, sync-banned, and wholly suspended mirror targets do not block readiness; recorded edges still serve. Overdue eligible snapshots or missing mirror mappings return 503. Filters select people by recorded grants, not inherited roles. Load /people/{accountId}/access when opening an editor; it returns that person's grants and fresh editing capabilities. The list has no full mode. Filters and totalCount apply before cursor pagination; results are ordered by account ID.",
+        "operationId": "listOrgPeople",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Select people with a recorded grant at this resource level.",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "description": "Select people with a recorded grant at this resource level.",
+              "enum": [
+                "organization",
+                "project",
+                "repository"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring of account ID, public handle, or resource name.",
+            "explode": false,
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "description": "Case-insensitive substring of account ID, public handle, or resource name.",
+              "maxLength": 200,
+              "type": "string"
+            }
+          },
+          {
+            "description": "member includes non-pending memberships; invited means pending; collaborator means no direct membership.",
+            "explode": false,
+            "in": "query",
+            "name": "membership",
+            "schema": {
+              "description": "member includes non-pending memberships; invited means pending; collaborator means no direct membership.",
+              "enum": [
+                "member",
+                "invited",
+                "collaborator"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Direct membership status; collaborators have no membership status.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "Direct membership status; collaborators have no membership status.",
+              "enum": [
+                "active",
+                "inactive",
+                "pending"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact recorded grant role, including organization membership and weaker independent grants.",
+            "explode": false,
+            "in": "query",
+            "name": "role",
+            "schema": {
+              "description": "Exact recorded grant role, including organization membership and weaker independent grants.",
+              "enum": [
+                "owner",
+                "admin",
+                "member",
+                "reader",
+                "writer",
+                "mirror_source_admin"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgPeopleOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List organization members, invitations, and collaborators with scope summaries",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/orgs/{orgId}/people/{accountId}/access": {
+      "get": {
+        "description": "Requires organization management permission. Selects the exact account within this organization's roster, not a handle or substring. Returns all recorded grants and fresh caller-specific editing capabilities. Missing or excluded people return 404; incomplete organization read models return 503. Uses global public data only. Mutations independently reauthorize every write.",
+        "operationId": "getOrgPersonAccess",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgPerson"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get one organization person's grants and editing capabilities",
         "tags": [
           "orgs"
         ]
@@ -6435,6 +8403,17 @@
               "description": "Optional: exact-match project name (case-insensitive).",
               "type": "string"
             }
+          },
+          {
+            "description": "Optional: opaque commit token from a project create or delete, to list at a snapshot that contains that write. Ignored when name is set.",
+            "explode": false,
+            "in": "query",
+            "name": "commitToken",
+            "schema": {
+              "description": "Optional: opaque commit token from a project create or delete, to list at a snapshot that contains that write. Ignored when name is set.",
+              "pattern": "^$|^[A-Za-z0-9_-]{20,512}$",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -6489,11 +8468,19 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Project"
+                  "$ref": "#/components/schemas/CreatedProject"
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-Entire-Commit-Token": {
+                "schema": {
+                  "description": "Opaque token to pass as commitToken on the next project list, so this project appears immediately. Absent when none could be minted; list without it.",
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -6520,6 +8507,70 @@
         ]
       }
     },
+    "/projects/resolve/{host}/{project}": {
+      "get": {
+        "description": "Case-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project inspect permission, including platform administrators. Missing and inaccessible projects both return 404.",
+        "operationId": "resolveProject",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host",
+            "required": true,
+            "schema": {
+              "enum": [
+                "et",
+                "gh"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "maxLength": 39,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveProjectOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resolve a canonical project reference",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
     "/projects/{projectId}": {
       "delete": {
         "operationId": "deleteProject",
@@ -6536,7 +8587,15 @@
         ],
         "responses": {
           "204": {
-            "description": "No Content"
+            "description": "No Content",
+            "headers": {
+              "X-Entire-Commit-Token": {
+                "schema": {
+                  "description": "Opaque token to pass as commitToken on the next project list, so this project is gone from it. Absent when none could be minted; list without it.",
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -6629,7 +8688,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GrantProjectAccessInputBody"
+                "$ref": "#/components/schemas/GrantAccessBody"
               }
             }
           },
@@ -6866,6 +8925,109 @@
         ]
       }
     },
+    "/projects/{projectId}/people": {
+      "get": {
+        "description": "Requires project roster-view permission, held by project managers and source-managed forge members but not ordinary native readers or writers. Returns one account per row with its effective role and merged access sources. Grant managers also receive the mutable direct grant. Search and role filters run before cursor pagination. Results are ordered by effective role (owner, admin, mirror_source_admin, writer, reader, member), then by handle without the provider prefix, ignoring case, then by account ID. Accounts without a handle come last within their role.",
+        "operationId": "listProjectPeople",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring of account ID or public handle.",
+            "explode": false,
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "description": "Case-insensitive substring of account ID or public handle.",
+              "maxLength": 200,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact effective role on the selected resource.",
+            "explode": false,
+            "in": "query",
+            "name": "role",
+            "schema": {
+              "description": "Exact effective role on the selected resource.",
+              "enum": [
+                "owner",
+                "admin",
+                "member",
+                "reader",
+                "writer",
+                "mirror_source_admin"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcePeopleOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List effective project members",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
     "/projects/{projectId}/repos": {
       "get": {
         "operationId": "listProjectRepos",
@@ -6909,6 +9071,17 @@
             "name": "name",
             "schema": {
               "description": "Optional: exact-match repo name (case-insensitive).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write.",
+            "explode": false,
+            "in": "query",
+            "name": "commitToken",
+            "schema": {
+              "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write.",
+              "pattern": "^$|^[A-Za-z0-9_-]{60,512}$",
               "type": "string"
             }
           }
@@ -6998,6 +9171,17 @@
             "name": "filter",
             "schema": {
               "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored, but the fact filters below still apply (a repo whose facts don't match returns empty).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write. Requires filter.",
+            "explode": false,
+            "in": "query",
+            "name": "commitToken",
+            "schema": {
+              "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write. Requires filter.",
+              "pattern": "^$|^[A-Za-z0-9_-]{60,512}$",
               "type": "string"
             }
           },
@@ -7098,6 +9282,17 @@
             }
           },
           {
+            "description": "Exact-match owning project id (ULID). Also accepts projectId[eq]; projectId[ne] is rejected.",
+            "explode": false,
+            "in": "query",
+            "name": "projectId",
+            "schema": {
+              "description": "Exact-match owning project id (ULID). Also accepts projectId[eq]; projectId[ne] is rejected.",
+              "pattern": "^$|^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
             "description": "Filter on placement/candidacy lifecycle. inactive requires scope=all. Also accepts status[eq]/status[ne].",
             "explode": false,
             "in": "query",
@@ -7180,11 +9375,19 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Repo"
+                  "$ref": "#/components/schemas/CreatedRepo"
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-Entire-Commit-Token": {
+                "schema": {
+                  "description": "Opaque token to pass as commitToken on the next repo resolve, so this repo resolves immediately.",
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -7519,7 +9722,15 @@
         ],
         "responses": {
           "204": {
-            "description": "No Content"
+            "description": "No Content",
+            "headers": {
+              "X-Entire-Commit-Token": {
+                "schema": {
+                  "description": "Opaque token to pass as commitToken on the next repo listing, so this repo is gone from it. Absent when none could be minted; list without it.",
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -7855,6 +10066,137 @@
         ]
       }
     },
+    "/repos/{repoId}/ci-deliveries": {
+      "get": {
+        "description": "Recent deliveries, newest first. direction=outbound (default) is what Entire sent the repo's CI when refs changed; direction=inbound is what that CI sent back.",
+        "operationId": "listRepoCIDeliveries",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "direction",
+            "schema": {
+              "enum": [
+                "outbound",
+                "inbound"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoCIDeliveriesOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a repo's webhook deliveries",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
+    "/repos/{repoId}/ci-deliveries/{id}": {
+      "get": {
+        "description": "The id is the opaque value from a list response. A payload is absent once its day has been swept (payload_absent=swept) or when no request was ever built (payload_absent=no_request).",
+        "operationId": "getRepoCIDelivery",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CIDeliveryDetailView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get one delivery and its wire payloads",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
     "/repos/{repoId}/ci-webhooks": {
       "get": {
         "operationId": "listRepoCIWebhooks",
@@ -8097,7 +10439,7 @@
     },
     "/repos/{repoId}/ci-webhooks/{id}": {
       "delete": {
-        "description": "Deletes the subscription AND tears down its enrollment identity: the automation row (when no sibling repo shares it), its expiring repo grant, and its Buildkite OIDC binding. The Buildkite pipeline itself is always kept. Pass keep_identity=true to delete only the subscription — for an immediate re-enroll that must preserve automation_id, since teardown retires it and a re-enroll declares a new one that only bk_force_rescaffold pushes into the pipeline. A retained identity holds read access on this repo until its grant lapses. A subscription enrolled before the automation principal has no automation to retire: the delete succeeds and removes only the subscription, reported as identity_retired=false on the ci_webhook_deleted audit event — the list an operator queries to hand-delete the leftover service accounts.",
+        "description": "Deletes the subscription and clears this repo's own enrolment marker. This does NOT immediately revoke the automation's access to the repo: that access normally continues, on its existing expiry, in the background. Pass keep_identity=true to leave the marker untouched too — for an immediate re-enroll, which always resumes the same automation_id either way. The Buildkite pipeline is always kept.",
         "operationId": "deleteRepoCIWebhook",
         "parameters": [
           {
@@ -8383,7 +10725,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GrantRepoAccessInputBody"
+                "$ref": "#/components/schemas/GrantAccessBody"
               }
             }
           },
@@ -8711,6 +11053,109 @@
         "summary": "Delete a native-mirror placement",
         "tags": [
           "native-mirrors"
+        ]
+      }
+    },
+    "/repos/{repoId}/people": {
+      "get": {
+        "description": "Returns one account per row with its effective role and merged access sources. Grant managers also receive the mutable direct grant. Search and role filters run before cursor pagination. Results are ordered by effective role (owner, admin, mirror_source_admin, writer, reader, member), then by handle without the provider prefix, ignoring case, then by account ID. Accounts without a handle come last within their role.",
+        "operationId": "listRepoPeople",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring of account ID or public handle.",
+            "explode": false,
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "description": "Case-insensitive substring of account ID or public handle.",
+              "maxLength": 200,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact effective role on the selected resource.",
+            "explode": false,
+            "in": "query",
+            "name": "role",
+            "schema": {
+              "description": "Exact effective role on the selected resource.",
+              "enum": [
+                "owner",
+                "admin",
+                "member",
+                "reader",
+                "writer",
+                "mirror_source_admin"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourcePeopleOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List effective repository members",
+        "tags": [
+          "repos"
         ]
       }
     },

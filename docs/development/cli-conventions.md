@@ -80,7 +80,7 @@ the commands are always runnable in every build.
   --region`; CLUSTER is the placement slug `repo mirror list --cluster` filters
   on and the key the native-mirror API is addressed by; HOST is the bare public
   host every targeting `--cluster` takes (`repo mirror add`/`remove`, `repo
-  access list`, `repo clone`, `repo remote use`), reduced through
+  clone`, `repo remote add`), reduced through
   `hostFromPublicURL` so a publicUrl that fails validation renders `-` rather
   than a spoofable host. It is also what goes into an `entire://` clone URL and
   what `runCoreForCluster` dials. `--json` is the wire model, `apiUrl` and `isDefault`
@@ -101,12 +101,13 @@ the commands are always runnable in every build.
   grantee, roles owner/admin/member (default member)
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
-  grantee, roles reader/writer/admin; `remove` also takes an account ULID
+  grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
+  optionally (see the grant-subtree notes below)
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
-  `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`, `access`,
+  `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
-  `project grant`, addressing the repo by its `/et/<project>/<repo>` path
-  only). Verb names follow the GitHub CLI where the job is the same (`view`,
+  `project grant`, addressing the repo by its `/et/<project>/<repo>` path;
+  `grant list` alone also takes a `/gh/` mirror ref). Verb names follow the GitHub CLI where the job is the same (`view`,
   `edit --visibility`, `auth switch`), per the unified-repo-commands proto.
   Git content operations (log, diff, …) are intentionally out of scope.
   **A targeting `--cluster` names a cluster by its public host**
@@ -158,41 +159,97 @@ the commands are always runnable in every build.
   native-mirror routes are home-core-scoped and answer 421 for a repo in another
   jurisdiction, which `coreapi`'s transport follows and re-authenticates on its
   own, so they run on the plain active-context client with no cluster-fronting
-  detour. `remote use` repoints the *current clone's*
-  git remote at a mirror (local git config only — it creates nothing
-  server-side). Interactively it picks among the repo's placements and asks
-  whether to replace the remote (preserving the old URL under `--upstream`) or
-  add a separate one; non-interactively it repoints `--remote` directly. It
-  serves both forges: for a native repo the placements are its primary plus each
-  **ready** mirror. One URL per remote either way — a placement serves pushes as
-  well as fetches, so there is no split fetch/push remote to maintain.
-  `remote url` is the read-only half of the same subtree: it resolves a repo to
-  its `entire://` URL and prints it, changing nothing.
-  `remote use`, `remote url` and `clone` all choose a placement through the shared
+  detour. `remote add <remote-name> [repo]` is the whole `remote` subtree: it
+  writes one git remote in the *current clone* (local git config only — it
+  creates nothing server-side). It serves both forges: for a native repo the
+  placements are its primary plus each **ready** mirror. One URL per remote
+  either way — a placement serves pushes as well as fetches, so there is no
+  split fetch/push remote to maintain. An occupied `<remote-name>` is refused
+  the way `git remote add` refuses one; `--override` repoints it instead. A
+  remote already carrying that exact URL is a reported no-op, not a collision,
+  so re-running is safe. `--override` writes exactly the remote it names and
+  copies the replaced URL nowhere — the report echoes it (redacted) and that is
+  its only record. Saving it under a second remote the caller never named was
+  the previous design, and its failure mode was a name collision that reported
+  a clean ✓ over a URL that had left git config for good.
+  There is no URL-printing verb: `repo mirror get` already lists a clone URL per
+  cluster for both forges, in a table and in `--json`.
+  `remote add` and `clone` choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
-  picker matches on the cluster host, which is what `--cluster` takes. That
-  selection is **GitHub-only**
-  in `clone` and `remote url`: a native ref there resolves the repo's primary
-  and `--cluster` is refused, so the way to target a native mirror is
-  `remote use --cluster <host>` or a full `entire://` URL (which both `clone`
-  and `remote url` forward untouched). Teaching those two to select among native
-  placements is unfinished work, not a decision. It renders on stderr when that is
-  a terminal and on the controlling
-  terminal otherwise (`openPlacementPromptTerminal`), because Bubble Tea fails
-  *silently* on a redirected writer — no window size, a 0x0 viewport, and stdin
-  still in raw mode — and `remote url` exists to have its stdout captured. The
-  cancellation message follows the same writer, so it is never explained into a
-  stream the user is not reading.
-  `remote url` is `clone` without the clone: it resolves the same three ref
-  shapes through the same `resolveRepoRemoteURL` and prints the `entire://` URL
-  to stdout for `git remote add entire "$(…)"`, so the two always accept the
-  same refs. It deliberately does **not** take the `resolveRepoRef` grammar the
-  rest of the group shares (no ULID, no `--project`) — a URL producer matches
-  its sibling `clone`, not `view`. Because it prints rather than execs, its
-  `entire://` passthrough is validated (`validateEntireURLForPrinting`) where
-  `clone`'s is forwarded verbatim. `access list` shows who can pull a mirror (live
-  GitHub-admin gated). `edit --visibility` sets a native repo's visibility;
+  picker matches on the cluster host, which is what `--cluster` takes, and both
+  verbs resolve native placements — a repo's primary and its ready mirrors —
+  identically. With several placements and no `--cluster`, a terminal gets the
+  picker and a script gets the **primary**, passed to `selectPlacement` by host
+  rather than inferred from list order. For a native repo that is the cluster it
+  lives on. For a GitHub repo it is `defaultClusterHost`, the
+  cluster onboarding always places a mirror on, so it is the one every mirror
+  set has in common. That is an assumption, not a lookup: a repo mirrored only
+  elsewhere matches nothing and still gets the `--cluster` pointer. The server
+  can name the real one (POST `/repos/resolve` returns `primaries.processing`,
+  an id from the same space as `ResolvedPlacement.MirrorId`), at the cost of a
+  second round trip. The picker renders on stderr when that is a terminal and on the
+  controlling terminal otherwise (`openPlacementPromptTerminal`), because Bubble
+  Tea fails *silently* on a redirected writer — no window size, a 0x0 viewport,
+  and stdin still in raw mode. The cancellation message follows the same writer,
+  so it is never explained into a stream the user is not reading.
+  `edit --visibility` sets a native repo's visibility;
   `visibility get` reads it.
+  **"Who can reach this repo?" is one verb, `repo grant`,** because a user
+  asking it need not know which backend the repo has. `grant list` branches on
+  the ref's forge before resolving anything: a `/et/` ref lists the repo's
+  grants, a `/gh/` ref lists the placement's collaborators from
+  `GET /mirrors/collaborators` (live GitHub-admin gated against the caller's own
+  GitHub identity, so a service-account token cannot answer it). The mirror
+  branch renders `GRANTEE`/`ROLE` — `grantColumns` without the provenance the
+  mirror endpoint does not report — and its `--json` rewrites the
+  collaborator model into the grant vocabulary through `mergeSynthesizedFields`
+  — `accountId` → `granteeId`, `handle` → `granteeName`, plus `source` =
+  `github`, where a mirror's access does come from — so one script reads either
+  ref and no value is printed twice under two names. The merge (rather than a
+  struct of our own) is what keeps any field the server adds later.
+  `granteeType` stays absent — the endpoint reports an `accountId` and no kind,
+  so `account` would be a guess about a principal whose kind it never gave, and
+  a sentinel would add a value no server emits; absence carries the fact
+  unambiguously, since the schema makes `granteeType` required on the native
+  rows. `granteeName` is merged only when a name resolved, which is what the
+  native rows do with theirs. That endpoint is served by the core fronting
+  one cluster, so the branch resolves the repo's placements through
+  `resolvePullablePlacements` (the pull-gated lookup `repo clone` and
+  `remote add` share) and reads the collaborators on a cluster the repo
+  actually has — preferring the default, else the first in sorted order. That
+  lookup is a **hint, never a gate**: the two endpoints answer to different
+  authorities, `/mirrors/placements` being pull-gated while
+  `/mirrors/collaborators` runs a live GitHub-admin check, so a GitHub admin
+  holding no Entire grant resolves no placement and must still be answered. A
+  lookup that resolves nothing, names no dialable host, or fails outright falls
+  back to `defaultClusterHost`; what the hint buys is the repo mirrored only
+  outside that default. A fallback is a guess, so it never passes for a chosen
+  cluster: every error names the host and the reason, and an empty read says so
+  on **stderr**, which is the only channel `--json` shares — an empty array
+  exits 0 and otherwise reads exactly like a mirror with no collaborators. The
+  reason decides the next step, because only one of them has one that can
+  answer: placements that resolved but named no dialable host point at `repo
+  mirror get`, while a placement no login of yours can see points at
+  `--context`, since `mirror get` reads the affiliation-scoped directory and is
+  narrower than the pull-gated lookup that just came back empty. There is no region flag either: every placement
+  materializes the same upstream collaborators, so the caller has nothing to
+  choose. What the removed `--cluster` named was the cell — `clusterHost` is a
+  required parameter of that endpoint — and the cell is now read from the
+  repo's own placements. The login was never the flag's to pick and still is
+  not: `runCoreForCluster` auto-selects whichever saved login the cluster
+  trusts, which is what `docs/architecture/upstream-host-resolution.md`
+  describes. `grant add` and
+  `grant remove` keep the native path as their whole grammar: a mirror's access
+  is the upstream GitHub repository's, so a `/gh/` ref is refused before any
+  request — and before required flags are validated, through the target's
+  `unwritableRef` PreRunE hook, so the answer is the repo rather than a missing
+  `--role` — with a message naming `grant list`, rather than accepted into the
+  grammar and always failing. A `github.com` URL is claimed by that refusal too,
+  though it is not an accepted spelling: it names the repository unambiguously,
+  so answering it with the native path's grammar would send the reader to
+  rewrite the ref as the one shape that repository can never have. The branch is one optional `listBranch` field on
+  `grantTarget`, so the shared builder stays forge-unaware for `org` and
+  `project`.
   **A repository is named `/<forge>/<a>/<b>` and no other way**, across the
   mirror subtree and `clone` alike: a bare `<a>/<b>` is refused because both
   forges take that shape, and a GitHub URL is refused because it would be a
@@ -203,9 +260,11 @@ the commands are always runnable in every build.
   next line. A ref naming a forge the verb does not serve is refused **without
   being parsed**: declaring the forge is the whole answer, and quoting a name
   rule would send the reader to fix something that would be refused again.
-  `repo access list` is the one verb still GitHub-only (it reads GitHub
-  collaborators; native access is grants), and it points a native ref at
-  `entire repo grant list`. `repo mirror get` takes a mirror ULID or an
+  No verb narrows those forges today: the mirror subtree's own verbs read both
+  and branch on what they get, and `repo grant list` serves both as well, so
+  `unsupportedForgeErr` is reached only by the tests that pin the refusal — the
+  parser keeps the narrowing because it is its contract, not because a caller
+  exercises it. `repo mirror get` takes a mirror ULID or an
   `entire://` clone URL besides, since those address a placement rather than
   name a repo.
   `clone`
@@ -228,7 +287,9 @@ the commands are always runnable in every build.
   `path` the API returns, and `resolveRepoRef` accepts it for every command
   that takes a repo ref — `view`, `edit`, `delete`, and the `visibility` and
   `protection` subtrees (COR-1632). `repo grant` takes that path and nothing else — no
-  `--project`, no bare name, no ULID — through `resolveRepoPath`, which parses
+  `--project`, no bare name, no ULID (its `list` reads a `/gh/` mirror ref from
+  the mirror endpoint instead, never through this resolver) — through
+  `resolveRepoPath`, which parses
   with `parseNativeCloneRef` and resolves both segments by name only (a project
   or repo can be *named* like a ULID, so path segments never touch the
   `looksLikeULID` passthrough). The other two clone shapes are not: a `/gh/`
@@ -265,22 +326,171 @@ the commands are always runnable in every build.
   are best-effort without `--cluster`: if either fails (a core that 404s or
   503s the listing, a catalog hiccup), resolution degrades to the home cluster
   instead of failing a clone that has always worked.
-  A trailing `.git` is never part of a repo name, on **either** backend
-  (`gitDirSuffix` documents the mechanics): every ref parser drops it and `repo
-  create` refuses a name ending in it. This is a deliberate client-side
-  narrowing — GitHub rejects such a name outright, but the server accepts a
-  native `foo.git` (interior dot, same rule that makes `entire-trails.el` legal)
-  and strips the suffix for `/gh/` paths only. `gitremote.splitOwnerRepo` trims
-  unconditionally when reading a remote back, so such a repo is unaddressable by
-  name once cloned regardless; dropping it everywhere makes the CLI agree with
-  itself instead of leaving `repo clone` the one path that keeps it. Escape
-  hatches: the repo's ULID, or a full `entire://` URL. Two consequences worth
-  knowing — a `foo.git` created through the API or web UI *aliases* onto `foo`
-  in `resolveRepoRef`, and the durable fix is a server-side rule in
-  `normalizeName`, not this check.
+  A trailing `.git` is decoration on a `/gh/` mirror ref and **part of the name**
+  on a native `/et/` one (`mirrorGitDirSuffix` documents the mechanics). GitHub
+  rejects a repository name ending in `.git` outright, so on a mirror path the
+  suffix can only ever be decoration and dropping it is what lets a pasted
+  `git clone` URL resolve. The server is the opposite case: entiredb permits an
+  interior dot (the same rule that makes `entire-trails.el` legal), `POST
+  /api/v1/repos {"name":"foo.git"}` returns 201, and the data plane resolves
+  `/et/` paths verbatim — so `parseNativeCloneRef` keeps the suffix, `repo
+  create` forwards such a name, and a native lookup asks for `foo.git`. Trimming
+  it there resolved a *different* repository — sibling repos `foo` and `foo.git`
+  both exist, so `repo delete /et/p/foo.git` destroyed the neighbour and printed
+  the path the user typed beside the survivor's ULID, reading as success. Every
+  remaining trim is therefore a `/gh/` grammar, and
+  `gitremote.splitOwnerRepo` skips the trim for `ForgeNative` so a native remote
+  reads back the name it was cloned under. Two consequences worth knowing — a
+  trim can *manufacture* a dot-only segment (`..git` → `.`), which both the
+  `/gh/` grammar and `splitOwnerRepo` refuse; and `resolveRepoRef`'s
+  project-scoped miss names the suffix in its hint rather than stripping it,
+  since a bare name in that position is a name, not a path.
 - The three `grant` subtrees (`org grant`, `project grant`, `repo grant`) are one
   generic builder plus three target descriptions in `grant.go`; a new target is
   a `grantTarget` value, not a fourth copy of the leaves.
+
+  **`add` and `remove` take the grantee optionally**: omitted on a terminal,
+  they open a multi-select (`grant_picker.go`). `add` then collects a role **per
+  grantee**, so one run can add a reader and an admin; `--role` fixes every row,
+  rendered as a non-focusable `huh` note so the pairing is shown but not
+  editable. The forms sit behind the `grantPicker`, `removePicker` and
+  `revokeConfirmed` seams, because `go test` has no terminal to answer them on.
+
+  **The two pools are mirror images, and the axis is `source`.** `add` offers
+  the owning org's members with **no direct grant** on the target; `remove`
+  offers the **direct** grants revoking would remove. A `project:<name>` row is
+  neither: project access reaches the project's repos (`push = writer +
+  project->write`), but it is not a grant on the repo, so it does not block
+  adding one and cannot be revoked there — revoking it really does answer "no
+  such grant; nothing to revoke". `directHolders` is the one place `source` is
+  read for this. `remove` also drops the `owner` row, the owning org itself,
+  which holds the target through the authz schema rather than a grant.
+
+  Both earlier versions of the add pool were wrong in opposite directions, so do
+  not "simplify" back to either. Subtracting every holder emptied the pool on any
+  repo whose project already covered the org, and subtracting none meant every
+  row was a possible silent role change — `grant add` **upserts**, which is why
+  a direct holder has nothing to add and why changing a role is the typed form's
+  job.
+
+  **`org grant add` has no picker** (`candidates` is nil, which also keeps it at
+  two required args): everyone eligible is by definition absent from the only
+  list there is. `org grant remove` does have one, because the members to remove
+  ARE that list. There is no user search or global account listing in the API —
+  the only enumerable people endpoints are `/orgs/{id}/members`,
+  `/projects/{id}/members` and `/repos/{id}/grants`, none filterable — so the
+  filtering is client-side. Org membership is also the only pool whose entries
+  are directly grantable: project and repo rows carry a grantee ULID and no
+  provider identity, with no reverse lookup, while a `Membership` carries the
+  `provider:handle` that `resolveGranteeProvider` already takes. `remove` uses
+  the ULID where a typed-id route exists, since it needs no lookup and survives
+  a rename, so a candidate carries a `ref` to act on and a `label` to show, plus
+  `byID` saying which route it takes. **A grantee is a provider-qualified handle
+  and nothing else** (`ensureGranteeIsHandle`, checked before the target is
+  resolved so a grantee that cannot work costs no lookup): a ULID is an internal
+  id the interface does not ask anyone to copy, and routing on `byID` rather
+  than on the ref's shape is what keeps the typed-id route reachable only by the
+  picker, which reads the id off a listing.
+
+  **`--role` is not a cobra-required flag**, because cobra enforces those before
+  `RunE` and a role that cannot reach `RunE` cannot be prompted for. The
+  guarantee it gave — an omitted role never reaching validation, a lookup, or
+  the API — moved into the `RunE`, which settles both non-interactive refusals
+  from the command line **before any request**: an unanswerable prompt must not
+  cost a lookup.
+
+  **An empty pool exits 0; a missing one does not.** Having nobody to add is not
+  a failure — nothing went wrong and, in the common case, the state the user
+  wanted already holds, the same reasoning that makes revoking an
+  already-revoked grant a success rather than a 404. Selecting nobody in the
+  picker is the same and also exits 0. What stays an error is a command that
+  cannot run as asked: an account-owned target, which has no membership list
+  anywhere, and a non-interactive run with no grantee. Those two spell out the
+  `provider:handle` form because the user is stuck without it; the empty-pool
+  messages do not, there being nobody left to add. Under `--json` the reason
+  moves to stderr and stdout gets the empty array, so a caller parsing stdout is
+  never handed a sentence.
+
+  **Only the picker confirms a `remove`, and there is no flag to bypass it.** A
+  typed grantee already names exactly who to revoke and is the form a script
+  uses, so `<noun> grant remove <ref> github:alice` revokes unprompted whether or
+  not a terminal is attached — gating it on terminal *detection* instead made a
+  redirected stdin reach a form, read EOF, take the default of "no", and exit 0
+  having revoked nothing. What a confirmation is for is the set clicked off a
+  list. Gating only that path is also what leaves nothing to bypass: no caller
+  who would want `--force` ever meets the prompt. Do not "finish the job" by
+  adding a refusal and the flag; that is `delete`'s bargain, and the difference
+  is blast radius — a deleted repo is gone, a revoked grant is one command from
+  being restored. The prompt comes after the picker so it names what was chosen,
+  and covers the whole set at once: a count in the title with the grantees listed
+  under it, never a bare number.
+
+  No candidate is auto-picked even when only one is eligible, unlike
+  `selectPlacement`, which returns a lone cluster without prompting: this writes
+  access.
+
+  **Prompts go where the user can see them**, via `runPromptForm`: stderr when
+  that is a terminal, and otherwise the controlling terminal for input *and*
+  output, with the cancellation message following the prompt to the same writer.
+  Pinning to stdout is wrong because `huh` writes there in accessible mode and
+  these commands can be asked for `--json`; pinning to stderr is wrong because
+  `... 2>log` then renders an invisible prompt on an apparently hung command.
+  `selectPlacement` uses the same helper.
+
+  **The prompt moves; the result does not.** Anything that asks a question or
+  qualifies what the question is showing — the form, its cancellation line, the
+  truncated-pool caveat — follows the prompt to whatever writer it rendered on.
+  Anything that reports what the command DID (`✓ Revoked …`, `✓ Granted …`)
+  stays on `cmd.OutOrStdout()`, because it is the command's output and a caller
+  redirected it deliberately. A `--json` read piped into a parser is the case
+  that settles this: the payload has to stay on stdout, so anything the command
+  asks or explains goes to the terminal instead. Do not "fix" results onto the
+  terminal.
+
+  **A cancelled context is an interruption, not an answer.** A confirmation
+  gate's `(false, nil)` means the user declined, and the caller exits 0 on it,
+  so nothing else may borrow that pair: a context cancelled out from under the
+  gate comes back as an error wrapping `ctx.Err()`. `main.go` matches
+  `errors.Is(err, context.Canceled)` against the signal it recorded and
+  re-raises it, which is what gives Ctrl+C its usual quiet 130 (143 for
+  SIGTERM) and breaks an enclosing shell loop — swallowing the cancellation
+  throws that away and exits 0 having done nothing, silently. Check either side
+  of the form, as `plugin_confirm.go` does: `huh` opens the TTY during startup
+  regardless of context state, and the far-side check must come before the form
+  error is inspected, because `handleFormCancellation` treats `context.Canceled`
+  as a clean abort. An abort from *inside* the form (`huh.ErrUserAborted`) is
+  the opposite case — that one IS an answer. `confirmControlPlaneDeletion` is
+  the outlier here and carries the same bug for `delete`.
+
+  A caveat that belongs to a form goes IN the form — for the pool note, in the
+  field's `Title`. `huh`'s accessible mode renders a field's title and options
+  and nothing else, so a `Description` is silently dropped for exactly the
+  readers who cannot see the styled version.
+
+  **A pool is bounded; a filter is not.** A listing that IS a pool
+  (`boundedList` at `coreListFetchBudget`) is read in full before a single row
+  can be shown, so an unbounded walk would cost one round trip per page on a
+  large org — and a truncated pool is disclosed on stderr by `reportPartialPool`
+  along with the way past it. The grant rows *subtracted* from the add pool stay
+  unbounded: a partial filter would offer someone the target they already hold.
+  The grantee multi-select is `Filterable`, the pool being a whole org's
+  membership.
+
+  **A bounded walk cannot make a statement about the whole thing.** `listWindow`
+  carries how many rows were READ (never how many survived filtering, which was
+  never "the first" anything) and whether more remain, and the empty-pool
+  branches consult it *before* they speak. "Every member of the org already has
+  a grant on it" and "has no grants that can be revoked here" are claims about
+  an org and a target; on a truncated walk neither is known, so both become an
+  error naming the explicit `provider:handle` form instead — the one empty pool
+  that is not a clean success, because the state the user wanted was never
+  looked for past the budget.
+
+  **The least-privileged role is named, not indexed.** `grantTarget.leastRole`
+  feeds `grantPickerTarget.least`, which is what an unanswered role row starts on
+  and what a refusal's example suggests. Help order runs in opposite directions —
+  reader/writer/admin is least-first, owner/admin/member last — so `roles[0]` is
+  right for two targets and backwards for the third.
 
 Forge tokens (`gh`, `et`) are the path segments of an `entire://` URL, and
 `gitremote.pathForges` owns the *set* — `IsForgePathToken` answers "is this a

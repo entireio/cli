@@ -94,6 +94,16 @@ func TestFetchURL(t *testing.T) {
 			token:        "secret-token",
 			wantURL:      "entire://aws-us-east-2.entire.io/gh/acme/app",
 		},
+		{
+			// The other half of that seam: an origin git dials over ssh must
+			// reach the token whichever of git's three ssh spellings named it.
+			// Left as configured, the fetch carries no credential at all.
+			name:         "token coerces a git+ssh origin to https",
+			originURL:    "git+ssh://git@github.com/acme/app.git",
+			settingsJSON: `{"enabled":true}`,
+			token:        "secret-token",
+			wantURL:      "https://github.com/acme/app.git",
+		},
 	}
 
 	for _, tt := range tests {
@@ -491,6 +501,22 @@ func TestPushURL(t *testing.T) {
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			token:        "push-token",
 			wantURL:      "https://github.com/acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
+			// The push side of the same coercion (isDirectGitTransport),
+			// reached through a spelling of ssh:// rather than ssh:// itself.
+			// The host is deliberately not github.com: an unrecognized
+			// transport fails the coercion, fails deriveCheckpointURLFromInfo,
+			// and lands on the provider-host fallback — which on github.com
+			// returns the right URL by accident and pins nothing. Here that
+			// fallback sends an enterprise host's checkpoints to github.com.
+			name:         "token forces https for push url with git+ssh remote",
+			originURL:    "git+ssh://git@ghe.example.com/acme/app.git",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			token:        "push-token",
+			wantURL:      "https://ghe.example.com/acme/checkpoints.git",
 			wantEnabled:  true,
 		},
 		{
@@ -973,6 +999,15 @@ func TestDeriveCheckpointURLFromInfo(t *testing.T) {
 			want:           "git@github.com:org/checkpoints.git",
 		},
 		{
+			// Same transport as the ssh:// row above, so it must derive the
+			// same checkpoint URL. Unnormalized it reaches the switch's
+			// default and errors out.
+			name:           "git+ssh alias push remote",
+			pushRemoteURL:  "git+ssh://git@github.com/org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			want:           "git@github.com:org/checkpoints.git",
+		},
+		{
 			name:           "different host",
 			pushRemoteURL:  "git@github.example.com:org/main-repo.git",
 			checkpointRepo: "org/checkpoints",
@@ -1103,6 +1138,11 @@ func TestDeriveTokenOriginURL_RewritesGitHostTransports(t *testing.T) {
 		{name: "https with port", in: "https://ghe.example.com:8443/acme/app.git", want: "https://ghe.example.com:8443/acme/app.git"},
 		{name: "http upgrades to https", in: "http://git.example.com/acme/app.git", want: "https://git.example.com/acme/app.git"},
 		{name: "git upgrades to https", in: "git://git.example.com/acme/app.git", want: "https://git.example.com/acme/app.git"},
+		// git's own ssh aliases: an ordinary SSH remote the token can
+		// authenticate over HTTPS, so refusing them was the same silent
+		// no-credential fetch as dropping http:// would be.
+		{name: "git+ssh alias", in: "git+ssh://git@github.com/acme/app.git", want: "https://github.com/acme/app.git"},
+		{name: "ssh+git alias drops the ssh port", in: "ssh+git://git@git.example.com:2222/acme/app.git", want: "https://git.example.com/acme/app.git"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

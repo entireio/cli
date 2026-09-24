@@ -91,12 +91,12 @@ func TestComposeSynthesisPrompt_ExcludesFailedReviewerNarratives(t *testing.T) {
 		status    reviewtypes.AgentStatus
 	}{
 		{"claude-code", "Actionable finding.", reviewtypes.AgentStatusSucceeded},
-		{"gemini", "Partial output before quota failure.", reviewtypes.AgentStatusFailed},
+		{"opencode", "Partial output before quota failure.", reviewtypes.AgentStatusFailed},
 	})
 
 	prompt := review.ExposedComposeSynthesisPrompt(summary, "")
 
-	if strings.Contains(prompt, "gemini") || strings.Contains(prompt, "Partial output before quota failure") {
+	if strings.Contains(prompt, "opencode") || strings.Contains(prompt, "Partial output before quota failure") {
 		t.Errorf("prompt should exclude failed reviewer output\nfull prompt:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "claude-code") || !strings.Contains(prompt, "Actionable finding.") {

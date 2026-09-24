@@ -116,7 +116,7 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 		// and "install claude-code" names nothing you can install. The mapping
 		// lives in isSummaryCLIAvailable; deriving this needs that, not the
 		// name list.
-		return nil, errors.New("no summary-capable provider is available; install claude, codex, gemini, pi, opencode, cursor, or copilot, install an external entire-agent-* plugin that declares text_generator, or set summary_generation.provider in settings")
+		return nil, errors.New("no summary-capable provider is available; install claude, codex, pi, opencode, cursor, or copilot, install an external entire-agent-* plugin that declares text_generator, or set summary_generation.provider in settings")
 	case 1:
 		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider", selectionAutomatic)
 	default:
@@ -386,7 +386,7 @@ func buildCheckpointSummaryProviderWithEffectiveModel(name types.AgentName, effe
 // CLI binary is not on PATH. Checks the binary directly (via exec.LookPath)
 // rather than DetectPresence, because DetectPresence checks repo-level agent
 // configuration — a repo using Claude Code for development can still use Codex
-// or Gemini for summary generation as long as the binary is installed.
+// or Pi for summary generation as long as the binary is installed.
 func ensureSummaryProviderPresent(_ context.Context, name types.AgentName) error {
 	ag, err := getSummaryAgent(name)
 	if err != nil {

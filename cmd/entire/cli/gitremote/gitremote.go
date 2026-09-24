@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	// ProtocolSSH is the ssh transport, whichever of git's three spellings
+	// named it: ssh://, git+ssh://, or ssh+git:// (see normalizeProtocol).
 	ProtocolSSH   = "ssh"
 	ProtocolHTTPS = "https"
 	// ProtocolHTTP and ProtocolGit are the remaining schemes whose host is the
@@ -49,7 +51,7 @@ type Info struct {
 // trails API. entire:// URLs carry the forge in the path instead and bypass
 // this map.
 var hostToForge = map[string]string{
-	"github.com": "gh",
+	"github.com": ForgeGitHub,
 }
 
 // forgeToHost is the reverse of hostToForge: it maps a forge identifier back to
@@ -62,6 +64,23 @@ var forgeToHost = func() map[string]string {
 	}
 	return m
 }()
+
+const (
+	// ForgeGitHub is the entire:// path token for a GitHub mirror.
+	ForgeGitHub = "gh"
+
+	// ForgeNative is the entire:// path token for an Entire-native repo. It is
+	// the one forge whose repo names may legitimately end in `.git`: GitHub
+	// rejects such a name outright, so on a /gh/ path the suffix can only be
+	// decoration, while entiredb permits an interior dot and the data plane
+	// resolves /et/ paths verbatim. Exported so callers holding a parsed forge
+	// can ask the question without a bare "et" literal.
+	ForgeNative = "et"
+)
+
+// gitDirSuffix is the suffix git tools habitually append to a repo path.
+// Dropped for every forge except ForgeNative — see splitOwnerRepo.
+const gitDirSuffix = ".git"
 
 // pathForges are the forge tokens Entire uses in an entire:// URL path
 // (`entire://<cluster-host>/<forge>/…`), mapped to the placeholder spelling of
@@ -78,8 +97,8 @@ var forgeToHost = func() map[string]string {
 // addressed internally by ULID and `entire repo clone` does not accept a /git/
 // ref, so admitting it would have callers suggest a command that then fails.
 var pathForges = map[string]string{
-	"gh": "<owner>/<repo>",
-	"et": "<project>/<repo>",
+	ForgeGitHub: "<owner>/<repo>",
+	ForgeNative: "<project>/<repo>",
 }
 
 // IsForgePathToken reports whether forge is one of the forge tokens Entire uses
@@ -226,13 +245,16 @@ func ParseURL(rawURL string) (*Info, error) {
 			host = hostPart
 		}
 
-		pathPart := strings.TrimSuffix(parts[1], ".git")
-		owner, repo, err := splitOwnerRepo(pathPart)
+		// Forge first: splitOwnerRepo needs it to decide whether `.git` is
+		// decoration. An SCP-style URL never names a native repo (the map holds
+		// git hosts only), but reading it here keeps one rule in one place.
+		forge := hostToForge[host]
+		owner, repo, err := splitOwnerRepo(parts[1], forge)
 		if err != nil {
 			return nil, err
 		}
 
-		return &Info{Protocol: ProtocolSSH, Host: host, Forge: hostToForge[host], Owner: owner, Repo: repo}, nil
+		return &Info{Protocol: ProtocolSSH, Host: host, Forge: forge, Owner: owner, Repo: repo}, nil
 	}
 
 	u, err := url.Parse(rawURL)
@@ -249,12 +271,33 @@ func ParseURL(rawURL string) (*Info, error) {
 		// entire:// URLs encode the forge as the first path segment.
 		forge, pathPart = splitForgePrefix(pathPart)
 	}
-	owner, repo, err := splitOwnerRepo(pathPart)
+	owner, repo, err := splitOwnerRepo(pathPart, forge)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Info{Protocol: u.Scheme, Host: u.Hostname(), Port: u.Port(), Forge: forge, Owner: owner, Repo: repo}, nil
+	return &Info{Protocol: normalizeProtocol(u.Scheme), Host: u.Hostname(), Port: u.Port(), Forge: forge, Owner: owner, Repo: repo}, nil
+}
+
+// normalizeProtocol returns the transport git dials for scheme.
+//
+// Protocol answers how a remote is reached, not how it is spelled. git accepts
+// git+ssh:// and ssh+git:// as aliases of ssh:// and dispatches all three to
+// ssh, so a caller switching on Protocol must never see an alias as a scheme
+// of its own: it would take a default branch, or refuse a remote it admits
+// under another name.
+//
+// Every other scheme is returned unchanged. An unrecognized "<x>+ssh" is a
+// remote helper to git, not a transport, and must keep failing closed. ftps://
+// is absent deliberately: git accepts it, but it is read-only and cannot carry
+// a push.
+func normalizeProtocol(scheme string) string {
+	switch scheme {
+	case "git+ssh", "ssh+git":
+		return ProtocolSSH
+	default:
+		return scheme
+	}
 }
 
 // splitForgePrefix returns the leading forge/namespace segment of an entire://
@@ -318,8 +361,20 @@ func ResolveRemoteRepo(ctx context.Context, remoteName string) (forge, owner, re
 	return info.Forge, info.Owner, info.Repo, nil
 }
 
-func splitOwnerRepo(path string) (string, string, error) {
-	path = strings.TrimSuffix(path, ".git")
+// splitOwnerRepo splits a remote path into owner and repo.
+//
+// A trailing `.git` is dropped for every forge except ForgeNative. GitHub
+// rejects a name ending in it, so there the suffix is decoration; a native repo
+// may genuinely be named "foo.git", and trimming it names a different
+// repository. See COR-1892. The forge is known on every ParseURL branch before
+// the split, so the choice needs no lookup and has no fallback.
+//
+// This is the only place the suffix is dropped: trimming again in ParseURL's
+// SCP branch collapsed "repo.git.git" to "repo".
+func splitOwnerRepo(path, forge string) (string, string, error) {
+	if forge != ForgeNative {
+		path = strings.TrimSuffix(path, gitDirSuffix)
+	}
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("cannot parse owner/repo from path: %s", path)
@@ -333,5 +388,18 @@ func splitOwnerRepo(path string) (string, string, error) {
 	if strings.IndexFunc(parts[0]+"/"+parts[1], unicode.IsControl) >= 0 {
 		return "", "", errors.New("invalid control character in remote owner/repo")
 	}
+	// A dot-only segment names nothing, and the trim above can MANUFACTURE one:
+	// "..git" becomes "." and "...git" becomes "..". Neither addresses a repo,
+	// and both are path-traversal shapes for any caller that joins them. The
+	// /gh/ ref grammar already refuses this (parseMirrorCloneRef); refuse it on
+	// the URL path too, which is what ResolveRemoteRepo reads.
+	if isDotOnly(parts[0]) || isDotOnly(parts[1]) {
+		return "", "", fmt.Errorf("owner and repo cannot be dot-only: %s", path)
+	}
 	return parts[0], parts[1], nil
+}
+
+// isDotOnly reports whether s is non-empty and made only of '.' characters.
+func isDotOnly(s string) bool {
+	return s != "" && strings.Trim(s, ".") == ""
 }

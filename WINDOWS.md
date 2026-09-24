@@ -35,7 +35,7 @@ Git hooks use `#!/bin/sh` shebangs with POSIX shell syntax. Git for Windows exec
 
 ### Agent Hooks
 
-Agent-specific hooks (Claude Code, Cursor, Gemini, OpenCode) are JSON configuration — the agents themselves handle execution. The hooks call `entire.exe` directly via `exec.Command`, not through a shell.
+Agent-specific hooks (Claude Code, Cursor, OpenCode) are JSON configuration — the agents themselves handle execution. The hooks call `entire.exe` directly via `exec.Command`, not through a shell.
 
 ## Testing
 
@@ -54,7 +54,7 @@ E2E tests require the agent binary (e.g., `claude`) to be installed and availabl
 ```bash
 # Set required env vars
 set E2E_ENTIRE_BIN=entire.exe
-set E2E_AGENT=claude-code        # or gemini-cli, opencode
+set E2E_AGENT=claude-code        # or opencode
 
 # Run all E2E tests
 go test -tags=e2e -count=1 -timeout=30m ./e2e/tests/...

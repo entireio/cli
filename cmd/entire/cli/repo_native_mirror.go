@@ -510,7 +510,7 @@ func reportNativeMirrorNotes(w io.Writer, mirrors []coreapi.NativeMirrorPlacemen
 	}
 }
 
-// nativeUsePlacements lists the clusters `repo remote use` may point a git
+// nativeUsePlacements lists the clusters `repo remote add` may point a git
 // remote at: the repo's primary, plus every mirror that is actually readable.
 //
 // A placement that is still seeding, failed or suspended serves nothing, so

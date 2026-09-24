@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,7 +26,7 @@ func TestParseMirrorRepoRef_GitHub(t *testing.T) {
 // and the project/repo pair is passed on as the user spelled it.
 func TestParseMirrorRepoRef_Native(t *testing.T) {
 	t.Parallel()
-	for _, ref := range []string{"/et/my-project/my-repo", "et/my-project/my-repo", "/et/my-project/my-repo.git"} {
+	for _, ref := range []string{"/et/my-project/my-repo", "et/my-project/my-repo"} {
 		t.Run(ref, func(t *testing.T) {
 			t.Parallel()
 			got, err := parseMirrorRepoRef(ref, nativeCloneForge)
@@ -35,6 +34,17 @@ func TestParseMirrorRepoRef_Native(t *testing.T) {
 			require.Equal(t, mirrorRepoRef{forge: nativeCloneForge, owner: "my-project", repo: "my-repo"}, got)
 		})
 	}
+}
+
+// TestParseMirrorRepoRef_NativeKeepsGitSuffix pins that `.git` on a native ref
+// is part of the repo name, not decoration: the data plane resolves /et/ paths
+// verbatim, so trimming here would point at a different repository. Contrast
+// TestParseMirrorRepoRef_GitHub, where the suffix is dropped.
+func TestParseMirrorRepoRef_NativeKeepsGitSuffix(t *testing.T) {
+	t.Parallel()
+	got, err := parseMirrorRepoRef("/et/my-project/my-repo.git", nativeCloneForge)
+	require.NoError(t, err)
+	require.Equal(t, mirrorRepoRef{forge: nativeCloneForge, owner: "my-project", repo: "my-repo.git"}, got)
 }
 
 // TestParseMirrorRepoRef_ServingBothForges pins that one call site can take
@@ -109,34 +119,16 @@ func TestParseMirrorRepoRef_UnservedForgeIsRefusedUnparsed(t *testing.T) {
 	require.ErrorContains(t, err, "supports Entire repositories only")
 }
 
-// TestMirrorCommands_NativeRepoUnsupported covers `repo access list`, the one
-// verb here that still serves GitHub alone: it reads GitHub collaborators, and
-// a native repo's access is grants, so the answer is a pointer to the command
-// that does serve it.
-func TestMirrorCommands_NativeRepoUnsupported(t *testing.T) {
-	t.Parallel()
-	t.Run("access list", func(t *testing.T) {
-		t.Parallel()
-		cmd := newRepoAccessListCmd()
-		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetErr(&bytes.Buffer{})
-		cmd.SetArgs([]string{"/et/project/widget"})
-		err := cmd.ExecuteContext(t.Context())
-		require.ErrorContains(t, err, "does not support Entire repository")
-		require.ErrorContains(t, err, "entire repo grant list")
-	})
-}
-
-// TestResolveMirrorUseUpstream_BothForges pins that `repo remote use` now reads
+// TestResolveRemoteRepoRef_BothForges pins that `repo remote add` reads
 // a native ref as readily as a GitHub one — a clone of either kind can have its
 // remote repointed at another cluster.
-func TestResolveMirrorUseUpstream_BothForges(t *testing.T) {
+func TestResolveRemoteRepoRef_BothForges(t *testing.T) {
 	t.Parallel()
-	native, err := resolveMirrorUseUpstream(t.Context(), t.TempDir(), "origin", "/et/project/widget")
+	native, err := resolveRemoteRepoRef(t.Context(), t.TempDir(), "origin", "/et/project/widget")
 	require.NoError(t, err)
 	require.Equal(t, mirrorRepoRef{forge: nativeCloneForge, owner: "project", repo: "widget"}, native)
 
-	mirror, err := resolveMirrorUseUpstream(t.Context(), t.TempDir(), "origin", "/gh/Acme/Widget")
+	mirror, err := resolveRemoteRepoRef(t.Context(), t.TempDir(), "origin", "/gh/Acme/Widget")
 	require.NoError(t, err)
 	require.Equal(t, mirrorRepoRef{forge: mirrorCloneForge, owner: "acme", repo: "widget"}, mirror)
 }

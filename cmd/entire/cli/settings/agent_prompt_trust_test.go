@@ -227,14 +227,14 @@ func TestAgentPromptTrust_ClonePreferencesReviewPromptIsHonored(t *testing.T) {
 	writeSettingsFile(t, project, `{"enabled":true}`)
 	prefs := writePreferences(t,
 		`{"review_profiles":{"general":{"task":"Audit it.","agents":{"codex":{"prompt":"`+trustedPrompt+`"}}}},`+
-			`"review":{"gemini":{"prompt":"`+trustedPrompt+`"}}}`)
+			`"review":{"pi":{"prompt":"`+trustedPrompt+`"}}}`)
 
 	s := loadedForPromptTrust(t, project, prefs, local)
 	assert.Equal(t, "Audit it.", s.ReviewProfiles["general"].Task,
 		"a preferences-owned profile keeps its task")
 	assert.Equal(t, trustedPrompt, s.ReviewProfiles["general"].Agents["codex"].Prompt,
 		"a preferences-owned profile keeps its prompt")
-	assert.Equal(t, trustedPrompt, s.Review["gemini"].Prompt,
+	assert.Equal(t, trustedPrompt, s.Review["pi"].Prompt,
 		"the preferences-owned legacy review map keeps its prompts")
 	assert.Empty(t, s.AgentPromptRejections())
 }
@@ -267,7 +267,7 @@ func TestAgentPromptTrust_PromptOnlyWorkerStaysPresent(t *testing.T) {
 	_, project, local := newOPFRepo(t)
 	writeSettingsFile(t, project,
 		`{"enabled":true,"review_profiles":{"general":{"agents":{"pi":{"prompt":"`+attackerPrompt+`"}}}},`+
-			`"review":{"gemini":{"prompt":"`+attackerPrompt+`"}}}`)
+			`"review":{"opencode":{"prompt":"`+attackerPrompt+`"}}}`)
 
 	s := loadedForPromptTrust(t, project, "", local)
 
@@ -276,9 +276,9 @@ func TestAgentPromptTrust_PromptOnlyWorkerStaysPresent(t *testing.T) {
 	assert.Equal(t, "pi", worker.Agent, "the worker stays present via its own agent name")
 	assert.False(t, worker.IsZero(), "a gated worker must not read as unset")
 
-	legacy := s.Review["gemini"]
+	legacy := s.Review["opencode"]
 	assert.Empty(t, legacy.Prompt)
-	assert.Equal(t, "gemini", legacy.Agent)
+	assert.Equal(t, "opencode", legacy.Agent)
 	assert.False(t, legacy.IsZero())
 }
 

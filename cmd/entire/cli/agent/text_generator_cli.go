@@ -112,7 +112,6 @@ var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNameCodex:      "codex",
 	AgentNameCopilotCLI: "copilot",
 	AgentNameCursor:     "agent",
-	AgentNameGemini:     "gemini",
 	AgentNamePi:         "pi",
 	AgentNameOpenCode:   openCodeBinary,
 }
@@ -128,7 +127,7 @@ func SummaryCLIBinaryName(name types.AgentName) string {
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
 // agent is on PATH. This is distinct from DetectPresence, which checks
 // repo-level agent configuration — a repo configured with Claude Code for
-// development can still use Codex or Gemini for summary generation as long
+// development can still use Codex or Pi for summary generation as long
 // as the binary is installed.
 func IsSummaryCLIAvailable(name types.AgentName) bool {
 	binary := SummaryCLIBinaryName(name)

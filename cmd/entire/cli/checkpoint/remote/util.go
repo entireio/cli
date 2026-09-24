@@ -746,6 +746,11 @@ func isDirectGitTransport(protocol string) bool {
 // git:// carry no credential of their own, and rewriting them moves the token
 // onto HTTPS instead of that host's cleartext port.
 //
+// These are transports, not spellings. git's git+ssh:// and ssh+git:// arrive
+// as ProtocolSSH (gitremote.normalizeProtocol) and so need no case of their
+// own; a case here would admit them while every call site that switches on
+// ProtocolSSH stayed blind to them.
+//
 // entire:// and file:// are the exclusions that matter. An entire:// host is an
 // Entire cluster rather than a git endpoint, so the rewrite invents an HTTPS
 // git URL on a host that serves none and sends the token there; file:// names

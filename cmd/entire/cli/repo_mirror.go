@@ -503,9 +503,10 @@ func filterByName[T any](items []T, nameOf func(T) string, substr string) []T {
 }
 
 // defaultClusterHost is the cluster a mirror command targets when --cluster is
-// omitted and there is no terminal to offer a picker on: `access list` defaults
-// its flag to it outright, and `mirror add` falls back to it for a
-// non-interactive run, so scripts keep a stable, offline-resolvable default.
+// omitted and there is no terminal to offer a picker on: `mirror add` falls
+// back to it for a non-interactive run, and mirrorReadCluster reads it when no
+// placement of a mirror chose a cluster, so scripts keep a stable,
+// offline-resolvable default.
 //
 // `mirror remove` deliberately has no default. Which clusters a repo is on is a
 // property of the repo rather than of the catalog, and removing is destructive,
@@ -559,8 +560,8 @@ func validateClusterHost(host string) error {
 
 // newRepoMirrorCmd is the `entire repo mirror` subtree: manage EntireDB
 // GitHub-mirror placements on a cluster (add / list / get / remove). The
-// local-clone rewrite lives at `repo remote use` (repo_remote.go) and the
-// collaborator view at `repo access list` (repo_access.go).
+// local-clone rewrite lives at `repo remote add` (repo_remote.go) and the
+// collaborator view at `repo grant list` (repo_grant.go).
 func newRepoMirrorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mirror",
@@ -746,7 +747,7 @@ func chooseMirrorAddRegions(cmd *cobra.Command, ref mirrorRepoRef, nativeRepo *c
 // mirrorAddOutcome bundles the create response with the clone status
 // observed while waiting. polled is false for --no-wait, where status is unset.
 type mirrorAddOutcome struct {
-	created *coreapi.CreatedMirror
+	created *coreapi.MirrorRequestResult
 	status  coreapi.MirrorStatus
 	polled  bool
 }
@@ -1464,8 +1465,8 @@ func parseMirrorCloneURL(raw string) (clusterHost, provider, owner, repo string,
 	// Trim a trailing .git so a URL pasted from `git remote -v` resolves the
 	// same as the bare clone URL (matching gitremote.ParseURL). GitHub repo
 	// names can contain dots, so only the suffix is trimmed, not all dots.
-	repo = strings.ToLower(strings.TrimSuffix(parts[2], gitDirSuffix))
-	return u.Host, string(coreapi.CreateMirrorInputBodyProviderGithub), strings.ToLower(parts[1]), repo, nil
+	repo = strings.ToLower(strings.TrimSuffix(parts[2], mirrorGitDirSuffix))
+	return u.Host, string(coreapi.CreateMirrorRequestInputBodyProviderGithub), strings.ToLower(parts[1]), repo, nil
 }
 
 func noMirrorErr(ref string) error {

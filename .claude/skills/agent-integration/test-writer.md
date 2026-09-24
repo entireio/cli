@@ -49,7 +49,7 @@ Read `cmd/entire/cli/agent/$AGENT_PACKAGE/AGENT.md` (the one-pager from the rese
 
 Add a new `Agent` implementation in `e2e/agents/${agent_slug}.go`:
 
-**Pattern to follow** (based on existing implementations like `claude.go`, `gemini.go`, `opencode.go`):
+**Pattern to follow** (based on existing implementations like `claude.go`, `codex.go`, `opencode.go`):
 
 ```go
 package agents
@@ -153,7 +153,7 @@ func (a *${AgentName}) StartSession(ctx context.Context, dir string) (Session, e
 
 Key implementation details:
 - Self-register in `init()` with `Register()`, gated by `E2E_AGENT` env var
-- Use `RegisterGate("name", N)` if the agent's API has strict rate limits (e.g., Gemini uses gate of 1)
+- Use `RegisterGate("name", N)` if the agent's API has strict rate limits (e.g., Factory AI Droid uses gate of 1)
 - `Bootstrap()` handles CI-specific one-time setup (auth config, API key injection)
 - `IsTransientError()` identifies retryable API failures — `RepoState.RunPrompt` retries once on transient errors
 - `RunPrompt()` uses `exec.CommandContext` with `Setpgid: true` and process-group kill for clean cancellation
