@@ -3560,6 +3560,79 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 		}
 	})
 
+	t.Run("omitted flag with async response records marker", func(t *testing.T) {
+		repoDir, headHash := setupSubagentEndTestRepo(t)
+		ctx := context.Background()
+		sessionID := "async-launch-session"
+
+		saveInFlightSession(ctx, t, sessionID, headHash)
+
+		ag := newMockAgent()
+		event := &agent.Event{
+			Type:                 agent.SubagentEnd,
+			SessionID:            sessionID,
+			ToolUseID:            "toolu_async1",
+			SubagentID:           "agent-async1",
+			ToolInput:            json.RawMessage(`{"subagent_type":"dev","description":"Implement Y"}`),
+			ToolResponseStatus:   "async_launched",
+			ToolResponseIsAsync:  true,
+			Final:                false,
+			Timestamp:            time.Now(),
+		}
+
+		err := handleLifecycleSubagentEnd(ctx, ag, event)
+		require.NoError(t, err)
+
+		state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, state)
+		require.Len(t, state.TaskRecords, 1, "omitted flag + async response must record an in-flight marker")
+		marker := state.TaskRecords[0]
+		assert.Equal(t, "toolu_async1", marker.ToolUseID)
+		assert.Equal(t, "agent-async1", marker.AgentID)
+		assert.Equal(t, "dev", marker.SubagentType)
+		assert.Equal(t, "Implement Y", marker.TaskDescription)
+
+		shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+		if testutil.BranchExists(t, repoDir, shadowBranch) {
+			t.Error("async launch must defer capture to subagent-stop, not save a task step immediately")
+		}
+	})
+
+	t.Run("explicit false with async response records marker", func(t *testing.T) {
+		repoDir, headHash := setupSubagentEndTestRepo(t)
+		ctx := context.Background()
+		sessionID := "async-conflict-session"
+
+		saveInFlightSession(ctx, t, sessionID, headHash)
+
+		ag := newMockAgent()
+		event := &agent.Event{
+			Type:                agent.SubagentEnd,
+			SessionID:           sessionID,
+			ToolUseID:           "toolu_async2",
+			SubagentID:          "agent-async2",
+			ToolInput:           json.RawMessage(`{"run_in_background":false}`),
+			ToolResponseIsAsync: true,
+			Final:               false,
+			Timestamp:           time.Now(),
+		}
+
+		err := handleLifecycleSubagentEnd(ctx, ag, event)
+		require.NoError(t, err)
+
+		state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+		require.NoError(t, loadErr)
+		require.NotNil(t, state)
+		require.Len(t, state.TaskRecords, 1, "async response must beat an explicit run_in_background: false")
+		assert.Equal(t, "toolu_async2", state.TaskRecords[0].ToolUseID)
+
+		shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+		if testutil.BranchExists(t, repoDir, shadowBranch) {
+			t.Error("async launch must defer capture to subagent-stop, not save a task step immediately")
+		}
+	})
+
 	// foreground guards invariant 2: a foreground Task invocation (no
 	// run_in_background) completes at post-task time — its record is created
 	// on completion (no launch stub exists for foreground) with the task's

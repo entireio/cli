@@ -160,6 +160,12 @@ type Event struct {
 	// these fields directly parse them from ToolInput).
 	ToolInput json.RawMessage
 
+	// ToolResponseStatus is the tool_response.status from PostToolUse.
+	ToolResponseStatus string
+
+	// ToolResponseIsAsync is the tool_response.isAsync flag from PostToolUse.
+	ToolResponseIsAsync bool
+
 	// SubagentType is the kind of subagent (for SubagentStart/SubagentEnd events).
 	// Used with TaskDescription instead of ToolInput
 	SubagentType    string

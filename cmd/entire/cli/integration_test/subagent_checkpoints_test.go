@@ -628,13 +628,14 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 
 	env.WriteFile(editedFile, "# Foreground\n\nWritten by a foreground subagent.\n")
 
-	// Foreground completion: PostToolUse fires with no run_in_background, so
-	// this is captured immediately — the existing, unchanged behavior.
+	// PostToolUse with no run_in_background and no async signals is a
+	// foreground completion, captured immediately.
 	if err := env.SimulatePostTask(PostTaskInput{
-		SessionID:      session.ID,
-		TranscriptPath: session.TranscriptPath,
-		ToolUseID:      taskToolUseID,
-		AgentID:        subagentID,
+		SessionID:           session.ID,
+		TranscriptPath:      session.TranscriptPath,
+		ToolUseID:           taskToolUseID,
+		AgentID:             subagentID,
+		OmitRunInBackground: true,
 	}); err != nil {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
@@ -679,5 +680,92 @@ func TestSubagentCheckpoints_ForegroundDoubleFire_CapturesOnce(t *testing.T) {
 	rec = state.FindTaskRecord(taskToolUseID)
 	if rec == nil || !rec.CompletedAt.Equal(firstCompletedAt) {
 		t.Errorf("the double-fire must not re-complete the record, got %+v", rec)
+	}
+}
+
+func TestSubagentCheckpoints_AsyncLaunchResponse_DefersToSubagentStop(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	session := env.NewSession()
+	session.CreateTranscript("delegate a background task", nil)
+
+	const (
+		taskToolUseID = "toolu_01AsyncOmittedFlag"
+		subagentID    = "d4444555566667777"
+		editedFile    = "docs/async-default.md"
+	)
+
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	if err := env.SimulatePreTask(session.ID, session.TranscriptPath, taskToolUseID); err != nil {
+		t.Fatalf("SimulatePreTask failed: %v", err)
+	}
+
+	if err := env.SimulatePostTask(PostTaskInput{
+		SessionID:           session.ID,
+		TranscriptPath:      session.TranscriptPath,
+		ToolUseID:           taskToolUseID,
+		AgentID:             subagentID,
+		OmitRunInBackground: true,
+		AsyncStatus:         "async_launched",
+		IsAsync:             true,
+	}); err != nil {
+		t.Fatalf("SimulatePostTask (async launch stub) failed: %v", err)
+	}
+
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state == nil || !hasLiveTaskRecord(state, taskToolUseID) {
+		t.Fatalf("expected in-flight marker for %s after async launch stub, state=%+v", taskToolUseID, state)
+	}
+
+	subagentTranscriptPath := session.CreateSubagentTranscript(subagentID, []FileChange{
+		{Path: editedFile, Content: "# Async default\n"},
+	})
+	env.WriteFile(editedFile, "# Async default\n\nWritten by a default-background subagent.\n")
+
+	if err := env.SimulateSubagentStop(SubagentStopInput{
+		SessionID:           session.ID,
+		TranscriptPath:      session.TranscriptPath,
+		AgentID:             subagentID,
+		AgentTranscriptPath: subagentTranscriptPath,
+		ToolUseID:           taskToolUseID,
+	}); err != nil {
+		t.Fatalf("SimulateSubagentStop failed: %v", err)
+	}
+
+	state, err = env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	if state == nil || hasLiveTaskRecord(state, taskToolUseID) {
+		t.Fatalf("in-flight marker for %s should be completed after subagent-stop, state=%+v", taskToolUseID, state)
+	}
+	rec := state.FindTaskRecord(taskToolUseID)
+	if rec == nil {
+		t.Fatalf("expected a completed task record for %s", taskToolUseID)
+	}
+	if !containsFile(rec.Files, editedFile) {
+		t.Errorf("the completed record must carry the subagent's real modified file, got %v", rec.Files)
+	}
+	if !containsFile(state.FilesTouched, editedFile) {
+		t.Errorf("the subagent's file must merge into FilesTouched, got %v", state.FilesTouched)
+	}
+
+	env.GitCommitWithShadowHooksAsAgent("Add async default doc", editedFile)
+	checkpointID := env.TryGetLatestCheckpointID()
+	if checkpointID == "" {
+		t.Fatal("expected a condensed checkpoint after committing the subagent's work")
+	}
+	storedTranscript, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
+		CheckpointTaskFilePath(checkpointID, taskToolUseID, "agent-"+subagentID+".jsonl"))
+	if !ok {
+		t.Fatalf("subagent transcript not materialized under the checkpoint's tasks/ subtree")
+	}
+	if !strings.Contains(storedTranscript, editedFile) {
+		t.Errorf("materialized subagent transcript does not reference the modified file %q: %q", editedFile, storedTranscript)
 	}
 }

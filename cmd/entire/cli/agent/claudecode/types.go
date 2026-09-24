@@ -65,6 +65,8 @@ type postToolHookInputRaw struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 	ToolResponse   struct {
 		AgentID string `json:"agentId"`
+		Status  string `json:"status"`
+		IsAsync bool   `json:"isAsync"`
 	} `json:"tool_response"`
 }
 
