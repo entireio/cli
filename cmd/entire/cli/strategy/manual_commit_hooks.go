@@ -2298,7 +2298,7 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 // The fast path activates when an eligible session exists and either:
 //   - No TTY is available (agent subprocess, CI), or
 //   - commit_linking="always" (user opted into auto-linking — needed because
-//     some agents like Gemini subagents commit mid-turn from processes that
+//     some agents' subagents commit mid-turn from processes that
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
 //

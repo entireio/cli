@@ -309,8 +309,8 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 // agent at `entire agent-help`. It targets Factory AI Droid, which is banner-only
 // — no model-context injection and no agent-help skill file — so the SessionStart
 // banner is its sole in-session channel for the pointer. Every other agent gets
-// the pointer via context injection (Claude/Codex/Gemini/OpenCode/Pi), a skill
-// file (Claude/Codex/Gemini), or the passive `entire status` surface
+// the pointer via context injection (Claude/Codex/OpenCode/Pi), a skill
+// file (Claude/Codex), or the passive `entire status` surface
 // (Cursor/Copilot), so this returns "" for them to avoid a duplicate pointer.
 func agentHelpBannerSuffix(agentName types.AgentName) string {
 	if agentName == agent.AgentNameFactoryAIDroid {
@@ -333,8 +333,8 @@ func finalizeSessionStartBanner(message, responseMessage string, agentName types
 
 // handleLifecycleModelUpdate persists the model name for the current session.
 //
-// If the session state file already exists (e.g., Gemini's BeforeModel fires
-// after TurnStart), the model is written directly to state.ModelName — no hint
+// If the session state file already exists (the model report arrives after
+// TurnStart), the model is written directly to state.ModelName — no hint
 // file needed. Otherwise falls back to StoreModelHint for cross-process
 // persistence (see its doc comment for the full rationale).
 func handleLifecycleModelUpdate(ctx context.Context, ag agent.Agent, event *agent.Event) error {
@@ -740,7 +740,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// This must run BEFORE fileExists: agents like OpenCode lazily fetch transcripts
 	// via `opencode export`, so the file doesn't exist until PrepareTranscript creates it.
 	// Claude Code's PrepareTranscript just flushes (always succeeds). Agents without
-	// TranscriptPreparer (Gemini, Droid) are unaffected.
+	// TranscriptPreparer (e.g. Droid) are unaffected.
 	_, prepareSpan := perf.Start(ctx, "prepare_and_validate_transcript")
 	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 		if err := preparer.PrepareTranscript(ctx, transcriptRef); err != nil {

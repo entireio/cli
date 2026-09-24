@@ -503,9 +503,10 @@ func filterByName[T any](items []T, nameOf func(T) string, substr string) []T {
 }
 
 // defaultClusterHost is the cluster a mirror command targets when --cluster is
-// omitted and there is no terminal to offer a picker on: `access list` defaults
-// its flag to it outright, and `mirror add` falls back to it for a
-// non-interactive run, so scripts keep a stable, offline-resolvable default.
+// omitted and there is no terminal to offer a picker on: `mirror add` falls
+// back to it for a non-interactive run, and mirrorReadCluster reads it when no
+// placement of a mirror chose a cluster, so scripts keep a stable,
+// offline-resolvable default.
 //
 // `mirror remove` deliberately has no default. Which clusters a repo is on is a
 // property of the repo rather than of the catalog, and removing is destructive,
@@ -559,8 +560,8 @@ func validateClusterHost(host string) error {
 
 // newRepoMirrorCmd is the `entire repo mirror` subtree: manage EntireDB
 // GitHub-mirror placements on a cluster (add / list / get / remove). The
-// local-clone rewrite lives at `repo remote use` (repo_remote.go) and the
-// collaborator view at `repo access list` (repo_access.go).
+// local-clone rewrite lives at `repo remote add` (repo_remote.go) and the
+// collaborator view at `repo grant list` (repo_grant.go).
 func newRepoMirrorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mirror",

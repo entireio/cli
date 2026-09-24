@@ -87,7 +87,7 @@ func newOrgInviteCmd() *cobra.Command {
 	}
 	// The wire field is required, so an omitted flag still sends a role: the
 	// same default the API documents.
-	cmd.Flags().StringVar(&role, "role", roleMember, "Role the invitation grants: one of "+strings.Join(orgRoles, ", "))
+	cmd.Flags().StringVar(&role, "role", orgRoleMember, "Role the invitation grants: one of "+strings.Join(orgRoles, ", "))
 	addJSONFlag(cmd)
 	return cmd
 }

@@ -138,9 +138,6 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	}
 
 	entire.Enable(t, dir, agent.EntireAgent())
-	if agent.Name() == "gemini-cli" {
-		setupGeminiTestHome(t, dir)
-	}
 	if agent.Name() == "factoryai-droid" {
 		if err := configureDroidRepoSettings(dir); err != nil {
 			t.Fatalf("configure droid repo settings: %v", err)
@@ -220,31 +217,6 @@ func PushCheckpointRefs(t *testing.T, dir string) {
 		return
 	}
 	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
-}
-
-func setupGeminiTestHome(t *testing.T, repoDir string) {
-	t.Helper()
-
-	homeDir := geminiTestHomeDir(repoDir)
-	t.Cleanup(func() {
-		if err := os.RemoveAll(homeDir); err != nil {
-			t.Errorf("remove gemini test home: %v", err)
-		}
-	})
-
-	geminiDir := filepath.Join(homeDir, ".gemini")
-	if err := os.MkdirAll(filepath.Join(geminiDir, "acknowledgments"), 0o755); err != nil {
-		t.Fatalf("create gemini test home: %v", err)
-	}
-
-	config := `{"security":{"auth":{"selectedType":"gemini-api-key"}}}`
-	if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(config), 0o644); err != nil {
-		t.Fatalf("write gemini settings: %v", err)
-	}
-}
-
-func geminiTestHomeDir(repoDir string) string {
-	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-gemini-home")
 }
 
 func configureDroidRepoSettings(repoDir string) error {
@@ -431,7 +403,7 @@ func runForAgents(t *testing.T, all []agents.Agent, timeout time.Duration, fn fu
 			defer agents.ReleaseSlot(agent)
 
 			// Per-test timeout starts after slot is acquired, scaled
-			// by the agent's multiplier (e.g. 2.5× for gemini).
+			// by the agent's multiplier.
 			scaled := time.Duration(float64(timeout) * agent.TimeoutMultiplier())
 
 			var prevState *RepoState

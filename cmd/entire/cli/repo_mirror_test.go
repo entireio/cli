@@ -134,10 +134,9 @@ func TestAwaitMirrorReady(t *testing.T) {
 // TestRepoMirrorAdd_Flags pins the one-shot flags: the wait bound is
 // TestTargetingClusterFlagsTakeAHost pins the one spelling --cluster takes
 // wherever it names a cluster to ACT on. These verbs do not share a flag
-// registration — each declares its own — and `repo remote url` declares one but
-// delegates the logic to repo clone's resolver, so its help drifted to
-// promising a slug the shared resolver then rejected. Nothing caught it,
-// because its behaviour test passed a host.
+// registration — each declares its own — and one that delegates its logic to
+// repo clone's shared resolver can drift into promising a slug that resolver
+// then rejects, with nothing to catch it when its behaviour test passes a host.
 //
 // `repo mirror list --cluster` is deliberately absent: it is a server-side
 // filter that takes either spelling, not a target.
@@ -146,10 +145,8 @@ func TestTargetingClusterFlagsTakeAHost(t *testing.T) {
 	for name, newCmd := range map[string]func() *cobra.Command{
 		"repo mirror add":    newRepoMirrorAddCmd,
 		"repo mirror remove": newRepoMirrorRemoveCmd,
-		"repo access list":   newRepoAccessListCmd,
 		"repo clone":         newRepoCloneCmd,
-		"repo remote use":    newRepoRemoteUseCmd,
-		"repo remote url":    newRepoRemoteURLCmd,
+		"repo remote add":    newRepoRemoteAddCmd,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -1701,40 +1698,6 @@ func TestChooseMirrorAddRegions_NonInteractive(t *testing.T) {
 	})
 }
 
-func TestMirrorCollaboratorRow(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   coreapi.MirrorCollaborator
-		want []string
-	}{
-		{
-			name: "resolved handle",
-			in:   coreapi.MirrorCollaborator{AccountId: "01ACCT", Handle: coreapi.NewOptString("github:alice"), Role: "writer"},
-			want: []string{"github:alice", "writer", "01ACCT"},
-		},
-		{
-			name: "no handle falls back to dash",
-			in:   coreapi.MirrorCollaborator{AccountId: "01ACCT", Role: "reader"},
-			want: []string{"-", "reader", "01ACCT"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := mirrorCollaboratorRow(tt.in)
-			if len(got) != len(tt.want) {
-				t.Fatalf("mirrorCollaboratorRow len = %d, want %d (%v)", len(got), len(tt.want), got)
-			}
-			for i := range tt.want {
-				if got[i] != tt.want[i] {
-					t.Errorf("mirrorCollaboratorRow[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
 func TestValidateClusterHost(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2229,80 +2192,6 @@ func TestRepoMirrorRemove_ClusterFlag(t *testing.T) {
 		require.ErrorContains(t, err, "accepts 1 arg(s)")
 		require.Empty(t, deleted)
 	})
-}
-
-// TestRepoAccessList_ClusterFlag pins that `repo access list` names the
-// placement with --cluster as a cluster host, defaulting to defaultClusterHost,
-// and refusing a second positional.
-//
-// Not parallel: swaps the package-level activeCoreClient and clusterCoreClient
-// seams.
-func TestRepoAccessList_ClusterFlag(t *testing.T) {
-	var listed []string
-	client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/mirrors/collaborators") {
-			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-		}
-		listed = append(listed, r.URL.Query().Get("clusterHost"))
-		writeJSONResponse(t, w, http.StatusOK, &coreapi.ListMirrorCollaboratorsOutputBody{
-			Collaborators: []coreapi.MirrorCollaborator{{Handle: coreapi.NewOptString("alice"), Role: "reader", AccountId: "01ACCOUNT"}},
-		})
-	})
-	serveClusters(t, testClusterCatalog)
-	seamClusterCoreClient(t, client)
-	run := func(args ...string) (stdout string, err error) {
-		listed = nil
-		cmd := newRepoAccessListCmd()
-		var out bytes.Buffer
-		cmd.SetOut(&out)
-		cmd.SetErr(&bytes.Buffer{})
-		cmd.SetArgs(args)
-		err = cmd.ExecuteContext(t.Context())
-		return out.String(), err
-	}
-
-	t.Run("--cluster names the placement by host", func(t *testing.T) {
-		stdout, err := run("/gh/o/r", "--cluster", "eu.example")
-		require.NoError(t, err)
-		require.Contains(t, stdout, "alice")
-		require.Equal(t, []string{"eu.example"}, listed)
-	})
-
-	t.Run("omitted means the default cluster", func(t *testing.T) {
-		_, err := run("/gh/o/r")
-		require.NoError(t, err)
-		require.Equal(t, []string{"aws-us-east-2.entire.io"}, listed)
-	})
-
-	// The host is passed through to the cluster's own core rather than checked
-	// against the catalog, so an unknown one is the server's 404 to give. What
-	// must still fail locally is a host that is not a host.
-	t.Run("a malformed cluster fails before any request", func(t *testing.T) {
-		_, err := run("/gh/o/r", "--cluster", "eu.example@evil.com")
-		require.ErrorContains(t, err, "invalid --cluster")
-		require.Empty(t, listed)
-	})
-
-	t.Run("a second positional is refused before any request", func(t *testing.T) {
-		_, err := run("/gh/o/r", "eu.example")
-		require.ErrorContains(t, err, "accepts 1 arg(s)")
-		require.Empty(t, listed)
-	})
-}
-
-// TestRepoAccessList_NativeRefNamesTheGrantCommand pins that `repo access`,
-// whose name says nothing about GitHub, points a native ref at the verb that
-// answers it instead of stopping at "unsupported".
-func TestRepoAccessList_NativeRefNamesTheGrantCommand(t *testing.T) {
-	t.Parallel()
-	cmd := newRepoAccessListCmd()
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"/et/my-project/my-repo"})
-	err := cmd.ExecuteContext(t.Context())
-	require.ErrorContains(t, err, "does not support Entire repository")
-	require.ErrorContains(t, err, "entire repo grant list")
 }
 
 // TestRepoMirrorGet_NamesARepoOneWay pins the subtree's single grammar: a repo

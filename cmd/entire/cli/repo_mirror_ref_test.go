@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -120,34 +119,16 @@ func TestParseMirrorRepoRef_UnservedForgeIsRefusedUnparsed(t *testing.T) {
 	require.ErrorContains(t, err, "supports Entire repositories only")
 }
 
-// TestMirrorCommands_NativeRepoUnsupported covers `repo access list`, the one
-// verb here that still serves GitHub alone: it reads GitHub collaborators, and
-// a native repo's access is grants, so the answer is a pointer to the command
-// that does serve it.
-func TestMirrorCommands_NativeRepoUnsupported(t *testing.T) {
-	t.Parallel()
-	t.Run("access list", func(t *testing.T) {
-		t.Parallel()
-		cmd := newRepoAccessListCmd()
-		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetErr(&bytes.Buffer{})
-		cmd.SetArgs([]string{"/et/project/widget"})
-		err := cmd.ExecuteContext(t.Context())
-		require.ErrorContains(t, err, "does not support Entire repository")
-		require.ErrorContains(t, err, "entire repo grant list")
-	})
-}
-
-// TestResolveMirrorUseUpstream_BothForges pins that `repo remote use` now reads
+// TestResolveRemoteRepoRef_BothForges pins that `repo remote add` reads
 // a native ref as readily as a GitHub one — a clone of either kind can have its
 // remote repointed at another cluster.
-func TestResolveMirrorUseUpstream_BothForges(t *testing.T) {
+func TestResolveRemoteRepoRef_BothForges(t *testing.T) {
 	t.Parallel()
-	native, err := resolveMirrorUseUpstream(t.Context(), t.TempDir(), "origin", "/et/project/widget")
+	native, err := resolveRemoteRepoRef(t.Context(), t.TempDir(), "origin", "/et/project/widget")
 	require.NoError(t, err)
 	require.Equal(t, mirrorRepoRef{forge: nativeCloneForge, owner: "project", repo: "widget"}, native)
 
-	mirror, err := resolveMirrorUseUpstream(t.Context(), t.TempDir(), "origin", "/gh/Acme/Widget")
+	mirror, err := resolveRemoteRepoRef(t.Context(), t.TempDir(), "origin", "/gh/Acme/Widget")
 	require.NoError(t, err)
 	require.Equal(t, mirrorRepoRef{forge: mirrorCloneForge, owner: "acme", repo: "widget"}, mirror)
 }

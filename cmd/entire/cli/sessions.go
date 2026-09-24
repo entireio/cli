@@ -40,7 +40,8 @@ import (
 //     Only one line is held in memory at a time. A trailing partial line
 //     (agent mid-write) is silently dropped so consumers never see a
 //     truncated record.
-//   - Whole-document JSON agents (Gemini) — read snapshot into memory and
+//   - Whole-document JSON agents (Gemini CLI sessions recorded before its
+//     support was removed) — read snapshot into memory and
 //     validate with json.Valid before emitting. These transcripts are
 //     bounded by conversation size and rarely exceed a few MB even for
 //     long sessions, so buffering is acceptable here.
@@ -96,7 +97,8 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, age
 }
 
 // isWholeDocumentJSONAgent reports whether an agent's on-disk transcript is
-// a single JSON document (e.g. Gemini's session-*.json) versus JSONL.
+// a single JSON document (Gemini's session-*.json) versus JSONL. Gemini CLI is
+// no longer supported, but session state it left behind can still be read.
 func isWholeDocumentJSONAgent(agentType types.AgentType) bool {
 	return agentType == agent.AgentTypeGemini
 }
@@ -483,8 +485,8 @@ Output modes:
   Default       Human-readable summary.
   --json        Metadata-only JSON envelope (no transcript bytes).
   --transcript  Stream the live raw agent transcript bytes to stdout in
-                the agent's native format (JSONL for Claude/Cursor/Codex,
-                JSON for Gemini). Snapshot is bounded to the file size
+                the agent's native format (e.g. JSONL for
+                Claude/Cursor/Codex). Snapshot is bounded to the file size
                 observed at open. JSONL streams have a trailing partial
                 line trimmed; JSON documents are emitted intact.
 
@@ -546,8 +548,8 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 
 // writeSessionTranscript streams the live raw agent transcript for a session
 // to stdout. The transcript bytes are exactly what the agent has written to
-// disk in its native per-agent format (JSONL for Claude Code/Cursor, JSON for
-// Gemini, etc.) — Entire performs no normalization here.
+// disk in its native per-agent format (JSONL for Claude Code/Cursor,
+// etc.) — Entire performs no normalization here.
 func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	if state.TranscriptPath == "" {
 		cmd.SilenceUsage = true

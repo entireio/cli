@@ -268,8 +268,8 @@ func TestSessionResolution_IsCaller(t *testing.T) {
 // depths, so recording chain[0] as a session's owner makes that session
 // genuinely our nearest-ancestor match.
 //
-// This tier is what covers the agents that publish no session ID — Gemini CLI
-// and opencode — so it must not be left to the environment-variable tests.
+// This tier is what covers the agents that publish no session ID — opencode,
+// for one — so it must not be left to the environment-variable tests.
 func TestResolveCallerSession_MatchesOwnerByProcessAncestry(t *testing.T) {
 	clearCallerSessionEnv(t)
 	callerSessionRepo(t)
@@ -341,7 +341,7 @@ func TestResolveCallerSession_EnvClaimWinsWhenAncestryCannotRank(t *testing.T) {
 }
 
 // An inherited environment ID must not outrank the session that actually
-// spawned us. Codex launching Gemini or opencode is the shape: the inner agent
+// spawned us. Codex launching opencode is the shape: the inner agent
 // publishes no ID of its own, so CODEX_SESSION_ID survives in our environment
 // through the inner agent's process and is the ONLY env claim — while the
 // inner session's owner is our nearest ancestor. Accepting the lone claim

@@ -65,7 +65,6 @@ func TestSingleLineMultiSelectHeight(t *testing.T) {
 		huh.NewOption("Copilot CLI", "copilot-cli"),
 		huh.NewOption("Cursor", "cursor"),
 		huh.NewOption("Factory AI Droid", "factoryai-droid"),
-		huh.NewOption("Gemini CLI", "gemini"),
 		huh.NewOption("OpenCode", "opencode"),
 		huh.NewOption("Pi", "pi"),
 	}

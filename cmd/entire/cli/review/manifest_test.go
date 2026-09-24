@@ -981,7 +981,7 @@ func TestExplainEmptyManifest_AggregatesObservedAgentTypes(t *testing.T) {
 			WorktreePath: "/repo",
 			BaseCommit:   "abc123",
 			StartedAt:    started.Add(time.Second),
-			AgentType:    agenttypes.AgentType("Gemini"),
+			AgentType:    agenttypes.AgentType("OpenCode"),
 		},
 		{
 			SessionID:    "s2",
@@ -997,12 +997,12 @@ func TestExplainEmptyManifest_AggregatesObservedAgentTypes(t *testing.T) {
 		t.Fatalf("reason = %q, want 'AgentType mismatch'", got)
 	}
 	// Both observed types must appear (not just one — that was the bug).
-	if !strings.Contains(got, "Codex") || !strings.Contains(got, "Gemini") {
-		t.Errorf("reason = %q, want both observed AgentTypes ('Codex' and 'Gemini')", got)
+	if !strings.Contains(got, "Codex") || !strings.Contains(got, "OpenCode") {
+		t.Errorf("reason = %q, want both observed AgentTypes ('Codex' and 'OpenCode')", got)
 	}
-	// Sorted order: "Codex" must appear before "Gemini" in the rendered list.
-	if idxCodex, idxGemini := strings.Index(got, "Codex"), strings.Index(got, "Gemini"); idxCodex == -1 || idxGemini == -1 || idxCodex > idxGemini {
-		t.Errorf("reason = %q, want observed types sorted (Codex before Gemini)", got)
+	// Sorted order: "Codex" must appear before "OpenCode" in the rendered list.
+	if idxCodex, idxOpenCode := strings.Index(got, "Codex"), strings.Index(got, "OpenCode"); idxCodex == -1 || idxOpenCode == -1 || idxCodex > idxOpenCode {
+		t.Errorf("reason = %q, want observed types sorted (Codex before OpenCode)", got)
 	}
 	if sentinel {
 		t.Errorf("sentinel = true, want false")

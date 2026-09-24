@@ -235,7 +235,7 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
 | git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
 | the working tree | `worktreedir` | worktree root |
-| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`) |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`; also `.gemini/` for the retired Gemini CLI hook cleanup) |
 | an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
 | the active git hooks dir | `strategy.hooksRootForInstall` / `ForRemoval` | `git rev-parse --git-path hooks`, absolutized |
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
@@ -406,8 +406,8 @@ comments at each site say which case applies:
   pre-run guard so it still runs on such a repo, and its message says the repo is
   stopped rather than that the setup is fine.
   The agent hook-config directories get the same treatment via
-  `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.gemini` /
-  `.codex` / `.pi` is refused at the create, because a working tree arrives by
+  `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.codex` /
+  `.pi` is refused at the create, because a working tree arrives by
   clone and `entire enable` must not create directories and write JSON through a
   link the repository supplied. Pi was the last agent still joining its path onto
   the repo root and calling `os.ReadFile` / `os.MkdirAll` / `os.WriteFile` /
@@ -515,7 +515,7 @@ comments at each site say which case applies:
   (Codex's `hooksDocumentRoot`) makes the check itself.
 
   **`writeManagedScaffold` is the same rule for the skill scaffolds** —
-  `.claude/skills/`, `.claude/agents/`, `.codex/agents/`, `.gemini/agents/`. It
+  `.claude/skills/`, `.claude/agents/`, `.codex/agents/`. It
   was not one of the seven call sites `HookConfigFile` replaced, and until it was
   anchored it did `os.MkdirAll` two levels and `os.WriteFile` through a symlinked
   `.claude`, landing files outside the repository and reporting Created. It now

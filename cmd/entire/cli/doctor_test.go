@@ -1744,9 +1744,8 @@ func TestCheckAgentDirSymlinks_ReportsWrongTypedComponent(t *testing.T) {
 // TestAgentSymlinkCheckPaths_CoversLegacySubagentDir keeps .claude/agents/ in
 // the scan. removeLegacySearchSubagent deletes through it with
 // osroot.LstatNoSymlinks, which refuses a symlinked parent, so a link there is
-// refused at enable and has to be diagnosable. .codex/agents and .gemini/agents
-// were only ever covered as a side effect of the agent-help template living
-// under them.
+// refused at enable and has to be diagnosable. .codex/agents was only ever
+// covered as a side effect of the agent-help template living under it.
 func TestAgentSymlinkCheckPaths_CoversLegacySubagentDir(t *testing.T) {
 	t.Parallel()
 

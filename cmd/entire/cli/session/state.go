@@ -291,7 +291,7 @@ type State struct {
 	// Review/investigate sessions leave this false because they skip injection.
 	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
 
-	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
+	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Codex", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
 	// ModelName is the LLM model used in this session (e.g., "claude-sonnet-4-20250514", "gpt-4o").

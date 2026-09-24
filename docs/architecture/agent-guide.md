@@ -52,7 +52,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
-| `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex / Gemini inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit / BeforeAgent); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
+| `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
 
 ### Declaring a subagent transcript
@@ -191,7 +191,7 @@ func (a *YourAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 func (a *YourAgent) ChunkTranscript(content []byte, maxSize int) ([][]byte, error) {
     // Use JSONL chunking for line-based formats
     return agent.ChunkJSONL(content, maxSize)
-    // Or implement format-specific chunking (see geminicli for JSON example)
+    // Or implement format-specific chunking (see opencode for a JSON example)
 }
 
 func (a *YourAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
@@ -380,7 +380,7 @@ var (
 
 ### Step 8: Implement Hook Installation (if `HookSupport`)
 
-If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Gemini's `.gemini/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
+If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
 
 ```go
 // HookConfigRelPath implements agent.HookConfigLocator: the same
@@ -483,15 +483,15 @@ Test `ParseHookEvent` for every hook name your agent supports. See [Testing Patt
 
 The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles each event type as follows:
 
-| Event Type | Framework Actions | Claude Code Hook | Gemini CLI Hook | Cursor Hook | OpenCode Hook | Factory AI Droid Hook | Copilot CLI Hook |
-|------------|-------------------|------------------|-----------------|-----------------|---------------|----------------------|-----------------|
-| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` |
-| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-agent` | `before-submit-prompt` | `turn-start` | `user-prompt-submit` | `user-prompt-submitted` |
-| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `after-agent` | `stop` | `turn-end` | `stop` | `agent-stop` |
-| `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compress` | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
-| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
-| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) |
-| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) |
+| Event Type | Framework Actions | Claude Code Hook | Cursor Hook | OpenCode Hook | Factory AI Droid Hook | Copilot CLI Hook |
+|------------|-------------------|------------------|-----------------|---------------|----------------------|-----------------|
+| `SessionStart` | Shows banner, checks concurrent sessions, fires state machine transition | `session-start` | `session-start` | `session-start` | `session-start` | `session-start` |
+| `TurnStart` | Captures pre-prompt state (git status, transcript position), ensures strategy setup, initializes session | `user-prompt-submit` | `before-submit-prompt` | `turn-start` | `user-prompt-submit` | `user-prompt-submitted` |
+| `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `stop` | `turn-end` | `stop` | `agent-stop` |
+| `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
+| `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
+| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) |
+| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) |
 
 ### Event Field Requirements
 
@@ -589,7 +589,7 @@ rather than from hook ordering, so it survives asynchronous dispatch.
 
 **Without it:** Users must manually configure hooks to call `entire hooks <agent> <verb>`.
 
-**Implement when:** Your agent supports a config file with hook definitions (e.g., `.claude/settings.json`, `.gemini/settings.json`).
+**Implement when:** Your agent supports a config file with hook definitions (e.g., `.claude/settings.json`, `.cursor/hooks.json`).
 
 ### `HookResponseWriter`
 
@@ -628,22 +628,9 @@ One JSON object per line. Each line is a transcript entry (user message, assista
 **Position:** Line count (`bufio.Reader` + count `\n`).
 **Offset:** Start parsing at line N (skip first N lines).
 
-### JSON Format (Gemini CLI pattern)
-
-Single JSON object with a `messages` array:
-
-```json
-{"messages": [{"type": "user", "content": "..."}, {"type": "gemini", "content": "..."}]}
-```
-
-**Chunking:** Parse the JSON, split the messages array across chunks, marshal each chunk as a complete JSON object with a subset of messages.
-**Reassembly:** Parse each chunk, concatenate all message arrays, marshal back.
-**Position:** Message count (`len(transcript.Messages)`).
-**Offset:** Start iterating messages at index N.
-
 ### JSON Format (OpenCode pattern)
 
-Single JSON object with `info` and `messages` array. Messages contain `parts` (text, tool calls with state). Similar to Gemini's pattern but with a different schema:
+Single JSON object with `info` and `messages` array. Messages contain `parts` (text, tool calls with state):
 
 ```json
 {"info": {"id": "...", "title": "..."}, "messages": [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "..."}]}]}
@@ -716,7 +703,7 @@ agent.SortChunkFiles(files, "full.jsonl")  // sorted by chunk index
 
 ### JSON Config File Pattern
 
-Claude Code, Gemini CLI, Cursor, Factory AI Droid, and Copilot CLI use a JSON settings file in their config directory. The installation pattern is:
+Claude Code, Cursor, Factory AI Droid, and Copilot CLI use a JSON settings file in their config directory. The installation pattern is:
 
 1. **Read existing settings** as `map[string]json.RawMessage` to preserve unknown fields
 2. **Parse only the hook types you modify** into typed slices
@@ -742,20 +729,6 @@ Key principles:
   }
 }
 ```
-
-### Example: Gemini CLI Hook Config
-
-```json
-{
-  "hooksConfig": {"enabled": true},
-  "hooks": {
-    "SessionStart": [{"hooks": [{"name": "entire-session-start", "type": "command", "command": "entire hooks gemini session-start"}]}],
-    "AfterAgent": [{"hooks": [{"name": "entire-after-agent", "type": "command", "command": "entire hooks gemini after-agent"}]}]
-  }
-}
-```
-
-Note: Gemini CLI requires `hooksConfig.enabled: true` and each hook entry requires a `name` field.
 
 ### Example: Cursor Hook Config
 
@@ -975,9 +948,6 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 - Claude Code lifecycle tests: `cmd/entire/cli/agent/claudecode/lifecycle_test.go`
 - Claude Code hooks tests: `cmd/entire/cli/agent/claudecode/hooks_test.go`
 - Claude Code transcript tests: `cmd/entire/cli/agent/claudecode/transcript_test.go`
-- Gemini CLI lifecycle tests: `cmd/entire/cli/agent/geminicli/lifecycle_test.go`
-- Gemini CLI hooks tests: `cmd/entire/cli/agent/geminicli/hooks_test.go`
-- Gemini CLI transcript tests: `cmd/entire/cli/agent/geminicli/transcript_test.go`
 - Cursor IDE & CLI lifecycle tests: `cmd/entire/cli/agent/cursor/lifecycle_test.go`
 - Cursor IDE & CLI hooks tests: `cmd/entire/cli/agent/cursor/hooks_test.go`
 - Cursor IDE & CLI session tests: `cmd/entire/cli/agent/cursor/cursor_test.go`
@@ -1028,8 +998,8 @@ Use `//nolint:nilnil` to suppress the linter warning on intentional nil returns.
 
 ### Agent Name vs Agent Type
 
-- `AgentName` is the **registry key** used in code (`"claude-code"`, `"gemini"`, `"opencode"`, `"cursor"`, `"factoryai-droid"`, `"copilot-cli"`). It appears in CLI commands: `entire hooks cursor stop`.
-- `AgentType` is the **display name** stored in metadata and commit trailers (`"Claude Code"`, `"Gemini CLI"`, `"OpenCode"`, `"Cursor"`, `"Factory AI Droid"`, `"Copilot CLI"`). It's what users see.
+- `AgentName` is the **registry key** used in code (`"claude-code"`, `"codex"`, `"opencode"`, `"cursor"`, `"factoryai-droid"`, `"copilot-cli"`). It appears in CLI commands: `entire hooks cursor stop`.
+- `AgentType` is the **display name** stored in metadata and commit trailers (`"Claude Code"`, `"Codex"`, `"OpenCode"`, `"Cursor"`, `"Factory AI Droid"`, `"Copilot CLI"`). It's what users see.
 
 Register constants for both in `cmd/entire/cli/agent/registry.go` when adding a new agent.
 
