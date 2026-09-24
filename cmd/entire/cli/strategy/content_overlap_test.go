@@ -293,6 +293,61 @@ func TestFilesWithRemainingAgentChanges_FileNotCommitted(t *testing.T) {
 	assert.Equal(t, []string{"fileB.txt"}, remaining, "Uncommitted file should be in remaining")
 }
 
+// A file can reach HEAD through a commit Entire never saw — one made with every
+// hook skipped (LEFTHOOK=0, a hooks-less GUI client). It is then absent from the
+// commit being processed, but nothing of the agent's is left in it: HEAD
+// already holds the shadow's content. Keeping it would carry it forward onto a
+// fresh shadow branch after every later commit, forever, since no later
+// commit's diff will ever contain it.
+func TestFilesWithRemainingAgentChanges_AlreadyInHeadFromEarlierCommit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		earlierB   string
+		wantRemain []string
+	}{
+		{"same content as shadow", "content B", nil},
+		{"different content from shadow", "user's B", []string{"fileB.txt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := setupGitRepo(t)
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+			createShadowBranchWithContent(t, repo, "abc1234", "e3b0c4", map[string][]byte{
+				"fileA.txt": []byte("content A"),
+				"fileB.txt": []byte("content B"),
+			})
+			wt, err := repo.Worktree()
+			require.NoError(t, err)
+			commitFile := func(name, content, msg string) plumbing.Hash {
+				t.Helper()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+				_, err := wt.Add(name)
+				require.NoError(t, err)
+				h, err := wt.Commit(msg, &git.CommitOptions{
+					Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+				})
+				require.NoError(t, err)
+				return h
+			}
+			// The commit Entire never saw, then the one it is processing.
+			commitFile("fileB.txt", tc.earlierB, "B, hooks skipped")
+			commit, err := repo.CommitObject(commitFile("fileA.txt", "content A", "A"))
+			require.NoError(t, err)
+
+			shadowBranch := checkpoint.ShadowBranchNameForCommit("abc1234", "e3b0c4")
+			remaining := filesWithRemainingAgentChanges(t.Context(), repo, shadowBranch, commit,
+				[]string{"fileA.txt", "fileB.txt"}, map[string]struct{}{"fileA.txt": {}})
+			if tc.wantRemain == nil {
+				assert.Empty(t, remaining)
+				return
+			}
+			assert.Equal(t, tc.wantRemain, remaining)
+		})
+	}
+}
+
 // TestFilesWithRemainingAgentChanges_FullyCommitted tests that files committed with
 // matching content are NOT in the remaining list.
 func TestFilesWithRemainingAgentChanges_FullyCommitted(t *testing.T) {
@@ -736,9 +791,8 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "fileB.txt"), []byte("agent content B"), 0o644))
 	_, err = wt.Add("fileA.txt")
 	require.NoError(t, err)
-	_, err = wt.Add("fileB.txt")
-	require.NoError(t, err)
-	headHash, err := wt.Commit("commit both files", &git.CommitOptions{
+	// fileB stays uncommitted: a file HEAD already holds is not remaining.
+	headHash, err := wt.Commit("commit fileA only", &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
 	})
 	require.NoError(t, err)

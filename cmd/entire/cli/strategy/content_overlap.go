@@ -373,7 +373,8 @@ func hasOverlappingFiles(stagedFiles, filesTouched []string) bool {
 // uncommitted agent changes. This is used for carry-forward after partial commits.
 //
 // A file has remaining agent changes if:
-//   - It wasn't committed at all (not in committedFiles), OR
+//   - It wasn't committed at all (not in committedFiles) and HEAD does not
+//     already hold the shadow's content, OR
 //   - It was committed but the committed content doesn't match the shadow branch
 //     AND the working tree still has changes (e.g., user did git add -p)
 //
@@ -474,8 +475,17 @@ func filesWithRemainingAgentChanges(
 			continue
 		}
 
-		// File wasn't committed at all — it has remaining changes
+		// File wasn't committed at all — it has remaining changes, unless HEAD
+		// already holds the shadow's content. That happens when an earlier
+		// commit Entire never saw (every hook skipped) took it: no later commit
+		// will contain it, so keeping it would carry it forward forever.
 		if _, wasCommitted := committedFiles[filePath]; !wasCommitted {
+			if headFile, headErr := commitTree.File(filePath); headErr == nil && headFile.Hash.Equal(shadowFile.Hash) {
+				logging.Debug(logCtx, "filesWithRemainingAgentChanges: not in this commit but already in HEAD, skipping",
+					slog.String("file", filePath),
+				)
+				continue
+			}
 			keep[i] = true
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
 				slog.String("file", filePath),
