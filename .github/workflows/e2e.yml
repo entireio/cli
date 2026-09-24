@@ -167,6 +167,10 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          # agy's API-key mode. Scoped to its own leg for the same reason the
+          # token below is: an agent that does not need a credential does not
+          # get one. nightly-e2e.yml and e2e-windows.yml wire it too.
+          GEMINI_API_KEY: ${{ matrix.agent == 'antigravity' && secrets.GEMINI_API_KEY || '' }}
           # Only the copilot-cli leg gets the token; other agents must not receive it.
           COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
         run: go run ./e2e/bootstrap
@@ -176,6 +180,7 @@ jobs:
           TEST_FILTER: ${{ inputs.test }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ matrix.agent == 'antigravity' && secrets.GEMINI_API_KEY || '' }}
           E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-6-luna' || '' }}
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
