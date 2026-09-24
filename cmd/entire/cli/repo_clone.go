@@ -470,7 +470,10 @@ func parseMirrorCloneRef(ref string) (provider, owner, repo string, err error) {
 }
 
 func newRepoCloneCmd() *cobra.Command {
-	var cluster string
+	var (
+		cluster string
+		nearest bool
+	)
 	cmd := &cobra.Command{
 		Use:   "clone <repo> [target-dir]",
 		Short: "Clone an Entire repository",
@@ -482,6 +485,12 @@ func newRepoCloneCmd() *cobra.Command {
 			"clusters. On a single cluster it clones directly; on more than one, it " +
 			"prompts you to pick which to clone from, and without a terminal it " +
 			"uses the repo's primary cluster. Pass --cluster to choose either way.\n\n" +
+			"--nearest times a connection to each cluster and clones from the " +
+			"fastest, ordering the prompt by distance and replacing the primary as " +
+			"the no-terminal default, when the primary was measured and lost.\n\n" +
+			"The timing is local and the control plane is never told where you " +
+			"are. Each candidate cluster does see a connection from you, where " +
+			"without the flag only the one you clone from would.\n\n" +
 			"A full `entire://` URL already names the cluster, so it's passed straight " +
 			"through to `git clone` with no lookup (and --cluster is ignored). The " +
 			"optional [target-dir] is passed through to `git clone` either way.",
@@ -489,13 +498,26 @@ func newRepoCloneCmd() *cobra.Command {
 			"  entire repo clone /gh/entirehq/entire-api\n" +
 			"  entire repo clone /gh/entirehq/entire-api ./entire-api\n" +
 			"  entire repo clone /gh/entirehq/entire-api --cluster aws-us-east-2.entire.io\n" +
+			"  entire repo clone /gh/entirehq/entire-api --nearest\n" +
 			"  entire repo clone entire://aws-us-east-2.entire.io/gh/entirehq/entire-api",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
+			// Both name the cluster to clone from, and they disagree whenever
+			// --cluster is not already the nearest. Refuse rather than rank
+			// them: a silent winner here picks the remote URL the user lives
+			// with, and neither order is obviously right to the person who
+			// typed both.
+			if nearest && cluster != "" {
+				return errors.New("--nearest and --cluster both choose a cluster; pass one")
+			}
+			picker := clonePlacementPicker()
+			if nearest {
+				picker = withLatencyProbe(picker)
+			}
 			// passthroughNeedsHost is false: an entire:// URL typed here goes
 			// straight to `git clone`, which reports a bad one itself.
-			cloneURL, err := resolveRepoRemoteURL(cmd, args[0], cluster, clonePlacementPicker(), false)
+			cloneURL, err := resolveRepoRemoteURL(cmd, args[0], cluster, picker, false)
 			if err != nil {
 				return err
 			}
@@ -507,6 +529,7 @@ func newRepoCloneCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is readable on more than one (for /gh/ refs it may belong to another auth context)")
+	cmd.Flags().BoolVar(&nearest, "nearest", false, "Time a connection to each cluster and clone from the fastest, instead of prompting")
 	return cmd
 }
 
@@ -753,6 +776,12 @@ type placementPicker struct {
 	// ("Clone", "Remote update") — handleFormCancellation prints
 	// "<action> cancelled."
 	action string
+	// probe measures round-trip time to each candidate cluster, so the picker
+	// can offer the nearest first and a non-interactive caller can be given a
+	// default instead of an error. A nil probe disables latency ordering
+	// entirely and restores the alphabetical picker — which is what every
+	// unit test wants, since a probe is the one part of this file that dials.
+	probe latencyProbe
 }
 
 const clusterSelectorFlag = "--cluster"
@@ -767,6 +796,30 @@ func clonePlacementPicker() placementPicker {
 		title:    "This repo is mirrored on more than one cluster — pick one to clone from",
 		action:   "Clone",
 	}
+}
+
+// withLatencyProbe turns on nearest-placement selection for one invocation.
+// `repo clone --nearest` is the only caller today; the picker is otherwise
+// probe-less, which is what keeps the default path from dialling anything.
+func withLatencyProbe(p placementPicker) placementPicker {
+	p.probe = dialLatencies
+	return p
+}
+
+// probeableHosts returns the hosts that are safe to dial: those validateClusterHost
+// admits. Everything else is dropped with a debug line rather than an error,
+// because a host this rejects is refused after selection anyway — the probe
+// simply must not reach it first.
+func probeableHosts(ctx context.Context, hosts []string) []string {
+	out := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		if err := validateClusterHost(host); err != nil {
+			logging.Debug(ctx, "skipping an invalid cluster host in the latency probe", "host", host, "error", err)
+			continue
+		}
+		out = append(out, host)
+	}
+	return out
 }
 
 // placementPromptTerminal is the controlling terminal the placement picker
@@ -802,6 +855,13 @@ var openPlacementPromptTerminal = func() (placementPromptTerminal, error) {
 // defaultClusterHost). A script therefore gets the primary rather than a
 // refusal, and only a repo whose placements don't include it has to be told to
 // pass p.selector.
+//
+// A picker carrying a probe (today: `repo clone --nearest`) measures the
+// candidates first, offers them nearest-first, and takes the fastest as the
+// no-terminal default INSTEAD of defaultHost — that substitution is what the
+// flag asks for. defaultHost still backs it: an unmeasurable network falls
+// through to the primary rather than to an error. Every other caller has no
+// probe, dials nothing, and behaves exactly as described above.
 func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement, clusterSel, defaultHost string, p placementPicker) (coreapi.ResolvedPlacement, error) {
 	// Dedupe by cluster host: one placement per cluster is what a caller acts on,
 	// and the same host appearing twice would only confuse the picker. Key on the
@@ -820,6 +880,25 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 	}
 	sort.Strings(hosts)
 
+	// Probe only when there is a choice left to make — one host is not a
+	// choice, and an explicit --cluster is a choice already made, so neither
+	// earns a dial. p.probe is nil unless the caller opted in.
+	var rtt map[string]probeResult
+	if clusterSel == "" && len(hosts) > 1 && p.probe != nil {
+		// validateClusterHost gates the CHOSEN placement further down, as
+		// "defense-in-depth against a malformed host reaching git". Dialling
+		// first would walk in front of that guard: these hosts arrive from the
+		// API unvalidated, an empty one dials ":443" (the local machine), and
+		// probeAddress honours an embedded port, so the target is not even
+		// pinned to 443. Validate before connecting, not after choosing.
+		//
+		// A rejected host is dropped from the probe, not from the picker: it is
+		// refused after selection anyway, with a message that names it.
+		rtt = p.probe(cmd.Context(), probeableHosts(cmd.Context(), hosts))
+		hosts = orderHostsByLatency(hosts, rtt)
+		logging.Debug(cmd.Context(), "probed placement latency", "hosts", hosts, "measured", len(rtt))
+	}
+
 	if clusterSel != "" {
 		match, ok := byHost[strings.ToLower(strings.TrimSpace(clusterSel))]
 		if !ok {
@@ -834,6 +913,26 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 
 	if !interactive.CanPromptInteractively() {
 		wanted := strings.TrimSpace(defaultHost)
+		// --nearest displaces the primary as the default, and says so. The host
+		// is about to be written into .git/config and followed by every later
+		// fetch, and swapping the primary for a mirror is exactly the trade a
+		// reader should see named: a mirror lags its primary, which matters to
+		// a clone that is about to be read back from. The line goes to stderr,
+		// clear of `repo remote url`'s captured stdout.
+		//
+		// nearestHost answers only when the primary was itself measured and
+		// beaten, so reaching here means both numbers exist and the winner is
+		// not the primary — the message can state the trade unconditionally.
+		if nearest, ok := nearestHost(hosts, wanted, rtt); ok {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Nearest placement: %s [%s], not the primary %s [%s] — pass %s to choose another\n",
+				nearest, formatProbedRTT(rtt[nearest], true),
+				wanted, formatProbedRTT(rtt[strings.ToLower(wanted)], true), p.selector)
+			return byHost[nearest], nil
+		}
+		// An unmeasurable network — or an unmeasured primary, or a primary that
+		// was already the nearest — falls through to the primary, which is a
+		// better answer than the error --nearest used to end at and the same
+		// answer a caller who never passed the flag would get.
 		if match, ok := byHost[strings.ToLower(wanted)]; ok {
 			return match, nil
 		}
@@ -849,9 +948,12 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 		return coreapi.ResolvedPlacement{}, fmt.Errorf("repo is on %d clusters%s; pass %s to choose one of: %s", len(hosts), missing, p.selector, strings.Join(hosts, ", "))
 	}
 
+	// hosts is already nearest-first, and huh preselects the first option, so
+	// the ordering IS the recommendation — no separate default to keep in sync.
 	options := make([]huh.Option[string], len(hosts))
 	for i, h := range hosts {
-		options[i] = huh.NewOption(mirrorCellLabel(byHost[h]), h)
+		measured, ok := rtt[h]
+		options[i] = huh.NewOption(mirrorCellLabel(byHost[h], formatProbedRTT(measured, ok)), h)
 	}
 
 	// The answer is read from the terminal, so the question has to be visible
@@ -927,17 +1029,25 @@ func selectPlacement(cmd *cobra.Command, placements []coreapi.ResolvedPlacement,
 // the physical cell and jurisdiction when known, always anchored by the cluster
 // host that goes into the clone URL — the value the same command takes as
 // --cluster, so a reader who cancels the picker knows what to type next.
-func mirrorCellLabel(p coreapi.ResolvedPlacement) string {
+func mirrorCellLabel(p coreapi.ResolvedPlacement, rtt string) string {
 	cell := strings.TrimSpace(p.Cell.Or(""))
 	jur := strings.TrimSpace(p.Jurisdiction.Or(""))
+	var label string
 	switch {
 	case cell != "" && jur != "":
-		return fmt.Sprintf("%s (%s) — %s", cell, jur, p.ClusterHost)
+		label = fmt.Sprintf("%s (%s) — %s", cell, jur, p.ClusterHost)
 	case cell != "":
-		return fmt.Sprintf("%s — %s", cell, p.ClusterHost)
+		label = fmt.Sprintf("%s — %s", cell, p.ClusterHost)
 	default:
-		return p.ClusterHost
+		label = p.ClusterHost
 	}
+	// An unmeasured host is labelled like any other. Annotating it as unknown
+	// would read as a warning about the placement, when all it records is that
+	// one 400ms probe went unanswered.
+	if rtt != "" {
+		label += " [" + rtt + "]"
+	}
+	return label
 }
 
 // runGitClone shells out to `git clone <cloneURL> [target-dir]`, wiring the

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -118,24 +117,6 @@ func TestParseMirrorRepoRef_UnservedForgeIsRefusedUnparsed(t *testing.T) {
 	_, err := parseMirrorRepoRef("/gh/acme/widget", nativeCloneForge)
 	require.ErrorContains(t, err, "does not support GitHub mirror")
 	require.ErrorContains(t, err, "supports Entire repositories only")
-}
-
-// TestMirrorCommands_NativeRepoUnsupported covers `repo access list`, the one
-// verb here that still serves GitHub alone: it reads GitHub collaborators, and
-// a native repo's access is grants, so the answer is a pointer to the command
-// that does serve it.
-func TestMirrorCommands_NativeRepoUnsupported(t *testing.T) {
-	t.Parallel()
-	t.Run("access list", func(t *testing.T) {
-		t.Parallel()
-		cmd := newRepoAccessListCmd()
-		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetErr(&bytes.Buffer{})
-		cmd.SetArgs([]string{"/et/project/widget"})
-		err := cmd.ExecuteContext(t.Context())
-		require.ErrorContains(t, err, "does not support Entire repository")
-		require.ErrorContains(t, err, "entire repo grant list")
-	})
 }
 
 // TestResolveMirrorUseUpstream_BothForges pins that `repo remote use` now reads

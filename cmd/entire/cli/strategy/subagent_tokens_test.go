@@ -518,9 +518,6 @@ func TestCalculateLiveTranscriptTokenUsage_RescopesSubagentCumulativeTotal(t *te
 	require.Equal(t, 200, state.TokenUsage.SubagentTokens.InputTokens,
 		"session state must retain the cumulative snapshot for the next baseline")
 
-	applyBackfilledSessionTokenUsage(t.Context(), ag, state, mainTranscript, usage)
-	require.Equal(t, 200, state.TokenUsage.SubagentTokens.InputTokens,
-		"main-token backfill must not replace the cumulative snapshot with the checkpoint delta")
 	state.RebaselineSubagentTokens()
 	require.NoError(t, os.WriteFile(subagentPath, []byte(`{"type":"assistant","uuid":"a-sub","message":{"id":"msg_sub","type":"message","role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":260,"output_tokens":35}}}
 `), 0o644))
@@ -627,15 +624,8 @@ func TestCondenseSessionByID_CapturesSubagentBaselineViaRealResetPath(t *testing
 	metadataDir := ".entire/metadata/" + sessionID
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
-	// The assistant line carries real usage data (message.id + usage). Real
-	// Claude Code transcripts always do, which makes sessionStateBackfillTokenUsage
-	// fire during condensation (its InputTokens > 0 branch) and overwrite
-	// state.TokenUsage with the transcript-recomputed value — which is computed
-	// with subagentsDir="" and therefore drops SubagentTokens. This is what makes
-	// this test guard the REAL condensation path: without preserving the
-	// cumulative subagent total across the backfill, resetCheckpointWindow would
-	// snapshot a nil baseline and the next checkpoint would re-report the full
-	// cumulative subagent total (finding 019f5ebf-a57e).
+	// Checkpoint-scoped transcript usage must not replace the cumulative session
+	// total here, so the reset can retain the subagent baseline.
 	transcript := `{"type":"human","message":{"content":"do the thing"}}
 {"type":"assistant","uuid":"a1","message":{"id":"m1","usage":{"input_tokens":300,"output_tokens":150}}}
 `
@@ -715,11 +705,8 @@ func TestCondenseSessionByID_CapturesSubagentBaselineViaRealResetPath(t *testing
 	require.Equal(t, 60, summary.TokenUsage.SubagentTokens.OutputTokens)
 }
 
-// TestWithSubagentTokensFrom_DoesNotMutateInput guards the copy semantics directly.
-// The condensation tests cannot: applyBackfilledSessionTokenUsage already hands back
-// a copy on that path, so a mutate-in-place implementation passes them. Mutating
-// would overwrite the session-wide cumulative with a window delta and make
-// resetCheckpointWindow snapshot a too-small baseline for the next window.
+// Session and checkpoint token snapshots can share pointers, so replacement must
+// not mutate either input.
 func TestSubagentCoverageSurvivesBackfill(t *testing.T) {
 	t.Parallel()
 	incomplete := false

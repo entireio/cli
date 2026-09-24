@@ -181,8 +181,8 @@ explicit `ENTIRE_API_BASE_URL` (`auth/cell_data_api.go`'s
 failing that, for cluster-addressed operations only, the sole saved login the
 host accepts.** `/.well-known` decides which identities are *accepted*. A git
 remote or a cluster-addressed control-plane command (`repo mirror add` /
-`remove`, `repo access list`) auto-selects because the cluster already pins the
-host, so the login can follow it; every other API follows the selected login
+`remove`, and `repo grant list` reading a mirror) auto-selects because the
+cluster already pins the host, so the login can follow it; every other API follows the selected login
 instead, and a host that rejects it names the login that would work.
 
 Whenever several logins are saved, every CLI command that acts as one says

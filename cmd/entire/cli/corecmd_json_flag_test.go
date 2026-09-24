@@ -48,7 +48,6 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		// there is no object to render, so it stays off the --json surface like
 		// the other side-effect verbs.
 		"repo remote use":     false,
-		"repo access list":    true,
 		"repo visibility get": true,
 		// add/remove print the resulting rule list, so they render JSON too.
 		"repo protection list":   true,
