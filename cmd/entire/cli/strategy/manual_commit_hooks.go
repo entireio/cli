@@ -376,6 +376,11 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		openRepoSpan.End()
 		return nil
 	}
+	// Commits redone after a reset are links too: their trailers ride along.
+	if redone := s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile); len(redone) > 0 {
+		inherited = append(inherited, redone...)
+		recordInheritedTrailers(ctx, inherited)
+	}
 	defer repo.Close()
 	openRepoSpan.End()
 

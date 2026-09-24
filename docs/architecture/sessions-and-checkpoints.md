@@ -225,6 +225,17 @@ write into a checkpoint the session did not stamp for this commit is refused
 (`stampedByAnotherCommit`). Merge commits stay unlinked by design; the
 merged commits keep their own trailers.
 
+**Redone commits inherit their trailers too** (`inheritReplacedCommitsTrailers`).
+After `git reset` and a new commit, the dropped commits are those between the
+merge base of HEAD and ORIG_HEAD and ORIG_HEAD itself. A dropped commit's
+trailers are carried into the new message when a file it changed is staged
+with exactly the content it had at ORIG_HEAD: the work is recommitted, not
+rewritten, so an agent's ten commits redone as three logical ones keep every
+checkpoint, each on the commit that now holds its files. Content that differs
+inherits nothing; a merge or pull, whose ORIG_HEAD is an ancestor of HEAD,
+replaces nothing; and the reset must still be the latest ref operation in
+HEAD's reflog, since ORIG_HEAD outlives it. Inherited trailers are links, exactly as for a squash.
+
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
 `WorktreePath` match first, then sessions from a sibling worktree of the same
