@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -252,4 +253,15 @@ func TestPrepareCommitMsg_StaleOrigHeadInheritsNothing(t *testing.T) {
 	testutil.GitAdd(t, dir, "f2.txt")
 	got := prepareMessage(t, "bring f2 back\n")
 	require.Empty(t, checkpointIDs(got), "a stale ORIG_HEAD must not link unrelated work: %q", got)
+}
+
+// A redo committed with `git commit -v`: git discards everything below the
+// scissors line, so the inherited trailers must land above git's comments.
+func TestPrepareCommitMsg_RedoInVerboseEditorKeepsTrailersAboveScissors(t *testing.T) {
+	dir := redoFixture(t)
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", "HEAD~2")
+	scissors := "# ------------------------ >8 ------------------------"
+	got := advPrepare(t, "\n# Please enter the commit message.\n"+scissors+"\ndiff --git a/f1.txt b/f1.txt\n", "")
+	kept, _, _ := strings.Cut(got, scissors)
+	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(kept), "%q", got)
 }

@@ -83,7 +83,7 @@ func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Contex
 	added := 0
 	for _, cpID := range inherited {
 		if !present[cpID] {
-			message = addCheckpointTrailer(message, cpID)
+			message = addInheritedCheckpointTrailer(message, cpID)
 			added++
 		}
 	}
