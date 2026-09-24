@@ -1,11 +1,15 @@
 package strategy
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestStampedTrailer_SkipsInheritedTrailers(t *testing.T) {
@@ -65,4 +69,30 @@ func TestPickCondensationTargetState_RechecksSelectedTarget(t *testing.T) {
 	assert.Equal(t, target, got)
 	assert.True(t, preexisting,
 		"a target created after selection must be treated as preexisting before condensation")
+}
+
+// The inherited-trailer marker speaks only for a commit on the parent it was
+// recorded against, and is consumed by the first post-commit that reads it.
+func TestInheritedTrailersMarker_TiedToParentAndConsumed(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "base\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	parent := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	inherited := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J50")
+	ctx := context.Background()
+
+	recordInheritedTrailers(ctx, []id.CheckpointID{inherited})
+	require.Empty(t, takeInheritedTrailers(ctx, "0000000000000000000000000000000000000000"), "a commit on another parent is not the one prepared")
+	require.Empty(t, takeInheritedTrailers(ctx, parent), "the marker is consumed by the first reader")
+
+	recordInheritedTrailers(ctx, []id.CheckpointID{inherited})
+	require.Equal(t, map[id.CheckpointID]bool{inherited: true}, takeInheritedTrailers(ctx, parent))
+
+	recordInheritedTrailers(ctx, []id.CheckpointID{inherited})
+	recordInheritedTrailers(ctx, nil)
+	require.Empty(t, takeInheritedTrailers(ctx, parent), "a later prepare that inherited nothing clears the marker")
 }

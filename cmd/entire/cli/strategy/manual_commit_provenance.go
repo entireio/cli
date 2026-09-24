@@ -2,13 +2,19 @@ package strategy
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"os"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
@@ -107,4 +113,112 @@ func stampedByAnotherCommit(ctx context.Context, checkpointID id.CheckpointID, s
 func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, checkpointID id.CheckpointID) bool {
 	summary, err := store.Read(ctx, checkpointID)
 	return err == nil && summary != nil
+}
+
+// inheritedTrailersFile carries the trailers prepare-commit-msg inherited from
+// squashed commits to post-commit. It lives in the per-worktree git dir, like
+// SQUASH_MSG, and is tied to the commit's parent so a commit that never
+// happened cannot speak for the next one.
+const inheritedTrailersFile = "entire-inherited-trailers.json"
+
+type inheritedTrailers struct {
+	Parent string            `json:"parent"`
+	IDs    []id.CheckpointID `json:"ids"`
+}
+
+// recordInheritedTrailers tells post-commit which trailers this commit
+// inherited, so it never condenses into one: an inherited trailer links an
+// existing checkpoint, which may simply not be in this clone's store yet.
+// With nothing inherited it clears any marker a commit that never happened left.
+func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return
+	}
+	if len(inherited) == 0 {
+		_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent is the usual case
+		return
+	}
+	marker := inheritedTrailers{IDs: inherited, Parent: headHash(ctx)}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, inheritedTrailersFile, data, 0o600); err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record inherited trailers",
+			slog.String("error", err.Error()))
+	}
+}
+
+// headHash returns HEAD's commit, the parent the commit being prepared will
+// have; empty before the first commit.
+func headHash(ctx context.Context) string {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return ""
+	}
+	defer repo.Close()
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+	return head.Hash().String()
+}
+
+// stampedTrailersOf returns the checkpoint trailers of commit that
+// prepare-commit-msg stamped, leaving out the ones it recorded as inherited.
+func stampedTrailersOf(ctx context.Context, commit *object.Commit) []id.CheckpointID {
+	var parent string
+	if len(commit.ParentHashes) > 0 {
+		parent = commit.ParentHashes[0].String()
+	}
+	return withoutInherited(trailers.ParseAllCheckpoints(commit.Message), takeInheritedTrailers(ctx, parent))
+}
+
+// takeInheritedTrailers returns the trailers prepare-commit-msg recorded as
+// inherited for a commit on parent, and consumes the marker either way.
+func takeInheritedTrailers(ctx context.Context, parent string) map[id.CheckpointID]bool {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return nil
+	}
+	data, err := osroot.ReadFileNoFollow(root, inheritedTrailersFile)
+	if err != nil {
+		return nil
+	}
+	_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // a stale marker is ignored by its parent check
+	var marker inheritedTrailers
+	if json.Unmarshal(data, &marker) != nil || marker.Parent != parent {
+		return nil
+	}
+	out := make(map[id.CheckpointID]bool, len(marker.IDs))
+	for _, cpID := range marker.IDs {
+		out[cpID] = true
+	}
+	return out
+}
+
+// withoutInherited drops the trailers a commit inherited: post-commit condenses
+// only into what prepare stamped.
+func withoutInherited(ids []id.CheckpointID, inherited map[id.CheckpointID]bool) []id.CheckpointID {
+	if len(inherited) == 0 {
+		return ids
+	}
+	out := make([]id.CheckpointID, 0, len(ids))
+	for _, cpID := range ids {
+		if !inherited[cpID] {
+			out = append(out, cpID)
+		}
+	}
+	return out
+}
+
+// perWorktreeGitRoot opens the per-worktree git dir, where SQUASH_MSG and the
+// sequencer markers live. The root is the shared registry handle: never close it.
+func perWorktreeGitRoot(ctx context.Context) (*os.Root, error) {
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return gitdir.OpenAt(gitDir) //nolint:wrapcheck // callers treat any error as "no marker"
 }

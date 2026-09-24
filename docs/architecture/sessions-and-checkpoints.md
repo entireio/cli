@@ -216,7 +216,10 @@ matching and either refuse or mint a fresh, empty checkpoint. Inherited
 trailers are links to checkpoints that already exist. Matching still runs, so
 work a session holds at squash time is stamped as its own trailer after the
 inherited ones, and post-commit condenses only into the trailer that has no
-checkpoint yet (`pickCondensationTarget`), rechecks whether that target appeared
+checkpoint yet (`pickCondensationTarget`) among those prepare stamped: prepare
+records the inherited IDs in the per-worktree git dir, tied to the commit's
+parent (`recordInheritedTrailers`), so an inherited trailer whose checkpoint
+simply is not in this clone's store yet is never mistaken for a fresh one, rechecks whether that target appeared
 between selection and condensation, and never writes into an inherited one; a
 write into a checkpoint the session did not stamp for this commit is refused
 (`stampedByAnotherCommit`). Merge commits stay unlinked by design; the

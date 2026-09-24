@@ -353,6 +353,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	// Inherited trailers link the squashed commits' checkpoints; matching still
 	// runs so work the session holds gets a checkpoint of its own.
 	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
+	recordInheritedTrailers(ctx, inherited)
 
 	// A merge commit is skipped: the merged commits keep their own trailers.
 	if source == "merge" {
@@ -1092,7 +1093,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	// Condense into the trailer prepare stamped, never into an inherited one.
-	stamped := trailers.ParseAllCheckpoints(commit.Message)
+	stamped := stampedTrailersOf(ctx, commit)
 	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, stamped)
 	openRepoSpan.End()
 
