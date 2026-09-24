@@ -98,9 +98,37 @@ jobs:
 
       - name: Install agent CLI
         run: |
+          set -euo pipefail
+
+          # Every install below fetches from a third-party endpoint that fails
+          # for reasons this repo can neither fix nor predict. Run 36007855846
+          # lost two legs at once: a CDN edge served agy's installer gzipped and
+          # bash choked on the binary, while opencode's script could not reach
+          # its own version endpoint. Neither reached a test, and main went red.
+          #
+          # pipefail is load-bearing here rather than tidiness. `curl ... | bash`
+          # reports BASH's status, so a fetch that fails feeds an empty script to
+          # a shell that exits 0 -- the step would pass having installed nothing,
+          # and the real failure would surface later as a missing binary.
+          retry() {
+            local attempt=1
+            while true; do
+              if bash -euo pipefail -c "$1"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::install failed after $attempt attempts: $1"
+                return 1
+              fi
+              echo "install attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+
           case "${{ matrix.agent }}" in
-            claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
-            opencode)    curl -fsSL https://opencode.ai/install | bash ;;
+            claude-code) retry 'curl -fsSL https://claude.ai/install.sh | bash' ;;
+            opencode)    retry 'curl -fsSL https://opencode.ai/install | bash' ;;
             antigravity)
               # Deliberately NOT pinned, because pinning agy does not work.
               # agy self-updates IN PLACE — the updater replaces the executable
@@ -125,15 +153,15 @@ jobs:
               #
               # nightly-e2e.yml also tracks latest, but for its own reason:
               # that job exists to report agy drift.
-              curl -fsSL https://antigravity.google/cli/install.sh | bash
+              retry 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
               ;;
-            codex)       npm install -g @openai/codex ;;
-            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
-            factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
-            copilot-cli)  npm install -g @github/copilot  ;;
+            codex)       retry 'npm install -g @openai/codex' ;;
+            cursor-cli)  retry 'curl https://cursor.com/install -fsS | bash' ;;
+            factoryai-droid) retry 'curl -fsSL https://app.factory.ai/cli | sh' ;;
+            copilot-cli) retry 'npm install -g @github/copilot' ;;
             roger-roger) ;; # installed by mise (see mise.toml)
           esac
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Verify roger-roger agent
         if: matrix.agent == 'roger-roger'

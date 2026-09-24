@@ -58,13 +58,47 @@ jobs:
       - name: Install claude-code
         if: inputs.agent == 'claude-code'
         run: |
-          irm https://claude.ai/install.ps1 | iex
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846). Retry the throw path; an
+          # installer that exits instead still ends the step.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://claude.ai/install.ps1 | iex }
           "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install factoryai-droid
         if: inputs.agent == 'factoryai-droid'
         run: |
-          irm https://app.factory.ai/cli/windows | iex
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846). Retry the throw path; an
+          # installer that exits instead still ends the step.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://app.factory.ai/cli/windows | iex }
           # droid.exe lands in %USERPROFILE%\bin, not .local\bin.
           "$env:USERPROFILE\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
@@ -76,7 +110,24 @@ jobs:
           # %LOCALAPPDATA%\agy\bin. It always takes latest and has no version
           # flag — right for a dispatch-only workflow, which wants whatever agy
           # users actually have. e2e.yml pins instead; see its own comment.
-          irm https://antigravity.google/cli/install.ps1 | iex
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846). Retry the throw path; an
+          # installer that exits instead still ends the step.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://antigravity.google/cli/install.ps1 | iex }
           "$env:LOCALAPPDATA\agy\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Bootstrap agent

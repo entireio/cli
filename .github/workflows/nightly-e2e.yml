@@ -63,14 +63,58 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict -- run 36007855846 lost two e2e legs at once to a
+          # gzipped installer and an unreachable version endpoint. Retry rather
+          # than redden a scheduled run. (pipefail is already set above, which
+          # `curl ... | bash` needs: the pipeline reports BASH's status, so a
+          # failed fetch otherwise exits 0 having installed nothing.)
+          retry() {
+            local attempt=1
+            while true; do
+              if bash -euo pipefail -c "$1"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::install failed after $attempt attempts: $1"
+                return 1
+              fi
+              echo "install attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          retry 'curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly CLI (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           set -euo pipefail
-          brew install --cask entireio/tap/entire@nightly
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict -- run 36007855846 lost two e2e legs at once to a
+          # gzipped installer and an unreachable version endpoint. Retry rather
+          # than redden a scheduled run. (pipefail is already set above, which
+          # `curl ... | bash` needs: the pipeline reports BASH's status, so a
+          # failed fetch otherwise exits 0 having installed nothing.)
+          retry() {
+            local attempt=1
+            while true; do
+              if bash -euo pipefail -c "$1"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::install failed after $attempt attempts: $1"
+                return 1
+              fi
+              echo "install attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          retry 'brew install --cask entireio/tap/entire@nightly'
 
       # The README's nightly invocation. The installer updates only the stored
       # user PATH, which later steps do not re-read, hence GITHUB_PATH.
@@ -80,7 +124,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly"
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846 lost two Unix legs to a gzipped
+          # installer and an unreachable version endpoint). Retry each install.
+          #
+          # Limit worth stating: this retries the THROW path only. An installer
+          # that calls exit instead ends the step before the catch runs -- per
+          # the notes below that is droid's shape, so its transient failures
+          # still redden the run. Isolating each installer in a child pwsh
+          # would close that, and is untested here.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly" }
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # Pin the checkout to the tag that produced the installed binary, so the
@@ -174,17 +241,39 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           set -euo pipefail
-          curl -fsSL https://claude.ai/install.sh | bash
-          curl https://cursor.com/install -fsS | bash
-          curl -fsSL https://app.factory.ai/cli | sh
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict -- run 36007855846 lost two e2e legs at once to a
+          # gzipped installer and an unreachable version endpoint. Retry rather
+          # than redden a scheduled run. (pipefail is already set above, which
+          # `curl ... | bash` needs: the pipeline reports BASH's status, so a
+          # failed fetch otherwise exits 0 having installed nothing.)
+          retry() {
+            local attempt=1
+            while true; do
+              if bash -euo pipefail -c "$1"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::install failed after $attempt attempts: $1"
+                return 1
+              fi
+              echo "install attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          retry 'curl -fsSL https://claude.ai/install.sh | bash'
+          retry 'curl https://cursor.com/install -fsS | bash'
+          retry 'curl -fsSL https://app.factory.ai/cli | sh'
           # opencode by npm: its install script resolves its version through an
           # unauthenticated api.github.com call it gives no way to authenticate,
           # so it is rate-limited at random.
-          npm install -g @openai/codex @github/copilot opencode-ai
+          retry 'npm install -g @openai/codex @github/copilot opencode-ai'
           # agy's official installer: it resolves OS and architecture itself,
           # verifies a SHA-512 from the release manifest, and installs latest
           # into ~/.local/bin, which the line below puts on PATH.
-          curl -fsSL https://antigravity.google/cli/install.sh | bash
+          retry 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "AGENTS=claude-code opencode codex cursor-cli factoryai-droid copilot-cli antigravity" >> "$GITHUB_ENV"
 
@@ -200,13 +289,38 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          irm https://claude.ai/install.ps1 | iex
-          irm https://app.factory.ai/cli/windows | iex
-          irm https://antigravity.google/cli/install.ps1 | iex
-          npm install -g @openai/codex @github/copilot opencode-ai
-          # Stop does not cover native commands ($PSNativeCommandUseError-
-          # ActionPreference defaults to $false), so npm's failure needs this.
-          if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846 lost two Unix legs to a gzipped
+          # installer and an unreachable version endpoint). Retry each install.
+          #
+          # Limit worth stating: this retries the THROW path only. An installer
+          # that calls exit instead ends the step before the catch runs -- per
+          # the notes below that is droid's shape, so its transient failures
+          # still redden the run. Isolating each installer in a child pwsh
+          # would close that, and is untested here.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://claude.ai/install.ps1 | iex }
+          Invoke-WithRetry { irm https://app.factory.ai/cli/windows | iex }
+          Invoke-WithRetry { irm https://antigravity.google/cli/install.ps1 | iex }
+          Invoke-WithRetry {
+            npm install -g @openai/codex @github/copilot opencode-ai
+            # Stop does not cover native commands ($PSNativeCommandUseError-
+            # ActionPreference defaults to $false), so npm's failure needs this.
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
+          }
           # None of the three iex lines needs such a guard: each installer
           # throws or exits on every failure path, and that ends this step.
           # Verified 2026-09-09 for claude, 2026-09-10 for droid, whose
