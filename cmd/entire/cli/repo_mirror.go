@@ -195,15 +195,24 @@ func visibilityOf(visibility string) *bool {
 }
 
 // sharedPlacementStatus folds a row's placements into the one STATUS cell the
-// row shows: the status they all share, or repoDirStatusMixed when they
+// row shows: the status they all state, or repoDirStatusMixed when they
 // disagree. Both forges fold it the same way, so `--status ready` means the
 // same thing whichever kind of repo produced the row — and a row that skipped
 // the fold reported an empty status for a repo that plainly had one.
+//
+// A placement stating NO status is skipped rather than folded: it is evidence
+// neither of agreement nor of disagreement. Spelling "nothing seen yet" the
+// same as "unknown" made the answer depend on position — ["", "ready"] agreed
+// on ready while ["ready", ""] disagreed into "mixed", from the same facts —
+// and an unreadable state must not read as partial degradation, which is the
+// whole reason the dash left this field.
 func sharedPlacementStatus(placements []repoDirPlacement) string {
 	status := ""
 	for _, p := range placements {
-		switch status {
-		case "", p.Status:
+		switch {
+		case p.Status == "":
+			continue
+		case status == "", status == p.Status:
 			status = p.Status
 		default:
 			return repoDirStatusMixed
@@ -971,10 +980,15 @@ func validateClusterFilter(cluster string, hostBySlug map[string]string) error {
 	if cluster == "" {
 		return nil
 	}
-	for slug, host := range hostBySlug {
+	// Hosts in a pass of their own. One value could be this cluster's slug and
+	// that cluster's host, and map iteration is randomised, so a single pass
+	// would accept or refuse the same input depending on the run.
+	for _, host := range hostBySlug {
 		if strings.EqualFold(host, cluster) {
 			return nil
 		}
+	}
+	for slug, host := range hostBySlug {
 		if strings.EqualFold(slug, cluster) {
 			return fmt.Errorf("--cluster %q is a cluster slug; this filter takes the public host, so pass --cluster %s (the HOST column of `entire cluster list`)", cluster, host)
 		}

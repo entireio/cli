@@ -136,6 +136,27 @@ func TestPrimaryPlacementStatus(t *testing.T) {
 func TestNativeRepoDetailRow(t *testing.T) {
 	t.Parallel()
 
+	// A cluster the catalog does not carry keeps its SLUG in the CLUSTER cell
+	// (placementCluster's fallback), so the sort has to order on that cell and
+	// not on the raw host — which is "" for exactly those rows, putting them in
+	// a sequence unrelated to the column a reader follows.
+	t.Run("a cluster missing from the catalog sorts by the cell it prints", func(t *testing.T) {
+		t.Parallel()
+		row := nativeRepoDetailRow("/et/acme/web", nativeTestRepo(), []coreapi.NativeMirrorPlacement{
+			{ClusterSlug: "zzz-unknown", Status: coreapi.NativeMirrorPlacementStatusReady},
+			{ClusterSlug: "aws-eu-central-1", Status: coreapi.NativeMirrorPlacementStatusReady},
+		}, nativeTestClusters)
+		cells := make([]string, 0, len(row.Placements))
+		for _, p := range row.Placements {
+			cells = append(cells, p.Cluster)
+		}
+		require.Equal(t, []string{
+			"aws-us-east-2.entire.io", // the primary always leads
+			"aws-eu-central-1.entire.io",
+			"zzz-unknown", // the slug, and it sorts as the slug
+		}, cells, "the rows follow the CLUSTER column the reader sees")
+	})
+
 	t.Run("the primary leads and mirrors follow in slug order", func(t *testing.T) {
 		t.Parallel()
 		row := nativeRepoDetailRow("/et/acme/web", nativeTestRepo(), []coreapi.NativeMirrorPlacement{

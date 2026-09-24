@@ -1373,6 +1373,36 @@ func TestRepoView_NativeCloneURL(t *testing.T) {
 	)
 }
 
+// TestSharedPlacementStatus pins the fold, and above all that it does not
+// depend on the ORDER of the placements. A status the server did not state is
+// evidence neither way: folding it as agreement made a row claim ready while
+// its primary was unknown, and folding it as disagreement made an unreadable
+// state read as partial degradation. Which of the two you got was decided by
+// position, since "nothing seen yet" was spelled the same as "unknown".
+func TestSharedPlacementStatus(t *testing.T) {
+	t.Parallel()
+	of := func(ss ...string) []repoDirPlacement {
+		out := make([]repoDirPlacement, len(ss))
+		for i, st := range ss {
+			out[i] = repoDirPlacement{Status: st}
+		}
+		return out
+	}
+
+	require.Empty(t, sharedPlacementStatus(nil))
+	require.Equal(t, "ready", sharedPlacementStatus(of("ready", "ready")))
+	require.Equal(t, repoDirStatusMixed, sharedPlacementStatus(of("ready", "failed")))
+
+	// The pair that used to disagree with itself. The native path builds the
+	// primary first, so the left spelling is the one that occurs today.
+	require.Equal(t, "ready", sharedPlacementStatus(of("", "ready")))
+	require.Equal(t, "ready", sharedPlacementStatus(of("ready", "")))
+
+	require.Empty(t, sharedPlacementStatus(of("", "")), "nothing stated is nothing to report")
+	require.Equal(t, repoDirStatusMixed, sharedPlacementStatus(of("", "ready", "failed")),
+		"an unstated status neither creates agreement nor hides a real disagreement")
+}
+
 // TestValidateClusterFilter pins that --cluster names a cluster or fails. The
 // filter is client-side over the printed rows, so an unknown value matched
 // nothing and exited 0 with "No repos found" — indistinguishable from a repo
@@ -1392,6 +1422,14 @@ func TestValidateClusterFilter(t *testing.T) {
 	require.ErrorContains(t, err, "aws-us-east-2.entire.io", "the message names the spelling that works")
 
 	require.ErrorContains(t, validateClusterFilter("nope.entire.io", hosts), "names no cluster in the catalog")
+
+	// A value that is one cluster's slug AND another's host must always be
+	// accepted: it names a cluster. Resolving it in a single pass let Go's
+	// randomised map order decide, so the same input passed or failed by run.
+	collide := map[string]string{"aws-us-east-2.entire.io": "eu-west-1.entire.io", "eu": "aws-us-east-2.entire.io"}
+	for range 50 {
+		require.NoError(t, validateClusterFilter("aws-us-east-2.entire.io", collide))
+	}
 }
 
 // TestMirrorRefOwner pins the owner extraction the --owner filter uses, now

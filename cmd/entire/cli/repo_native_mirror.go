@@ -592,14 +592,15 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 			CloneURL:     cloneURL(primary),
 		})
 	}
-	// Sorted by the host, which is the CLUSTER column a reader actually sees —
-	// the GitHub half of this shared table sorts on the same value. Ordering by
-	// the slug put the rows in a sequence unrelated to the column displayed.
-	// The slug breaks ties so a cluster missing from the catalog (empty host)
-	// still lands somewhere deterministic.
+	// Sorted by the CLUSTER cell itself, which is what a reader follows — the
+	// GitHub half of this shared table sorts on the same value. Ordering by the
+	// slug put the rows in a sequence unrelated to the column displayed; so
+	// does ordering by the raw host, because placementCluster falls back to the
+	// slug when the catalog has no host, and then the key and the cell are
+	// different strings. The slug breaks ties for determinism.
 	sorted := slices.Clone(mirrors)
 	slices.SortFunc(sorted, func(a, b coreapi.NativeMirrorPlacement) int {
-		if c := strings.Compare(hostBySlug[a.ClusterSlug], hostBySlug[b.ClusterSlug]); c != 0 {
+		if c := strings.Compare(placementCluster(hostBySlug, a.ClusterSlug), placementCluster(hostBySlug, b.ClusterSlug)); c != 0 {
 			return c
 		}
 		return strings.Compare(a.ClusterSlug, b.ClusterSlug)
