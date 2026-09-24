@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -15,6 +19,9 @@ import (
 type hookManager struct {
 	Name       string // "Husky", "Lefthook", "pre-commit", "Overcommit", "hk"
 	ConfigPath string // relative path that triggered detection (e.g., ".husky/")
+	// ComposesWithEntire is set for hk when it installs Git's config-based
+	// hooks, which git runs alongside .git/hooks/* instead of replacing them.
+	ComposesWithEntire bool
 }
 
 // detectHookManagers checks the repository root for known hook manager config
@@ -23,23 +30,26 @@ type hookManager struct {
 // Every manager listed here overwrites Entire's hooks when it installs them —
 // verified against pre-commit 4.6.2 ("Use -f to use only pre-commit", which
 // saves a .pre-commit.legacy copy), Overcommit 0.73.0 ("Moving old hooks"), and
-// hk 1.58.1. What makes Lefthook different, and what EnsureLefthookIntegration
+// hk 1.58.1 — hk only in its legacy mode, which writes .git/hooks/* shims: on
+// Git 2.54+ hk 2.x installs config-based hooks (hook.<name>.command), which git
+// runs alongside Entire's hook files (verified with hk 2.1.0 on Git 2.55). What
+// makes Lefthook different, and what EnsureLefthookIntegration
 // exists for, is that it also reclaims .git/hooks/* at the top of every later
 // run, so reinstalling on the next agent turn never wins the race.
 func detectHookManagers(repoRoot string) []hookManager {
 	var managers []hookManager
 
 	checks := []hookManager{
-		{"Husky", ".husky/"},
-		{"pre-commit", ".pre-commit-config.yaml"},
-		{"Overcommit", ".overcommit.yml"},
+		{Name: "Husky", ConfigPath: ".husky/"},
+		{Name: "pre-commit", ConfigPath: ".pre-commit-config.yaml"},
+		{Name: "Overcommit", ConfigPath: ".overcommit.yml"},
 	}
 
 	// Lefthook supports {.,}lefthook{,-local}.{yml,yaml,json,toml}
 	for _, prefix := range []string{"", "."} {
 		for _, variant := range []string{"", "-local"} {
 			for _, ext := range []string{"yml", "yaml", "json", "toml"} {
-				checks = append(checks, hookManager{LefthookManagerName, prefix + "lefthook" + variant + "." + ext})
+				checks = append(checks, hookManager{Name: LefthookManagerName, ConfigPath: prefix + "lefthook" + variant + "." + ext})
 			}
 		}
 	}
@@ -47,7 +57,7 @@ func detectHookManagers(repoRoot string) []hookManager {
 	// hk supports {.config/,}hk{,.local}.pkl
 	for _, dir := range []string{"", ".config/"} {
 		for _, variant := range []string{"", ".local"} {
-			checks = append(checks, hookManager{"hk", dir + "hk" + variant + ".pkl"})
+			checks = append(checks, hookManager{Name: "hk", ConfigPath: dir + "hk" + variant + ".pkl"})
 		}
 	}
 
@@ -114,15 +124,105 @@ func hookManagerWarning(managers []hookManager, cmdPrefix, declined string) stri
 				fmt.Fprintf(&b, "    %s%s:\n", m.ConfigPath, spec.name)
 				fmt.Fprintf(&b, "      %s\n\n", cmdLine)
 			}
+		case "hk":
+			if !m.ComposesWithEntire {
+				writeOverwritesAtInstallWarning(&b, m)
+				break
+			}
+			fmt.Fprintf(&b, "Note: %s detected (%s)\n\n", m.Name, m.ConfigPath)
+			fmt.Fprintf(&b, "  %s uses Git's config-based hooks here (Git 2.54+), which run alongside\n", m.Name)
+			fmt.Fprintf(&b, "  Entire's hooks instead of replacing them. No action needed.\n")
+			fmt.Fprintf(&b, "  (`%s install --legacy` writes hook files instead, which do replace Entire's.)\n\n", m.Name)
 		default:
-			fmt.Fprintf(&b, "Warning: %s detected (%s)\n\n", m.Name, m.ConfigPath)
-			fmt.Fprintf(&b, "  %s overwrites Entire's hooks when it installs its own.\n", m.Name)
-			fmt.Fprintf(&b, "  Entire reinstalls them on the next agent turn, but a commit made in\n")
-			fmt.Fprintf(&b, "  between is not captured. Run 'entire enable' to restore them now.\n\n")
+			writeOverwritesAtInstallWarning(&b, m)
 		}
 	}
 
 	return b.String()
+}
+
+// writeOverwritesAtInstallWarning is the warning for a manager that replaces
+// Entire's hook files when it installs its own but does not reclaim them later.
+func writeOverwritesAtInstallWarning(b *strings.Builder, m hookManager) {
+	fmt.Fprintf(b, "Warning: %s detected (%s)\n\n", m.Name, m.ConfigPath)
+	fmt.Fprintf(b, "  %s overwrites Entire's hooks when it installs its own.\n", m.Name)
+	fmt.Fprintf(b, "  Entire reinstalls them on the next agent turn, but a commit made in\n")
+	fmt.Fprintf(b, "  between is not captured. Run 'entire enable' to restore them now.\n\n")
+}
+
+// hkComposesWithEntire reports whether hk's hooks run alongside Entire's here.
+// hk 2.x uses Git's config-based hooks on Git 2.54+ and falls back to writing
+// .git/hooks/* shims on older Git (or with --legacy); a shim already present
+// settles it, since the next `hk install` rewrites those files. An unknown
+// version is treated as the old behaviour, so the warning errs toward caution.
+func hkComposesWithEntire(legacyShimInstalled bool, gitVersion string) bool {
+	if legacyShimInstalled {
+		return false
+	}
+	major, minor, ok := parseGitMajorMinor(gitVersion)
+	return ok && (major > 2 || (major == 2 && minor >= 54))
+}
+
+// parseGitMajorMinor reads the leading "major.minor" of a version such as
+// "2.54.1.windows.1".
+func parseGitMajorMinor(version string) (major, minor int, ok bool) {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, errMajor := strconv.Atoi(parts[0])
+	minor, errMinor := strconv.Atoi(parts[1])
+	if errMajor != nil || errMinor != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
+}
+
+// isHkShim recognises the hook file hk's legacy mode writes
+// (`test "${HK:-1}" = "0" || exec hk run <hook> --from-hook "$@"`).
+func isHkShim(content string) bool {
+	return strings.Contains(content, "hk run ") && strings.Contains(content, "--from-hook")
+}
+
+// hkLegacyShimInstalled reports whether any file in the hooks directory is an
+// hk shim. Best effort: an unreadable directory reads as no shim.
+func hkLegacyShimInstalled(ctx context.Context) bool {
+	hooksDir, err := GetHooksDir(ctx)
+	if err != nil {
+		return false
+	}
+	root, err := hooksRootForRemoval(hooksDir)
+	if err != nil {
+		return false
+	}
+	entries, err := osroot.ReadDir(root, ".")
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if data, err := osroot.ReadFileNoFollow(root, e.Name()); err == nil && isHkShim(string(data)) {
+			return true
+		}
+	}
+	return false
+}
+
+// installedGitVersion returns `git --version`'s version token, or "".
+func installedGitVersion(ctx context.Context) string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "--version").Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 3 || fields[0] != "git" || fields[1] != "version" {
+		return ""
+	}
+	return fields[2]
 }
 
 // extractCommandLine returns the first non-shebang, non-comment, non-empty line
@@ -156,6 +256,11 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath boo
 	if err != nil {
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return
+	}
+	for i := range managers {
+		if managers[i].Name == "hk" {
+			managers[i].ComposesWithEntire = hkComposesWithEntire(hkLegacyShimInstalled(ctx), installedGitVersion(ctx))
+		}
 	}
 	warning := hookManagerWarning(managers, cmdPrefix, declinedLefthookLocalConfig(ctx, repoRoot))
 	if warning != "" {

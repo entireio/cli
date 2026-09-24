@@ -382,6 +382,65 @@ func TestHookManagerWarning_OverwritesAtInstall(t *testing.T) {
 	}
 }
 
+// On Git 2.54+ hk installs config-based hooks (hook.<name>.command), which git
+// runs alongside .git/hooks/* — so hk does not touch Entire's hooks, and
+// warning that it overwrites them is the false advice #2263 was about.
+func TestHookManagerWarning_HkComposes(t *testing.T) {
+	t.Parallel()
+	warning := hookManagerWarning([]hookManager{{Name: "hk", ConfigPath: "hk.pkl", ComposesWithEntire: true}}, "entire", "")
+	if !strings.Contains(warning, "Note: hk detected (hk.pkl)") {
+		t.Errorf("composing hk should get a note, got %q", warning)
+	}
+	if strings.Contains(warning, "overwrites") || strings.Contains(warning, "Warning:") {
+		t.Errorf("composing hk must not be described as overwriting, got %q", warning)
+	}
+	if !strings.Contains(warning, "--legacy") {
+		t.Errorf("note should name the install mode that does overwrite, got %q", warning)
+	}
+}
+
+func TestHkComposesWithEntire(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		legacyShim bool
+		gitVersion string
+		want       bool
+	}{
+		{"config hooks available", false, "2.54.0", true},
+		{"newer git", false, "2.55.0", true},
+		{"windows build suffix", false, "2.54.1.windows.1", true},
+		{"major above 2", false, "3.0.0", true},
+		{"too old for config hooks", false, "2.53.9", false},
+		{"apple git", false, "2.50.1", false},
+		{"unknown version", false, "", false},
+		{"unparseable version", false, "garbage", false},
+		// A shim in .git/hooks means hk is in legacy mode here, whatever git
+		// could do: the next `hk install` rewrites those files.
+		{"legacy shim installed", true, "2.55.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hkComposesWithEntire(tc.legacyShim, tc.gitVersion); got != tc.want {
+				t.Errorf("hkComposesWithEntire(%v, %q) = %v, want %v", tc.legacyShim, tc.gitVersion, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsHkShim(t *testing.T) {
+	t.Parallel()
+	shim := "#!/bin/sh\ntest \"${HK:-1}\" = \"0\" || exec hk run pre-commit --from-hook \"$@\"\n"
+	if !isHkShim(shim) {
+		t.Error("hk's legacy shim must be recognised")
+	}
+	for _, other := range []string{"#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$1\"\n", "#!/bin/sh\nhk check\n"} {
+		if isHkShim(other) {
+			t.Errorf("not an hk shim: %q", other)
+		}
+	}
+}
+
 func TestHookManagerWarning_Empty(t *testing.T) {
 	t.Parallel()
 
