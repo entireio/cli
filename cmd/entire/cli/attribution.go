@@ -18,6 +18,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -173,11 +175,10 @@ func newBlameCmd() *cobra.Command {
 func newWhyCmd() *cobra.Command {
 	var jsonFlag bool
 	var lineFlag string
+	var tuiFlag bool
 
 	cmd := &cobra.Command{
 		Use: "why <file>[:line]",
-		// Hidden from `entire help` while the feature is still maturing —
-		// advertised under `entire labs`, and `entire why` / `entire why
 		// --help` keep working normally. The agent-help annotation keeps
 		// `entire agent-help why` resolving in stable builds: agents that
 		// learn of `why` (labs, docs, a user's prompt) verify commands
@@ -185,19 +186,21 @@ func newWhyCmd() *cobra.Command {
 		Annotations: map[string]string{agentHelpAnnotation: agentHelpAnnotationEnabled},
 		Hidden:      true,
 		Short:       "Show why a line exists",
-		Long:        "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.",
+		Long:        "Explain the commit, checkpoint, prompt, and session behind a file or line.\n\nTarget a specific line with <file>:12 or the --line flag.\n\nUse --tui to browse the file interactively (TTY only; non-interactive runs fall back to the plain output).",
 		Example:     "  entire why src/auth.go:42\n  entire why src/auth.go:42 --json",
 		Args:        cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAttributionWhy(cmd.Context(), cmd.OutOrStdout(), args[0], attributionWhyOptions{
 				LineFlag: lineFlag,
 				JSON:     jsonFlag,
+				TUI:      tuiFlag,
 			})
 		},
 	}
 
 	cmd.Flags().StringVar(&lineFlag, "line", "", "Explain a specific line, for example 12 (same as <file>:12)")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output explanation as JSON")
+	cmd.Flags().BoolVar(&tuiFlag, "tui", false, "Browse line attribution in an interactive viewer (TTY only)")
 	return cmd
 }
 
@@ -210,6 +213,7 @@ type attributionBlameOptions struct {
 type attributionWhyOptions struct {
 	LineFlag string
 	JSON     bool
+	TUI      bool
 }
 
 func runAttributionBlame(ctx context.Context, w io.Writer, file string, opts attributionBlameOptions) error {
@@ -270,6 +274,18 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		return err
 	}
 
+	// Interactive browsing is strictly opt-in AND prompt-gated (agent-safe CLI
+	// fallbacks): a non-interactive run with --tui falls through to the same
+	// deterministic plain/JSON output below, which carries the full
+	// information. --json wins over --tui so scripted callers never block.
+	if opts.TUI && !opts.JSON && interactive.CanPromptInteractively() && !IsAccessibleMode() {
+		startLine, err := whyTUIStartLine(result, hasLine, line)
+		if err != nil {
+			return err
+		}
+		return runWhyTUI(result, attributionRepoFullName(ctx), shouldUseColor(w), startLine)
+	}
+
 	if !hasLine {
 		if opts.JSON {
 			return printJSON(w, result)
@@ -278,13 +294,7 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 		return nil
 	}
 
-	var selected *attributionLine
-	for i := range result.Lines {
-		if result.Lines[i].LineNumber == line {
-			selected = &result.Lines[i]
-			break
-		}
-	}
+	selected := findAttributionLine(result.Lines, line)
 	if selected == nil {
 		return fmt.Errorf("line %d is outside %s", line, result.File)
 	}
@@ -303,6 +313,32 @@ func runAttributionWhy(ctx context.Context, w io.Writer, target string, opts att
 	}
 	renderAttributionLineWhy(w, result.File, *selected)
 	return nil
+}
+
+// findAttributionLine returns the attribution entry for the given 1-based line
+// number, or nil when the file has no such line. Both the plain and TUI why
+// paths rely on this so an out-of-range line is reported consistently.
+func findAttributionLine(lines []attributionLine, lineNumber int) *attributionLine {
+	for i := range lines {
+		if lines[i].LineNumber == lineNumber {
+			return &lines[i]
+		}
+	}
+	return nil
+}
+
+// whyTUIStartLine resolves the cursor start line for the interactive why
+// viewer. When a specific line was requested it must exist in the file:
+// otherwise we return the same "line N is outside <file>" error the plain
+// path emits, rather than silently opening the viewer at line 1.
+func whyTUIStartLine(result *fileAttributionResult, hasLine bool, line int) (int, error) {
+	if !hasLine {
+		return 0, nil
+	}
+	if findAttributionLine(result.Lines, line) == nil {
+		return 0, fmt.Errorf("line %d is outside %s", line, result.File)
+	}
+	return line, nil
 }
 
 func resolveFileAttribution(ctx context.Context, file string, fetchOnMiss bool) (*fileAttributionResult, error) {
@@ -1410,6 +1446,21 @@ func shortSessionID(sessionID string) string {
 		return sessionID
 	}
 	return sessionID[:8]
+}
+
+// attributionRepoFullName resolves owner/repo from the origin remote for
+// building session web links in the why viewer. Best-effort: an empty result
+// disables the links without failing the command.
+func attributionRepoFullName(ctx context.Context) string {
+	originURL, err := remote.GetRemoteURL(ctx, "origin")
+	if err != nil || originURL == "" {
+		return ""
+	}
+	info, err := remote.ParseURL(originURL)
+	if err != nil || info.Owner == "" || info.Repo == "" {
+		return ""
+	}
+	return info.Owner + "/" + info.Repo
 }
 
 func shortSHA(sha string) string {
