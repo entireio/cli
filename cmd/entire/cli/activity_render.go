@@ -459,10 +459,8 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 
 			cpCount := len(c.Checkpoints)
 			cpStr := ""
-			if cpCount == 1 {
-				cpStr = "1 checkpoint"
-			} else if cpCount > 1 {
-				cpStr = fmt.Sprintf("%d checkpoints", cpCount)
+			if cpCount > 0 {
+				cpStr = pluralCheckpoints(cpCount)
 			}
 
 			// Build right-aligned stats: +N / -N  M files  [K checkpoints]
@@ -596,10 +594,7 @@ func renderSessionRow(w io.Writer, sty activityStyles, s userSession) {
 		model = formatModel(*s.Model)
 	}
 
-	cpStr := fmt.Sprintf("%d checkpoints", s.CheckpointCount)
-	if s.CheckpointCount == 1 {
-		cpStr = "1 checkpoint"
-	}
+	cpStr := pluralCheckpoints(s.CheckpointCount)
 
 	// Right side: [model  ]checkpoints, right-aligned.
 	rightSide := sty.render(sty.muted, cpStr)
