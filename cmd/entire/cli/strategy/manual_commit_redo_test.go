@@ -53,6 +53,17 @@ func TestPrepareCommitMsg_RedoAfterSoftResetInheritsBothTrailers(t *testing.T) {
 	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(got), "%q", got)
 }
 
+// A backup branch at the tip being redone (`git branch backup` before the
+// reset) holds the very work being recommitted; it must not make that work
+// look like it is still on a branch.
+func TestPrepareCommitMsg_RedoWithBackupBranchAtTipStillInherits(t *testing.T) {
+	dir := redoFixture(t)
+	testutil.RunGit(t, dir, "branch", "backup")
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", "HEAD~2")
+	got := prepareMessage(t, "feat: the feature (logical)\n")
+	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(got), "%q", got)
+}
+
 func TestPrepareCommitMsg_RedoDeletedFileInheritsTrailer(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	dir := resolvedTempDir(t)

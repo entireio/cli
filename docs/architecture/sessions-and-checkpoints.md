@@ -226,15 +226,23 @@ write into a checkpoint the session did not stamp for this commit is refused
 merged commits keep their own trailers.
 
 **Redone commits inherit their trailers too** (`inheritReplacedCommitsTrailers`).
-After `git reset` and a new commit, the dropped commits are those between the
-merge base of HEAD and ORIG_HEAD and ORIG_HEAD itself. A dropped commit's
-trailers are carried into the new message when a file it changed is staged
-with exactly the content it had at ORIG_HEAD: the work is recommitted, not
-rewritten, so an agent's ten commits redone as three logical ones keep every
-checkpoint, each on the commit that now holds its files. Content that differs
-inherits nothing; a merge or pull, whose ORIG_HEAD is an ancestor of HEAD,
-replaces nothing; and the reset must still be the latest ref operation in
-HEAD's reflog, since ORIG_HEAD outlives it. Inherited trailers are links, exactly as for a squash.
+After `git reset` and new commits, the dropped commits are read from HEAD's
+reflog, not ORIG_HEAD (which unstaging or a stash overwrites): walking back from
+the newest entry, resets that did not move HEAD are skipped, and the tip the
+last real reset left is where the dropped work starts. Dropped means only that
+tip reaches it: commits HEAD, a remote or another branch still reach (merged-in
+main, a teammate's commit an undone rebase brought in) are never inherited,
+while a backup branch pointing at the tip itself does not count. A dropped
+commit's trailers are carried into the new message when every staged file it
+changed has exactly the content it had at that tip, so an agent's ten commits
+redone as three logical ones keep every checkpoint, each on the commit that now
+holds its files, while one coincidentally identical file (a lockfile, an empty
+`__init__.py`, the same deletion) among rewritten ones inherits nothing. Commits
+made since the reset keep the redo open only while each of them redid some of
+the dropped work; any other ref operation (checkout, merge, rebase, pull) ends
+it. Folding with `git reset --soft HEAD~1 && git commit --amend` inherits the
+folded commit's trailers too. Inherited trailers are links, exactly as for a
+squash, and are recorded so post-commit never condenses into one.
 
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
