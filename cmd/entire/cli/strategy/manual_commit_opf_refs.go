@@ -133,13 +133,23 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		if limit := resolveBatchLimit(); leafBytes > limit {
 			return &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}
 		}
+		// Every commit in pendings[*].commits is, by construction
+		// (unappliedAncestry), one that still needs OPF — unlike the v1
+		// rewrite there is no already-applied member to exclude here.
+		var unappliedCount int
+		for _, pr := range pendings {
+			unappliedCount += len(pr.commits)
+		}
+		stopOPFProgress := startOPFRewriteProgress(unappliedCount)
 		globalRedacted, err = redact.BatchBytesWithPrivacyFilter(ctx, globalBlobs)
 		if err != nil {
+			stopOPFProgress("")
 			if errors.Is(err, redact.ErrOPFNoEnabledCategories) {
 				return &OPFNoCategoriesError{}
 			}
 			return &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
 		}
+		stopOPFProgress(" done")
 	}
 
 	// Pass 3: rebuild every commit before touching any ref, so a failure
