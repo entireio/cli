@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 const flagCheckpointPushRemote = "checkpoint-push-remote"
@@ -445,7 +446,9 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 	if !verdict.Refused() {
 		return false
 	}
-	repo := cr.Repo
+	// The repo comes from the committed settings file, so it is stripped of
+	// escape sequences before it reaches the terminal.
+	repo := tuiutil.SanitizeDisplayText(cr.Repo)
 	// The verdict above votes with ONE remote — the elected one — and a repo can
 	// have several. A remote whose owner matches still resolves the store, so
 	// "not in use" would be flatly false for a repo where pushing to that remote
@@ -458,8 +461,7 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 			return false
 		}
 	}
-	explanation, command := remote.IgnoredCheckpointRemoteGuidance(ctx, cr, verdict, reason)
-	fmt.Fprintf(w, "checkpoint_remote %s is not in use: %s.\n", repo, explanation)
+	fmt.Fprintf(w, "checkpoint_remote %s is not in use: %s.\n", repo, reason)
 
 	// Ownership merely UNPROVABLE is the one case a human can settle that local
 	// git config cannot: a single-segment or non-forge origin
@@ -483,8 +485,10 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 		return true
 	}
 
-	if command != "" {
-		fmt.Fprintf(w, "If %s is yours, confirm it for this clone: `%s`.\n", repo, command)
+	if claim := remote.ClaimCheckpointRemoteCommand(cr); claim != "" {
+		fmt.Fprintf(w, "If %s is yours, run `%s` to use it from this clone.\n", repo, claim)
+	} else {
+		fmt.Fprintf(w, "If %s is yours, declare checkpoint_remote in .entire/settings.local.json.\n", repo)
 	}
 	return false
 }

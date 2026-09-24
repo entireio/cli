@@ -1,34 +1,11 @@
 package remote
 
 import (
-	"context"
-	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
-
-// IgnoredCheckpointRemoteGuidance supplies the same ownership explanation and
-// actionable command to status, enable, and pre-push. A mismatched owner must
-// never produce a command that sends a fork contributor's transcripts upstream.
-func IgnoredCheckpointRemoteGuidance(ctx context.Context, config *settings.CheckpointRemoteConfig, verdict OwnershipVerdict, reason string) (explanation, command string) {
-	if !verdict.Refused() || config == nil {
-		return "", ""
-	}
-	if verdict == OwnershipDisproved {
-		return reason + fmt.Sprintf(". If this is a fork, do not claim this store: your transcripts would go to %q's store", config.Owner()), ""
-	}
-	if rejection := settings.CheckpointRemoteLocalClaimRejection(ctx); rejection != "" {
-		return reason + ". " + rejection, ""
-	}
-	explanation = reason + ". The checkpoint_remote comes from .entire/settings.json and may be inherited from another project; declaring it in your own untracked .entire/settings.local.json confirms it for this clone and skips the owner check"
-	command = ClaimCheckpointRemoteCommand(config)
-	if command == "" {
-		explanation += ". If this store is yours, set checkpoint_remote in that local file"
-	}
-	return explanation, command
-}
 
 // claimRepoPattern is an ALLOWLIST, not a denylist, because config.Repo is read
 // from the COMMITTED .entire/settings.json — the inherited-from-upstream case

@@ -50,13 +50,13 @@ func captureHintStderr(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestPrePushWarnsAgainstClaimingAnotherOwnersCheckpointRemote is the point of
+// TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote is the point of
 // the warning: before it, the ownership rejection reached the user only as a
 // Warn in .entire/logs, and the visible symptom — checkpoints landing in the
 // code repository — looks like a working setup.
 //
 // Not parallel: t.Chdir.
-func TestPrePushWarnsAgainstClaimingAnotherOwnersCheckpointRemote(t *testing.T) {
+func TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote(t *testing.T) {
 	dir := hintRepo(t, "alice")
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
@@ -70,8 +70,32 @@ func TestPrePushWarnsAgainstClaimingAnotherOwnersCheckpointRemote(t *testing.T) 
 	got := out.String()
 	assert.Contains(t, got, "acme/checkpoints", "the store the user configured is named")
 	assert.Contains(t, got, `"origin"`, "so is the store their checkpoints are actually going to")
-	assert.NotContains(t, got, "entire enable --local --checkpoint-remote")
-	assert.Contains(t, got, "If this is a fork")
+	assert.Contains(t, got, "entire enable --local --checkpoint-remote github:acme/checkpoints",
+		"the remedy is a command to run, not a file to go and edit")
+}
+
+// TestPrePushStripsTerminalEscapesFromTheCheckpointRemote: the repo comes from
+// the committed settings file, so it must not be able to drive the terminal.
+//
+// Not parallel: t.Chdir.
+func TestPrePushStripsTerminalEscapesFromTheCheckpointRemote(t *testing.T) {
+	dir := hintRepo(t, "alice")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "acme/store\u001b[2J\u001b]0;pwned\u0007"}}}`),
+		0o644,
+	))
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	out := captureHintStderr(t)
+
+	ctx := context.Background()
+	warnIgnoredCheckpointRemote(ctx, resolvePushSettings(ctx, "origin"))
+
+	got := out.String()
+	assert.Contains(t, got, "acme/store")
+	assert.NotContains(t, got, "\x1b")
+	assert.NotContains(t, got, "\a")
 }
 
 // TestPrePushSaysNothingWhenTheCheckpointRemoteIsInUse is the control: the

@@ -8,6 +8,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // warnIgnoredCheckpointRemote tells the user, in their own push output, that
@@ -37,8 +38,8 @@ func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
 	if err != nil {
 		return
 	}
-	verdict, reason := remote.InheritedCheckpointRemoteVerdict(ctx, s, ps.remote)
-	if !verdict.Refused() {
+	repo, reason, inherited := remote.InheritedCheckpointRemote(ctx, s, ps.remote)
+	if !inherited {
 		// Configured, not adopted, and ownership is not why. PushURL fell back
 		// for some other reason (an unparseable remote URL, an unreachable
 		// derivation) and logged its own cause; naming ownership here would
@@ -47,17 +48,21 @@ func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
 		return
 	}
 
-	repo := s.GetCheckpointRemote().Repo
-	explanation, claim := remote.IgnoredCheckpointRemoteGuidance(ctx, s.GetCheckpointRemote(), verdict, reason)
+	// repo comes from the committed settings file; strip escape sequences
+	// before it reaches the terminal.
+	shown := tuiutil.SanitizeDisplayText(repo)
 	fmt.Fprintf(stderrWriter,
 		"[entire] Checkpoints are going to %q, not to the configured checkpoint_remote %s: %s.\n",
-		ps.remote, repo, explanation)
-	if claim != "" {
+		ps.remote, shown, reason)
+	if claim := remote.ClaimCheckpointRemoteCommand(s.GetCheckpointRemote()); claim != "" {
 		fmt.Fprintf(stderrWriter,
-			"[entire] If %s is yours, confirm it for this clone: %s — checkpoints already pushed follow it on the next push.\n",
-			repo, claim)
+			"[entire] If %s is yours, run: %s — checkpoints already pushed follow it on the next push.\n",
+			shown, claim)
+	} else {
+		fmt.Fprintf(stderrWriter,
+			"[entire] If %s is yours, declare it in .entire/settings.local.json — checkpoints already pushed follow it on the next push.\n",
+			shown)
 	}
-
 	logging.Info(ctx, "ignored checkpoint_remote surfaced at pre-push",
 		slog.String("checkpoint_repo", repo),
 		slog.String("reason", reason),

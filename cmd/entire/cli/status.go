@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 
 	"github.com/spf13/cobra"
 )
@@ -533,9 +534,10 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// lives only in the elected remote's push URL shows "not in use" here
 	// even though such a lead-less fetch still resolves the checkpoint remote.
 	if cr := s.GetCheckpointRemote(); cr != nil {
-		if verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, elected.Name); verdict.Refused() {
-			info.IgnoredRemote = cr.Repo
-			info.IgnoredReason, info.IgnoredRemedy = checkpointremote.IgnoredCheckpointRemoteGuidance(ctx, cr, verdict, reason)
+		if repo, reason, inherited := checkpointremote.InheritedCheckpointRemote(ctx, s, elected.Name); inherited {
+			info.IgnoredRemote = repo
+			info.IgnoredReason = reason
+			info.IgnoredRemedy = checkpointremote.ClaimCheckpointRemoteCommand(cr)
 		} else if info.PushDisabled {
 			// That verdict is ownership only, so it accepts a store the fetch
 			// side declined for another reason (an unparseable origin URL, an
@@ -632,14 +634,16 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString(sty.render(sty.dim, " (fallback; nothing was elected)"))
 	}
 	if info.IgnoredRemote != "" {
-		fix := ""
+		fix := "set checkpoint_remote in .entire/settings.local.json"
 		if info.IgnoredRemedy != "" {
-			fix = ". If this checkpoint repo is yours, confirm it for this clone: `" + info.IgnoredRemedy + "`"
+			fix = "run `" + info.IgnoredRemedy + "`"
 		}
+		// The repo comes from the committed settings file, so it is stripped
+		// of escape sequences before it reaches the terminal.
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.yellow,
-			"  ! checkpoint_remote "+info.IgnoredRemote+" is not in use: "+info.IgnoredReason+
-				fix+"."))
+			"  ! checkpoint_remote "+tuiutil.SanitizeDisplayText(info.IgnoredRemote)+" is not in use: "+info.IgnoredReason+
+				". If this checkpoint repo is yours, "+fix+"."))
 	}
 	if info.Unpushed > 0 {
 		b.WriteString("\n  ")

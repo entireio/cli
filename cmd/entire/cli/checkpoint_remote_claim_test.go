@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -104,8 +105,7 @@ func TestEnableReportsAnIgnoredCheckpointRemote(t *testing.T) {
 
 	got := out.String()
 	assert.Contains(t, got, "acme/checkpoints is not in use")
-	assert.NotContains(t, got, "entire enable --local --checkpoint-remote")
-	assert.Contains(t, got, "If this is a fork")
+	assert.Contains(t, got, "entire enable --local --checkpoint-remote github:acme/checkpoints")
 }
 
 // TestEnableSaysNothingAboutACheckpointRemoteInUse is the control: the report
@@ -143,8 +143,7 @@ func TestEnableCommandSurfacesAnIgnoredCheckpointRemote(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 
 	assert.Contains(t, output.String(), "checkpoint_remote acme/checkpoints is not in use")
-	assert.NotContains(t, output.String(), "entire enable --local --checkpoint-remote")
-	assert.Contains(t, output.String(), "If this is a fork")
+	assert.Contains(t, output.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
 }
 
 // TestEnableDoesNotOfferAStoreAnotherOwnerHolds is the guard on the offer: it
@@ -239,8 +238,9 @@ func TestCheckpointClaimReport(t *testing.T) {
 				assert.NotContains(t, out.String(), "Keeping checkpoint destination: origin")
 				assert.NotContains(t, out.String(), "uploaded when you push to origin")
 			case tc.localState != "":
-				assert.Contains(t, out.String(), "Untrack it, commit its removal")
-				assert.NotContains(t, out.String(), "entire enable --local --checkpoint-remote")
+				// Same command as everyone else; running it explains why it
+				// cannot take effect.
+				assert.Contains(t, out.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
 				err := updateStrategyOptions(t.Context(), &out, EnableOptions{UseLocalSettings: true, CheckpointRemote: "github:acme/checkpoints"})
 				require.ErrorContains(t, err, "Untrack it, commit its removal")
 			default:
@@ -258,8 +258,7 @@ func TestStatusUnprovableCheckpointClaim(t *testing.T) {
 	require.NoError(t, err)
 	info := computeCheckpointSyncInfo(t.Context(), s)
 	assert.Equal(t, "entire enable --local --checkpoint-remote github:acme/checkpoints", info.IgnoredRemedy)
-	assert.Contains(t, info.IgnoredReason, "may be inherited from another project")
-	assert.Contains(t, info.IgnoredReason, "skips the owner check")
+	assert.Equal(t, "origin URL owner could not be determined", info.IgnoredReason)
 }
 
 func TestStatusTrackedLocalCheckpointClaim(t *testing.T) {
@@ -271,10 +270,28 @@ func TestStatusTrackedLocalCheckpointClaim(t *testing.T) {
 	s, err := settings.Load(t.Context())
 	require.NoError(t, err)
 	info := computeCheckpointSyncInfo(t.Context(), s)
-	assert.Empty(t, info.IgnoredRemedy)
-	assert.Contains(t, info.IgnoredReason, "Untrack it, commit its removal")
-	var out bytes.Buffer
-	require.NoError(t, runStatus(t.Context(), &out, false, false))
-	assert.NotContains(t, out.String(), "entire enable --local --checkpoint-remote")
-	assert.NotContains(t, out.String(), "set checkpoint_remote")
+	assert.Equal(t, "entire enable --local --checkpoint-remote github:acme/checkpoints", info.IgnoredRemedy)
+	err = updateStrategyOptions(t.Context(), io.Discard, EnableOptions{UseLocalSettings: true, CheckpointRemote: "github:acme/checkpoints"})
+	require.ErrorContains(t, err, "Untrack it, commit its removal")
+}
+
+// Not parallel: repository CWD is process-global.
+func TestIgnoredCheckpointRemoteStripsTerminalEscapes(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@github.com:alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/store\u001b[2J\u001b]0;pwned\u0007"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	var enableOut bytes.Buffer
+	reportIgnoredCheckpointRemote(t.Context(), &enableOut, s, "origin", false)
+	assert.Contains(t, enableOut.String(), "acme/store")
+	assert.NotContains(t, enableOut.String(), "\x1b")
+	assert.NotContains(t, enableOut.String(), "\a")
+
+	var statusOut bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+	assert.Contains(t, statusOut.String(), "acme/store")
+	assert.NotContains(t, statusOut.String(), "\x1b]0;")
+	assert.NotContains(t, statusOut.String(), "\x1b[2J")
 }
