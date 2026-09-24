@@ -34,8 +34,9 @@ func TestCommitLinking_HookWithoutSignalDoesNotPullSessionBack(t *testing.T) {
 	require.Equal(t, feature.RepoDir, state.WorktreePath, "a signal-less hook in the launch directory must not move the session")
 }
 
-// Factory Droid's payload carries no working directory at all, so its hooks
-// always run in the launch directory; the own-commit re-home must still hold.
+// A Droid payload without a working directory (as older Droid builds and
+// external agents send) keeps its hooks in the launch directory; the
+// own-commit re-home must still hold.
 func TestCommitLinking_AgentWithoutPayloadCwdKeepsCommitHome(t *testing.T) {
 	t.Parallel()
 	parent := NewRepoWithCommit(t)

@@ -34,16 +34,21 @@ type FactoryHookEntry struct {
 	Command string `json:"command"`
 }
 
+// Every Droid hook payload also carries cwd, the agent's working directory,
+// which follows it into another worktree.
+
 // sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop/SubagentStop/PreCompact hooks.
 type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
+	Cwd            string `json:"cwd,omitempty"`
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.
 type userPromptSubmitRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
+	Cwd            string `json:"cwd,omitempty"`
 	Prompt         string `json:"prompt"`
 	Model          string `json:"model"`
 }
@@ -53,6 +58,7 @@ type userPromptSubmitRaw struct {
 type stopRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
+	Cwd            string `json:"cwd,omitempty"`
 	Model          string `json:"model"`
 }
 
@@ -60,6 +66,7 @@ type stopRaw struct {
 type taskHookInputRaw struct {
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`
+	Cwd            string          `json:"cwd,omitempty"`
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
@@ -69,6 +76,7 @@ type taskHookInputRaw struct {
 type postToolHookInputRaw struct {
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`
+	Cwd            string          `json:"cwd,omitempty"`
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`

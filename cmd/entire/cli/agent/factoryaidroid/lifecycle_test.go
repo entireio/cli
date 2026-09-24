@@ -340,3 +340,29 @@ func TestParseHookEvent_MalformedJSON(t *testing.T) {
 		t.Fatal("expected error for malformed JSON")
 	}
 }
+
+// Every Droid hook payload carries the agent's working directory, which the
+// dispatcher follows into another worktree.
+func TestParseHookEvent_CarriesWorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		HookNameSessionStart:     `{"session_id": "s", "transcript_path": "/tmp/t.jsonl", "cwd": "/repo/wt"}`,
+		HookNameUserPromptSubmit: `{"session_id": "s", "transcript_path": "/tmp/t.jsonl", "prompt": "p", "cwd": "/repo/wt"}`,
+		HookNameStop:             `{"session_id": "s", "transcript_path": "/tmp/t.jsonl", "cwd": "/repo/wt"}`,
+		HookNamePreToolUse:       `{"session_id": "s", "transcript_path": "/tmp/t.jsonl", "tool_use_id": "toolu_1", "tool_name": "Task", "tool_input": {}, "cwd": "/repo/wt"}`,
+		HookNamePostToolUse:      `{"session_id": "s", "transcript_path": "/tmp/t.jsonl", "tool_use_id": "toolu_1", "tool_name": "Task", "tool_input": {}, "tool_response": {}, "cwd": "/repo/wt"}`,
+	}
+	for hook, input := range cases {
+		t.Run(hook, func(t *testing.T) {
+			t.Parallel()
+			event, err := (&FactoryAIDroidAgent{}).ParseHookEvent(context.Background(), hook, strings.NewReader(input))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if event == nil || event.CWD != "/repo/wt" {
+				t.Fatalf("expected cwd /repo/wt, got %+v", event)
+			}
+		})
+	}
+}
