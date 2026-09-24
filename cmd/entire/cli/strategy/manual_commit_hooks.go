@@ -544,8 +544,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 // inheritSquashedCheckpointTrailers handles a commit made while `git merge
 // --squash` is in progress (SQUASH_MSG present): the squashed commits'
-// Entire-Checkpoint trailers are carried into the message when staged content
-// matches the recorded commits. `commit -m` reports source "message", not "squash", so this runs
+// Entire-Checkpoint trailers are carried into the message when a staged path is
+// one the recorded commits changed. `commit -m` reports source "message", not "squash", so this runs
 // before the source switch — but only for those two sources: an amend must
 // keep its own logic even when an abandoned squash left SQUASH_MSG behind.
 // Reports whether it took over; no trailers or an unusable message fall
@@ -581,7 +581,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 	defer repo.Close()
 	if !squashStagedContentMatches(ctx, repo, squashMsg) {
 		stripInheritedCheckpointTrailers(commitMsgFile, inherited)
-		logging.Debug(logCtx, "prepare-commit-msg: ignored stale squash message whose commits do not match staged content",
+		logging.Debug(logCtx, "prepare-commit-msg: ignored stale squash message whose commits changed none of the staged paths",
 			slog.String("source", source),
 			slog.Int("inherited", len(inherited)))
 		return nil
@@ -620,14 +620,19 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 	return inherited
 }
 
-// squashStagedContentMatches reports whether the index contains the final state
-// of a path changed by one of the commits Git recorded in SQUASH_MSG. Git leaves
-// SQUASH_MSG behind when a squash is abandoned, so the file alone is not proof
-// that the current staged work belongs to those commits.
+// squashStagedContentMatches reports whether a staged path is one that a
+// commit Git recorded in SQUASH_MSG changed. Git leaves SQUASH_MSG behind when a
+// squash is abandoned, so the file alone is not proof that the current staged
+// work belongs to those commits; matching paths rather than content keeps a
+// squash whose files were touched up before committing.
 func squashStagedContentMatches(ctx context.Context, repo *git.Repository, squashMsg []byte) bool {
-	staged, err := stagedBlobs(ctx, repo)
-	if err != nil || len(staged) == 0 {
+	files, err := getStagedFiles(ctx)
+	if err != nil || len(files) == 0 {
 		return false
+	}
+	staged := make(map[string]bool, len(files))
+	for _, f := range files {
+		staged[f] = true
 	}
 	for _, line := range strings.Split(string(squashMsg), "\n") {
 		fields := strings.Fields(line)
@@ -638,11 +643,32 @@ func squashStagedContentMatches(ctx context.Context, repo *git.Repository, squas
 		if err != nil {
 			continue
 		}
-		commitTree, err := commit.Tree()
-		if err != nil {
-			continue
+		if commitChangesAnyPath(commit, staged) {
+			return true
 		}
-		if recommitsFilesOf(commit, commitTree, staged) {
+	}
+	return false
+}
+
+// commitChangesAnyPath reports whether c changed one of wanted relative to its
+// first parent (or added it, for a root commit).
+func commitChangesAnyPath(c *object.Commit, wanted map[string]bool) bool {
+	tree, err := c.Tree()
+	if err != nil {
+		return false
+	}
+	var parentTree *object.Tree
+	if parent, err := c.Parents().Next(); err == nil {
+		if parentTree, err = parent.Tree(); err != nil {
+			return false
+		}
+	}
+	changes, err := object.DiffTree(parentTree, tree)
+	if err != nil {
+		return false
+	}
+	for _, change := range changes {
+		if wanted[change.To.Name] || wanted[change.From.Name] {
 			return true
 		}
 	}
