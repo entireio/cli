@@ -220,3 +220,27 @@ func TestRunOPFFlush_RetriesWhenBacklogSetChangesAtSameSize(t *testing.T) {
 		require.True(t, trailers.HasOPFApplied(commit.Message), "ref %s must be rewritten", refName)
 	}
 }
+
+// A ref name is not a unit of work by itself. If a checkpoint write advances
+// A while the worker is rewriting A's previous generation, the new A tip must
+// receive another pass even though the backlog still contains only {A}.
+func TestRunOPFFlush_RetriesWhenSameRefGenerationChanges(t *testing.T) {
+	_, repo, refs := setupGitRefsOPFRepo(t, flushFitsID)
+	fake := &opfThatAddsRefOnFirstBatch{
+		add: func() {
+			addGitRefsSession(t, repo, flushFitsID, "sess-added-to-same-ref")
+		},
+	}
+	configureFakeOPF(t, fake)
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+
+	require.NoError(t, RunOPFFlush(t.Context()))
+	require.Equal(t, 2, fake.batchCallCount(), "the new generation of the same ref must receive another pass")
+
+	ref, err := repo.Reference(refs[0], true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message))
+}

@@ -766,6 +766,33 @@ func TestCollectTreeBlobs_RedactsAllFileTypes(t *testing.T) {
 	require.False(t, collectedNames[paths.ContentHashFileName], "content_hash.txt must be excluded from collection (deferred path)")
 }
 
+func TestCollectTreeBlobsWithinBudget_RejectsBlobFromMetadataBeforeReadingContent(t *testing.T) {
+	tempDir := t.TempDir()
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	obj := repo.Storer.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	w, err := obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write([]byte("larger than the configured budget"))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	require.NoError(t, err)
+	tree := &object.Tree{Entries: []object.TreeEntry{{Name: "transcript", Mode: filemode.Regular, Hash: hash}}}
+
+	var blobs []redact.NamedBlob
+	var blobPaths []string
+	err = collectTreeBlobsWithinBudget(repo, tree, "", &blobs, &blobPaths, newOPFRawByteBudget(4))
+	var tooLarge *OPFRawBytesTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	assert.Greater(t, tooLarge.RawBytes, tooLarge.Limit)
+	assert.Empty(t, blobs, "an oversized blob must be rejected before its content is retained")
+	assert.Empty(t, blobPaths)
+}
+
 // The OPF rewrite must not touch externalized image assets: byte-redacting the
 // raw image blobs would corrupt them (breaking restore), and the fail-closed
 // rebuild would abort the push if they were collected but not redacted. Both

@@ -162,21 +162,15 @@ func collectCheckpointRefForOPF(
 	}
 
 	pending := &pendingOPFRef{ref: refName, old: ref.Hash(), base: base}
-	rawBytes := 0
+	rawBudget := newOPFRawByteBudget(rawCap)
 	for _, commit := range chain {
 		tree, treeErr := repo.TreeObject(commit.TreeHash)
 		if treeErr != nil {
 			return nil, fmt.Errorf("load tree for %s: %w", commit.Hash.String()[:7], treeErr)
 		}
 		pc := pendingOPFCommit{commit: commit}
-		if err := collectTreeBlobs(repo, tree, "", &pc.blobs, &pc.paths); err != nil {
+		if err := collectTreeBlobsWithinBudget(repo, tree, "", &pc.blobs, &pc.paths, rawBudget); err != nil {
 			return nil, fmt.Errorf("collect blobs %s: %w", commit.Hash.String()[:7], err)
-		}
-		for _, blob := range pc.blobs {
-			rawBytes += len(blob.Content)
-		}
-		if rawBytes > rawCap {
-			return nil, &OPFRawBytesTooLargeError{RawBytes: rawBytes, Limit: rawCap}
 		}
 		pending.commits = append(pending.commits, pc)
 	}

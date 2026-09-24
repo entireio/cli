@@ -234,6 +234,80 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	assert.Contains(t, files, "c.txt", "local-only change must be replayed on top")
 }
 
+func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflict(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	ctx := context.Background()
+	ref := refs[0]
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	base := head.Hash()
+	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref}))
+
+	// Advance the remote from base.
+	testutil.WriteFile(t, workDir, "remote.txt", "remote")
+	testutil.GitAdd(t, workDir, "remote.txt")
+	testutil.GitCommit(t, workDir, "remote generation")
+	head, err = repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, head.Hash())))
+	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref}))
+	remoteTip := head.Hash()
+
+	// Create a disconnected queued generation that recovery will try to replay.
+	// This covers the former ReconcileDisconnectedMetadataRef path, whose final
+	// update was unconditional before checkpoint recovery became generation-safe.
+	testutil.GitReset(t, workDir, base.String())
+	testutil.WriteFile(t, workDir, "local.txt", "local")
+	testutil.GitAdd(t, workDir, "local.txt")
+	tree := strings.TrimSpace(testutil.RunGit(t, workDir, "write-tree"))
+	candidate := plumbing.NewHash(strings.TrimSpace(testutil.RunGit(t, workDir, "commit-tree", tree, "-m", "local generation")))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, candidate)))
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
+
+	// At the recovery install boundary, simulate a checkpoint writer advancing
+	// the same ref and queueing that newer generation. The real CAS must reject
+	// the stale recovery rather than overwrite it.
+	oldCAS := checkpointRefRecoveryCAS
+	var concurrent plumbing.Hash
+	checkpointRefRecoveryCAS = func(
+		casCtx context.Context,
+		casRepo *git.Repository,
+		refName plumbing.ReferenceName,
+		newHash, expectedOld plumbing.Hash,
+	) error {
+		require.Equal(t, expectedOld, candidate)
+		runGit := func(args ...string) string {
+			return strings.TrimSpace(testutil.RunGit(t, workDir, args...))
+		}
+		tree := runGit("rev-parse", candidate.String()+"^{tree}")
+		concurrent = plumbing.NewHash(runGit("commit-tree", tree, "-p", candidate.String(), "-m", "concurrent generation"))
+		require.NoError(t, casRepo.Storer.SetReference(plumbing.NewHashReference(refName, concurrent)))
+		require.NoError(t, queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: refName, Hash: concurrent}))
+		return checkpoint.CASPersistentRef(casCtx, casRepo, refName, newHash, expectedOld)
+	}
+	t.Cleanup(func() { checkpointRefRecoveryCAS = oldCAS })
+
+	restore := captureStderr(t)
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
+	restore()
+	require.Error(t, pushErr)
+	assert.Zero(t, pushed)
+	assert.Zero(t, withheld)
+
+	localRef, err := repo.Reference(ref, true)
+	require.NoError(t, err)
+	assert.Equal(t, concurrent, localRef.Hash(), "recovery must not overwrite the concurrent checkpoint generation")
+	assert.Equal(t, remoteTip.String(), remoteRefHash(t, bareDir, ref), "a CAS conflict must not push a stale recovered tip")
+	queued, err := queue.PeekEntries()
+	require.NoError(t, err)
+	require.Len(t, queued, 1)
+	assert.Equal(t, concurrent, queued[0].Hash, "the concurrent generation must remain queued")
+}
+
 // enqueueRefs seeds the repo's push queue with the given refs.
 func enqueueRefs(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceName) *checkpoint.PushQueue {
 	t.Helper()

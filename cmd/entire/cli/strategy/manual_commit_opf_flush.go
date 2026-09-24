@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	git "github.com/go-git/go-git/v6"
@@ -101,55 +102,51 @@ func opfFlushRecentlySpawned(commonDir string, now time.Time) bool {
 // pending redaction work is visible. It reads local refs and the queue file and
 // nothing else, so it is safe on a read-only status path.
 func RefsAwaitingOPF(ctx context.Context, repo *git.Repository) ([]plumbing.ReferenceName, error) {
+	entries, err := refsAwaitingOPFGenerations(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]plumbing.ReferenceName, 0, len(entries))
+	for _, entry := range entries {
+		refs = append(refs, entry.Ref)
+	}
+	return refs, nil
+}
+
+// refsAwaitingOPFGenerations returns the current local generation of each
+// queued ref that still needs OPF. The queue token alone is insufficient here:
+// a checkpoint writer may advance the same ref while leaving the older token
+// in the queue, and that new tip is distinct work for the flush worker.
+func refsAwaitingOPFGenerations(ctx context.Context, repo *git.Repository) ([]checkpoint.PushQueueEntry, error) {
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("resolve push queue: %w", err)
 	}
 	// Peek, not Drain: the queue belongs to the flush, and a mere progress
 	// check must never be able to strand a ref by consuming it.
-	queued, err := queue.Peek()
+	queued, err := queue.PeekEntries()
 	if err != nil {
 		return nil, fmt.Errorf("peek push queue: %w", err)
 	}
 	if len(queued) == 0 {
 		return nil, nil
 	}
-	existing, _ := partitionLocalRefs(repo, queued)
-	awaiting := make([]plumbing.ReferenceName, 0, len(existing))
-	for _, refName := range existing {
+	awaiting := make([]checkpoint.PushQueueEntry, 0, len(queued))
+	for _, entry := range queued {
 		// An unknown trailer state (the ref vanished between the peek and here,
 		// or its tip will not load) is not this worker's backlog: there is no
-		// rewrite it could usefully attempt. Delivery reads the same state with
-		// the opposite default — see refTipCarriesOPFApplied.
-		applied, known := refTipCarriesOPFApplied(repo, refName)
-		if known && !applied {
-			awaiting = append(awaiting, refName)
+		// rewrite it could usefully attempt. Delivery uses the opposite default:
+		// an unreadable candidate is not shippable.
+		ref, refErr := repo.Reference(entry.Ref, true)
+		if refErr != nil {
+			continue
+		}
+		commit, commitErr := repo.CommitObject(ref.Hash())
+		if commitErr == nil && !trailers.HasOPFApplied(commit.Message) {
+			awaiting = append(awaiting, checkpoint.PushQueueEntry{Ref: entry.Ref, Hash: ref.Hash()})
 		}
 	}
 	return awaiting, nil
-}
-
-// refTipCarriesOPFApplied reports whether refName's tip commit carries the
-// Entire-OPF-Applied trailer, and whether that question could be answered at
-// all: a ref that has vanished, or a tip commit that will not load, has no
-// trailer state to report.
-//
-// Both callers need the second return and they choose opposite defaults for it,
-// which is why it is not folded into the first. RefsAwaitingOPF treats an
-// unanswerable ref as not its work; delivery treats it as not shippable, because
-// "we could not read the trailer" must never ship as "the trailer is there".
-// One shared reader so the two can never disagree about what carrying the
-// trailer means.
-func refTipCarriesOPFApplied(repo *git.Repository, refName plumbing.ReferenceName) (applied, known bool) {
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return false, false
-	}
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return false, false
-	}
-	return trailers.HasOPFApplied(commit.Message), true
 }
 
 // maybeSpawnOPFFlush fires one detached __opf_flush child when OPF is enabled
@@ -262,7 +259,7 @@ func RunOPFFlush(ctx context.Context) error {
 
 	// Progress is measured against the previous pass's backlog: the loop exists
 	// only to keep going while each pass is still clearing refs.
-	before, err := RefsAwaitingOPF(ctx, repo)
+	before, err := refsAwaitingOPFGenerations(ctx, repo)
 	if err != nil {
 		logging.Warn(logCtx, "opf flush: could not read push queue",
 			slog.String("error", err.Error()))
@@ -277,7 +274,7 @@ func RunOPFFlush(ctx context.Context) error {
 			logging.Warn(logCtx, "opf flush: git-refs pass failed",
 				slog.String("error", rewriteErr.Error()))
 		}
-		after, afterErr := RefsAwaitingOPF(ctx, repo)
+		after, afterErr := refsAwaitingOPFGenerations(ctx, repo)
 		if afterErr != nil {
 			// Whether the pass achieved anything is now unknown, so there is
 			// nothing to base another attempt on.
@@ -285,7 +282,7 @@ func RunOPFFlush(ctx context.Context) error {
 				slog.String("error", afterErr.Error()))
 			return nil
 		}
-		if len(after) == 0 || sameCheckpointRefSet(before, after) {
+		if len(after) == 0 || sameCheckpointRefGenerationSet(before, after) {
 			// Fully rewritten, or this pass left the same refs pending: every
 			// ref left fails on its own terms and a retry would fail identically.
 			return nil
@@ -297,13 +294,17 @@ func RunOPFFlush(ctx context.Context) error {
 	return nil
 }
 
-func sameCheckpointRefSet(a, b []plumbing.ReferenceName) bool {
+func sameCheckpointRefGenerationSet(a, b []checkpoint.PushQueueEntry) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	a = slices.Clone(a)
 	b = slices.Clone(b)
-	slices.Sort(a)
-	slices.Sort(b)
+	slices.SortFunc(a, func(x, y checkpoint.PushQueueEntry) int {
+		return strings.Compare(x.Ref.String()+x.Hash.String(), y.Ref.String()+y.Hash.String())
+	})
+	slices.SortFunc(b, func(x, y checkpoint.PushQueueEntry) int {
+		return strings.Compare(x.Ref.String()+x.Hash.String(), y.Ref.String()+y.Hash.String())
+	})
 	return slices.Equal(a, b)
 }
