@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -160,21 +161,29 @@ func removeBaselineIn(worktree, name string) error {
 	return nil
 }
 
-// carryTurnPrompt moves the prompts the turn-start hook appended to the
-// session's prompt.txt in the worktree the agent has since left into this
-// tree's copy, which the end hook checkpoints.
-func carryTurnPrompt(ctx context.Context, from, sessionID string) error {
+// carryTurnPrompt moves this turn's prompts, which the turn-start hook appended
+// past offset in the session's prompt.txt in the worktree the agent has since
+// left, into this tree's copy, which the end hook checkpoints. Earlier prompts
+// stay where they were: they belong to steps already saved in that tree.
+func carryTurnPrompt(ctx context.Context, from, sessionID string, offset int) error {
 	name := sessionMetadataName(sessionID) + "/" + paths.PromptFileName
 	src, err := entiredir.OpenAtForRead(from)
 	if err != nil {
 		return fmt.Errorf("open %s in %s: %w", paths.EntireDir, from, err)
 	}
-	carried, err := entiredir.ReadFile(src, name)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && len(carried) == 0) {
+	content, err := entiredir.ReadFile(src, name)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("read carried prompt: %w", err)
+	}
+	if offset < 0 || offset > len(content) {
+		offset = 0 // the file was reset since the turn began: all of it is this turn's
+	}
+	kept, carried := content[:offset], bytes.TrimPrefix(content[offset:], []byte(promptSeparator))
+	if len(carried) == 0 {
+		return nil
 	}
 	dst, err := entiredir.Open(ctx)
 	if err != nil {
@@ -183,15 +192,23 @@ func carryTurnPrompt(ctx context.Context, from, sessionID string) error {
 	if err := osroot.MkdirAllNoSymlink(dst, sessionMetadataName(sessionID), 0o750); err != nil {
 		return fmt.Errorf("create session metadata dir: %w", err)
 	}
-	content := carried
+	merged := carried
 	if existing, readErr := entiredir.ReadFile(dst, name); readErr == nil && len(existing) > 0 {
-		content = append(append(existing, []byte("\n\n---\n\n")...), carried...)
+		merged = append(append(existing, []byte(promptSeparator)...), carried...)
 	}
-	if err := entiredir.WriteFile(dst, name, content, 0o600); err != nil {
+	if err := entiredir.WriteFile(dst, name, merged, 0o600); err != nil {
 		return fmt.Errorf("write carried prompt: %w", err)
 	}
-	if err := osroot.RemoveNoSymlinks(src, name); err != nil {
-		return fmt.Errorf("remove carried prompt: %w", err)
+	if len(kept) > 0 {
+		err = entiredir.WriteFile(src, name, kept, 0o600)
+	} else {
+		err = osroot.RemoveNoSymlinks(src, name)
+	}
+	if err != nil {
+		return fmt.Errorf("trim carried prompt: %w", err)
 	}
 	return nil
 }
+
+// promptSeparator joins the prompts of successive turns in prompt.txt.
+const promptSeparator = "\n\n---\n\n"

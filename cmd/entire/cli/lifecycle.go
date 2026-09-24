@@ -747,7 +747,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 				existing, readErr := entiredir.ReadFile(root, promptName)
 				var content string
 				if readErr == nil && len(existing) > 0 {
-					content = string(existing) + "\n\n---\n\n" + event.Prompt
+					content = string(existing) + promptSeparator + event.Prompt
 				} else {
 					content = event.Prompt
 				}
@@ -942,7 +942,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			slog.String("error", err.Error()))
 	}
 	if preState != nil && preState.capturedIn != "" {
-		if carryErr := carryTurnPrompt(ctx, preState.capturedIn, sessionID); carryErr != nil {
+		if carryErr := carryTurnPrompt(ctx, preState.capturedIn, sessionID, preState.PromptOffset); carryErr != nil {
 			logging.Warn(logCtx, "failed to carry the turn's prompt from the worktree it started in",
 				slog.String("worktree", preState.capturedIn),
 				slog.String("error", carryErr.Error()))

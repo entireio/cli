@@ -144,3 +144,35 @@ func TestFollow_CodexToolUseLocatesItsFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, session.PendingContentInSeveralWorktrees, state.PendingContentWorktree, "content in both trees must hold the session where it is")
 }
+
+// A session that cannot re-home (its home holds saved steps) still has this
+// turn's prompt carried to the worktree the turn ended in, while the prompts of
+// the steps saved at home stay there.
+func TestFollow_MidTurnMoveCarriesOnlyThisTurnsPrompt(t *testing.T) {
+	t.Parallel()
+	parent := NewRepoWithCommit(t)
+	feature := worktreeEnv(t, parent, "feature")
+
+	sess := parent.NewSession()
+	hooks := NewHookRunner(parent.RepoDir, parent.ClaudeProjectDir, t)
+	require.NoError(t, hooks.runHookWithInput("user-prompt-submit", followPayload(sess.ID, sess.TranscriptPath, parent.RepoDir, map[string]any{"prompt": "first"})))
+	parent.WriteFile("home.txt", "home\n")
+	sess.CreateTranscript("first", []FileChange{{Path: "home.txt", Content: "home\n"}})
+	require.NoError(t, hooks.runHookWithInput("stop", followPayload(sess.ID, sess.TranscriptPath, parent.RepoDir, nil)))
+
+	require.NoError(t, hooks.runHookWithInput("user-prompt-submit", followPayload(sess.ID, sess.TranscriptPath, parent.RepoDir, map[string]any{"prompt": "second"})))
+	feature.WriteFile("feature.txt", "work\n")
+	sess.CreateTranscript("second", []FileChange{{Path: filepath.Join(feature.RepoDir, "feature.txt"), Content: "work\n"}})
+	require.NoError(t, hooks.runHookWithInput("stop", followPayload(sess.ID, sess.TranscriptPath, feature.RepoDir, nil)))
+
+	state, err := parent.GetSessionState(sess.ID)
+	require.NoError(t, err)
+	require.Equal(t, parent.RepoDir, state.WorktreePath, "precondition: saved steps keep the session home")
+	read := func(env *TestEnv) string {
+		data, err := os.ReadFile(filepath.Join(env.RepoDir, ".entire", "metadata", sess.ID, "prompt.txt"))
+		require.NoError(t, err)
+		return string(data)
+	}
+	require.Equal(t, "first", read(parent), "prompts of steps saved at home stay there")
+	require.Equal(t, "second", read(feature), "only this turn's prompt moves")
+}

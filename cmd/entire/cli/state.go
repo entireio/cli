@@ -63,6 +63,10 @@ type PrePromptState struct {
 	// Migrated to TranscriptOffset on load.
 	LastTranscriptLineCount int `json:"last_transcript_line_count,omitempty"`
 
+	// PromptOffset is the size of the session's prompt.txt when the turn began,
+	// so an end hook in another worktree carries only this turn's prompt.
+	PromptOffset int `json:"prompt_offset,omitempty"`
+
 	// capturedIn is the other worktree this baseline was loaded from, or "" when
 	// it describes the hook's own tree.
 	capturedIn string
@@ -161,6 +165,9 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedFiles:       untrackedFiles,
 		UntrackedScanSkipped: scanSkipped,
 		TranscriptOffset:     transcriptOffset,
+	}
+	if existing, readErr := entiredir.ReadFile(root, sessionMetadataName(sessionID)+"/"+paths.PromptFileName); readErr == nil {
+		state.PromptOffset = len(existing)
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
