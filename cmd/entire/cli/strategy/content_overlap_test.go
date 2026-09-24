@@ -798,7 +798,7 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "fileB.txt"), []byte("agent content B"), 0o644))
 	_, err = wt.Add("fileA.txt")
 	require.NoError(t, err)
-	// fileB stays uncommitted: a file HEAD already holds is not remaining.
+	// fileB stays out of the commit and out of HEAD, so it is remaining.
 	headHash, err := wt.Commit("commit fileA only", &git.CommitOptions{
 		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
 	})
