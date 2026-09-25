@@ -61,7 +61,11 @@ func pickCondensationTargetState(ids []id.CheckpointID, exists func(id.Checkpoin
 	}
 	target, found = pickCondensationTarget(ids, exists)
 	if !found {
-		return id.EmptyCheckpointID, false, false
+		// Every trailer already has a checkpoint: an amend of a squash whose
+		// inherited-trailer marker the first post-commit consumed. The stamp is
+		// the last trailer; as a preexisting target, only the session amending
+		// it (its LastCheckpointID) may write there, exactly as for a lone one.
+		return ids[len(ids)-1], true, true
 	}
 	// Recheck after selection: another session may have created the checkpoint
 	// between the first store read and condensation.
@@ -84,10 +88,6 @@ func (s *ManualCommitStrategy) condensationTarget(ctx context.Context, repo *git
 	}
 	exists := func(cpID id.CheckpointID) bool { return checkpointExists(ctx, store, cpID) }
 	target, preexisting, ok := pickCondensationTargetState(ids, exists)
-	if !ok {
-		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "post-commit: every trailer links an existing checkpoint; nothing to condense",
-			slog.Int("trailers", len(ids)))
-	}
 	return target, preexisting, ok
 }
 
