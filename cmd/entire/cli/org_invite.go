@@ -11,9 +11,9 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// The invitation verbs. `entire org invite <org> <email>` creates an
-// invitation, with `invite list` and `invite revoke` managing the ones already
-// sent. An invitation is how an org grants membership to someone the control
+// The invitation verbs. `entire org invite` groups `send`, which creates an
+// invitation, with `list` and `revoke` managing the ones already sent. The
+// shape follows the WorkOS CLI's `invitation send --email`. An invitation is how an org grants membership to someone the control
 // plane cannot name yet: `grant add` needs an existing provider account, an
 // invitation needs only an email address.
 //
@@ -35,13 +35,22 @@ func invitationRow(i coreapi.Invitation) []string {
 }
 
 func newOrgInviteCmd() *cobra.Command {
-	var role string
 	cmd := &cobra.Command{
-		Use:     "invite <org> <email>",
+		Use:   "invite",
+		Short: "Manage organization invitations",
+	}
+	cmd.AddCommand(newOrgInviteSendCmd(), newOrgInviteListCmd(), newOrgInviteRevokeCmd())
+	return requireSubcommand(cmd)
+}
+
+func newOrgInviteSendCmd() *cobra.Command {
+	var email, role string
+	cmd := &cobra.Command{
+		Use:     "send <org> --email <email>",
 		Short:   "Invite an email address to an organization",
 		Long:    "Invite an email address to an organization. The org is addressed by name. The invited address receives a link to accept. Inviting an address that already has an open invitation sends the mail again and keeps the role the invitation was created with.",
-		Example: "  entire org invite acme dev@example.com --role admin\n  entire org invite list acme\n  entire org invite revoke acme dev@example.com",
-		Args:    cobra.ExactArgs(2),
+		Example: "  entire org invite send acme --email dev@example.com --role admin",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("role") {
 				if err := validateChoice("role", role, orgRoles); err != nil {
@@ -55,7 +64,7 @@ func newOrgInviteCmd() *cobra.Command {
 					return "", nil, err
 				}
 				body := &coreapi.CreateOrgInvitationInputBody{
-					Email: args[1],
+					Email: email,
 					Role:  coreapi.CreateOrgInvitationInputBodyRole(role),
 				}
 				res, err := c.CreateOrgInvitation(ctx, body, coreapi.CreateOrgInvitationParams{OrgId: orgID})
@@ -80,18 +89,17 @@ func newOrgInviteCmd() *cobra.Command {
 					inv.AdditionalProps = nil
 					return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s", inv.Email, args[0], inv.Role), &inv, nil
 				default:
-					return "", nil, fmt.Errorf("invite %s: unexpected response %T from the control plane", args[1], res)
+					return "", nil, fmt.Errorf("invite %s: unexpected response %T from the control plane", email, res)
 				}
 			})
 		},
 	}
 	// The wire field is required, so an omitted flag still sends a role: the
 	// same default the API documents.
+	cmd.Flags().StringVar(&email, "email", "", "Email address to invite")
 	cmd.Flags().StringVar(&role, "role", orgRoleMember, "Role the invitation grants: one of "+strings.Join(orgRoles, ", "))
+	markRequired(cmd, "email")
 	addJSONFlag(cmd)
-	// The subcommands take precedence over the <org> positional, so an org
-	// literally named "list" or "revoke" must be addressed by its ULID here.
-	cmd.AddCommand(newOrgInviteListCmd(), newOrgInviteRevokeCmd())
 	return cmd
 }
 

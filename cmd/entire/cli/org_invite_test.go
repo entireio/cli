@@ -52,7 +52,7 @@ func testInvitation(role, status string) *coreapi.Invitation {
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_CreatesAndReportsTheRole(t *testing.T) {
+func TestOrgInviteSend_CreatesAndReportsTheRole(t *testing.T) {
 	var gotPath string
 	var gotBody coreapi.CreateOrgInvitationInputBody
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +64,7 @@ func TestOrgInvite_CreatesAndReportsTheRole(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "admin")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--email", "dev@example.com", "--role", "admin")
 	require.NoError(t, err)
 	assert.Equal(t, "/api/v1/orgs/"+testOrgULID+"/invitations", gotPath)
 	assert.Equal(t, "dev@example.com", gotBody.Email)
@@ -76,7 +76,7 @@ func TestOrgInvite_CreatesAndReportsTheRole(t *testing.T) {
 // rather than an empty string the server would reject.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_SendsTheDefaultRoleWhenFlagOmitted(t *testing.T) {
+func TestOrgInviteSend_SendsTheDefaultRoleWhenFlagOmitted(t *testing.T) {
 	var gotBody coreapi.CreateOrgInvitationInputBody
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
@@ -86,7 +86,7 @@ func TestOrgInvite_SendsTheDefaultRoleWhenFlagOmitted(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com")
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--email", "dev@example.com")
 	require.NoError(t, err)
 	assert.EqualValues(t, "member", gotBody.Role)
 }
@@ -95,7 +95,7 @@ func TestOrgInvite_SendsTheDefaultRoleWhenFlagOmitted(t *testing.T) {
 // it was created with, which may not be the one just asked for.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_ResendReportsTheStoredRole(t *testing.T) {
+func TestOrgInviteSend_ResendReportsTheStoredRole(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -103,7 +103,7 @@ func TestOrgInvite_ResendReportsTheStoredRole(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "admin")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--email", "dev@example.com", "--role", "admin")
 	require.NoError(t, err)
 	assert.Contains(t, out, "✓ Resent the open invitation for dev@example.com to org "+testOrgULID+", which invites as member")
 	assert.NotContains(t, out, "as admin", "the request's role must not be reported as the effective one")
@@ -113,7 +113,7 @@ func TestOrgInvite_ResendReportsTheStoredRole(t *testing.T) {
 // own explanation rather than pre-empted by a client-side role check.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_ForbiddenRoleSurfacesTheServerMessage(t *testing.T) {
+func TestOrgInviteSend_ForbiddenRoleSurfacesTheServerMessage(t *testing.T) {
 	var reached bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		reached = true
@@ -124,19 +124,19 @@ func TestOrgInvite_ForbiddenRoleSurfacesTheServerMessage(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "owner")
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--email", "dev@example.com", "--role", "owner")
 	require.ErrorContains(t, err, "only an owner may invite an owner")
 	assert.True(t, reached, "the CLI must ask the server rather than refuse an owner invite itself")
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_RejectsAnUnknownRoleWithoutCallingTheServer(t *testing.T) {
+func TestOrgInviteSend_RejectsAnUnknownRoleWithoutCallingTheServer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("an invalid --role must be refused before any request")
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "auditor")
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--email", "dev@example.com", "--role", "auditor")
 	require.ErrorContains(t, err, `invalid --role "auditor": must be one of owner, admin, member`)
 }
 
@@ -146,7 +146,7 @@ func TestOrgInvite_RejectsAnUnknownRoleWithoutCallingTheServer(t *testing.T) {
 // an accept token, so this pins that none can leak.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvite_JSONDropsUnmodeledResponseProperties(t *testing.T) {
+func TestOrgInviteSend_JSONDropsUnmodeledResponseProperties(t *testing.T) {
 	const leakedValue = "SHOULD-NEVER-REACH-JSON-OUTPUT"
 	cases := []struct {
 		name   string
@@ -166,7 +166,7 @@ func TestOrgInvite_JSONDropsUnmodeledResponseProperties(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "admin", "--json")
+			out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--email", "dev@example.com", "--role", "admin", "--json")
 			require.NoError(t, err)
 			assert.NotContains(t, out, leakedValue, "an unmodeled response property reached --json output")
 			assert.NotContains(t, out, "unexpectedField")
@@ -234,7 +234,7 @@ func TestOrgInviteList_ReportsAnEmptyListing(t *testing.T) {
 }
 
 // The list path loops over every invitation returned, so the create path's
-// defense (see TestOrgInvite_JSONDropsUnmodeledResponseProperties) must hold
+// defense (see TestOrgInviteSend_JSONDropsUnmodeledResponseProperties) must hold
 // for each item, not just the first — this is the case that matters more.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
@@ -347,11 +347,22 @@ func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	for _, args := range [][]string{
-		{"invite", "ior", "dev@example.com"},
+		{"invite", "send", "ior", "--email", "dev@example.com"},
 		{"invite", "list", "ior"},
 		{"invite", "revoke", "ior", "dev@example.com"},
 	} {
 		_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, args...)
 		require.EqualError(t, err, "no org named \"ior\" (run `entire org list` to see org names)", "%v", args)
 	}
+}
+
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInviteSend_RequiresEmail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("a missing --email must be refused before any request")
+	}))
+	t.Cleanup(srv.Close)
+
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID)
+	require.ErrorContains(t, err, `required flag(s) "email" not set`)
 }
