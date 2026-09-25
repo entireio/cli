@@ -72,7 +72,7 @@ Run it with `mise run test:e2e:controlplane [filter]`; the task installs the Pla
 | `GOOGLE_APPLICATION_CREDENTIALS` | Optional Antigravity ADC (service account); takes precedence over `GEMINI_API_KEY` when set | — |
 | `GOOGLE_CLOUD_PROJECT` | Optional Antigravity ADC project override | ADC JSON `project_id` |
 | `E2E_ANTIGRAVITY_PROJECT` | Optional Antigravity E2E project override; takes precedence over `GOOGLE_CLOUD_PROJECT` | ADC JSON `project_id` |
-| `OPENAI_API_KEY` | Required for Codex (0.157+: the runner passes `--no-daemon`; CI pins the version in `e2e.yml`) | — |
+| `OPENAI_API_KEY` | Required for Codex (0.157+; the runner passes `--no-daemon`) | — |
 | `COPILOT_GITHUB_TOKEN` | Required for Copilot CLI, unless a `copilot login` credential is already stored. `GH_TOKEN` and `GITHUB_TOKEN` also work — Copilot reads all three, in that order of precedence. A `gh auth login` alone is not enough: Copilot does not read gh's config. | — |
 | `E2E_KEEP_AGENT_HOME` | Set to `1` to preserve the isolated `COPILOT_HOME` a session ran under (holds Copilot's own logs) | unset |
 | `E2E_GH_USERNAME` | GitHub test user for the control-plane tests' `entire login --device` | — |

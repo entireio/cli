@@ -150,7 +150,7 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 // dir, and on CI that socket path exceeds the 108-byte unix limit (SUN_LEN),
 // so the TUI dies before its first prompt. --no-daemon avoids the socket
 // entirely. It requires Codex 0.157+; older binaries reject the flag at
-// startup, which is the intended loud failure (e2e.yml pins the version).
+// startup, which is the intended loud failure.
 func codexTUIArgs(extra ...string) []string {
 	args := []string{"codex", "--dangerously-bypass-approvals-and-sandbox", "--no-daemon"}
 	return append(args, extra...)
