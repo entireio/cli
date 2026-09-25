@@ -1156,18 +1156,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// per-session functions (filesOverlapWithContent, filesWithRemainingAgentChanges,
 	// calculateSessionAttributions).
 	_, resolveTreesSpan := perf.Start(ctx, "resolve_commit_trees")
-	var headTree *object.Tree
-	if t, err := commit.Tree(); err == nil {
-		headTree = t
-	}
-	var parentTree *object.Tree
-	if commit.NumParents() > 0 {
-		if parent, err := commit.Parent(0); err == nil {
-			if t, err := parent.Tree(); err == nil {
-				parentTree = t
-			}
-		}
-	}
+	headTree, parentTree := commitAndParentTrees(commit)
 
 	committedFileSet := filesChangedInCommit(ctx, worktreePath, commit, headTree, parentTree)
 	resolveTreesSpan.End()
@@ -1265,6 +1254,22 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// commitAndParentTrees resolves commit's tree and its first parent's; either is
+// nil when it cannot be read (a root commit has no parent tree).
+func commitAndParentTrees(commit *object.Commit) (headTree, parentTree *object.Tree) {
+	if t, err := commit.Tree(); err == nil {
+		headTree = t
+	}
+	if commit.NumParents() > 0 {
+		if parent, err := commit.Parent(0); err == nil {
+			if t, err := parent.Tree(); err == nil {
+				parentTree = t
+			}
+		}
+	}
+	return headTree, parentTree
 }
 
 // anySessionOwnsCheckpoint reports whether any session already recorded cpID as
