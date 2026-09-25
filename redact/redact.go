@@ -1366,8 +1366,13 @@ func shouldSkipJSONLField(key string) bool {
 
 // shouldSkipJSONLObject returns true if the object has "type":"image" or "type":"image_url".
 func shouldSkipJSONLObject(obj map[string]any) bool {
-	t, ok := obj["type"].(string)
-	return ok && (strings.HasPrefix(t, "image") || t == "base64")
+t, ok := obj["type"].(string)
+return ok && (
+strings.HasPrefix(t, "image") ||
+t == "input_image" ||
+t == "output_image" ||
+t == "base64"
+)
 }
 
 func shannonEntropy(s string) float64 {
