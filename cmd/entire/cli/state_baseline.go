@@ -171,7 +171,10 @@ func removeBaselineIn(worktree, name string) error {
 // stay where they were: they belong to steps already saved in that tree.
 func carryTurnPrompt(ctx context.Context, from, sessionID string, offset int) error {
 	name := sessionMetadataName(sessionID) + "/" + paths.PromptFileName
-	src, err := entiredir.OpenAtForRead(from)
+	// Opened for writing: the carried part is trimmed from the source below.
+	// Its .entire already exists (the turn-start hook wrote prompt.txt there),
+	// so nothing is created.
+	src, err := entiredir.OpenAt(from)
 	if err != nil {
 		return fmt.Errorf("open %s in %s: %w", paths.EntireDir, from, err)
 	}
@@ -183,7 +186,11 @@ func carryTurnPrompt(ctx context.Context, from, sessionID string, offset int) er
 		return fmt.Errorf("read carried prompt: %w", err)
 	}
 	if offset < 0 || offset > len(content) {
-		offset = 0 // the file was reset since the turn began: all of it is this turn's
+		// Shorter than at turn start: a condensation cleared it mid-turn, so what
+		// remains was written since and is all this turn's.
+		logging.Debug(logging.WithComponent(ctx, "state"), "prompt.txt shrank since turn start; carrying all of it",
+			slog.Int("offset", offset), slog.Int("size", len(content)))
+		offset = 0
 	}
 	kept, carried := content[:offset], bytes.TrimPrefix(content[offset:], []byte(promptSeparator))
 	if len(carried) == 0 {

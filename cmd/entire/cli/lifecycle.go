@@ -192,6 +192,9 @@ func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *age
 			slog.String("cwd", target))
 		return ctx
 	}
+	// A process-wide chdir is safe here: each hook is its own process, and
+	// nothing has resolved or cached a path yet besides what
+	// clearWorktreeCaches drops right after.
 	if err := os.Chdir(target); err != nil {
 		logging.Warn(logCtx, "could not follow the agent's working directory",
 			slog.String("cwd", target), slog.String("error", err.Error()))
