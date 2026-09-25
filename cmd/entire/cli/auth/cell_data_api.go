@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -510,20 +509,16 @@ func requireSafeExchangeURL(label, raw string) error {
 // Returns "" (no error) when the claim is absent so each caller can phrase
 // its own missing-claim error. Shared with git-remote-entire's jurisdiction
 // git auth.
+//
+// Unverified is not unchecked: decodeLoginJWTClaims refuses a token that is not
+// a well-formed JWT naming a real algorithm, so an alg:none token errors here
+// rather than routing. Every login token a core mints is signed.
 func HomeJurisdictionFromLoginJWT(loginJWT string) (string, error) {
-	parts := strings.Split(loginJWT, ".")
-	if len(parts) < 2 {
-		return "", errors.New("login token is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("decode login token payload: %w", err)
-	}
 	var claims struct {
 		HomeJurisdiction string `json:"home_jurisdiction"`
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("parse login token payload: %w", err)
+	if err := decodeLoginJWTClaims(loginJWT, &claims); err != nil {
+		return "", err
 	}
 	return NormalizeJurisdiction(claims.HomeJurisdiction)
 }

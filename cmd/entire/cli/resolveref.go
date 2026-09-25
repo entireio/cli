@@ -215,6 +215,20 @@ func parseQualifiedHandle(ref string) (provider, handle string, err error) {
 	return provider, handle, nil
 }
 
+// formatQualifiedHandle renders a provider and handle in the form every grant
+// command accepts as a grantee ("github:alice"). Inverse of
+// parseQualifiedHandle, and deliberately adjacent to it so the two spellings
+// cannot drift.
+//
+// An empty provider yields the bare handle rather than ":alice", which parses
+// as nothing and would be a grantee string no command accepts.
+func formatQualifiedHandle(provider, handle string) string {
+	if provider == "" {
+		return handle
+	}
+	return provider + ":" + handle
+}
+
 // resolveProjectRefResolved is resolveProjectRef plus the server's name.
 func resolveProjectRefResolved(ctx context.Context, c projectRefClient, ref string) (resolvedRef, error) {
 	if looksLikeULID(ref) {
