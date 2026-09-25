@@ -71,6 +71,20 @@ func TestPickCondensationTargetState_RechecksSelectedTarget(t *testing.T) {
 		"a target created after selection must be treated as preexisting before condensation")
 }
 
+// Amending a squash after its first post-commit: every trailer now has a
+// checkpoint and the inherited-trailer marker is gone. The last trailer, where
+// prepare stamps, is the target, preexisting, so only the session amending it
+// may write there (stampedByAnotherCommit).
+func TestPickCondensationTargetState_AllExistingFallsBackToTheStamp(t *testing.T) {
+	t.Parallel()
+	inherited := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J3C")
+	stamp := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J3D")
+	got, preexisting, found := pickCondensationTargetState([]id.CheckpointID{inherited, stamp}, func(id.CheckpointID) bool { return true })
+	assert.True(t, found)
+	assert.Equal(t, stamp, got)
+	assert.True(t, preexisting)
+}
+
 // The inherited-trailer marker speaks only for a commit on the parent it was
 // recorded against, and is consumed by the first post-commit that reads it.
 func TestInheritedTrailersMarker_TiedToParentAndConsumed(t *testing.T) {
