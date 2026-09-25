@@ -33,8 +33,11 @@ func TestLocalRefReads_ReftableProcessCount(t *testing.T) {
 			_, err := paths.WorktreeRoot(t.Context())
 			require.NoError(t, err)
 			t.Run("branch", func(t *testing.T) {
+				repo, err := OpenRepository(t.Context())
+				require.NoError(t, err)
+				defer repo.Close()
 				commands := gitenv.TraceCommands(t)
-				require.NoError(t, branchExistsFresh(t.Context(), "shadow"))
+				require.NoError(t, branchExists(t.Context(), repo, "shadow"))
 				calls := commands()
 				require.Len(t, calls, 1, "%v", calls)
 				require.Contains(t, calls[0], "show-ref")

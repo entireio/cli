@@ -1624,21 +1624,16 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 	return nil
 }
 
-// branchExistsFresh checks a branch using a newly opened storer so native Git
-// deletions of packed refs are visible. It verifies the target object exists,
-// like show-ref --verify, rather than accepting a dangling object ID.
-func branchExistsFresh(ctx context.Context, branchName string) error {
+// branchExists checks a branch through the caller's repository. Packed refs
+// are reread on lookup, so native deletions are visible through the same handle.
+// Like show-ref --verify, it also checks that the target object exists.
+func branchExists(ctx context.Context, repo *git.Repository, branchName string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("check branch %s: %w", branchName, err)
 	}
 	if gitrepo.ReadsNeedNativeGit(ctx) {
 		return branchExistsNative(ctx, branchName)
 	}
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return branchExistsNative(ctx, branchName)
-	}
-	defer repo.Close()
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
 	if err != nil {
 		return fmt.Errorf("read branch %s: %w", branchName, err)

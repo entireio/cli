@@ -120,8 +120,8 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
 		fmt.Fprintf(errW, "Warning: failed to clean up shadow branch %s: %v\n", shadowBranchName, err)
 	} else {
-		// Reopen the reference store to observe native deletion of packed refs.
-		if err := branchExistsFresh(ctx, shadowBranchName); err != nil {
+		// The existing handle observes native deletion of both loose and packed refs.
+		if err := branchExists(ctx, repo, shadowBranchName); err != nil {
 			fmt.Fprintf(w, "✓ Deleted shadow branch %s\n", shadowBranchName)
 		}
 	}
