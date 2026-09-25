@@ -484,6 +484,10 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	if len(queued) == 0 {
 		return 0, nil
 	}
+	queued, err = normalizeQueuedCheckpointRefs(repo, queue, queued)
+	if err != nil {
+		return 0, err
+	}
 
 	pushCtx, pushSpan := perf.Start(ctx, "push_checkpoint_refs")
 	defer pushSpan.End()
