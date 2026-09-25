@@ -5,8 +5,13 @@ import (
 	"os/exec"
 	"testing"
 
+	"github.com/go-git/go-git/v6/plumbing"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,4 +58,187 @@ func TestDeferCheckpointPushOnEmptyRemote_UsesLocalTrackingRefs(t *testing.T) {
 	require.False(t,
 		deferCheckpointPushOnEmptyRemote(ctx, pushSettings{remote: "origin", checkpointURL: "https://example.invalid/cp.git"}),
 		"a dedicated checkpoint remote is exempt from the guard")
+}
+
+// TestPrePushCheckpointRefs_AlreadyRedactedRefShipsWhileSiblingStillQueued
+// pins the asynchronous delivery boundary: pre-push ships a hash already
+// trailered by an earlier worker pass while leaving its untrailered sibling for
+// the detached worker.
+func TestPrePushCheckpointRefs_AlreadyRedactedRefShipsWhileSiblingStillQueued(t *testing.T) {
+	// No t.Parallel: the fixture uses t.Chdir.
+	const okID, pendingID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, okID)
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	addGitRefsSession(t, repo, pendingID, "sess-pending")
+	refs = append(refs, mustRefName(t, id.MustCheckpointID(pendingID)))
+	spawns := swapOPFFlushSpawn(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
+		"pending background OPF work must not block the user's git push")
+	require.Equal(t, 1, fake.batchCallCount(), "pre-push must not add an inline OPF call")
+	require.Len(t, *spawns, 1)
+
+	lsCmd := exec.CommandContext(t.Context(), "git", "ls-remote", bareDir)
+	lsCmd.Env = testutil.GitIsolatedEnv()
+	out, lsErr := lsCmd.CombinedOutput()
+	require.NoError(t, lsErr, "ls-remote failed: %s", out)
+	require.Contains(t, string(out), refs[0].String(),
+		"the ref completed by the worker must reach the remote")
+	require.NotContains(t, string(out), refs[1].String(),
+		"the pending ref must not reach the remote")
+
+	stillQueued := queuedRefs(t, repo)
+	require.Contains(t, stillQueued, refs[1], "the pending ref stays queued for the worker")
+	require.NotContains(t, stillQueued, refs[0], "a ref that landed must leave the queue")
+}
+
+// TestPushQueuedCheckpointRefs_ShipsReadyRefsAndReportsTheRest is the explicit
+// push's half of the same gate. It cannot log-and-swallow like the pre-push
+// path, so it has to say both things at once: the refs that were ready went,
+// AND some are still queued. pushed being non-zero next to a non-nil error is
+// the contract `doctor migrate-checkpoints` depends on to report what landed.
+func TestPushQueuedCheckpointRefs_ShipsReadyRefsAndReportsTheRest(t *testing.T) {
+	// No t.Parallel: the fixture uses t.Chdir.
+	const okID, failID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	const failSentinel = "OPFBOOM"
+	configureFakeOPF(t, &fakeRuntimeFailsOnSentinel{sentinel: failSentinel})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, okID, failID)
+	addGitRefsSessionWithTranscript(t, repo, failID, "sess-fail",
+		"Hello, PERSONABC asked about "+failSentinel)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(t.Context(), repo, bareDir)
+
+	require.ErrorContains(t, err, "1 checkpoint ref(s) stay queued",
+		"the leftover must be reported, and counted, not swallowed")
+	require.False(t, pushDisabled)
+	require.Equal(t, 1, pushed, "a non-nil error must not hide the ref that actually landed")
+
+	require.NotEmpty(t, remoteRefHash(t, bareDir, refs[0]),
+		"the already-redacted ref must reach the remote")
+	require.Equal(t, []plumbing.ReferenceName{refs[1]}, queuedRefs(t, repo),
+		"only the ref OPF could not finish stays queued")
+}
+
+// TestFlushCheckpointRefsQueue_WithholdsARefEnqueuedAfterTheReadinessRead walks
+// the exact timeline that made a pre-computed exclusion list fail open, in the
+// order a concurrent session produces it:
+//
+//  1. the readiness read (RefsAwaitingOPF) — what the delivery path used to take
+//     BEFORE calling the flush, and pass in as the set to exclude;
+//  2. another session finalizes a checkpoint and enqueues its ref, untrailered.
+//     That ref cannot be in the snapshot from step 1: it did not exist yet;
+//  3. the flush drains the queue — and the new ref IS in what it drained.
+//
+// A flush that excludes the caller's snapshot ships that ref having never
+// checked it for the OPF trailer, which is 8-layer content leaving the machine
+// under an OPFRun decision. A flush that reads the trailer off the set it
+// drained cannot: there is no set it did not check.
+//
+// So this test is also the guard against a regression to the two-step pattern.
+// The flush is told only WHETHER the trailer is required; the step-1 snapshot is
+// computed here purely to pin that it is blind to the racing ref, and is
+// deliberately not passed anywhere.
+func TestFlushCheckpointRefsQueue_WithholdsARefEnqueuedAfterTheReadinessRead(t *testing.T) {
+	// No t.Parallel: the fixture uses t.Chdir.
+	const earlyID, lateID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, earlyID)
+	earlyRef := refs[0]
+
+	// The gate's inline rewrite: the queued ref is redacted and trailered, so it
+	// is genuinely ready to ship.
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	// Step 1: the pre-Drain readiness read. Nothing is awaiting OPF yet.
+	snapshot, err := RefsAwaitingOPF(t.Context(), repo)
+	require.NoError(t, err)
+	require.Empty(t, snapshot, "the rewritten ref carries the trailer, so nothing is awaiting OPF")
+
+	// Step 2: a concurrent session finalizes a checkpoint, enqueuing a ref that
+	// has never been near OPF.
+	addGitRefsSession(t, repo, lateID, "sess-late")
+	lateRef := mustRefName(t, id.MustCheckpointID(lateID))
+	require.NotContains(t, snapshot, lateRef,
+		"the racing ref must be invisible to the earlier read — that is the window")
+	require.ElementsMatch(t, []plumbing.ReferenceName{earlyRef, lateRef}, queuedRefs(t, repo),
+		"both refs are queued, so both are in what the flush drains")
+
+	// Step 3: the flush. It is handed no exclusion set, only the requirement.
+	pushed, withheld, err := flushCheckpointRefsQueue(
+		t.Context(), repo, pushSettings{remote: bareDir}, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pushed, "the trailered ref must still ship; per-ref delivery is the point")
+	assert.Equal(t, 1, withheld, "the racing untrailered ref must be counted as held back")
+
+	assert.NotEmpty(t, remoteRefHash(t, bareDir, earlyRef),
+		"the already-redacted ref must reach the remote")
+	assertRefsAbsentFromRemote(t, bareDir, []plumbing.ReferenceName{lateRef},
+		"a ref enqueued after the readiness read must not ship unchecked")
+	assert.Equal(t, []plumbing.ReferenceName{lateRef}, queuedRefs(t, repo),
+		"the withheld ref stays queued untouched, for the worker and the next push")
+}
+
+func TestCheckpointRefDelivery_PreservesSameRefGenerationAdvancedAfterVerification(t *testing.T) {
+	// No t.Parallel: the fixture uses t.Chdir and OPF test configuration.
+	const checkpointID = "a1b2c3d4e5f6"
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, checkpointID)
+	refName := refs[0]
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
+	require.NoError(t, err)
+	drained, err := queue.DrainEntries()
+	require.NoError(t, err)
+	ready, awaiting, stale := partitionCheckpointRefPushes(repo, drained, true)
+	require.Len(t, ready, 1)
+	require.Empty(t, awaiting)
+	require.Empty(t, stale)
+	verifiedHash := ready[0].hash
+
+	addGitRefsSession(t, repo, checkpointID, "sess-later")
+	current, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	require.NotEqual(t, verifiedHash, current.Hash())
+
+	require.NoError(t, batchPushCheckpointRefs(t.Context(), bareDir, ready))
+	require.NoError(t, queue.RemoveEntries(checkpointRefPushTokens(ready)))
+	assert.Equal(t, verifiedHash.String(), remoteRefHash(t, bareDir, refName),
+		"delivery must stay pinned to the hash that passed the trailer check")
+
+	remaining, err := queue.DrainEntries()
+	require.NoError(t, err)
+	require.Equal(t, []checkpoint.PushQueueEntry{{Ref: refName, Hash: current.Hash()}}, remaining,
+		"cleanup for the delivered generation must preserve the newer generation")
+
+	pushed, withheld, err := flushCheckpointRefsQueue(
+		t.Context(), repo, pushSettings{remote: bareDir}, true)
+	require.NoError(t, err)
+	assert.Zero(t, pushed)
+	assert.Equal(t, 1, withheld, "the newer untrailered generation must remain fail-closed")
+	assert.Equal(t, verifiedHash.String(), remoteRefHash(t, bareDir, refName))
+}
+
+// TestPrePushCheckpointRefs_OPFSkipShipsTheWholeQueueUnchanged is the other half
+// of the delivery gate: an explicit opt-out for this push (ENTIRE_OPF=no) is not
+// a backlog. Nothing is rewritten, so every queued ref is untrailered — and the
+// per-ref filter must not mistake that for "still redacting" and withhold the
+// queue the user deliberately chose to ship as-is, 8-layer and untagged.
+func TestPrePushCheckpointRefs_OPFSkipShipsTheWholeQueueUnchanged(t *testing.T) {
+	// No t.Parallel: uses t.Setenv and the fixture's t.Chdir.
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	t.Setenv("ENTIRE_OPF", "no")
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	before := refHashes(t, repo, refs)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+
+	require.Equal(t, before, refHashes(t, repo, refs), "an opted-out push must rewrite nothing")
+	for i, ref := range refs {
+		require.Equal(t, before[i].String(), remoteRefHash(t, bareDir, ref),
+			"every ref must ship as written when the user opted out of OPF")
+	}
+	require.Empty(t, queuedRefs(t, repo), "pushed refs leave the queue")
 }

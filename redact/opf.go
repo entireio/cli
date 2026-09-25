@@ -19,13 +19,22 @@ import (
 )
 
 // OPFConfig configures the optional OpenAI Privacy Filter detection layer.
-// Defaults are applied by ConfigurePrivacyFilter; callers should pass values
-// straight from settings without local normalization.
+// Callers pass values straight from settings without local normalization:
+// ConfigurePrivacyFilter fills in the default Command, and Timeout's default
+// is resolved per call, at the point the batch size is known.
 type OPFConfig struct {
 	Enabled    bool
 	Categories map[string]bool
 	Command    string // path or name of the opf binary; "" defaults to "opf"
-	Timeout    int    // seconds; 0 defaults to 30
+
+	// Timeout is the per-invocation deadline in seconds. It is deliberately
+	// NOT normalized to a default at configuration time: 0 has to survive
+	// all the way to the shell-out, where it means "no explicit override"
+	// and selects the size-adaptive deadline (adaptiveOPFTimeout). Folding
+	// it into a concrete number here would make an unset setting
+	// indistinguishable from someone typing that number, and the adaptive
+	// path would never run.
+	Timeout int
 
 	// Logger receives OPF runtime-failure diagnostics. nil means
 	// slog.Default(); the CLI injects its entry-point-initialized logger
@@ -45,8 +54,8 @@ var (
 	// The first detectOPF failure trips it via handleOPFFailure; subsequent
 	// detectOPF calls short-circuit before shelling out. Without this, a
 	// broken OPF install (binary missing, persistently timing out, etc.)
-	// makes every redaction call pay the full timeout — turning one
-	// condensation into N × 30s waits instead of a single warning plus
+	// makes every redaction call pay its full timeout — turning one
+	// condensation into N such waits instead of a single warning plus
 	// graceful fallback. Process-scoped so a fresh CLI invocation re-attempts.
 	opfBreakerTripped atomic.Bool
 )
@@ -58,9 +67,6 @@ var (
 // one).
 func ConfigurePrivacyFilter(cfg OPFConfig) {
 	cfgCopy := cfg
-	if cfgCopy.Timeout <= 0 {
-		cfgCopy.Timeout = 30
-	}
 	if cfgCopy.Command == "" {
 		cfgCopy.Command = defaultOPFCommand
 	}
@@ -75,9 +81,6 @@ func ConfigurePrivacyFilter(cfg OPFConfig) {
 // explicit runtime instead of constructing one.
 func ConfigurePrivacyFilterWithRuntime(cfg OPFConfig, rt opfRuntime) {
 	cfgCopy := cfg
-	if cfgCopy.Timeout <= 0 {
-		cfgCopy.Timeout = 30
-	}
 	cfgCopy.runtime = rt
 	opfConfigMu.Lock()
 	opfConfig = &cfgCopy
@@ -332,7 +335,11 @@ type opfRuntime interface {
 // invocation is intentional for v1 — daemon mode is a planned follow-up
 // that implements the same opfRuntime interface so callers don't change.
 type shellOut struct {
-	command        string
+	command string
+
+	// timeoutSeconds is the configured per-invocation deadline. 0 means the
+	// user set no timeout_seconds, which selects adaptiveOPFTimeout's
+	// size-scaled deadline instead of a fixed one.
 	timeoutSeconds int
 
 	// commandRunner builds the *exec.Cmd run for each Redact call. Tests
@@ -361,11 +368,113 @@ const (
 	//     span boundaries)
 	opfBatchSeparator = "\x1e"
 
-	// Keep a pathological transcript or process from making the CLI allocate
-	// unbounded buffers while preparing or reading an OPF shell-out.
-	opfMaxBatchInputBytes    = 16 * 1024 * 1024
+	// opfMaxBatchInputBytes bounds the joined input this process buffers
+	// before handing it to the opf shell-out. It exists for exactly one
+	// reason: a buffer this size is safe to allocate on any machine
+	// capable of running this CLI, so no pathological or corrupted input
+	// can make the CLI allocate its way into an out-of-memory crash. It
+	// bounds process memory, not content legitimacy.
+	//
+	// It is therefore NOT tuned to how big a session is, and it is not
+	// user-configurable — not even via ENTIRE_OPF_BATCH_LIMIT=unlimited,
+	// which waives the friendlier strategy-layer cap (batchDefaultLimit in
+	// cmd/entire/cli/strategy) and never this one. "Unlimited" means "stop
+	// applying the sanity check", not "remove memory protection". Judging
+	// whether input is plausible belongs to that cap, which owns the
+	// explanatory error; this is the last wall and its error is blunt by
+	// design. Nothing real should ever reach it: the cap above sits far
+	// below, so hitting this means the layer above was explicitly waived.
+	opfMaxBatchInputBytes = 256 * 1024 * 1024
+
+	// opfMaxProcessOutputBytes bounds what we buffer back from the opf
+	// process's stdout/stderr, for the same allocate-no-further reason.
 	opfMaxProcessOutputBytes = 1 * 1024 * 1024
 )
+
+// The shell-out's deadline scales with how much text the call actually
+// carries, because a fixed one cannot do this job. Benchmarked against the
+// real binary (docs/development/opf-throughput-findings.md), OPF sustains
+// roughly 1.14 s/KB of input on CPU — the only viable device on this stack,
+// since MPS measured slower rather than faster — so the fixed 30s this
+// replaces was already short of what 50 KB of prose needs. Reading
+// slow-but-working redaction as a broken runtime is the worst failure
+// available here: it trips the process-wide circuit breaker
+// (handleOPFFailure), which abandons every other ref in the same pass, not
+// just the call that ran long.
+const (
+	// opfTimeoutFloor is the minimum deadline, held at the previous fixed
+	// default. Below a few KB the per-call fixed cost (the ~6s model load)
+	// dominates throughput, so scaling further down would measure nothing
+	// real.
+	opfTimeoutFloor = 30 * time.Second
+
+	// opfTimeoutRatePerKB is the measured sustained rate. It is the 1.14 s/KB
+	// figure the benchmark held at from 250 KB through 500 KB, not the
+	// friendlier 0.85 s/KB small inputs show before throughput degrades.
+	opfTimeoutRatePerKB = 1140 * time.Millisecond
+
+	// opfTimeoutMargin covers hardware variance against the one machine the
+	// rate was measured on. It is slack, not tightness: this deadline should
+	// essentially never fire on content that is merely large.
+	opfTimeoutMargin = 2
+
+	// opfTimeoutCeiling clamps the scaled estimate. Its only job is to answer
+	// "at what point is 'the runtime is stuck' a better explanation than
+	// 'this is a big session still working'?" It is NOT derived from
+	// batchDefaultLimit in cmd/entire/cli/strategy and must not be
+	// re-derived from it: that cap is a byte-sized memory-safety backstop
+	// with no time budget in it at all.
+	//
+	// Three hours buys ~9 MB of batched input at the measured rate WITHOUT
+	// the 2x margin above, or ~4.6 MB WITH it — two framings of the same
+	// clamp, not two different capacities. Sized against the real figures
+	// in docs/development/opf-bug-investigation.md: a median checkpoint's
+	// transcript is 3.9 MB raw (~3.3 MB of prose leaves), and the largest
+	// figure there — a ref's whole un-trailered ancestry at ~9.5 MB raw —
+	// is measured before the dedup the batch redactor applies to
+	// near-identical trees, so what the model actually sees stays closer
+	// to one session's text than to the summed chain. Content up to the
+	// ~4.6 MB with-margin figure, comfortably past a median session, keeps
+	// the full doubled allowance; past that the allowance narrows toward
+	// 1x (still not zero) as it approaches the ~9 MB without-margin
+	// figure, so only a machine materially slower than the benchmark
+	// trips it.
+	//
+	// The clamp is also what bounds one call's blast radius on the work
+	// queued behind it: the detached flush worker (strategy.RunOPFFlush)
+	// rewrites refs one at a time and re-spawns only on a 5-minute throttle,
+	// and the pre-push gate's inline attempt runs inside the user's push. An
+	// effectively open-ended deadline would let one stuck call recreate the
+	// jam this design exists to remove.
+	opfTimeoutCeiling = 3 * time.Hour
+
+	// opfTimeoutBytesPerKB converts batch bytes into the KB unit the rate is
+	// expressed in.
+	opfTimeoutBytesPerKB = 1024
+)
+
+// adaptiveOPFTimeout resolves the deadline for a single opf invocation from
+// the size of the batch it carries.
+//
+// configuredSeconds is the raw timeout_seconds from settings, where 0 means
+// "unset" — nothing normalizes it earlier, precisely so this distinction
+// survives (see OPFConfig.Timeout). An explicit value is a deliberate
+// override and is honored exactly, in both directions: the formula neither
+// raises it for a large batch nor lowers it for a small one.
+func adaptiveOPFTimeout(configuredSeconds, batchedLen int) time.Duration {
+	if configuredSeconds > 0 {
+		return time.Duration(configuredSeconds) * time.Second
+	}
+	estimated := time.Duration(batchedLen/opfTimeoutBytesPerKB) * opfTimeoutRatePerKB * opfTimeoutMargin
+	switch {
+	case estimated < opfTimeoutFloor:
+		return opfTimeoutFloor
+	case estimated > opfTimeoutCeiling:
+		return opfTimeoutCeiling
+	default:
+		return estimated
+	}
+}
 
 // Redact runs OPF on a single text input.
 func (s *shellOut) Redact(ctx context.Context, text string, categories []string) ([]Span, error) {
@@ -400,7 +509,7 @@ func (s *shellOut) RedactBatch(ctx context.Context, inputs []string, categories 
 	if tooLarge {
 		return nil, fmt.Errorf("opf input too large (%d bytes, limit %d)", batchedLen, opfMaxBatchInputBytes)
 	}
-	timeout := time.Duration(s.timeoutSeconds) * time.Second
+	timeout := adaptiveOPFTimeout(s.timeoutSeconds, batchedLen)
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

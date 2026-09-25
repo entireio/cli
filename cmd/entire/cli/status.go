@@ -392,6 +392,17 @@ type checkpointSyncInfo struct {
 	// where a user finds out why — the hooks only log the rejection.
 	IgnoredRemote string
 	IgnoredReason string
+	// OPFPending counts queued checkpoint refs the OpenAI Privacy Filter has
+	// not rewritten yet. It is 0 when the filter is off (the default), when
+	// there is no backlog, and when the local read failed — status never fails
+	// over this. A ref the worker can never rewrite simply stays counted here
+	// for as long as it exists; there is no separate escalation.
+	//
+	// Unlike Unpushed, it is not scoped to a sync destination: OPF is a local
+	// rewrite that runs before anything is pushed, so it holds identically
+	// whatever the elected remote turns out to be — which is why it is computed
+	// before the election rather than on any one of its branches.
+	OPFPending int
 }
 
 // resolveDedicatedReadSource records where checkpoint READS land when the
@@ -437,6 +448,12 @@ func resolveDedicatedReadSource(ctx context.Context, s *EntireSettings, lead str
 
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
 	info := checkpointSyncInfo{PushDisabled: s.IsPushSessionsDisabled()}
+	// Before the election, and before every early return below: the OPF
+	// backlog is a property of the local refs alone, so it is just as true in
+	// a repo with no remotes or a fail-closed checkpoint_push_remote as in a
+	// healthy one. Computing it on one branch of the election would hide it
+	// from exactly the repos most likely to have accumulated one.
+	info.OPFPending = opfBacklogForStatus(ctx, s)
 
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
@@ -562,6 +579,38 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 	return n
 }
 
+// opfBacklogForStatus reads the local OpenAI Privacy Filter backlog: how many
+// queued checkpoint refs still need the model rewrite.
+//
+// Best-effort and local-only, on the same contract as
+// countUnpushedCheckpointsForStatus: status must never fail because a backlog
+// read failed, so every error logs at debug and reads as "no backlog".
+//
+// Gated on the setting first so the default (filter off) opens no repository
+// and touches no files: this runs on every `entire status` in an enabled repo.
+// The settings answer is the right one here even though the push decision and
+// worker consult redact.OPFEnabled — see settings.EntireSettings.OPFEnabled.
+func opfBacklogForStatus(ctx context.Context, s *EntireSettings) int {
+	if !s.OPFEnabled() {
+		return 0
+	}
+	repo, err := gitrepo.OpenCurrent(ctx)
+	if err != nil {
+		logging.Debug(ctx, "OPF backlog read failed to open the repository; omitting from status",
+			slog.String("error", err.Error()))
+		return 0
+	}
+	defer repo.Close()
+
+	awaiting, err := strategy.RefsAwaitingOPF(ctx, repo)
+	if err != nil {
+		logging.Debug(ctx, "pending OPF ref count failed; omitting from status",
+			slog.String("error", err.Error()))
+		return 0
+	}
+	return len(awaiting)
+}
+
 // writeCheckpointSyncLines reports the checkpoint sync destination (and the
 // unpushed counter, when non-zero) in the enabled status block, prefixed by the
 // disabled-pushing line when automatic pushing is off. No remotes configured
@@ -635,6 +684,28 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString("\n  ")
 		b.WriteString(sty.render(sty.dim, formatUnpushedCheckpointsLine(info)))
 	}
+	// Dim, like the counter above: work in progress, nothing to do about it.
+	if info.OPFPending > 0 {
+		b.WriteString("\n  ")
+		b.WriteString(sty.render(sty.dim, formatPendingOPFLine(info.OPFPending)))
+	}
+}
+
+// formatPendingOPFLine phrases the pending-redaction counter: checkpoints whose
+// OPF rewrite has not happened yet. A detached worker retries them; a later
+// user push delivers generations the worker has finished, so this is
+// informational — the count going down on its own is the normal case.
+//
+// It deliberately says nothing about whether these checkpoints can be pushed.
+// That depends on the OPF decision resolved at push time, and a user who
+// answers "No" pushes them regex-only; status has no way to know that answer in
+// advance and must not promise either outcome.
+func formatPendingOPFLine(pending int) string {
+	noun := nounCheckpoints
+	if pending == 1 {
+		noun = nounCheckpoint
+	}
+	return fmt.Sprintf("%d %s pending OpenAI Privacy Filter redaction (runs in the background)", pending, noun)
 }
 
 // formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL
@@ -1105,6 +1176,11 @@ type statusJSON struct {
 	// fall back to the elected remote). Mirrors the text path's warning line.
 	CheckpointRemoteIgnored       string `json:"checkpoint_remote_ignored,omitempty"`
 	CheckpointRemoteIgnoredReason string `json:"checkpoint_remote_ignored_reason,omitempty"`
+	// CheckpointOPFPending mirrors the text path's OPF line: queued checkpoint
+	// refs the privacy filter has not rewritten yet. Absent when the OpenAI
+	// Privacy Filter is off, which is the default, so its absence is not
+	// evidence that a backlog is clear.
+	CheckpointOPFPending int `json:"checkpoint_opf_pending,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -1205,6 +1281,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.UnpushedCheckpoints = syncInfo.Unpushed
 		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
+		result.CheckpointOPFPending = syncInfo.OPFPending
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			// Read-only, and one entry per session. Collapsing by agent hid a

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -36,7 +37,17 @@ func TestPushCheckpointRefWithRecovery_PreservesRejection(t *testing.T) {
 	t.Chdir(workDir) // CWD-based push/recovery; cannot run in parallel.
 	installCheckpointRejectHook(t, bareDir, false)
 
-	err := pushCheckpointRefWithRecovery(t.Context(), bareDir, refs[0])
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	ref, err := repo.Reference(refs[0], true)
+	require.NoError(t, err)
+	candidate := checkpointRefPush{
+		token: checkpoint.PushQueueEntry{Ref: refs[0], Hash: ref.Hash()},
+		name:  refs[0],
+		hash:  ref.Hash(),
+	}
+	_, err = pushCheckpointRefWithRecovery(t.Context(), repo, bareDir, candidate, false)
 	require.ErrorContains(t, err, checkpointRejectReason)
 	require.ErrorContains(t, err, checkpointUnblockURL)
 	assert.NotContains(t, err.Error(), "sync diverged")
@@ -51,7 +62,17 @@ func TestPushCheckpointRefWithRecovery_PreservesUnknownFailure(t *testing.T) {
 	t.Chdir(workDir)
 
 	// Unknown failures still attempt recovery and must preserve both causes.
-	err := pushCheckpointRefWithRecovery(t.Context(), filepath.Join(t.TempDir(), "missing.git"), refs[0])
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	ref, err := repo.Reference(refs[0], true)
+	require.NoError(t, err)
+	candidate := checkpointRefPush{
+		token: checkpoint.PushQueueEntry{Ref: refs[0], Hash: ref.Hash()},
+		name:  refs[0],
+		hash:  ref.Hash(),
+	}
+	_, err = pushCheckpointRefWithRecovery(t.Context(), repo, filepath.Join(t.TempDir(), "missing.git"), candidate, false)
 	var recoveryErr *checkpointRefRecoveryError
 	require.ErrorAs(t, err, &recoveryErr)
 	require.ErrorIs(t, err, recoveryErr.pushErr)

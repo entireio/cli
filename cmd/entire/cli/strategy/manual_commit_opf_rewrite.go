@@ -54,8 +54,10 @@ func (e *V1DivergedError) Error() string {
 // BootstrapTooLargeError: more un-OPF'd commits to rewrite than the
 // safety cap — a first push to a remote with no v1 yet, or a checkpoint
 // ref whose un-trailered ancestry runs deep because OPF was enabled
-// late. OPF inference is ~30s per commit, so unbounded bootstraps could
-// take hours.
+// late. OPF inference cost scales with each commit's own content, not a
+// fixed per-commit price (~1.14s/KB measured, see
+// docs/development/opf-throughput-findings.md), so unbounded bootstraps
+// against many real commits could take far longer than a quick pass.
 type BootstrapTooLargeError struct {
 	Count, Limit int
 }
@@ -137,8 +139,12 @@ func (e *OPFNoCategoriesError) Error() string {
 }
 
 const (
-	// bootstrapDefaultLimit caps first-push history rewrites. Picked
-	// to bound worst-case wall-clock at ~50min @ 30s/commit.
+	// bootstrapDefaultLimit caps first-push history rewrites. This bounds
+	// COUNT (how many commits get pulled into one bootstrap rewrite), not
+	// wall-clock time — each commit's own content cost is governed
+	// separately by the leaf-byte cap (batchDefaultLimit) and the
+	// shell-out's adaptive timeout, not by a fixed per-commit estimate.
+	// 100 is a plausible-history-depth number, not a time budget.
 	bootstrapDefaultLimit = 100
 	bootstrapEnvVar       = "ENTIRE_OPF_BOOTSTRAP_LIMIT"
 )
@@ -157,14 +163,17 @@ func resolveBootstrapLimit() int {
 	return bootstrapDefaultLimit
 }
 
-// OPFBatchTooLargeError: a single push has more prose-leaf content
-// than ENTIRE_OPF_BATCH_LIMIT will allow OPF to chew through in one
-// inference call. Pushing under the limit yields a single ~10-30s
-// pause; without the cap, a 100MB-of-prose push could take an hour.
+// OPFBatchTooLargeError: one OPF pass — a single checkpoint ref on
+// git-refs, the whole unpushed v1 chain on git-branch — has more
+// prose-leaf content than ENTIRE_OPF_BATCH_LIMIT allows in one
+// inference call. See batchDefaultLimit: this is a backstop against
+// broken input, so hitting it says something about the content, not
+// about the size of the session.
 //
-// The user-facing remediation is identical in shape to
-// BootstrapTooLargeError: bump the limit, push without OPF, or break
-// the push into smaller pieces.
+// The message therefore leads with "look at what this checkpoint
+// holds" rather than with the override. The override is still named,
+// because someone who has looked and wants that content redacted
+// anyway needs a way through.
 type OPFBatchTooLargeError struct {
 	LeafBytes int
 	Limit     int
@@ -172,17 +181,58 @@ type OPFBatchTooLargeError struct {
 
 func (e *OPFBatchTooLargeError) Error() string {
 	return fmt.Sprintf("OPF would run inference on %d prose-leaf bytes "+
-		"(limit %d). Set ENTIRE_OPF_BATCH_LIMIT=<bytes> or =unlimited to override, "+
-		"or push without OPF (ENTIRE_OPF=no git push) and let a smaller follow-up push run OPF",
+		"(limit %d). No real session should reach this limit, so check what this "+
+		"content is — a corrupted transcript or an accidentally-embedded binary is "+
+		"the likely explanation. If it really is content you want redacted, set "+
+		"ENTIRE_OPF_BATCH_LIMIT=<bytes> or =unlimited to override, or push without "+
+		"OPF (ENTIRE_OPF=no git push)",
 		e.LeafBytes, e.Limit)
 }
 
 const (
-	// batchDefaultLimit caps the cumulative prose-leaf bytes one push
-	// will hand to OPF. 2 MB at ~5.4s/100KB ≈ ~110s of inference, on
-	// the high end of what's acceptable as a single push pause but
-	// generous enough that any realistic push fits.
-	batchDefaultLimit = 2 * 1024 * 1024
+	// batchDefaultLimit caps the cumulative prose-leaf bytes one OPF pass
+	// hands to the model: per checkpoint ref on git-refs
+	// (manual_commit_opf_refs.go), cumulative across the unpushed v1 chain
+	// on git-branch.
+	//
+	// It is a backstop against genuinely broken input — a corrupted
+	// transcript, an accidentally-embedded binary, gigabytes of pasted
+	// dump — and nothing else. It is not a speed target, it is not sized
+	// against real session data, and it is not a knob anyone should have
+	// to reason about or adjust: no real session, however long, should
+	// come anywhere near it. A session that does hit it is itself the
+	// thing to investigate; "your session didn't fit, raise the number"
+	// is not the intended reading.
+	//
+	// It does not try to tell "pathological" from "merely large", because
+	// a byte count cannot: both are just a lot of bytes. What actually
+	// separates the two is behavior, not size. Broken content makes the
+	// scan fail, and that has its own path — OPFRuntimeFailedError plus
+	// the process-wide circuit breaker. Large content just takes longer:
+	// docs/development/opf-throughput-findings.md measured the real runtime at ~1.14s/KB
+	// sustained on CPU (MPS confirmed slower on this stack), so every
+	// real session is minutes to hours of inference and no cap value
+	// changes that. On git-refs nobody waits for it either — the rewrite
+	// runs detached and flushCheckpointRefsQueue's partitionOPFTrailered
+	// gate ships the refs that are already redacted, so a slow-but-working
+	// checkpoint holds neither its siblings nor the user's push.
+	//
+	// The value is therefore picked to be unreachable rather than to hug
+	// anything. The largest real session measured holds a few MiB of
+	// prose-leaf text, so 128 MiB is more than an order of magnitude
+	// above any session that exists; content that reaches it has to be a
+	// mistake. It also sits well clear of redact's opfMaxBatchInputBytes
+	// (256 MiB), which bounds the same quantity one layer lower — the
+	// deduplicated prose-leaf population BatchBytesWithPrivacyFilter
+	// feeds to the shell-out, which opfBatchedInputLen measures as those
+	// same leaf bytes plus one separator byte per leaf. That one is a
+	// pure memory-safety wall with no override; keeping real distance
+	// below it means this check owns the error message a user can act on
+	// (OPFBatchTooLargeError explains itself; the shell-out's generic
+	// "input too large" does not) and that raising this limit, or setting
+	// ENTIRE_OPF_BATCH_LIMIT=unlimited, still leaves the process's
+	// allocation protected. Neither number is a size to tune.
+	batchDefaultLimit = 128 * 1024 * 1024
 	batchEnvVar       = "ENTIRE_OPF_BATCH_LIMIT"
 )
 
@@ -200,26 +250,27 @@ func resolveBatchLimit() int {
 	return batchDefaultLimit
 }
 
-// scaleBatchLimit multiplies a batch-limit value by mult, saturating
-// at math.MaxInt to avoid signed-overflow when the limit is "unlimited"
-// (math.MaxInt) or a very large explicit value. Returns 0 if either
-// operand is non-positive, so the caller can treat 0 as "no cap" too.
-func scaleBatchLimit(limit, mult int) int {
-	if limit <= 0 || mult <= 0 {
+// rawByteCapForBatchLimit derives the raw-memory ceiling from the prose-leaf
+// limit, saturating at math.MaxInt to avoid signed overflow when the limit is
+// "unlimited" (math.MaxInt) or a very large explicit value. A non-positive
+// limit returns 0 so the caller can treat it as "no cap" too.
+func rawByteCapForBatchLimit(limit int) int {
+	if limit <= 0 {
 		return 0
 	}
-	if limit > math.MaxInt/mult {
+	if limit > math.MaxInt/rawByteCapMultiplier {
 		return math.MaxInt
 	}
-	return limit * mult
+	return limit * rawByteCapMultiplier
 }
 
 // OPFRawBytesTooLargeError: the cumulative raw blob bytes the
 // collection pass loaded into memory exceeded the safety ceiling.
-// Unlike the leaf-byte cap, this is about RAM headroom rather than
-// inference wall-clock — a 200 MiB push of mostly-structural JSON has
-// tiny leaf content but huge raw bytes, and would OOM the user's
-// shell before the leaf-byte cap got a chance to fire.
+// Unlike the leaf-byte cap, this is about RAM headroom rather than the
+// plausibility of the input — a multi-hundred-MiB push of
+// mostly-structural JSON has tiny leaf content but huge raw bytes, and
+// would OOM the user's shell before the leaf-byte cap got a chance to
+// fire.
 //
 // The raw ceiling is derived from ENTIRE_OPF_BATCH_LIMIT (raw =
 // leaf × rawByteCapMultiplier) so a user bumping the leaf cap
@@ -231,8 +282,8 @@ type OPFRawBytesTooLargeError struct {
 }
 
 func (e *OPFRawBytesTooLargeError) Error() string {
-	return fmt.Sprintf("OPF rewrite would buffer %d raw blob bytes across "+
-		"all unpushed commits (limit %d, ~%d× the prose-leaf cap as a RAM ceiling). "+
+	return fmt.Sprintf("OPF rewrite would buffer %d raw blob bytes in one "+
+		"unit of work (limit %d, ~%d× the prose-leaf cap as a RAM ceiling). "+
 		"Bump ENTIRE_OPF_BATCH_LIMIT (the raw ceiling scales with it) "+
 		"or push without OPF (ENTIRE_OPF=no git push) and let a smaller "+
 		"follow-up push run OPF",
@@ -240,11 +291,34 @@ func (e *OPFRawBytesTooLargeError) Error() string {
 }
 
 // rawByteCapMultiplier ties the raw-byte RAM ceiling to the leaf-byte
-// inference cap. 100× means: leaf cap 2 MiB → raw ceiling 200 MiB.
-// Picked to comfortably exceed any realistic JSON-scaffolding ratio
-// (a 10 MiB JSONL with 300 KB of leaves still fits) while preventing
-// pathological RAM blowups (a 5 GiB pasted dump aborts before loading).
-const rawByteCapMultiplier = 100
+// cap so there is no second env var. 2× means: default leaf cap 128 MiB
+// → raw ceiling 256 MiB.
+//
+// This one really is a resource number, unlike batchDefaultLimit: it
+// bounds what this process holds in memory at once, so what matters is
+// the absolute ceiling, not the multiple. 256 MiB is the same order as
+// redact's opfMaxBatchInputBytes — both answer "what can this process
+// safely allocate", and the two buffers coexist during a rewrite. The
+// multiplier exists only so one env var moves both; it is not itself
+// the sized quantity, which is why it comes DOWN as batchDefaultLimit
+// goes up. Holding the old 16× against a 128 MiB leaf cap would put
+// this at 2 GiB, which stops being a memory ceiling at all.
+//
+// 2× still preserves the ordering the error messages depend on. Real
+// transcripts run ~1.2× raw bytes per prose-leaf byte (see
+// docs/development/opf-bug-investigation.md), so
+// content of real shape sitting exactly at the leaf cap buffers ~154
+// MiB of raw bytes and trips the leaf-byte cap — the check that
+// explains itself — before this one. What lands here instead is the
+// asymmetry: raw bytes are counted per commit across the whole flush
+// with no dedup, while the leaf count dedups, so an un-applied chain
+// re-carrying the same growing full.jsonl, or a blob that is mostly
+// JSON scaffolding, inflates this side only. Content whose raw-to-leaf
+// ratio exceeds 2× therefore aborts on RAM rather than on leaf bytes,
+// which is the right call: at a quarter-gigabyte of buffered blobs
+// memory really is the binding constraint, and the error says so and
+// names the env var that scales both.
+const rawByteCapMultiplier = 2
 
 // RewriteUnpushedV1WithOPF re-redacts unpushed entire/checkpoints/v1
 // commits with OPF, builds new commits carrying Entire-OPF-Applied:
@@ -329,13 +403,13 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	pendings := make([]pendingCommit, 0, len(unpushed))
 	// Bound raw-bytes-in-memory incrementally so a pathological push
 	// (e.g. 5 GiB of pasted dumps) aborts before exhausting the user's
-	// shell RAM. The leaf-byte cap downstream is about inference cost;
-	// this one is about memory ceiling and fires earlier. scaleBatchLimit
-	// saturates at math.MaxInt so "unlimited" actually means unlimited
-	// — without saturation, "unlimited" × 100 overflows int and the cap
-	// trips on every push.
-	rawCap := scaleBatchLimit(resolveBatchLimit(), rawByteCapMultiplier)
-	var rawBytesSoFar int
+	// shell RAM. The leaf-byte cap downstream backstops implausible
+	// content; this one is a memory ceiling and fires earlier.
+	// scaleBatchLimit saturates at math.MaxInt so "unlimited" actually
+	// means unlimited — without saturation, "unlimited" × 16 overflows
+	// int and the cap trips on every push.
+	rawCap := rawByteCapForBatchLimit(resolveBatchLimit())
+	rawBudget := newOPFRawByteBudget(rawCap)
 	for _, c := range unpushed {
 		pc := pendingCommit{commit: c}
 		if !trailers.HasOPFApplied(c.Message) {
@@ -350,14 +424,8 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 			// commit keeps the final rewritten tip from reintroducing an
 			// un-OPF-redacted older shard. collect and apply walk the tree the
 			// same way so the cached keys line up.
-			if err := collectTreeBlobs(repo, tree, "", &pc.blobs, &pc.paths); err != nil {
+			if err := collectTreeBlobsWithinBudget(repo, tree, "", &pc.blobs, &pc.paths, rawBudget); err != nil {
 				return plumbing.ZeroHash, fmt.Errorf("collect blobs %s: %w", c.Hash.String()[:7], err)
-			}
-			for _, b := range pc.blobs {
-				rawBytesSoFar += len(b.Content)
-			}
-			if rawBytesSoFar > rawCap {
-				return plumbing.ZeroHash, &OPFRawBytesTooLargeError{RawBytes: rawBytesSoFar, Limit: rawCap}
 			}
 			globalBlobs = append(globalBlobs, pc.blobs...)
 		}
@@ -369,6 +437,18 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	// so a too-large push fails fast with a clear remediation message.
 	var globalRedacted [][]byte
 	if len(globalBlobs) > 0 {
+		// Unlike the git-refs backend (manual_commit_opf_refs.go), this cap
+		// stays cumulative across the WHOLE unpushed v1 chain rather than being
+		// scoped per commit: each rebuilt commit is the next one's parent (see
+		// the Pass 3 loop below), so commits cannot be redacted independently
+		// without reintroducing the "chunking" hazard rejected in
+		// docs/development/opf-bug-investigation.md — a
+		// partially-rewritten chain whose ancestor is a still-un-trailered
+		// commit. Separate checkpoint refs are independent chains, which is why
+		// only that backend can scope per ref. So if this cap ever trips on
+		// content that really is a chain of real sessions, this backend's only
+		// remaining levers are ENTIRE_OPF_BATCH_LIMIT or converging it onto the
+		// git-refs queue model — not further chunking.
 		leafBytes := redact.SumProseLeafBytes(globalBlobs)
 		if limit := resolveBatchLimit(); leafBytes > limit {
 			return plumbing.ZeroHash, &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}
@@ -624,6 +704,29 @@ func isRedactableBlobName(name string) bool {
 // the tree (e.g. "ab/cd.../0/full.jsonl"), used later by the apply
 // walker to find each blob's redacted bytes in the cached map.
 func collectTreeBlobs(repo *git.Repository, tree *object.Tree, pathPrefix string, blobs *[]redact.NamedBlob, paths *[]string) error {
+	return collectTreeBlobsWithinBudget(repo, tree, pathPrefix, blobs, paths, nil)
+}
+
+type opfRawByteBudget struct {
+	used  int
+	limit int
+}
+
+func newOPFRawByteBudget(limit int) *opfRawByteBudget {
+	return &opfRawByteBudget{limit: limit}
+}
+
+// collectTreeBlobsWithinBudget checks each blob's object metadata before
+// opening its content reader. That ordering makes the raw cap an allocation
+// boundary rather than merely an after-the-fact input-size check.
+func collectTreeBlobsWithinBudget(
+	repo *git.Repository,
+	tree *object.Tree,
+	pathPrefix string,
+	blobs *[]redact.NamedBlob,
+	paths *[]string,
+	budget *opfRawByteBudget,
+) error {
 	for _, e := range tree.Entries {
 		switch e.Mode {
 		case filemode.Dir:
@@ -642,14 +745,14 @@ func collectTreeBlobs(repo *git.Repository, tree *object.Tree, pathPrefix string
 			if err != nil {
 				return fmt.Errorf("load subtree %s/%s: %w", pathPrefix, e.Name, err)
 			}
-			if err := collectTreeBlobs(repo, subTree, subPath, blobs, paths); err != nil {
+			if err := collectTreeBlobsWithinBudget(repo, subTree, subPath, blobs, paths, budget); err != nil {
 				return err
 			}
 		case filemode.Regular, filemode.Executable:
 			if !isRedactableBlobName(e.Name) {
 				continue
 			}
-			content, err := readBlob(repo, e.Hash)
+			content, err := readBlobWithinBudget(repo, e.Hash, budget)
 			if err != nil {
 				return fmt.Errorf("read blob %s/%s: %w", pathPrefix, e.Name, err)
 			}
@@ -664,6 +767,60 @@ func collectTreeBlobs(repo *git.Repository, tree *object.Tree, pathPrefix string
 		}
 	}
 	return nil
+}
+
+func readBlobWithinBudget(repo *git.Repository, hash plumbing.Hash, budget *opfRawByteBudget) ([]byte, error) {
+	blob, err := repo.BlobObject(hash)
+	if err != nil {
+		return nil, fmt.Errorf("blob: %w", err)
+	}
+	if budget == nil {
+		return readBlobObject(blob, math.MaxInt)
+	}
+
+	remaining := budget.limit - budget.used
+	if remaining < 0 || blob.Size > int64(remaining) {
+		rawBytes := budget.limit
+		if budget.limit < math.MaxInt {
+			rawBytes++
+		}
+		if blob.Size <= int64(math.MaxInt-budget.used) {
+			rawBytes = budget.used + int(blob.Size)
+		}
+		return nil, &OPFRawBytesTooLargeError{RawBytes: rawBytes, Limit: budget.limit}
+	}
+
+	content, err := readBlobObject(blob, remaining)
+	if err != nil {
+		var tooLarge *OPFRawBytesTooLargeError
+		if errors.As(err, &tooLarge) {
+			return nil, &OPFRawBytesTooLargeError{RawBytes: budget.used + remaining + 1, Limit: budget.limit}
+		}
+		return nil, err
+	}
+	budget.used += len(content)
+	return content, nil
+}
+
+func readBlobObject(blob *object.Blob, remaining int) ([]byte, error) {
+	r, err := blob.Reader()
+	if err != nil {
+		return nil, fmt.Errorf("blob reader: %w", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	var reader io.Reader = r
+	if remaining < math.MaxInt {
+		reader = io.LimitReader(r, int64(remaining)+1)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("blob read: %w", err)
+	}
+	if len(data) > remaining {
+		return nil, &OPFRawBytesTooLargeError{RawBytes: remaining + 1, Limit: remaining}
+	}
+	return data, nil
 }
 
 // rebuildTreeWithCachedRedaction walks the whole tree and produces a new
@@ -792,16 +949,7 @@ func readBlob(repo *git.Repository, hash plumbing.Hash) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("blob: %w", err)
 	}
-	r, err := blob.Reader()
-	if err != nil {
-		return nil, fmt.Errorf("blob reader: %w", err)
-	}
-	defer func() { _ = r.Close() }()
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("blob read: %w", err)
-	}
-	return data, nil
+	return readBlobObject(blob, math.MaxInt)
 }
 
 // atomicSetV1Ref CAS-updates the local v1 ref through the same lock protocol as

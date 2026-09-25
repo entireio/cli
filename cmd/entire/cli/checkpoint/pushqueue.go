@@ -43,7 +43,15 @@ func (q *PushQueue) lock() (*os.Root, func(), error) {
 
 // pushQueueEntry is one JSONL record: a checkpoint ref awaiting push.
 type pushQueueEntry struct {
-	Ref string `json:"ref"`
+	Ref  string `json:"ref"`
+	Hash string `json:"hash,omitempty"`
+}
+
+// PushQueueEntry identifies one observed generation of a checkpoint ref. Hash
+// is zero only for queue records written by older Entire versions.
+type PushQueueEntry struct {
+	Ref  plumbing.ReferenceName
+	Hash plumbing.Hash
 }
 
 // PushQueue is a flock-protected JSONL list of checkpoint refs awaiting push,
@@ -81,13 +89,24 @@ func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFi
 // idempotent. Enqueue takes the lock so concurrent writers never interleave a
 // partial line.
 func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
+	return q.EnqueueEntry(PushQueueEntry{Ref: ref})
+}
+
+// EnqueueEntry appends an observed ref generation. A later generation of the
+// same ref supersedes it when the queue is read, while exact-generation removal
+// cannot erase the later entry.
+func (q *PushQueue) EnqueueEntry(entry PushQueueEntry) error {
 	root, release, err := q.lock()
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	line, err := json.Marshal(pushQueueEntry{Ref: ref.String()})
+	diskEntry := pushQueueEntry{Ref: entry.Ref.String()}
+	if !entry.Hash.IsZero() {
+		diskEntry.Hash = entry.Hash.String()
+	}
+	line, err := json.Marshal(diskEntry)
 	if err != nil {
 		return fmt.Errorf("encode push queue entry: %w", err)
 	}
@@ -102,6 +121,15 @@ func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
 	return nil
 }
 
+// EnqueueRef records the ref's current observed generation.
+func (q *PushQueue) EnqueueRef(repo *git.Repository, refName plumbing.ReferenceName) error {
+	ref, err := repo.Reference(refName, true)
+	if err != nil {
+		return fmt.Errorf("resolve ref %s for push queue: %w", refName, err)
+	}
+	return q.EnqueueEntry(PushQueueEntry{Ref: refName, Hash: ref.Hash()})
+}
+
 // Drain returns the de-duplicated refs currently queued, in first-seen order. It
 // does NOT remove them; call Remove after a confirmed push so a failed push
 // retries next time. A missing queue file yields no refs.
@@ -113,22 +141,29 @@ func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
 // compaction point (e.g. a long-lived session that keeps re-enqueuing the same
 // checkpoint ref but never pushes).
 func (q *PushQueue) Drain() ([]plumbing.ReferenceName, error) {
+	entries, err := q.DrainEntries()
+	return pushQueueRefs(entries), err
+}
+
+// DrainEntries returns the latest observed generation of every queued ref in
+// first-seen ref order. It compacts redundant, superseded, and malformed lines.
+func (q *PushQueue) DrainEntries() ([]PushQueueEntry, error) {
 	root, release, err := q.lock()
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 
-	refs, rawLines, err := q.readLocked(root)
+	entries, rawLines, err := q.readEntriesLocked(root)
 	if err != nil {
 		return nil, err
 	}
-	if rawLines > len(refs) {
-		if err := q.rewriteLocked(root, refs); err != nil {
+	if rawLines > len(entries) {
+		if err := q.rewriteEntriesLocked(root, entries); err != nil {
 			return nil, err
 		}
 	}
-	return refs, nil
+	return entries, nil
 }
 
 // Peek returns the de-duplicated refs currently queued, in first-seen order,
@@ -136,14 +171,20 @@ func (q *PushQueue) Drain() ([]plumbing.ReferenceName, error) {
 // compacts redundant lines in place) — for counters/status displays that must
 // observe the queue without owning a push. A missing queue file yields no refs.
 func (q *PushQueue) Peek() ([]plumbing.ReferenceName, error) {
+	entries, err := q.PeekEntries()
+	return pushQueueRefs(entries), err
+}
+
+// PeekEntries is the read-only counterpart to DrainEntries.
+func (q *PushQueue) PeekEntries() ([]PushQueueEntry, error) {
 	root, release, err := q.lock()
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 
-	refs, _, err := q.readLocked(root)
-	return refs, err
+	entries, _, err := q.readEntriesLocked(root)
+	return entries, err
 }
 
 // Remove deletes the given refs from the queue, preserving any entries appended
@@ -159,7 +200,7 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	}
 	defer release()
 
-	current, _, err := q.readLocked(root)
+	current, _, err := q.readEntriesLocked(root)
 	if err != nil {
 		return err
 	}
@@ -167,30 +208,64 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	for _, r := range refs {
 		removed[r.String()] = struct{}{}
 	}
-	kept := make([]plumbing.ReferenceName, 0, len(current))
-	for _, r := range current {
-		if _, drop := removed[r.String()]; drop {
+	kept := make([]PushQueueEntry, 0, len(current))
+	for _, entry := range current {
+		if _, drop := removed[entry.Ref.String()]; drop {
 			continue
 		}
-		kept = append(kept, r)
+		kept = append(kept, entry)
 	}
-	return q.rewriteLocked(root, kept)
+	return q.rewriteEntriesLocked(root, kept)
+}
+
+// RemoveEntries removes only exact ref generations. A newer generation of the
+// same ref therefore survives cleanup for a push that delivered an older one.
+func (q *PushQueue) RemoveEntries(entries []PushQueueEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	root, release, err := q.lock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	current, _, err := q.readEntriesLocked(root)
+	if err != nil {
+		return err
+	}
+	removed := make(map[PushQueueEntry]struct{}, len(entries))
+	for _, entry := range entries {
+		removed[entry] = struct{}{}
+	}
+	kept := make([]PushQueueEntry, 0, len(current))
+	for _, entry := range current {
+		if _, drop := removed[entry]; drop {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return q.rewriteEntriesLocked(root, kept)
 }
 
 // rewriteLocked replaces the queue file with exactly refs (de-duplicated, one
 // line each), or removes the file when refs is empty so a clean repo has no
 // stray queue. The caller must hold the lock. The write is atomic (temp file +
 // rename) so a concurrent reader never sees a half-written queue.
-func (q *PushQueue) rewriteLocked(root *os.Root, refs []plumbing.ReferenceName) error {
-	if len(refs) == 0 {
+func (q *PushQueue) rewriteEntriesLocked(root *os.Root, entries []PushQueueEntry) error {
+	if len(entries) == 0 {
 		if err := root.Remove(pushQueueFileName); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove empty push queue: %w", err)
 		}
 		return nil
 	}
 	var buf bytes.Buffer
-	for _, r := range refs {
-		line, err := json.Marshal(pushQueueEntry{Ref: r.String()})
+	for _, entry := range entries {
+		diskEntry := pushQueueEntry{Ref: entry.Ref.String()}
+		if !entry.Hash.IsZero() {
+			diskEntry.Hash = entry.Hash.String()
+		}
+		line, err := json.Marshal(diskEntry)
 		if err != nil {
 			return fmt.Errorf("encode push queue entry: %w", err)
 		}
@@ -211,7 +286,7 @@ func (q *PushQueue) rewriteLocked(root *os.Root, refs []plumbing.ReferenceName) 
 // malformed records), so callers can detect when the file holds more than the
 // de-duplicated set and is worth compacting: rawLines > len(refs) exactly when
 // there were redundant lines.
-func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
+func (q *PushQueue) readEntriesLocked(root *os.Root) (entries []PushQueueEntry, rawLines int, err error) {
 	f, err := root.Open(pushQueueFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -221,7 +296,7 @@ func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, ra
 	}
 	defer f.Close()
 
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -234,16 +309,32 @@ func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, ra
 		if err := json.Unmarshal(line, &entry); err != nil || entry.Ref == "" {
 			continue
 		}
-		if _, dup := seen[entry.Ref]; dup {
+		parsed := PushQueueEntry{Ref: plumbing.ReferenceName(entry.Ref)}
+		if len(entry.Hash) > 0 {
+			if !plumbing.IsHash(entry.Hash) {
+				continue
+			}
+			parsed.Hash = plumbing.NewHash(entry.Hash)
+		}
+		if idx, dup := seen[entry.Ref]; dup {
+			entries[idx] = parsed
 			continue
 		}
-		seen[entry.Ref] = struct{}{}
-		refs = append(refs, plumbing.ReferenceName(entry.Ref))
+		seen[entry.Ref] = len(entries)
+		entries = append(entries, parsed)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, 0, fmt.Errorf("read push queue: %w", err)
 	}
-	return refs, rawLines, nil
+	return entries, rawLines, nil
+}
+
+func pushQueueRefs(entries []PushQueueEntry) []plumbing.ReferenceName {
+	refs := make([]plumbing.ReferenceName, 0, len(entries))
+	for _, entry := range entries {
+		refs = append(refs, entry.Ref)
+	}
+	return refs
 }
 
 // writeQueueAtomic writes data to a temp file inside root and renames it over

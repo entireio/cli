@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,4 +196,63 @@ func TestPushQueue_PeekIsReadOnly(t *testing.T) {
 	refs, err = q.Peek()
 	require.NoError(t, err)
 	assert.Equal(t, []plumbing.ReferenceName{a, b}, refs)
+}
+
+func TestPushQueue_RemovePreservesNewerGenerationOfSameRef(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	old := PushQueueEntry{Ref: ref, Hash: plumbing.NewHash(strings.Repeat("a", 40))}
+	newer := PushQueueEntry{Ref: ref, Hash: plumbing.NewHash(strings.Repeat("b", 40))}
+
+	require.NoError(t, q.EnqueueEntry(old))
+	require.NoError(t, q.EnqueueEntry(newer))
+	require.NoError(t, q.RemoveEntries([]PushQueueEntry{old}))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{newer}, entries,
+		"cleanup for an older generation must not remove the newer generation")
+}
+
+func TestPushQueue_DrainKeepsLatestGenerationAtFirstSeenPosition(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	refA := mustRefName(t, "a1b2c3d4e5f6")
+	refB := mustRefName(t, "b2c3d4e5f6a1")
+	a1 := PushQueueEntry{Ref: refA, Hash: plumbing.NewHash(strings.Repeat("a", 40))}
+	b1 := PushQueueEntry{Ref: refB, Hash: plumbing.NewHash(strings.Repeat("b", 40))}
+	a2 := PushQueueEntry{Ref: refA, Hash: plumbing.NewHash(strings.Repeat("c", 40))}
+
+	require.NoError(t, q.EnqueueEntry(a1))
+	require.NoError(t, q.EnqueueEntry(b1))
+	require.NoError(t, q.EnqueueEntry(a2))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{a2, b1}, entries,
+		"latest generation must win without moving the ref behind later refs")
+}
+
+func TestPushQueue_LegacyEntryCannotRemoveKnownGeneration(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	legacy := PushQueueEntry{Ref: ref}
+	known := PushQueueEntry{Ref: ref, Hash: plumbing.NewHash(strings.Repeat("d", 40))}
+
+	root, release, err := q.lock()
+	require.NoError(t, err)
+	legacyLine, err := json.Marshal(pushQueueEntry{Ref: ref.String()})
+	require.NoError(t, err)
+	require.NoError(t, writeQueueAtomic(root, append(legacyLine, '\n')))
+	release()
+
+	require.NoError(t, q.EnqueueEntry(known))
+	require.NoError(t, q.RemoveEntries([]PushQueueEntry{legacy}))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{known}, entries,
+		"exact legacy cleanup must not remove a later hash-bearing generation")
 }

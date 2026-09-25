@@ -88,6 +88,36 @@ func TestBatchPushRefs(t *testing.T) {
 	}
 }
 
+func TestBatchPushCheckpointRefs_PinsVerifiedHash(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	refName := refs[0]
+	verified, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+
+	testutil.WriteFile(t, workDir, "later.txt", "later")
+	testutil.GitAdd(t, workDir, "later.txt")
+	testutil.GitCommit(t, workDir, "later")
+	later, err := repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, later.Hash())))
+
+	candidate := checkpointRefPush{
+		token: checkpoint.PushQueueEntry{Ref: refName, Hash: verified.Hash()},
+		name:  refName,
+		hash:  verified.Hash(),
+	}
+	require.NoError(t, batchPushCheckpointRefs(t.Context(), bareDir, []checkpointRefPush{candidate}))
+
+	assert.Equal(t, verified.Hash().String(), remoteRefHash(t, bareDir, refName),
+		"the remote must receive the captured hash, not the ref's later tip")
+	current, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	assert.Equal(t, later.Hash(), current.Hash(), "pushing the captured hash must not rewind the local ref")
+}
+
 func TestBatchPushRefs_Empty(t *testing.T) {
 	t.Parallel()
 	// No refs → no git invocation, no error.
@@ -189,10 +219,11 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	// pushes are rejected, then recovery replays C3's delta onto C2.
 	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
 	restore := captureStderr(t)
-	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
 	output := restore()
 	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
 	assert.Equal(t, 1, pushed)
+	assert.Zero(t, withheld, "no OPF trailer is required here, so nothing is withheld")
 	assert.NotContains(t, output, "Warning:", "plain divergence should recover quietly")
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
@@ -201,6 +232,100 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	files := remoteRefFiles(t, bareDir, ref)
 	assert.Contains(t, files, "b.txt", "remote-only change must be preserved (not overwritten)")
 	assert.Contains(t, files, "c.txt", "local-only change must be replayed on top")
+}
+
+func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflict(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	ctx := context.Background()
+	ref := refs[0]
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	base := head.Hash()
+	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref}))
+
+	// Advance the remote from base.
+	testutil.WriteFile(t, workDir, "remote.txt", "remote")
+	testutil.GitAdd(t, workDir, "remote.txt")
+	testutil.GitCommit(t, workDir, "remote generation")
+	head, err = repo.Head()
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, head.Hash())))
+	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref}))
+	remoteTip := head.Hash()
+
+	// Create a disconnected queued generation that recovery will try to replay.
+	// This covers the former ReconcileDisconnectedMetadataRef path, whose final
+	// update was unconditional before checkpoint recovery became generation-safe.
+	testutil.GitReset(t, workDir, base.String())
+	testutil.WriteFile(t, workDir, "local.txt", "local")
+	testutil.GitAdd(t, workDir, "local.txt")
+	tree := strings.TrimSpace(testutil.RunGit(t, workDir, "write-tree"))
+	candidate := plumbing.NewHash(strings.TrimSpace(testutil.RunGit(t, workDir, "commit-tree", tree, "-m", "local generation")))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, candidate)))
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
+
+	// At the recovery install boundary, simulate a checkpoint writer advancing
+	// the same ref and queueing that newer generation. The real CAS must reject
+	// the stale recovery rather than overwrite it.
+	oldCAS := checkpointRefRecoveryCAS
+	var concurrent plumbing.Hash
+	checkpointRefRecoveryCAS = func(
+		casCtx context.Context,
+		casRepo *git.Repository,
+		refName plumbing.ReferenceName,
+		newHash, expectedOld plumbing.Hash,
+	) error {
+		require.Equal(t, expectedOld, candidate)
+		runGit := func(args ...string) string {
+			return strings.TrimSpace(testutil.RunGit(t, workDir, args...))
+		}
+		testutil.WriteFile(t, workDir, "concurrent.txt", "concurrent")
+		testutil.GitAdd(t, workDir, "concurrent.txt")
+		concurrentTree := runGit("write-tree")
+		concurrent = plumbing.NewHash(runGit("commit-tree", concurrentTree, "-p", candidate.String(), "-m", "concurrent generation"))
+		require.NoError(t, casRepo.Storer.SetReference(plumbing.NewHashReference(refName, concurrent)))
+		require.NoError(t, queue.EnqueueEntry(checkpoint.PushQueueEntry{Ref: refName, Hash: concurrent}))
+		return checkpoint.CASPersistentRef(casCtx, casRepo, refName, newHash, expectedOld)
+	}
+	t.Cleanup(func() { checkpointRefRecoveryCAS = oldCAS })
+
+	restore := captureStderr(t)
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
+	restore()
+	require.Error(t, pushErr)
+	assert.Zero(t, pushed)
+	assert.Zero(t, withheld)
+
+	localRef, err := repo.Reference(ref, true)
+	require.NoError(t, err)
+	assert.Equal(t, concurrent, localRef.Hash(), "recovery must not overwrite the concurrent checkpoint generation")
+	assert.Equal(t, remoteTip.String(), remoteRefHash(t, bareDir, ref), "a CAS conflict must not push a stale recovered tip")
+	queued, err := queue.PeekEntries()
+	require.NoError(t, err)
+	require.Len(t, queued, 1)
+	assert.Equal(t, concurrent, queued[0].Hash, "the concurrent generation must remain queued")
+
+	// The losing recovered commit is only a derived intermediate: the next
+	// delivery replays the queued winner onto the remote and preserves all three
+	// sources of data without keeping that stale intermediate under another ref.
+	checkpointRefRecoveryCAS = oldCAS
+	restore = captureStderr(t)
+	pushed, withheld, pushErr = flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, false)
+	restore()
+	require.NoError(t, pushErr)
+	assert.Equal(t, 1, pushed)
+	assert.Zero(t, withheld)
+	queued, err = queue.PeekEntries()
+	require.NoError(t, err)
+	assert.Empty(t, queued)
+	files := remoteRefFiles(t, bareDir, ref)
+	assert.Contains(t, files, "remote.txt")
+	assert.Contains(t, files, "local.txt")
+	assert.Contains(t, files, "concurrent.txt")
 }
 
 // enqueueRefs seeds the repo's push queue with the given refs.

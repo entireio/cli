@@ -1,13 +1,13 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -87,6 +87,33 @@ func (f *fakeRuntimeAlwaysFails) Redact(_ context.Context, _ string, _ []string)
 }
 func (f *fakeRuntimeAlwaysFails) RedactBatch(_ context.Context, _ []string, _ []string) ([][]redact.Span, error) {
 	return nil, errors.New("simulated OPF runtime failure")
+}
+
+// fakeRuntimeFailsOnSentinel fails Redact/RedactBatch only when a given text
+// contains sentinel; otherwise it behaves like fakeOPFForRewrite (tags
+// "PERSONABC" occurrences via findSentinelSpans). It lets a test make exactly
+// one checkpoint ref's OPF call fail while its siblings' calls succeed —
+// unlike fakeRuntimeAlwaysFails, which breaks the runtime for every ref.
+type fakeRuntimeFailsOnSentinel struct {
+	sentinel string
+}
+
+func (f *fakeRuntimeFailsOnSentinel) Redact(_ context.Context, text string, _ []string) ([]redact.Span, error) {
+	if strings.Contains(text, f.sentinel) {
+		return nil, errors.New("fake OPF failure on sentinel text")
+	}
+	return findSentinelSpans(text), nil
+}
+
+func (f *fakeRuntimeFailsOnSentinel) RedactBatch(_ context.Context, inputs []string, _ []string) ([][]redact.Span, error) {
+	out := make([][]redact.Span, len(inputs))
+	for i, in := range inputs {
+		if strings.Contains(in, f.sentinel) {
+			return nil, errors.New("fake OPF failure on sentinel text")
+		}
+		out[i] = findSentinelSpans(in)
+	}
+	return out, nil
 }
 
 // testOPFRuntime is the structural interface the redact package's
@@ -574,24 +601,42 @@ func TestRewriteUnpushedV1WithOPF_MultiCommit_SingleBatchCall(t *testing.T) {
 
 // Leaf-byte cap: the rewrite must refuse a push whose cumulative
 // prose-leaf bytes exceed ENTIRE_OPF_BATCH_LIMIT, returning a typed
-// error the pre-push hook can surface. Without this, a runaway push
-// (10MB+ of dense prose) would tie up the user's terminal for minutes
-// without warning.
+// error the pre-push hook can surface. Without this backstop, input
+// that is broken rather than merely large — a corrupted transcript, an
+// accidentally-embedded binary, a multi-GiB paste — would be handed to
+// the model at whatever size it happened to be.
 func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 	cases := []struct {
 		name     string
 		envLimit string
 		wantErr  bool
 	}{
-		{name: "over_limit_rejected", envLimit: "10", wantErr: true},
+		// 8000 is under the fixture's ~10 KB of prose-leaf content and over
+		// its 12,960 raw bytes divided by rawByteCapMultiplier, so it is the
+		// leaf-byte cap that trips and not the RAM ceiling that scales off
+		// the same env var. Both bounds are tight enough to matter: below
+		// ~6.5 KB the raw ceiling fires first, above ~10 KB nothing fires.
+		{name: "over_limit_rejected", envLimit: "8000", wantErr: true},
 		{name: "unlimited_allows_any_size", envLimit: "unlimited", wantErr: false},
-		{name: "env_override_allows_above_default", envLimit: "1000000", wantErr: false},
+		// Above batchDefaultLimit (128 MiB), so the override is doing
+		// something: the default is a backstop, not a size anyone should need
+		// to raise. Still below redact's 256 MiB allocation wall, which no
+		// override moves.
+		{name: "env_override_allows_above_default", envLimit: "200000000", wantErr: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			configureFakeOPF(t, &fakeOPFForRewrite{})
 			t.Setenv(batchEnvVar, tc.envLimit)
-			repo, originalTip := setupV1Repo(t) // ~50 bytes of prose-leaf content
+			repo, _ := setupV1Repo(t)
+			// A prose-heavy second checkpoint (~10 KB of leaves, ~13 KB raw)
+			// so this fixture's raw-to-leaf ratio is ~1.2x, like real
+			// transcript content, rather than the ~22x of the tiny base
+			// fixture where structural JSON dominates. The caps are only
+			// meaningfully ordered against realistic content.
+			originalTip := addV1Checkpoint(t, repo, "b1b2c3d4e5f7", "prose-session",
+				strings.Repeat("the quick brown fox jumps over PERSONABC again ", 200),
+				strings.Repeat("look up PERSONABC please ", 40))
 
 			newTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
 			if !tc.wantErr {
@@ -618,18 +663,26 @@ func TestRewriteUnpushedV1WithOPF_BatchCap(t *testing.T) {
 // OPFBatchTooLargeError message includes leaf-byte count, the limit
 // that tripped, and remediation pointing to ENTIRE_OPF_BATCH_LIMIT —
 // the user-facing message is the only thing they see when this fires.
+//
+// Order matters as much as content: the cap is a backstop no real
+// session reaches, so the message must send someone to look at the
+// content first and offer the override second, not the reverse.
 func TestOPFBatchTooLargeErrorMessage(t *testing.T) {
 	t.Parallel()
-	e := &OPFBatchTooLargeError{LeafBytes: 5_000_000, Limit: 2_097_152}
+	e := &OPFBatchTooLargeError{LeafBytes: 20_000_000, Limit: batchDefaultLimit}
 	msg := e.Error()
 	for _, want := range []string{
-		"5000000",
-		"2097152",
+		"20000000",
+		strconv.Itoa(batchDefaultLimit),
 		batchEnvVar,
 		"unlimited",
 	} {
 		require.Contains(t, msg, want, "OPFBatchTooLargeError message should mention %q", want)
 	}
+	require.Contains(t, msg, "corrupted transcript",
+		"message should explain what hitting a backstop usually means")
+	require.Less(t, strings.Index(msg, "corrupted transcript"), strings.Index(msg, batchEnvVar),
+		"the content explanation must come before the override, not after it")
 }
 
 // TestRewriteUnpushedV1WithOPF_RawByteCap pins the RAM-ceiling check
@@ -644,8 +697,9 @@ func TestOPFBatchTooLargeErrorMessage(t *testing.T) {
 // setupV1Repo fixture triggers it.
 func TestRewriteUnpushedV1WithOPF_RawByteCap(t *testing.T) {
 	configureFakeOPF(t, &fakeOPFForRewrite{})
-	// leaf cap = 1 → raw ceiling = 100 bytes; the setupV1Repo
-	// checkpoint writes far more than that across its shard blobs.
+	// leaf cap = 1 → raw ceiling = rawByteCapMultiplier bytes; the
+	// setupV1Repo checkpoint writes far more than that across its
+	// shard blobs.
 	t.Setenv(batchEnvVar, "1")
 	repo, originalTip := setupV1Repo(t)
 
@@ -710,6 +764,33 @@ func TestCollectTreeBlobs_RedactsAllFileTypes(t *testing.T) {
 	require.True(t, collectedNames["notes.md"], ".md blob must be collected for redaction (privacy contract)")
 	require.True(t, collectedNames["transcript"], "no-extension blob must be collected for redaction (privacy contract)")
 	require.False(t, collectedNames[paths.ContentHashFileName], "content_hash.txt must be excluded from collection (deferred path)")
+}
+
+func TestCollectTreeBlobsWithinBudget_RejectsBlobFromMetadataBeforeReadingContent(t *testing.T) {
+	tempDir := t.TempDir()
+	testutil.InitRepo(t, tempDir)
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	obj := repo.Storer.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	w, err := obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write([]byte("larger than the configured budget"))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	require.NoError(t, err)
+	tree := &object.Tree{Entries: []object.TreeEntry{{Name: "transcript", Mode: filemode.Regular, Hash: hash}}}
+
+	var blobs []redact.NamedBlob
+	var blobPaths []string
+	err = collectTreeBlobsWithinBudget(repo, tree, "", &blobs, &blobPaths, newOPFRawByteBudget(4))
+	var tooLarge *OPFRawBytesTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	assert.Greater(t, tooLarge.RawBytes, tooLarge.Limit)
+	assert.Empty(t, blobs, "an oversized blob must be rejected before its content is retained")
+	assert.Empty(t, blobPaths)
 }
 
 // The OPF rewrite must not touch externalized image assets: byte-redacting the
@@ -858,6 +939,14 @@ func setupGitRefsOPFRepo(t *testing.T, cpIDs ...string) (bareDir string, repo *g
 // the shape a write followed by a backfill produces.
 func addGitRefsSession(t *testing.T, repo *git.Repository, cpID, sessionID string) {
 	t.Helper()
+	addGitRefsSessionWithTranscript(t, repo, cpID, sessionID, "Hello, PERSONABC asked")
+}
+
+// addGitRefsSessionWithTranscript is addGitRefsSession with caller-chosen
+// transcript text, so a test can make one checkpoint ref carry far more
+// prose-leaf content than another.
+func addGitRefsSessionWithTranscript(t *testing.T, repo *git.Repository, cpID, sessionID, transcript string) {
+	t.Helper()
 	stores, err := checkpoint.Open(t.Context(), repo, checkpoint.OpenOptions{})
 	require.NoError(t, err)
 	cid := id.MustCheckpointID(cpID)
@@ -865,7 +954,7 @@ func addGitRefsSession(t *testing.T, repo *git.Repository, cpID, sessionID strin
 		CheckpointID: cid,
 		SessionID:    sessionID,
 		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte(`{"role":"user","content":"Hello, PERSONABC asked"}` + "\n")),
+		Transcript:   redact.AlreadyRedacted([]byte(fmt.Sprintf(`{"role":"user","content":%q}`+"\n", transcript))),
 		Prompts:      []string{"Look up PERSONABC"},
 		AuthorName:   "Test",
 		AuthorEmail:  "test@test.com",
@@ -901,6 +990,26 @@ func refHashes(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceName
 	return out
 }
 
+func refRewriteSizes(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) (rawBytes, leafBytes int) {
+	t.Helper()
+	ref, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	chain, _, err := unappliedAncestry(repo, ref.Hash())
+	require.NoError(t, err)
+	for _, commit := range chain {
+		tree, treeErr := repo.TreeObject(commit.TreeHash)
+		require.NoError(t, treeErr)
+		var blobs []redact.NamedBlob
+		var paths []string
+		require.NoError(t, collectTreeBlobs(repo, tree, "", &blobs, &paths))
+		for _, blob := range blobs {
+			rawBytes += len(blob.Content)
+		}
+		leafBytes += redact.SumProseLeafBytes(blobs)
+	}
+	return rawBytes, leafBytes
+}
+
 // treeContents concatenates every file in the commit's tree.
 func treeContents(t *testing.T, repo *git.Repository, hash plumbing.Hash) string {
 	t.Helper()
@@ -929,8 +1038,22 @@ func queuedRefs(t *testing.T, repo *git.Repository) []plumbing.ReferenceName {
 	return got
 }
 
+func queuedRefEntries(t *testing.T, repo *git.Repository) []checkpoint.PushQueueEntry {
+	t.Helper()
+	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
+	require.NoError(t, err)
+	entries, err := queue.PeekEntries()
+	require.NoError(t, err)
+	return entries
+}
+
 // Queued checkpoint refs are OPF-rewritten and stamped applied; a second run is
 // a no-op because the trailer marks them done (no re-scan, no ref movement).
+//
+// Scanning is scoped per ref — one OPF call per ref rather than one for the
+// whole flush — so an oversized ref's cap failure cannot take its siblings down
+// with it (see TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers).
+// The cost of that isolation is N shell-outs instead of 1.
 func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.T) {
 	fake := &fakeOPFForRewrite{}
 	configureFakeOPF(t, fake)
@@ -938,10 +1061,14 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.
 	before := refHashes(t, repo, refs)
 
 	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
-	require.Equal(t, 1, fake.batchCallCount(), "one OPF call for the whole flush")
+	require.Equal(t, 2, fake.batchCallCount(), "one OPF call per ref")
 
 	after := refHashes(t, repo, refs)
+	entries := queuedRefEntries(t, repo)
+	require.Len(t, entries, len(refs))
 	for i, ref := range refs {
+		require.Equal(t, checkpoint.PushQueueEntry{Ref: ref, Hash: after[i]}, entries[i],
+			"the rewritten generation must replace the queue token for the old tip")
 		require.NotEqual(t, before[i], after[i], "ref %s should have been rewritten", ref)
 		commit, err := repo.CommitObject(after[i])
 		require.NoError(t, err)
@@ -950,12 +1077,25 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.
 	}
 
 	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
-	require.Equal(t, 1, fake.batchCallCount(), "already-applied refs must not be re-scanned")
+	require.Equal(t, 2, fake.batchCallCount(), "already-applied refs must not be re-scanned")
 	require.Equal(t, after, refHashes(t, repo, refs), "already-applied refs must keep their exact hash")
 }
 
-// Fail-closed: an OPF failure anywhere in the batch must leave EVERY queued ref
-// where it was, so no ref is stamped applied over content OPF never saw.
+// Fail-closed: an OPF *runtime* failure must leave EVERY queued ref where it
+// was, so no ref is stamped applied over content OPF never saw.
+//
+// This survives per-ref scoping deliberately, and is the reason the per-ref loop
+// re-checks the circuit breaker on every iteration. The first ref's failure
+// trips the process-wide breaker, and a tripped breaker makes
+// BatchBytesWithPrivacyFilter return regex-only output with a *nil* error — so
+// a loop that merely skipped the failing ref and carried on would rebuild every
+// later ref from regex-only content and stamp Entire-OPF-Applied on it. A
+// broken runtime is broken for the whole process; only the size cap is a
+// per-ref condition.
+//
+// Case (a) of the pair: the FIRST ref's call fails, so nothing is rewritten.
+// TestRewriteQueuedCheckpointRefsWithOPF_FailingOPFRefDoesNotBlockOthers is
+// case (b) — a ref already rewritten before the failure keeps its rewrite.
 func TestRewriteQueuedCheckpointRefsWithOPF_FailureLeavesEveryRefUnmoved(t *testing.T) {
 	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
 	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
@@ -965,30 +1105,198 @@ func TestRewriteQueuedCheckpointRefsWithOPF_FailureLeavesEveryRefUnmoved(t *test
 	var runtimeFail *OPFRuntimeFailedError
 	require.ErrorAs(t, err, &runtimeFail)
 	require.Equal(t, before, refHashes(t, repo, refs))
+	for _, ref := range refHashes(t, repo, refs) {
+		commit, cErr := repo.CommitObject(ref)
+		require.NoError(t, cErr)
+		require.False(t, trailers.HasOPFApplied(commit.Message),
+			"no ref may be stamped OPF-applied once the runtime is broken")
+	}
+}
+
+// Per-ref runtime-error scoping: a ref whose own OPF call fails is left
+// unmoved, while a ref already rewritten earlier in the same flush keeps its
+// rewrite instead of being discarded with it. Complements
+// _OversizedRefDoesNotBlockOthers, which covers the cap-failure path only: this
+// one pins a genuine BatchBytesWithPrivacyFilter error, asserted through the
+// error's Cause so a breaker-skip can't pass for a real per-ref call.
+//
+// Ref ORDER here is load-bearing, not incidental. redact.handleOPFFailure trips
+// the process-wide breaker on the FIRST runtime failure (a CompareAndSwap, not
+// an N-strike counter), and a tripped breaker makes BatchBytesWithPrivacyFilter
+// return regex-only content with a NIL error — so the top-of-loop breaker
+// check deliberately breaks out of the whole loop rather than continuing to the
+// next ref. There is therefore no ref that can be OPF-scanned *after* a runtime
+// failure, and a test that ordered the failing ref first would pass for the
+// wrong reason (the sibling skipped by the breaker-break, not isolated by the
+// per-ref logic — that is what _FailureLeavesEveryRefUnmoved pins). What per-ref
+// scoping buys under a runtime error is exactly what this test asserts: the ref
+// processed before the failure keeps the rewrite OPF really did scan.
+func TestRewriteQueuedCheckpointRefsWithOPF_FailingOPFRefDoesNotBlockOthers(t *testing.T) {
+	const okID, failID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	const failSentinel = "OPFBOOM"
+	configureFakeOPF(t, &fakeRuntimeFailsOnSentinel{sentinel: failSentinel})
+	// The push queue preserves first-seen order, so the refs are processed in
+	// the order they are written here: the surviving ref first, the failing
+	// one second.
+	_, repo, refs := setupGitRefsOPFRepo(t, okID, failID)
+	addGitRefsSessionWithTranscript(t, repo, failID, "sess-fail",
+		"Hello, PERSONABC asked about "+failSentinel)
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+
+	var runtimeFail *OPFRuntimeFailedError
+	require.ErrorAs(t, err, &runtimeFail, "the failing ref must still report its own runtime failure")
+	require.ErrorContains(t, runtimeFail.Cause, "fake OPF failure on sentinel text",
+		"the error must carry the failing ref's own OPF call as its cause, not the bare breaker check")
+
+	after := refHashes(t, repo, refs)
+	require.NotEqual(t, before[0], after[0],
+		"the ref whose OPF call succeeded must be rewritten despite its failing sibling")
+	survivor, cErr := repo.CommitObject(after[0])
+	require.NoError(t, cErr)
+	require.True(t, trailers.HasOPFApplied(survivor.Message))
+	require.NotContains(t, treeContents(t, repo, after[0]), "PERSONABC")
+
+	require.Equal(t, before[1], after[1], "the failing ref must be left exactly where it was")
+	unscanned, cErr := repo.CommitObject(after[1])
+	require.NoError(t, cErr)
+	require.False(t, trailers.HasOPFApplied(unscanned.Message),
+		"a ref OPF never finished scanning must not be stamped applied")
+	require.Contains(t, treeContents(t, repo, after[1]), "PERSONABC",
+		"the failing ref's content must be left byte-identical, sentinel included")
+}
+
+// The raw-byte memory ceiling is scoped to the one ref whose blobs are resident
+// for the current OPF call. Two refs that each fit must both rewrite even when
+// their combined raw bytes would exceed one ref's ceiling.
+func TestRewriteQueuedCheckpointRefsWithOPF_RawByteCapIsPerRef(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+
+	raw0, leaf0 := refRewriteSizes(t, repo, refs[0])
+	raw1, leaf1 := refRewriteSizes(t, repo, refs[1])
+	limit := max(max(leaf0, leaf1), (max(raw0, raw1)+rawByteCapMultiplier-1)/rawByteCapMultiplier)
+	rawCap := rawByteCapForBatchLimit(limit)
+	require.LessOrEqual(t, raw0, rawCap)
+	require.LessOrEqual(t, raw1, rawCap)
+	require.Greater(t, raw0+raw1, rawCap,
+		"fixture must exceed one raw ceiling only when refs are combined")
+	t.Setenv(batchEnvVar, strconv.Itoa(limit))
+	before := refHashes(t, repo, refs)
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.Equal(t, 2, fake.batchCallCount(), "each fitting ref must reach OPF")
+	after := refHashes(t, repo, refs)
+	for i := range refs {
+		require.NotEqual(t, before[i], after[i])
+		commit, err := repo.CommitObject(after[i])
+		require.NoError(t, err)
+		require.True(t, trailers.HasOPFApplied(commit.Message))
+	}
+}
+
+// A raw-oversized ref is a local failure. It stays untouched and reports the
+// cap error, while a later fitting sibling is still collected, scanned, and
+// rewritten.
+func TestRewriteQueuedCheckpointRefsWithOPF_RawOversizedRefDoesNotBlockLaterRef(t *testing.T) {
+	const oversizedID, fitsID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, oversizedID, fitsID)
+	addGitRefsSessionWithTranscript(t, repo, oversizedID, "sess-raw-oversized",
+		strings.Repeat("the quick brown fox jumps over PERSONABC again ", 800))
+
+	oversizedRaw, _ := refRewriteSizes(t, repo, refs[0])
+	fitsRaw, fitsLeaf := refRewriteSizes(t, repo, refs[1])
+	limit := max(fitsLeaf, (fitsRaw+rawByteCapMultiplier-1)/rawByteCapMultiplier)
+	rawCap := rawByteCapForBatchLimit(limit)
+	require.Greater(t, oversizedRaw, rawCap)
+	require.LessOrEqual(t, fitsRaw, rawCap)
+	t.Setenv(batchEnvVar, strconv.Itoa(limit))
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+
+	var tooLarge *OPFRawBytesTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	require.Greater(t, tooLarge.RawBytes, tooLarge.Limit)
+	after := refHashes(t, repo, refs)
+	require.Equal(t, before[0], after[0], "raw-oversized ref must remain byte-identical")
+	require.NotEqual(t, before[1], after[1], "later fitting ref must still rewrite")
+	require.Equal(t, 1, fake.batchCallCount(), "only the fitting ref may reach OPF")
+	fitting, commitErr := repo.CommitObject(after[1])
+	require.NoError(t, commitErr)
+	require.True(t, trailers.HasOPFApplied(fitting.Message))
+}
+
+// Per-ref cap scoping: the leaf-byte cap is enforced per ref, not across the
+// whole flush, so one oversized ref no longer poisons the rewrite of every ref
+// queued alongside it. The ref that fits is redacted, tagged, and moved; the
+// oversized one is left byte-identical and stays queued, and only it is named
+// in the returned error.
+//
+// This exercises the rewrite operation directly. Delivery independently checks
+// each immutable candidate's trailer before deciding whether it may ship.
+func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *testing.T) {
+	const fitsID, oversizedID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, fitsID, oversizedID)
+	// A second, much larger session carries the oversized ref's own prose-leaf
+	// bytes (~10 KB) past the cap while the other ref stays well under it. The
+	// raw-byte ceiling (cap × rawByteCapMultiplier, so 16 KB here) stays above
+	// the flush's raw bytes, so the leaf-byte cap is what this test observes.
+	addGitRefsSessionWithTranscript(t, repo, oversizedID, "sess-oversized",
+		strings.Repeat("the quick brown fox jumps over PERSONABC again ", 200))
+	t.Setenv(batchEnvVar, "8000")
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+
+	var tooLarge *OPFBatchTooLargeError
+	require.ErrorAs(t, err, &tooLarge, "the oversized ref must still report its own cap failure")
+	require.Greater(t, tooLarge.LeafBytes, tooLarge.Limit)
+
+	after := refHashes(t, repo, refs)
+	require.NotEqual(t, before[0], after[0],
+		"the ref that fits must be rewritten despite its oversized sibling")
+	fitting, cErr := repo.CommitObject(after[0])
+	require.NoError(t, cErr)
+	require.True(t, trailers.HasOPFApplied(fitting.Message))
+	require.NotContains(t, treeContents(t, repo, after[0]), "PERSONABC")
+
+	require.Equal(t, before[1], after[1], "the oversized ref must be left exactly where it was")
+	require.Equal(t, 1, fake.batchCallCount(), "only the ref that fits may reach OPF")
 }
 
 // Backend divergence: the v1 path aborts the user's push on OPF failure; the
-// refs path fails closed by withholding the flush instead — the user's push
-// succeeds, nothing un-OPF'd ships, and the refs stay queued.
-func TestPrePushCheckpointRefs_OPFFailureWithholdsFlush(t *testing.T) {
-	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+// refs path fails closed by withholding the un-redacted refs instead — the
+// user's push succeeds, nothing un-OPF'd ships, and those refs stay queued.
+//
+// Single-ref on purpose, and still distinct from
+// TestPrePushCheckpointRefs_AlreadyRedactedRefShipsWhileSiblingStillQueued:
+// that one pins that a trailered SIBLING still ships, this one that the sole
+// ref of a failed flush ships nothing at all. Per-ref delivery must not become
+// "push it anyway when there is nothing else to push".
+func TestPrePushCheckpointRefs_UntraileredRefStaysQueuedForWorker(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
-
-	var buf bytes.Buffer
-	oldWriter := stderrWriter
-	stderrWriter = &buf
-	t.Cleanup(func() { stderrWriter = oldWriter })
+	spawns := swapOPFFlushSpawn(t)
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
-		"an OPF failure must not block the user's git push")
+		"pending OPF work must not block the user's git push")
 
-	assert.Contains(t, buf.String(), "checkpoint refs", "the withheld push must be visible to the user")
+	assert.Zero(t, fake.batchCallCount(), "pre-push must not call OPF inline")
+	assert.Len(t, *spawns, 1)
 	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued for the next push")
 	lsCmd := exec.CommandContext(t.Context(), "git", "ls-remote", bareDir)
 	lsCmd.Env = testutil.GitIsolatedEnv()
 	out, err := lsCmd.CombinedOutput()
 	require.NoError(t, err, "ls-remote failed: %s", out)
-	assert.NotContains(t, string(out), refs[0].String(), "no ref may reach the remote when OPF failed")
+	assert.NotContains(t, string(out), refs[0].String(), "no untrailered ref may reach the remote")
 }
 
 // With OPF off the git-refs path is unchanged: refs push as written, unrewritten.
