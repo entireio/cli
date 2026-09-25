@@ -1263,6 +1263,41 @@ func TestShouldSkipJSONLObject(t *testing.T) {
 	}
 }
 
+func TestShouldSkipJSONLObject_CodexImageTypes(t *testing.T) {
+t.Parallel()
+tests := []struct {
+name string
+obj  map[string]any
+}{
+{
+name: "input_image type is skipped",
+obj:  map[string]any{"type": "input_image"},
+},
+{
+name: "output_image type is skipped",
+obj:  map[string]any{"type": "output_image"},
+},
+}
+for _, tt := range tests {
+t.Run(tt.name, func(t *testing.T) {
+t.Parallel()
+if !shouldSkipJSONLObject(tt.obj) {
+t.Errorf("shouldSkipJSONLObject(%v) = false, want true", tt.obj)
+}
+})
+}
+}
+func TestShouldSkipJSONLObject_CodexInputImagePreservesBase64(t *testing.T) {
+t.Parallel()
+obj := map[string]any{
+"type":      "input_image",
+"image_url": "data:image/png;base64," + highEntropySecret,
+}
+repls := collectJSONLReplacements(obj, String)
+if len(repls) != 0 {
+t.Fatalf("expected no replacements for Codex input_image, got %q", repls)
+}
+}
 func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 	// Verify that secrets inside image objects are NOT redacted.
 	obj := map[string]any{
