@@ -1624,12 +1624,42 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 	return nil
 }
 
-// branchExistsCLI checks if a branch exists using git CLI.
-// Returns nil if the branch exists, or an error if it does not.
-func branchExistsCLI(ctx context.Context, branchName string) error {
+// branchExists checks a branch through the caller's repository. Packed refs
+// are reread on lookup, so native deletions are visible through the same handle.
+// Like show-ref --verify, it also checks that the target object exists.
+//
+// When gitrepo.ReadsNeedNativeGit selects native Git, repo is ignored and
+// show-ref resolves the repository from the process CWD and Git's selectors,
+// so repo must be the CWD repository (as OpenRepository returns). Any non-nil
+// error means the branch is absent or unreadable; the wrapped cause differs by
+// path (plumbing.ErrReferenceNotFound or an *exec.ExitError), so callers must
+// not match a specific sentinel.
+func branchExists(ctx context.Context, repo *git.Repository, branchName string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("check branch %s: %w", branchName, err)
+	}
+	if gitrepo.ReadsNeedNativeGit(ctx) {
+		return branchExistsNative(ctx, branchName)
+	}
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
+	if err != nil {
+		return fmt.Errorf("read branch %s: %w", branchName, err)
+	}
+	if err := repo.Storer.HasEncodedObject(ref.Hash()); err != nil {
+		return fmt.Errorf("read branch %s target: %w", branchName, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("check branch %s: %w", branchName, err)
+	}
+	return nil
+}
+
+// branchExistsNative retains native selection for explicit store overrides and
+// repositories outside the worktree-opening contract (for example bare repos).
+func branchExistsNative(ctx context.Context, branchName string) error {
 	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branchName)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("branch %s not found: %w", branchName, err)
+		return fmt.Errorf("check branch %s: %w", branchName, err)
 	}
 	return nil
 }

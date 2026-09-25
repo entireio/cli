@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -516,8 +517,28 @@ func metadataTrackingRefExists(ctx context.Context, remoteName string) bool {
 	if !refs.Primary.IsBranch() {
 		return false
 	}
-	trackingRef := fmt.Sprintf("refs/remotes/%s/%s", remoteName, refs.Primary.Short())
-	return exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", trackingRef+"^{commit}").Run() == nil
+	if ctx.Err() != nil {
+		return false
+	}
+	trackingRef := plumbing.NewRemoteReferenceName(remoteName, refs.Primary.Short())
+	if !gitrepo.ReadsNeedNativeGit(ctx) {
+		repo, err := openRepository(ctx)
+		if err == nil {
+			defer repo.Close()
+			_, err = gitrepo.CommitAtReference(ctx, repo, trackingRef)
+			if err == nil {
+				return true
+			}
+			if errors.Is(err, plumbing.ErrReferenceNotFound) || ctx.Err() != nil {
+				return false
+			}
+		}
+		logging.Debug(ctx, "metadata tracking ref: go-git open or read failed, using native Git",
+			slog.String("ref", trackingRef.String()), slog.String("error", err.Error()))
+	}
+	// Preserve native selection and object backfill for stores go-git cannot
+	// read. This also retains support for bare repositories.
+	return exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", trackingRef.String()+"^{commit}").Run() == nil
 }
 
 // fetchMetadataFromRemote fetches the metadata branch from one remote into

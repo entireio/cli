@@ -1,9 +1,6 @@
 # Git CLI → go-git audit
 
-Static audit of this checkout against `~/Work/entire/go-git` main, treating that
-source as available (no release-availability gating). No production code changed.
-API availability is not a claim of behavioral equivalence; candidates below need
-regression tests before migration. Line numbers identify the audited checkout.
+Static audit against `~/Work/entire/go-git` main, treating that source as available (no release-availability gating). The original audit changed no production code; subsequent migrations are recorded below. API availability is not a claim of behavioral equivalence; candidates need regression tests before migration. Inventory line numbers identify the original audited checkout, not current locations.
 
 Scope: production Go subprocesses, their variadic wrappers/callers, test and
 benchmark helpers, and shell/build tooling. Test invocations are grouped rather
@@ -24,6 +21,15 @@ help text, and commands merely suggested to an agent are not executable call sit
 A go-git call through Entire's reftable adapter can still spawn Git. Replacing a
 caller with go-git does not eliminate subprocesses in reftable repositories.
 Always open via `gitrepo.OpenCurrent` / `OpenPath`, not a new direct `PlainOpen`.
+
+## Implemented migrations
+
+- Literal branch-name validation uses `plumbing.ValidateBranchName`; repository-dependent `@{...}` expressions retain native Git.
+- HEAD checkpoint messages and metadata tracking tips use `gitrepo.CommitAtReference`, including symbolic-ref resolution and nested tag peeling. Replace refs, explicit store selectors, and missing objects retain native compatibility paths.
+- Shadow-branch existence checks reuse the caller's repository after native deletion; go-git rereads packed refs on lookup. Explicit store selectors and bare repositories retain native Git. Branch deletion and its pre-check are unchanged.
+- Pre-push tracking-ref detection (`remoteHasTrackingRefs`) stays on native `for-each-ref --count=1`. go-git has no prefix-scoped ref iterator, so it enumerates every ref first: with 5,000 loose refs that measured about 400 ms against about 10 ms native, and one empty loose ref file aborts the whole enumeration. Revisit once go-git gains prefix iteration ([go-git#2424](https://github.com/go-git/go-git/pull/2424)).
+
+These migrations apply to files-backed worktrees without explicit store selectors, not all local reads. Discovery stays native; reftable is detected before opening its adapter and these reads retain their single native commands. A `GIT_DIR` naming the discovered Git directory, as Git exports to linked-worktree hooks, keeps the go-git path; any other store selector retains native reads. `ENTIRE_NATIVE_GIT_READS=1` forces every migrated read back to native Git. The retained compatibility boundaries are documented in [Git safety](git-safety.md#local-ref-and-commit-reads). Arbitrary revision expressions, history counts, doctor ref reports, and object-tree diffs remain follow-ups.
 
 ## 1. Strong replacement candidates
 
