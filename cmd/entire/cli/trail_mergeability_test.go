@@ -133,102 +133,97 @@ func trailMergeabilityTestServer(t *testing.T, detailStatus int) *httptest.Serve
 	return srv
 }
 
-func runTrailShowForMergeabilityTest(t *testing.T, srv *httptest.Server, selector string, jsonOut bool) (string, string) {
+func runTrailShowForMergeabilityTest(t *testing.T, srv *httptest.Server, selector string, jsonOut bool) (string, string, error) {
 	t.Helper()
 	var out, errOut bytes.Buffer
 	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL),
 		trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: selector, JSON: jsonOut})
-	require.NoError(t, err)
-	return out.String(), errOut.String()
+	return out.String(), errOut.String(), err
 }
 
-// Both selector paths must surface the snapshot: a number resolves through the
-// detail route directly, a branch resolves through the list (which omits
-// mergeability) and then fetches the detail.
-func TestRunTrailShowJSONIncludesMergeability(t *testing.T) {
-	t.Parallel()
+// --json is the detail resource exactly as served plus the synthesized url,
+// on both selector paths: a number resolves through the detail route
+// directly, a branch resolves through the list (a different, smaller shape)
+// and then fetches the detail.
+func TestRunTrailShowJSONIsTheDetailResourcePlusURL(t *testing.T) {
+	t.Setenv(api.BaseURLEnvVar, "https://entire.test")
+
+	var want map[string]any
+	require.NoError(t, json.Unmarshal([]byte(trailMergeabilityDetailJSON), &want))
+	want["url"] = "https://entire.test/gh/acme/repo/trails/7"
+	wantJSON, err := json.Marshal(want)
+	require.NoError(t, err)
 
 	for _, selector := range []string{"7", "feature/x"} {
 		t.Run(selector, func(t *testing.T) {
-			t.Parallel()
-
-			out, errOut := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, 0), selector, true)
+			out, errOut, err := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, 0), selector, true)
+			require.NoError(t, err)
 			require.Empty(t, errOut)
-
-			var got struct {
-				Number       int                    `json:"number"`
-				Body         string                 `json:"body"`
-				Mergeability *trailMergeabilityJSON `json:"mergeability"`
-			}
-			require.NoError(t, json.Unmarshal([]byte(out), &got), "output must be one JSON object: %s", out)
-			require.Equal(t, 7, got.Number, "existing trail fields must stay at the top level")
-			require.Equal(t, "detail body", got.Body)
-
-			mg := got.Mergeability
-			require.NotNil(t, mg)
-			require.NotNil(t, mg.HeadSHA)
-			require.Equal(t, "b1205a52b53b2206cf168a62c0c08b4e37e4449f", *mg.HeadSHA)
-			require.False(t, mg.Mergeable)
-			require.Equal(t, "clean", mg.ConflictStatus)
-
-			require.Equal(t, "available", mg.Checks.Availability)
-			require.Len(t, mg.Checks.Runs, 4, "--json must carry every run, not just failures")
-			require.Equal(t, "test-windows", mg.Checks.Runs[2].Name)
-			require.NotNil(t, mg.Checks.Runs[2].AppName)
-			require.Equal(t, "GitHub Actions", *mg.Checks.Runs[2].AppName)
-			require.Nil(t, mg.Checks.Runs[3].Conclusion)
-
-			require.Len(t, mg.Gates, 3)
-			approvals := mg.Gates[0]
-			require.Equal(t, "approvals", approvals.GateKey)
-			require.True(t, approvals.Blocking)
-			require.Equal(t, "failed", approvals.Status)
-			require.Equal(t, "evaluated", approvals.State)
-			require.Equal(t, []trailGateReviewerJSON{{Login: "rev1", State: "pending"}}, approvals.Reviewers)
-			require.JSONEq(t, `{"approved": 0, "required": 1, "config": {"version": 1, "min_reviewers": 1}}`, string(approvals.Value),
-				"gate value must pass through untouched")
-			require.Equal(t, []string{"trail-review"}, mg.Gates[1].RunnerIDs)
-			require.Equal(t, "null", string(mg.Gates[2].Value))
+			require.JSONEq(t, string(wantJSON), out)
 		})
 	}
 }
 
-// Fields the CLI does not expose stay out of the output: the snapshot is
-// passed through, not re-derived, but only the agreed fields are surfaced.
-func TestRunTrailShowJSONMergeabilityOmitsUnexposedFields(t *testing.T) {
-	t.Parallel()
+// A url the server starts sending wins over the synthesized one.
+func TestRunTrailShowJSONKeepsServerURL(t *testing.T) {
+	t.Setenv(api.BaseURLEnvVar, "https://entire.test")
 
-	out, _ := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, 0), "7", true)
-	var got struct {
-		Mergeability map[string]json.RawMessage `json:"mergeability"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(out), &got))
-	keys := make([]string, 0, len(got.Mergeability))
-	for k := range got.Mergeability {
-		keys = append(keys, k)
-	}
-	require.ElementsMatch(t, []string{"head_sha", "mergeable", "conflict_status", "checks", "gates"}, keys)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(`{"id": "trl_1", "number": 7, "url": "https://server/trails/7"}`)); err != nil {
+			t.Errorf("write detail response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	out, _, err := runTrailShowForMergeabilityTest(t, srv, "7", true)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"id": "trl_1", "number": 7, "url": "https://server/trails/7"}`, out)
 }
 
-// A failed detail fetch must leave the verdict unknown — an explicit null —
-// rather than a zero-valued "mergeable": false nobody computed.
-func TestRunTrailShowJSONMergeabilityNullWhenDetailFails(t *testing.T) {
+// Server strings are emitted byte-for-byte, not HTML-escaped.
+func TestRunTrailShowJSONDoesNotEscapeHTML(t *testing.T) {
 	t.Parallel()
 
-	out, errOut := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, http.StatusInternalServerError), "feature/x", true)
-	require.Contains(t, errOut, "could not load trail detail")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(`{"id": "trl_1", "number": 7, "url": "u", "title": "a <b> & c"}`)); err != nil {
+			t.Errorf("write detail response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
 
-	var top map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal([]byte(out), &top), "stdout must stay valid JSON: %s", out)
-	raw, ok := top["mergeability"]
-	require.True(t, ok, "mergeability key must be present even when unknown")
-	require.Equal(t, "null", string(raw))
+	out, _, err := runTrailShowForMergeabilityTest(t, srv, "7", true)
+	require.NoError(t, err)
+	require.Contains(t, out, `"a <b> & c"`)
+}
+
+// Without the detail there is nothing honest to print — the list item is a
+// different shape — so --json fails instead of emitting a partial object.
+func TestRunTrailShowJSONFailsWhenDetailFails(t *testing.T) {
+	t.Parallel()
+
+	out, _, err := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, http.StatusInternalServerError), "feature/x", true)
+	require.ErrorContains(t, err, "could not load trail detail")
+	require.Empty(t, out, "stdout must stay empty when --json fails")
+}
+
+// The human view keeps treating the detail as best-effort.
+func TestRunTrailShowTextWarnsWhenDetailFails(t *testing.T) {
+	t.Parallel()
+
+	out, errOut, err := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, http.StatusInternalServerError), "feature/x", false)
+	require.NoError(t, err)
+	require.Contains(t, errOut, "could not load trail detail")
+	require.Contains(t, out, "Trail: T")
+	require.Contains(t, out, "Mergeable: unknown")
 }
 
 func TestRunTrailShowTextRendersMergeability(t *testing.T) {
 	t.Parallel()
 
-	out, errOut := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, 0), "7", false)
+	out, errOut, err := runTrailShowForMergeabilityTest(t, trailMergeabilityTestServer(t, 0), "7", false)
+	require.NoError(t, err)
 	require.Empty(t, errOut)
 
 	for _, want := range []string{

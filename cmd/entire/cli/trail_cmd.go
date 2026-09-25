@@ -198,7 +198,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 		},
 	}
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (one entry of 'trail list --json' plus a mergeability snapshot, null when unknown)")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail detail as JSON, exactly as the API serves it plus the trail's browser url")
 	return cmd
 }
 
@@ -218,43 +218,51 @@ func runTrailShow(ctx context.Context, w, errW io.Writer, opts trailShowOptions)
 }
 
 // runTrailShowWithClientAtPath renders one trail once the repo route and API
-// client are resolved. Warnings go to errW, so --json keeps stdout parseable
-// even when the best-effort description fetch fails.
+// client are resolved. --json emits the detail resource as served and fails
+// when it cannot be loaded; the human view treats the detail as best-effort
+// and warns on errW instead.
 func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client *api.Client, basePath, forge, owner, repo string, opts trailShowOptions) error {
 	found, err := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repo, opts.Selector, opts.Branch)
 	if err != nil {
 		return err
 	}
 
-	// Enrich the list result with the detail endpoint, which carries the
-	// rendered description (trail.body_document.text_snapshot) and the
-	// mergeability snapshot the list omits, and surface a browser URL. The
-	// detail fetch is best-effort: the core metadata already came from the
-	// list, so a detail failure falls back to the list body, leaves
-	// mergeability unknown, and warns rather than failing.
-	m := found.ToMetadata()
-	m.URL = trailDisplayURL(*found, forge, owner, repo)
-	// Seed the description from the list body so a failed (or skipped)
-	// detail fetch still shows something; a successful detail fetch
-	// supersedes it with the richer body_document text below.
-	bodyText := found.Body
-	descriptionLoaded := strings.TrimSpace(found.Body) != ""
-	// A numeric selector already resolved through the detail route, so the
-	// detail is in hand — re-requesting the same URL would double the round
-	// trips for every `trail show <number>`.
+	// The detail endpoint carries what the list omits: the rendered
+	// description (body_document.text_snapshot) and the mergeability
+	// snapshot. A numeric selector already resolved through the detail
+	// route, so the detail is in hand — re-requesting the same URL would
+	// double the round trips for every `trail show <number>`.
 	var detail *api.TrailResource
+	var detailErr error
 	switch {
-	case found.BodyDocument != nil:
+	case found.Raw != nil:
 		detail = found
 	case found.Number > 0:
 		if d, derr := fetchTrailDetailAtPath(ctx, client, basePath, found.Number); derr == nil {
 			detail = &d
 		} else {
-			// Best-effort: warn but still render metadata + URL (and the
-			// list body) rather than failing the whole command.
-			fmt.Fprintf(errW, "Warning: could not load trail detail (description, mergeability): %v\n", derr)
+			detailErr = derr
 		}
+	default:
+		detailErr = errors.New("the trail has no number to load its detail by")
 	}
+
+	if opts.JSON {
+		// There is no honest partial object to print: the list item is a
+		// different, smaller shape than the detail resource.
+		if detailErr != nil {
+			return fmt.Errorf("could not load trail detail: %w", detailErr)
+		}
+		return writeTrailDetailJSON(w, detail, forge, owner, repo)
+	}
+
+	// Seed the description from the list body so a failed (or skipped)
+	// detail fetch still shows something; a successful detail fetch
+	// supersedes it with the richer body_document text below.
+	m := found.ToMetadata()
+	m.URL = trailDisplayURL(*found, forge, owner, repo)
+	bodyText := found.Body
+	descriptionLoaded := strings.TrimSpace(found.Body) != ""
 	var mergeability *api.TrailMergeability
 	if detail != nil {
 		// A successful fetch means we authoritatively consulted the
@@ -268,25 +276,34 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 			}
 		}
 		mergeability = detail.Mergeability
-	}
-	// The list body is the weaker source; carry the resolved description on the
-	// metadata so JSON callers read the same text the human view renders.
-	m.Body = bodyText
-
-	if opts.JSON {
-		// Emit the raw body — never the "no description" placeholder, which is
-		// display text, not data. A single object mirrors one entry of
-		// `trail list --json` so both can feed the same parser; the
-		// detail-only mergeability snapshot is the one addition.
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(trailShowJSON{Metadata: m, Mergeability: toTrailMergeabilityJSON(mergeability)}); err != nil {
-			return fmt.Errorf("failed to encode JSON: %w", err)
-		}
-		return nil
+	} else if found.Number > 0 {
+		// Best-effort: warn but still render metadata + URL (and the list
+		// body) rather than failing the whole command.
+		fmt.Fprintf(errW, "Warning: could not load trail detail (description, mergeability): %v\n", detailErr)
 	}
 
 	printTrailDetails(w, m, m.URL, mergeability, trailDescriptionForDisplay(bodyText, descriptionLoaded))
+	return nil
+}
+
+// writeTrailDetailJSON writes `trail show --json`: the detail resource exactly
+// as entire-api served it, with one synthesized field — the trail's browser
+// url, which the API does not return. The field is additive-only, so a url
+// the server starts sending wins.
+func writeTrailDetailJSON(w io.Writer, detail *api.TrailResource, forge, owner, repo string) error {
+	obj, err := mergeSynthesizedFieldRaw(detail.Raw, "url", func() string {
+		return trailDisplayURL(*detail, forge, owner, repo)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to encode JSON: %w", err)
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	// Keep server strings byte-for-byte rather than \u-escaping &, <, and >.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
+		return fmt.Errorf("failed to encode JSON: %w", err)
+	}
 	return nil
 }
 
@@ -476,12 +493,18 @@ func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePa
 	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), detail.BodyDocument.ETag, nil
 }
 
-// decodeTrailResource decodes entire-api's direct detail resource.
+// decodeTrailResource decodes entire-api's direct detail resource, keeping the
+// body as served on Raw.
 func decodeTrailResource(resp *http.Response) (api.TrailResource, error) {
-	var resource api.TrailResource
-	if err := api.DecodeJSON(resp, &resource); err != nil {
+	var raw json.RawMessage
+	if err := api.DecodeJSON(resp, &raw); err != nil {
 		return api.TrailResource{}, fmt.Errorf("decode trail resource: %w", err)
 	}
+	var resource api.TrailResource
+	if err := json.Unmarshal(raw, &resource); err != nil {
+		return api.TrailResource{}, fmt.Errorf("decode trail resource: %w", err)
+	}
+	resource.Raw = raw
 	return resource, nil
 }
 

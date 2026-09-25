@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -219,110 +218,4 @@ func toTrailDiscussionCreateResponseJSON(v api.TrailDiscussionCreateResponse) tr
 		out.Message = &message
 	}
 	return out
-}
-
-// trailShowJSON is the `trail show --json` object: the same trail fields as one
-// entry of `trail list --json`, plus the detail-only mergeability snapshot.
-// Mergeability is always present as a key and null when the detail could not
-// be loaded, so a missing verdict never reads as "mergeable": false.
-type trailShowJSON struct {
-	*trail.Metadata
-
-	Mergeability *trailMergeabilityJSON `json:"mergeability"`
-}
-
-type trailMergeabilityJSON struct {
-	HeadSHA        *string         `json:"head_sha"`
-	Mergeable      bool            `json:"mergeable"`
-	ConflictStatus string          `json:"conflict_status"`
-	Checks         trailChecksJSON `json:"checks"`
-	Gates          []trailGateJSON `json:"gates"`
-}
-
-func toTrailMergeabilityJSON(v *api.TrailMergeability) *trailMergeabilityJSON {
-	if v == nil {
-		return nil
-	}
-	return &trailMergeabilityJSON{
-		HeadSHA:        v.HeadSHA,
-		Mergeable:      v.Mergeable,
-		ConflictStatus: v.ConflictStatus,
-		Checks: trailChecksJSON{
-			Availability: v.Checks.Availability,
-			Runs:         mapSlice(v.Checks.Runs, toTrailCheckRunJSON),
-		},
-		Gates: mapSlice(v.Gates, toTrailGateJSON),
-	}
-}
-
-type trailChecksJSON struct {
-	Availability string              `json:"availability"`
-	Runs         []trailCheckRunJSON `json:"runs"`
-}
-
-type trailCheckRunJSON struct {
-	Name        string     `json:"name"`
-	Status      string     `json:"status"`
-	Conclusion  *string    `json:"conclusion"`
-	DetailsURL  *string    `json:"details_url"`
-	StartedAt   *time.Time `json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	AppName     *string    `json:"app_name"`
-}
-
-func toTrailCheckRunJSON(v api.TrailCheckRun) trailCheckRunJSON { return trailCheckRunJSON(v) }
-
-type trailGateJSON struct {
-	ID               string                  `json:"id"`
-	GateDefinitionID string                  `json:"gate_definition_id"`
-	GateKey          string                  `json:"gate_key"`
-	GateType         string                  `json:"gate_type"`
-	Blocking         bool                    `json:"blocking"`
-	Status           string                  `json:"status"`
-	State            string                  `json:"state,omitempty"`
-	Outcome          *string                 `json:"outcome"`
-	Rationale        *string                 `json:"rationale"`
-	HeadSHA          *string                 `json:"head_sha"`
-	EvaluatedAtSHA   *string                 `json:"evaluated_at_sha"`
-	StaleReason      *string                 `json:"stale_reason"`
-	FindingCount     *int64                  `json:"finding_count"`
-	Reviewers        []trailGateReviewerJSON `json:"reviewers"`
-	RunnerIDs        []string                `json:"runner_ids"`
-	Value            json.RawMessage         `json:"value"`
-	CreatedAt        time.Time               `json:"created_at"`
-	CompletedAt      *time.Time              `json:"completed_at"`
-}
-
-func toTrailGateJSON(v api.TrailGate) trailGateJSON {
-	return trailGateJSON{
-		ID:               v.ID,
-		GateDefinitionID: v.GateDefinitionID,
-		GateKey:          v.GateKey,
-		GateType:         v.GateType,
-		Blocking:         v.Blocking,
-		Status:           v.Status,
-		State:            v.State,
-		Outcome:          v.Outcome,
-		Rationale:        v.Rationale,
-		HeadSHA:          v.HeadSHA,
-		EvaluatedAtSHA:   v.EvaluatedAtSHA,
-		StaleReason:      v.StaleReason,
-		FindingCount:     v.FindingCount,
-		Reviewers:        mapSlice(v.Reviewers, toTrailGateReviewerJSON),
-		RunnerIDs:        v.RunnerIDs,
-		Value:            v.Value,
-		CreatedAt:        v.CreatedAt,
-		CompletedAt:      v.CompletedAt,
-	}
-}
-
-type trailGateReviewerJSON struct {
-	Login           string  `json:"login"`
-	State           string  `json:"state"`
-	ReviewedHeadSHA *string `json:"reviewed_head_sha"`
-	Reason          *string `json:"reason"`
-}
-
-func toTrailGateReviewerJSON(v api.TrailGateReviewer) trailGateReviewerJSON {
-	return trailGateReviewerJSON(v)
 }
