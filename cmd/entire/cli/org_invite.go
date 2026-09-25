@@ -12,9 +12,9 @@ import (
 )
 
 // The invitation verbs. `entire org invite` groups `send`, which creates an
-// invitation, with `list` and `revoke` managing the ones already sent. The
-// shape follows the WorkOS CLI's `invitation send --email`. An invitation is how an org grants membership to someone the control
-// plane cannot name yet: `grant add` needs an existing provider account, an
+// invitation, with `list` and `revoke` managing the ones already sent. An
+// invitation is how an org grants membership to someone the control plane
+// cannot name yet: `grant add` needs an existing provider account, an
 // invitation needs only an email address.
 //
 // Who may invite with which role is the server's decision: it answers 403 for
