@@ -130,6 +130,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"trail create":          {agentHelpAudienceTaskDriven, false},
 	"trail delete":          {agentHelpAudienceTaskDriven, false},
 	"trail finding":         {agentHelpAudienceTaskDriven, false},
+	"trail merge":           {agentHelpAudienceTaskDriven, false},
 	"trail request-changes": {agentHelpAudienceTaskDriven, false},
 	"trail resume":          {agentHelpAudienceTaskDriven, false},
 	"trail update":          {agentHelpAudienceTaskDriven, false},
