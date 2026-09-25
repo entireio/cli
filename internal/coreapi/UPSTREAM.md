@@ -44,9 +44,10 @@ the *client sends* (request bodies like `SetRepoVisibilityInputBody`) should
 stay strict.
 
 `Membership.role`/`status` and `Invitation.role`/`status` are the same shape:
-`entire org grant list` displays memberships; the generated
-`ListOrgInvitations` client decodes invitations. A new role or lifecycle state
-must not fail either listing.
+`entire org grant list` displays memberships. `entire org invite list`
+displays invitations, and the generated `ListOrgInvitations` client decodes
+them. A new role or lifecycle state must display rather than fail either
+listing.
 
 **Workaround:** `spec/normalize.go` (`loosenReadModelEnums`, allowlist
 `readModelEnumFields`) deletes the `enum` constraint from those response
