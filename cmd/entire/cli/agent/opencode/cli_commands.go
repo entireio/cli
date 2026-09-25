@@ -70,12 +70,12 @@ func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outp
 	var commandErr error
 	for _, invocation := range openCodeExportInvocations {
 		if err := writeOpenCodeExport(ctx, root, outputName, invocation, sessionID); err != nil {
-			commandErr = err
+			commandErr = preferOpenCodeError(commandErr, err)
 			continue
 		}
 		data, err := entiredir.ReadFile(root, outputName)
 		if err != nil {
-			commandErr = fmt.Errorf("failed to read export file: %w", err)
+			commandErr = preferOpenCodeError(commandErr, fmt.Errorf("failed to read export file: %w", err))
 			continue
 		}
 		if openCodeExportLooksValid(data) {
@@ -136,6 +136,25 @@ func openCodeExportLooksValid(data []byte) bool {
 		return false
 	}
 	return probe.Info != nil && probe.Messages != nil
+}
+
+// preferOpenCodeError keeps the first classified command error, because the
+// invocations are tried newest-first and the newest supported command reports
+// the real cause (for example "session not found"). It only replaces that error
+// when it is an unsupported-subcommand failure, which is less specific than a
+// later invocation's real failure.
+func preferOpenCodeError(current, next error) error {
+	if current == nil || looksLikeUnsupportedSubcommand(current) {
+		return next
+	}
+	return current
+}
+
+// looksLikeUnsupportedSubcommand reports whether err is OpenCode rejecting a
+// command it does not know, rather than failing to act on a real session.
+func looksLikeUnsupportedSubcommand(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown subcommand")
 }
 
 func classifyOpenCodeExportError(ctx context.Context, err error, stderr, sessionID string) error {
@@ -247,7 +266,8 @@ func runOpenCodeImport(ctx context.Context, exportFilePath string) error {
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	var lastErr error
+	var firstErr error
+	var unsupportedErr error
 	for _, invocation := range openCodeImportInvocations {
 		args := append(append([]string{}, invocation...), exportFilePath)
 		cmd := exec.CommandContext(ctx, "opencode", args...)
@@ -259,15 +279,22 @@ func runOpenCodeImport(ctx context.Context, exportFilePath string) error {
 			return nil
 		}
 		if err != nil {
-			lastErr = fmt.Errorf("opencode import failed: %w (output: %s)", err, string(output))
-		} else {
-			lastErr = fmt.Errorf("opencode import is not supported by this OpenCode version (output: %s)", string(output))
+			firstErr = preferOpenCodeError(firstErr, fmt.Errorf("opencode import failed: %w (output: %s)", err, string(output)))
+			continue
+		}
+		// Exit 0 with a help page: this version does not know the subcommand.
+		// Keep it only if no invocation reported a real failure.
+		if unsupportedErr == nil {
+			unsupportedErr = fmt.Errorf("opencode import is not supported by this OpenCode version (output: %s)", string(output))
 		}
 	}
-	if lastErr == nil {
-		lastErr = errors.New("opencode import could not be started")
+	if firstErr != nil {
+		return firstErr
 	}
-	return lastErr
+	if unsupportedErr != nil {
+		return unsupportedErr
+	}
+	return errors.New("opencode import could not be started")
 }
 
 // looksLikeOpenCodeHelp reports whether output is a command help page. A version

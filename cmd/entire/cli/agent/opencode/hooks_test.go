@@ -595,7 +595,10 @@ const ctx = {
     },
   },
 }
-await plugin.setup(ctx)
+const disposer = await plugin.setup(ctx)
+if (typeof disposer !== "function") {
+  throw new Error("setup did not return the subscription disposer")
+}
 if (typeof hooks.prompt !== "function" || typeof hooks.context !== "function") {
   throw new Error("setup did not register the prompt/context session hooks")
 }
@@ -633,6 +636,12 @@ await new Promise((resolve) => setTimeout(resolve, 200))
 		if !strings.Contains(marker, want) {
 			t.Fatalf("expected %s in marker, got %q\nnode output:\n%s", want, marker, out)
 		}
+	}
+	// session-start must finish before turn-start: the prompt hook skips its
+	// synchronous fallback once the session is current, so an async
+	// session.created handler would let turn-start run uninitialized.
+	if start, turn := strings.Index(marker, "session-start"), strings.Index(marker, "turn-start"); start < 0 || turn < 0 || start > turn {
+		t.Fatalf("expected session-start before turn-start in marker, got %q\nnode output:\n%s", marker, out)
 	}
 }
 

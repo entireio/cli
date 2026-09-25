@@ -121,6 +121,43 @@ func TestCompact_OpenCodeStartLine(t *testing.T) {
 	})
 }
 
+func TestCompact_OpenCodeV2PreservesToolInput(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{
+		"info":{"id":"ses-1","title":"test","time":{"created":1700000000000,"updated":1700000001000}},
+		"messages":[
+			{
+				"id":"msg-a1",
+				"type":"assistant",
+				"time":{"created":1700000001000,"completed":1700000002000},
+				"content":[
+					{
+						"type":"tool",
+						"id":"call_1",
+						"name":"write",
+						"state":{
+							"status":"completed",
+							"input":{"path":"/tmp/x.go"},
+							"content":[{"type":"text","text":"ok"}]
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	expected := []string{
+		`{"v":1,"agent":"opencode","cli_version":"0.5.1","type":"assistant","ts":"2023-11-14T22:13:21Z","id":"msg-a1","content":[{"type":"tool_use","id":"call_1","name":"write","input":{"path":"/tmp/x.go"},"result":{"output":"ok","status":"success"}}]}`,
+	}
+
+	result, err := Compact(redact.AlreadyRedacted(input), agentOpts("opencode"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertJSONLines(t, result, expected)
+}
+
 func TestCompact_OpenCodeNoTokensOmitsFields(t *testing.T) {
 	t.Parallel()
 

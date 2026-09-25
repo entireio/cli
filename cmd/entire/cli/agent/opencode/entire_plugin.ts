@@ -306,8 +306,13 @@ function createHooks(directory: string) {
         case "session.created": {
           const sessionID = event?.data?.sessionID
           if (!sessionID) break
+          // Fire session-start synchronously: resetSessionTracking marks the
+          // session as current before returning, and the prompt hook skips its
+          // synchronous fallback once the session is current. If this spawn
+          // were async, a prompt arriving in between could run turn-start
+          // before session state is initialized.
           if (resetSessionTracking(sessionID)) {
-            void callHook("session-start", { session_id: sessionID })
+            callHookSync("session-start", { session_id: sessionID })
           }
           break
         }
@@ -416,7 +421,9 @@ export const EntirePlugin = async ({ directory }: { directory: string }) => crea
 export default {
   id: "entire",
   async setup(ctx: AnyRecord) {
-    await createHooks(ctx?.location?.directory ?? process.cwd()).setup(ctx)
+    // Return the inner disposer so OpenCode aborts the event subscription and
+    // deregisters the hooks on plugin reload/unload.
+    return createHooks(ctx?.location?.directory ?? process.cwd()).setup(ctx)
   },
   async server(input: { directory: string }) {
     return createHooks(input.directory).v1

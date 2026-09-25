@@ -271,6 +271,7 @@ func normalizeOpenCodeMessage(raw json.RawMessage) (openCodeMessage, error) {
 			})
 		case openCodeToolPart:
 			var status, output string
+			state := map[string]json.RawMessage{}
 			if content.State != nil {
 				status = content.State.Status
 				output = content.State.Output
@@ -283,12 +284,19 @@ func normalizeOpenCodeMessage(raw json.RawMessage) (openCodeMessage, error) {
 					}
 					output = strings.Join(texts, "\n")
 				}
+				// Preserve tool arguments (e.g. filePath) alongside the result,
+				// matching the V1 path and NormalizeExportSession.
+				if len(content.State.Input) > 0 {
+					state["input"] = content.State.Input
+				}
 			}
+			state["status"] = rawJSON(status)
+			state["output"] = rawJSON(output)
 			out.Parts = append(out.Parts, map[string]json.RawMessage{
 				"type":           rawJSON(openCodeToolPart),
 				openCodeToolPart: rawJSON(content.Name),
 				"callID":         rawJSON(content.ID),
-				"state":          marshalRaw(map[string]json.RawMessage{"status": rawJSON(status), "output": rawJSON(output)}),
+				"state":          marshalRaw(state),
 			})
 		}
 	}
@@ -323,8 +331,9 @@ type openCodeContentV2 struct {
 }
 
 type openCodeToolStateV2 struct {
-	Status  string `json:"status"`
-	Output  string `json:"output"`
+	Status  string          `json:"status"`
+	Output  string          `json:"output"`
+	Input   json.RawMessage `json:"input"`
 	Content []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
