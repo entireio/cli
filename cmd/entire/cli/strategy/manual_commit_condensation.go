@@ -126,6 +126,13 @@ type condenseOpts struct {
 	// result. The gate is memoized per commit by commitCondensedEmitter, so the
 	// settings load behind it runs at most once per PostCommit.
 	searchProbeAllowed func() bool
+
+	// noCommitAttribution omits code attribution for a write that no commit
+	// backs (snapshot checkpoints). Attribution compares the shadow tree with
+	// HEAD on the premise that HEAD holds the work just committed; without a
+	// commit, HEAD predates the agent's uncommitted changes and every one of
+	// them would be counted as a human removal.
+	noCommitAttribution bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -704,17 +711,20 @@ func buildCondensationWriteOptions(
 	}
 
 	attributionStart := time.Now()
-	attrCtx, attributionSpan := perf.Start(ctx, "calculate_session_attribution")
-	attribution := calculateSessionAttributions(attrCtx, repo, shadowRef, sessionData, state, attributionOpts{
-		headTree:              o.headTree,
-		parentTree:            o.parentTree,
-		repoDir:               o.repoDir,
-		attributionBaseCommit: attrBase,
-		parentCommitHash:      o.parentCommitHash,
-		headCommitHash:        o.headCommitHash,
-		allAgentFiles:         o.allAgentFiles,
-	})
-	attributionSpan.End()
+	var attribution *cpkg.Attribution
+	if !o.noCommitAttribution {
+		attrCtx, attributionSpan := perf.Start(ctx, "calculate_session_attribution")
+		attribution = calculateSessionAttributions(attrCtx, repo, shadowRef, sessionData, state, attributionOpts{
+			headTree:              o.headTree,
+			parentTree:            o.parentTree,
+			repoDir:               o.repoDir,
+			attributionBaseCommit: attrBase,
+			parentCommitHash:      o.parentCommitHash,
+			headCommitHash:        o.headCommitHash,
+			allAgentFiles:         o.allAgentFiles,
+		})
+		attributionSpan.End()
+	}
 	attributionDuration := time.Since(attributionStart)
 
 	var summary *cpkg.Summary

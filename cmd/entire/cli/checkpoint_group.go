@@ -36,6 +36,7 @@ Examples:
 	}
 
 	cmd.AddCommand(newCheckpointListCmd())
+	cmd.AddCommand(newCheckpointCreateCmd())
 	cmd.AddCommand(newCheckpointResumeCmd())
 	cmd.AddCommand(newExplainCmd())
 	cmd.AddCommand(newCheckpointTokensCmd())
