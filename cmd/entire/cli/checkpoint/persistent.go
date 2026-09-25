@@ -739,9 +739,9 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		CLIVersion:                  versioninfo.Version,
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
-		ReviewPrompt:                opts.ReviewPrompt,
+		ReviewPrompt:                redact.String(opts.ReviewPrompt),
 		InvestigateRunID:            opts.InvestigateRunID,
-		InvestigateTopic:            opts.InvestigateTopic,
+		InvestigateTopic:            redact.String(opts.InvestigateTopic),
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
