@@ -437,6 +437,19 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 		ProviderUserID: me.Auth.ProviderUserId,
 	}
 	p.Handle, _ = me.Global.Handle.Get()
+	if p.Handle == "" {
+		// global.handle is optional; global.handles is not. Take the handle of
+		// the identity the bearer actually authenticated with, rather than the
+		// providerUserId beside it — that id is not a handle, and resolving a
+		// grantee by it answers 404, which would make the `user` value a
+		// spelling no command accepts.
+		for _, h := range me.Global.Handles {
+			if strings.EqualFold(h.Provider, p.Provider) && h.Handle != "" {
+				p.Handle = h.Handle
+				break
+			}
+		}
+	}
 	// global.homeJurisdiction is the account's own home region. The top-level
 	// me.Jurisdiction field is the serving node's region — reading that one is
 	// what used to make a geo-routed login report the wrong slug.
@@ -745,10 +758,17 @@ type authStatusJSON struct {
 	// Server is the login server's bare host; Context is the local name for it.
 	Server  string `json:"server,omitempty"`
 	Context string `json:"context,omitempty"`
-	// User is the provider-qualified handle, the spelling `entire grant` takes.
-	// The bare handle and provider are deliberately not split out: one field
-	// that is directly usable beats two a caller has to rejoin.
+	// User is the provider-qualified handle. The bare handle and provider are
+	// deliberately not split out: one field beats two a caller has to rejoin.
+	//
+	// It is the spelling `entire grant` takes wherever the provider issues real
+	// usernames. Where one is synthesised from a subject id (Google), the
+	// duplicated provider is dropped for legibility and the result no longer
+	// resolves as a grantee — see authIdentityLabel. Name is the display name
+	// such an account carries instead, absent where the handle is already
+	// human.
 	User          string `json:"user,omitempty"`
+	Name          string `json:"name,omitempty"`
 	Jurisdiction  string `json:"jurisdiction,omitempty"`
 	ForeignRegion bool   `json:"foreign_region,omitempty"`
 	// TokenSource is the same description the text view prints; EnvToken is the
@@ -831,6 +851,7 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	out.ForeignRegion = d.profile.ForeignRegion
 	out.Jurisdiction = d.profile.Jurisdiction
 	out.User = authIdentityLabel(d.profile)
+	out.Name = strings.TrimSpace(d.profile.DisplayName)
 
 	if t.envToken {
 		return out
@@ -875,22 +896,31 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	return out
 }
 
-// authIdentityLabel names the account the way `entire grant` takes it —
-// "github:alice" — falling back to the provider's own user id when the account
-// carries no handle.
+// authIdentityLabel names the account provider-qualified — "github:alice".
 //
-// /me's handle is optional, and an account without one would otherwise be
-// described by nothing at all: a verdict line, a jurisdiction and a token
-// backend, with no way to tell whose login this is. The provider id is not a
-// grantee spelling, but it identifies the account, which is the row's job.
+// The handle it qualifies is resolved in defaultFetchProfile, which falls back
+// to global.handles when the scalar global.handle is absent, so an account
+// missing the latter is still named. What it will not do is qualify a
+// providerUserId out of nowhere: that produces a well-formed string the
+// resolver answers 404 for, so an account naming no handle at all gets no row.
+//
+// A synthetic handle is unqualified first. A provider with no username concept
+// gets one minted as "<provider>-<providerUserId>" (Google), and qualifying
+// that spells the provider twice — `google:google-100164574874856813796`.
+// The prefix is dropped only when what follows it IS the providerUserId, so
+// the handle is provably the minted form: a GitHub user genuinely named
+// `github-foo` keeps their name, since `github-<their id>` is not what they
+// are called.
 func authIdentityLabel(p *authProfile) string {
-	if p.Handle != "" {
-		return formatQualifiedHandle(p.Provider, p.Handle)
+	if p.Handle == "" {
+		return ""
 	}
-	if p.ProviderUserID != "" {
-		return formatQualifiedHandle(p.Provider, p.ProviderUserID)
+	handle := p.Handle
+	if p.Provider != "" && p.ProviderUserID != "" &&
+		strings.EqualFold(handle, p.Provider+"-"+p.ProviderUserID) {
+		handle = p.ProviderUserID
 	}
-	return ""
+	return formatQualifiedHandle(p.Provider, handle)
 }
 
 // authProfileRows renders the user identity from GET /me, omitting any field
@@ -910,6 +940,14 @@ func authProfileRows(p *authProfile) []explainRow {
 	var rows []explainRow
 	if user := authIdentityLabel(p); user != "" {
 		rows = append(rows, explainRow{Label: "user", Value: user})
+	}
+	// A display name only earns a line where the handle is not already one.
+	// Providers split cleanly here: GitHub gives a human handle and no display
+	// name, while Google mints a synthetic `google-<subject id>` handle and
+	// does give one — so each provider is named by whichever half it has, and
+	// neither grows a row repeating the other.
+	if name := strings.TrimSpace(p.DisplayName); name != "" && !strings.EqualFold(name, p.Handle) {
+		rows = append(rows, explainRow{Label: "name", Value: name})
 	}
 	// The home jurisdiction slug is what 'entire auth token --jurisdiction'
 	// takes; surface it so it's discoverable non-interactively.

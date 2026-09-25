@@ -151,8 +151,21 @@ the commands are always runnable in every build.
   --json sessions` is refused by `cobra.NoArgs` before `RunE` runs, so it exits
   non-zero with empty stdout and a suggestion on stderr. The command keeps its
   non-zero exit and prints nothing further to stderr. The JSON carries the provider-qualified
-  `user` and deliberately not a split `handle`/`provider`: one directly usable
-  field beats two a caller has to rejoin. `auth status` also marks the caller's
+  `user` and deliberately not a split `handle`/`provider`: one field beats two a
+  caller has to rejoin. **Identity is split across providers**, so the view takes
+  whichever half each one has. GitHub supplies a human handle
+  (`github:gtrrz-victor`) and no display name; Google supplies a display name
+  and a handle synthesised as `google-<subject id>`, which qualifies to
+  `google:google-100…` — the provider twice. That prefix is dropped when what
+  follows it IS the `providerUserId`, so the handle is provably the minted form
+  and a GitHub user genuinely named `github-foo` keeps their name. A `name` row
+  (and JSON field) carries the display name, and appears only where the handle
+  is not already a human one, so GitHub grows no second line.
+  **The trade-off is deliberate and worth knowing:** the de-duplicated spelling
+  does not resolve as a grantee — `GET /identity/handles/google/<subject id>`
+  answers 404 while the doubled form resolves — so for synthetic handles `user`
+  is a legible identity, not a value to paste into `entire grant`. It stays
+  grant-able for every provider that issues real usernames. `auth status` also marks the caller's
   own row `(current)`, matching the login JWT's `fid` (refresh-token family id)
   claim against the listed session ids, since a session IS a refresh-token
   family. That match is the only thing entitling the verdict line to state an

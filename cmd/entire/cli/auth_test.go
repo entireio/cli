@@ -95,14 +95,18 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	if !strings.Contains(got, "Logged in") {
 		t.Fatalf("output = %q, want a logged-in verdict line", got)
 	}
-	// The handle is provider-qualified so it can be pasted straight into an
-	// `entire grant` command.
+	// The handle is provider-qualified, which for a provider that issues real
+	// usernames is also what `entire grant` takes.
 	if !hasMetadataRow(got, "user", "github:alice") {
 		t.Fatalf("output = %q, want a provider-qualified user row", got)
 	}
-	// Display name and email are deliberately not rendered — the handle is the
-	// account's identity everywhere else in the CLI.
-	for _, unwanted := range []string{"Alice Smith", "alice@example.com", "github/alice"} {
+	// A display name the server supplied is named; the account's email is not.
+	// The email is contact detail rather than identity, and nothing else in the
+	// CLI addresses an account by it.
+	if !hasMetadataRow(got, "name", "Alice Smith") {
+		t.Fatalf("output = %q, want the display name named", got)
+	}
+	for _, unwanted := range []string{"alice@example.com", "github/alice"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("output = %q, must not contain %q", got, unwanted)
 		}
@@ -1302,21 +1306,59 @@ func TestRunAuthStatus_ServerIsNamedOnlyWhereItSeparatesLogins(t *testing.T) {
 	})
 }
 
-// An account /me returns without a handle still has an identity; without this
-// the text view describes it with nothing at all.
-func TestAuthIdentityLabel_FallsBackToProviderUserID(t *testing.T) {
+// Identity is split across providers, so each is named by the half it has.
+// The fixtures are the real /me payloads for a GitHub and a Google login.
+func TestAuthIdentityLabel_PerProvider(t *testing.T) {
 	t.Parallel()
 
-	handleless := &authProfile{Provider: "github", ProviderUserID: "12345"}
-	if got := authIdentityLabel(handleless); got != "github:12345" {
-		t.Errorf("authIdentityLabel = %q, want the provider user id", got)
+	tests := []struct {
+		name    string
+		profile authProfile
+		want    string
+	}{
+		// A real username qualifies unchanged, and stays grant-able.
+		{"github username", authProfile{Handle: "gtrrz-victor", Provider: "github", ProviderUserID: "881031"}, "github:gtrrz-victor"},
+		// google-<subject id> would qualify to google:google-… — the provider twice.
+		{"google synthetic handle", authProfile{Handle: "google-100164574874856813796", Provider: "google", ProviderUserID: "100164574874856813796"}, "google:100164574874856813796"},
+		// The prefix is only dropped when what follows it IS the providerUserId,
+		// so a user genuinely called github-foo is not renamed to foo.
+		{"username that looks synthetic", authProfile{Handle: "github-foo", Provider: "github", ProviderUserID: "881031"}, "github:github-foo"},
+		// A providerUserId is not a handle: qualifying one yields a string the
+		// resolver answers 404 for, so no row beats a wrong one.
+		{"no handle at all", authProfile{Provider: "github", ProviderUserID: "881031"}, ""},
 	}
-	rows := authProfileRows(handleless)
-	if !hasRow(rows, "user", "github:12345") {
-		t.Errorf("rows = %+v, want a user row for a handle-less account", rows)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := authIdentityLabel(&tt.profile); got != tt.want {
+				t.Errorf("authIdentityLabel = %q, want %q", got, tt.want)
+			}
+		})
 	}
-	if got := authIdentityLabel(&authProfile{Provider: "github"}); got != "" {
-		t.Errorf("authIdentityLabel = %q, want empty when the account names neither", got)
+}
+
+// The name row carries the identity a synthetic handle does not, and stays away
+// where the handle is already human — GitHub supplies no display name at all.
+func TestAuthProfileRows_NameRow(t *testing.T) {
+	t.Parallel()
+
+	google := authProfileRows(&authProfile{Handle: "google-100164574874856813796", Provider: "google", ProviderUserID: "100164574874856813796", DisplayName: "Victor Gutierrez"})
+	if !hasRow(google, "user", "google:100164574874856813796") {
+		t.Errorf("rows = %+v, want the de-duplicated handle", google)
+	}
+	if !hasRow(google, "name", "Victor Gutierrez") {
+		t.Errorf("rows = %+v, want the display name", google)
+	}
+
+	github := authProfileRows(&authProfile{Handle: "gtrrz-victor", Provider: "github", ProviderUserID: "881031"})
+	if hasLabel(github, "name") {
+		t.Errorf("rows = %+v, want no name row where the provider supplies none", github)
+	}
+
+	// A display name that only restates the handle earns no line of its own.
+	echoed := authProfileRows(&authProfile{Handle: "alice", Provider: "github", ProviderUserID: "1", DisplayName: "alice"})
+	if hasLabel(echoed, "name") {
+		t.Errorf("rows = %+v, want no name row repeating the handle", echoed)
 	}
 }
 
