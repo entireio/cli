@@ -193,6 +193,27 @@ func TestReviewerTemplate_WaitIncludesStderrOnFailure(t *testing.T) {
 // previous behaviour panicked here, which would crash a whole multi-agent
 // fan-out (CU8) when one agent's template is misconfigured. Returning a
 // typed error lets callers skip that agent and continue.
+func TestReviewerTemplate_PrepareErrorAbortsBeforeBuild(t *testing.T) {
+	t.Parallel()
+	prepareErr := errors.New("prepare failed")
+	built := false
+	tmpl := ReviewerTemplate{
+		AgentName: "test",
+		Prepare:   func(context.Context) error { return prepareErr },
+		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
+			built = true
+			return exec.CommandContext(ctx, "true")
+		},
+		Parser: func(_ io.Reader) <-chan Event { c := make(chan Event); close(c); return c },
+	}
+	if _, err := tmpl.Start(context.Background(), RunConfig{}); !errors.Is(err, prepareErr) {
+		t.Fatalf("Start error = %v, want it to wrap the Prepare error", err)
+	}
+	if built {
+		t.Error("BuildCmd ran after Prepare failed")
+	}
+}
+
 func TestReviewerTemplate_StartReturnsErrTemplateMisconfigured(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

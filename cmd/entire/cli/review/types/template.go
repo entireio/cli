@@ -36,6 +36,11 @@ type ReviewerTemplate struct {
 	// The command MUST NOT have started yet; the template will call Start.
 	BuildCmd func(ctx context.Context, cfg RunConfig) *exec.Cmd
 
+	// Prepare, when set, runs before BuildCmd; an error aborts the run before
+	// anything is spawned. For setup the command depends on, such as a file
+	// its argv names.
+	Prepare func(ctx context.Context) error
+
 	// Parser converts the agent's stdout stream into a sequence of Events.
 	// The returned channel must close when stdout closes. Implementations
 	// must emit Started first, Finished{Success: ...} or RunError last,
@@ -66,6 +71,11 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	}
 	if t.Parser == nil {
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (nil Parser for agent %q)", ErrTemplateMisconfigured, t.AgentName)
+	}
+	if t.Prepare != nil {
+		if err := t.Prepare(ctx); err != nil {
+			return nil, fmt.Errorf("%s: prepare: %w", t.AgentName, err)
+		}
 	}
 	cmd := t.BuildCmd(ctx, cfg)
 	if cmd == nil {

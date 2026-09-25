@@ -2,10 +2,12 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -96,9 +98,10 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	cmd := buildReviewCmd(context.Background(), cfg)
 
 	// Expect: claude -p <prompt> --output-format stream-json --verbose
-	wantSuffix := []string{"--output-format", "stream-json", "--verbose"}
-	if len(cmd.Args) != 3+len(wantSuffix) {
-		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix), len(cmd.Args), cmd.Args)
+	// --setting-sources user --settings <hooks JSON> --strict-mcp-config
+	wantSuffix := []string{"--output-format", "stream-json", "--verbose", "--setting-sources", "user", "--settings"}
+	if len(cmd.Args) != 3+len(wantSuffix)+2 {
+		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix)+2, len(cmd.Args), cmd.Args)
 	}
 	if cmd.Args[0] != "claude" {
 		t.Errorf("Args[0] = %q, want %q", cmd.Args[0], "claude")
@@ -124,6 +127,67 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	// Stdin must be nil — claude receives prompt via argv, not stdin.
 	if cmd.Stdin != nil {
 		t.Errorf("cmd.Stdin = %v, want nil (claude uses argv, not stdin)", cmd.Stdin)
+	}
+}
+
+// The reviewer runs in the checkout under review, so that checkout's
+// .claude/settings.json (hooks, apiKeyHelper, permissions) and .mcp.json must
+// not be loaded: a branch could otherwise run commands just by being reviewed.
+// Entire's own hooks are supplied from the binary instead.
+func TestReviewer_DoesNotLoadCheckoutSettings(t *testing.T) {
+	t.Parallel()
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{})
+
+	flagValue := func(name string) (string, bool) {
+		for i, arg := range cmd.Args {
+			if arg == name && i+1 < len(cmd.Args) {
+				return cmd.Args[i+1], true
+			}
+		}
+		return "", false
+	}
+
+	sources, ok := flagValue("--setting-sources")
+	if !ok {
+		t.Fatalf("--setting-sources missing; claude would load the checkout's project settings: %v", cmd.Args)
+	}
+	if sources != "user" {
+		t.Errorf("--setting-sources = %q, want %q (project and local settings come from the checkout)", sources, "user")
+	}
+
+	if !slices.Contains(cmd.Args, "--strict-mcp-config") {
+		t.Errorf("--strict-mcp-config missing; the checkout's .mcp.json servers could start: %v", cmd.Args)
+	}
+
+	raw, ok := flagValue("--settings")
+	if !ok {
+		t.Fatalf("--settings missing; Entire's hooks would not run: %v", cmd.Args)
+	}
+	var got struct {
+		Hooks map[string][]ClaudeHookMatcher `json:"hooks"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("--settings is not valid JSON: %v\n%s", err, raw)
+	}
+
+	want := make(map[string]json.RawMessage)
+	installHookEntries(want, false)
+	if len(got.Hooks) != len(want) {
+		t.Errorf("--settings has %d hook types, want the %d `entire enable` installs", len(got.Hooks), len(want))
+	}
+	for hookType := range want {
+		if !hasEntireHook(got.Hooks[hookType]) {
+			t.Errorf("--settings is missing Entire's %s hook", hookType)
+		}
+	}
+	for hookType, matchers := range got.Hooks {
+		for _, m := range matchers {
+			for _, h := range m.Hooks {
+				if !isEntireHook(h.Command) {
+					t.Errorf("--settings %s carries a non-Entire hook %q", hookType, h.Command)
+				}
+			}
+		}
 	}
 }
 
