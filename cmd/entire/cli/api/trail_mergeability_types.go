@@ -11,8 +11,8 @@ import (
 // mergeability from its parts. head_sha, gates, and checks all come from the
 // same server read that decided mergeable, so they are consistent with it.
 //
-// The wire object carries further fields (approval_gate_passed, behind_by,
-// comparison_status, bypass_policy) that the CLI does not expose.
+// The wire object carries further fields (behind_by, comparison_status,
+// bypass_policy) that the CLI does not expose.
 type TrailMergeability struct {
 	HeadSHA        *string     `json:"head_sha"`
 	Mergeable      bool        `json:"mergeable"`

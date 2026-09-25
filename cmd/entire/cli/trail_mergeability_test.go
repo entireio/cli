@@ -20,7 +20,6 @@ import (
 const trailMergeabilityWireJSON = `{
   "bypass_policy": "nobody",
   "mergeable": false,
-  "approval_gate_passed": false,
   "behind_by": 0,
   "comparison_status": "unknown",
   "conflict_status": "clean",
