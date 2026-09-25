@@ -331,7 +331,7 @@ func isGitSequenceOperation(ctx context.Context) bool {
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
 //   - "merge": skip trailer entirely (the merged commits keep their own)
-//   - "squash": skip; the seeded message already carries the squashed trailers
+//   - "squash": git's seeded squash message - inherits the squashed trailers, then matches as usual
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -348,8 +348,6 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
-	// A squash in progress links to the commits being squashed, never to a
-	// session matched here — see inheritSquashedCheckpointTrailers.
 	// Inherited trailers link the squashed commits' checkpoints; matching still
 	// runs so work the session holds gets a checkpoint of its own.
 	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
@@ -549,8 +547,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 // one the recorded commits changed. `commit -m` reports source "message", not "squash", so this runs
 // before the source switch — but only for those two sources: an amend must
 // keep its own logic even when an abandoned squash left SQUASH_MSG behind.
-// Reports whether it took over; no trailers or an unusable message fall
-// through to ordinary matching.
+// Returns the inherited IDs; nil when there are none or the message is
+// unusable. Ordinary matching runs afterwards either way.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) []id.CheckpointID {
 	if source != "message" && source != "squash" {
 		return nil
@@ -580,7 +578,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		return nil
 	}
 	defer repo.Close()
-	if !squashStagedContentMatches(ctx, repo, squashMsg) {
+	if !squashTouchesStagedPath(ctx, repo, squashMsg) {
 		stripInheritedCheckpointTrailers(commitMsgFile, inherited)
 		logging.Debug(logCtx, "prepare-commit-msg: ignored stale squash message whose commits changed none of the staged paths",
 			slog.String("source", source),
@@ -601,7 +599,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		if present[cpID.String()] {
 			continue
 		}
-		message = addInheritedCheckpointTrailer(message, cpID)
+		message = addInheritedCheckpointTrailer(message, cpID, source)
 		added++
 	}
 	if added == 0 {
@@ -621,12 +619,12 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 	return inherited
 }
 
-// squashStagedContentMatches reports whether a staged path is one that a
+// squashTouchesStagedPath reports whether a staged path is one that a
 // commit Git recorded in SQUASH_MSG changed. Git leaves SQUASH_MSG behind when a
 // squash is abandoned, so the file alone is not proof that the current staged
 // work belongs to those commits; matching paths rather than content keeps a
 // squash whose files were touched up before committing.
-func squashStagedContentMatches(ctx context.Context, repo *git.Repository, squashMsg []byte) bool {
+func squashTouchesStagedPath(ctx context.Context, repo *git.Repository, squashMsg []byte) bool {
 	files, err := getStagedFiles(ctx)
 	if err != nil || len(files) == 0 {
 		return false
@@ -2603,8 +2601,13 @@ func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
 
 // addInheritedCheckpointTrailer adds an inherited trailer above git's comment
 // block rather than after it: with `commit -v` git discards everything below
-// the scissors line, and the trailer with it.
-func addInheritedCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
+// the scissors line, and the trailer with it. Only an editor message has that
+// block; a `-m`/`-F` message (source "message") keeps `#` lines as content, so
+// its trailer is appended as usual.
+func addInheritedCheckpointTrailer(message string, checkpointID id.CheckpointID, source string) string {
+	if source == "message" {
+		return addCheckpointTrailer(message, checkpointID)
+	}
 	lines := strings.Split(message, "\n")
 	for i, line := range lines {
 		if strings.HasPrefix(line, "#") {

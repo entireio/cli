@@ -103,12 +103,24 @@ func TestAddInheritedCheckpointTrailer_StaysAboveGitComments(t *testing.T) {
 	t.Parallel()
 	inherited := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J51")
 	msg := "Subject\n\n# Please enter the commit message.\n# ------------------------ >8 ------------------------\ndiff --git a/f b/f\n"
-	got := addInheritedCheckpointTrailer(msg, inherited)
+	got := addInheritedCheckpointTrailer(msg, inherited, "squash")
 	trailerAt := strings.Index(got, "Entire-Checkpoint: "+inherited.String())
 	require.GreaterOrEqual(t, trailerAt, 0, "%q", got)
 	require.Less(t, trailerAt, strings.Index(got, "# Please enter"), "%q", got)
 	require.True(t, strings.HasSuffix(got, "# ------------------------ >8 ------------------------\ndiff --git a/f b/f\n"), "git's block is kept intact: %q", got)
 
-	require.Equal(t, addCheckpointTrailer("Subject\n", inherited), addInheritedCheckpointTrailer("Subject\n", inherited),
+	require.Equal(t, addCheckpointTrailer("Subject\n", inherited), addInheritedCheckpointTrailer("Subject\n", inherited, "squash"),
 		"a message without git comments is unchanged in behaviour")
+}
+
+// A -m message keeps `#` lines as content: "#42 fix login" is the subject, not
+// git's comment block, so the inherited trailer must not go above it.
+func TestAddInheritedCheckpointTrailer_MessageSourceKeepsHashLines(t *testing.T) {
+	t.Parallel()
+	inherited := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J53")
+	for _, msg := range []string{"#42 fix login\n", "Fix login\n\n#42 is the issue\n"} {
+		got := addInheritedCheckpointTrailer(msg, inherited, "message")
+		require.True(t, strings.HasPrefix(got, strings.TrimRight(msg, "\n")), "the user's message comes first: %q", got)
+		require.True(t, strings.HasSuffix(got, "Entire-Checkpoint: "+inherited.String()+"\n"), "the trailer ends the message: %q", got)
+	}
 }
