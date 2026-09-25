@@ -135,8 +135,6 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this repo is causing repeated" +
 	"\n  approval prompts. Run 'entire doctor' to remove it."
 
-// handleLifecycleSessionStart handles session start: shows banner, checks concurrent sessions,
-// fires state machine transition.
 // followAgentWorkingDirectory moves this hook process into the worktree the
 // agent reports it is working in, when that is another worktree of the same
 // repository. Hooks run where the agent was launched while the payload's cwd
@@ -225,9 +223,6 @@ func sameDir(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
 
-// worktreeRootOf finds the worktree containing dir — nearest root first, so a
-// cwd inside a subdirectory still resolves — through the canonical metadata
-// resolver rather than a git query.
 // clearWorktreeCaches drops everything resolved from the process directory.
 func clearWorktreeCaches() {
 	paths.ClearWorktreeRootCache()
@@ -235,6 +230,9 @@ func clearWorktreeCaches() {
 	session.ClearGitCommonDirCache()
 }
 
+// worktreeRootOf finds the worktree containing dir — nearest root first, so a
+// cwd inside a subdirectory still resolves — through the canonical metadata
+// resolver rather than a git query.
 func worktreeRootOf(dir string) (string, gitrepo.WorktreeMetadata, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -257,6 +255,8 @@ func worktreeRootOf(dir string) (string, gitrepo.WorktreeMetadata, error) {
 	}
 }
 
+// handleLifecycleSessionStart handles session start: shows banner, checks concurrent sessions,
+// fires state machine transition.
 func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "session-start",
