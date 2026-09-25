@@ -253,6 +253,81 @@ func TestRunTrailShowNumericDetailWithoutBodyIsNotRefetched(t *testing.T) {
 	}
 }
 
+// trailMalformedMergeabilitySnapshots drift from the snapshot shape in ways a
+// typed decode rejects (a bad timestamp, a stringly-typed count).
+var trailMalformedMergeabilitySnapshots = map[string]string{
+	"empty gate created_at": `{"mergeable": true, "gates": [{"gate_key": "approvals", "created_at": ""}]}`,
+	"string finding_count":  `{"mergeable": true, "gates": [{"gate_key": "findings", "finding_count": "3"}]}`,
+	"empty run started_at":  `{"mergeable": true, "checks": {"availability": "available", "runs": [{"name": "lint", "started_at": ""}]}}`,
+}
+
+func trailDetailServerWithMergeability(t *testing.T, mergeability string) *httptest.Server {
+	t.Helper()
+	body := `{"id": "trl_1", "number": 7, "branch": "feature/x", "title": "T", "status": "open",
+  "body_document": {"text_snapshot": "detail body"}, "mergeability": ` + mergeability + `}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != trailTestBasePath+"/7" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Errorf("write detail response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Every numeric selector resolves through the detail route — approve,
+// request-changes, resume, update, and review-target resolution included —
+// and none of them read mergeability, so a snapshot the CLI cannot decode
+// must not break the lookup.
+func TestFindTrailByNumberToleratesMalformedMergeability(t *testing.T) {
+	t.Parallel()
+
+	for name, mergeability := range trailMalformedMergeabilitySnapshots {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := trailDetailServerWithMergeability(t, mergeability)
+			found, err := findTrailByNumberAtPath(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, 7)
+			require.NoError(t, err)
+			require.NotNil(t, found)
+			require.Equal(t, "trl_1", found.ID)
+			_, merr := found.DecodeMergeability()
+			require.Error(t, merr, "the fixture must actually be undecodable")
+		})
+	}
+}
+
+// trail show treats an undecodable snapshot like a missing one: the verdict is
+// unknown (null in JSON), a warning goes to stderr, and the rest renders.
+func TestRunTrailShowDegradesOnMalformedMergeability(t *testing.T) {
+	t.Parallel()
+
+	for name, mergeability := range trailMalformedMergeabilitySnapshots {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := trailDetailServerWithMergeability(t, mergeability)
+
+			out, errOut := runTrailShowForMergeabilityTest(t, srv, "7", true)
+			require.Contains(t, errOut, "could not read trail mergeability")
+			var top map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(out), &top), "stdout must stay valid JSON: %s", out)
+			require.Equal(t, "null", string(top["mergeability"]), "an unreadable verdict must be null, never false")
+			require.JSONEq(t, `"detail body"`, string(top["body"]))
+
+			out, errOut = runTrailShowForMergeabilityTest(t, srv, "7", false)
+			require.Contains(t, errOut, "could not read trail mergeability")
+			require.Contains(t, out, "Mergeable: unknown")
+			require.Contains(t, out, "detail body")
+		})
+	}
+}
+
 // A failed detail fetch must leave the verdict unknown — an explicit null —
 // rather than a zero-valued "mergeable": false nobody computed.
 func TestRunTrailShowJSONMergeabilityNullWhenDetailFails(t *testing.T) {

@@ -267,7 +267,13 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 				bodyText = snapshot
 			}
 		}
-		mergeability = detail.Mergeability
+		// Best-effort like the description: a snapshot the CLI cannot decode
+		// leaves the verdict unknown rather than failing the command.
+		if mg, merr := detail.DecodeMergeability(); merr == nil {
+			mergeability = mg
+		} else {
+			fmt.Fprintf(errW, "Warning: could not read trail mergeability: %v\n", merr)
+		}
 	}
 	// The list body is the weaker source; carry the resolved description on the
 	// metadata so JSON callers read the same text the human view renders.
