@@ -385,7 +385,7 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 	if remote == "" || ctx.Err() != nil {
 		return false
 	}
-	if gitrepo.ReadsNeedNativeGit() {
+	if gitrepo.ReadsNeedNativeGit(ctx) {
 		return remoteHasTrackingRefsNative(ctx, remote)
 	}
 	repo, err := OpenRepository(ctx)

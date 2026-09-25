@@ -38,12 +38,15 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		logging.Debug(ctx, "head checkpoint flags: locate worktree root", slog.String("error", err.Error()))
 		return false, false, ""
 	}
-	repo, err := gitrepo.OpenPath(repoRoot)
-	if err != nil {
-		logging.Debug(ctx, "head checkpoint flags: open repository", slog.String("error", err.Error()))
-		return false, false, ""
+	var repo *git.Repository
+	if !gitrepo.ReadsNeedNativeGit(ctx) {
+		repo, err = gitrepo.OpenPath(repoRoot)
+		if err != nil {
+			logging.Debug(ctx, "head checkpoint flags: open repository", slog.String("error", err.Error()))
+			return false, false, ""
+		}
+		defer repo.Close()
 	}
-	defer repo.Close()
 	message, err := headCommitMessage(ctx, repo, repoRoot)
 	if err != nil {
 		logging.Debug(ctx, "head checkpoint flags: read HEAD commit message", slog.String("error", err.Error()))
@@ -53,6 +56,14 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 	if !ok {
 		logging.Debug(ctx, "head checkpoint flags: no Entire-Checkpoint trailer on HEAD")
 		return false, false, ""
+	}
+	if repo == nil {
+		repo, err = gitrepo.OpenPath(repoRoot)
+		if err != nil {
+			logging.Debug(ctx, "head checkpoint flags: open repository", slog.String("error", err.Error()))
+			return false, false, ""
+		}
+		defer repo.Close()
 	}
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
@@ -76,7 +87,7 @@ func headCommitMessage(ctx context.Context, repo *git.Repository, repoRoot strin
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("read HEAD message: %w", err)
 	}
-	if !gitrepo.ReadsNeedNativeGit() {
+	if repo != nil && !gitrepo.ReadsNeedNativeGit(ctx) {
 		commit, err := gitrepo.CommitAtReference(ctx, repo, plumbing.HEAD)
 		if err == nil {
 			return commit.Message, nil

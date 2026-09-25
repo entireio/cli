@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// ReadsNeedNativeGit reports repository/object-store selectors that the
-// filesystem storer does not interpret. Migrated CLI reads retain native Git
-// for these explicit environments instead of silently reading another store.
+// ReadsNeedNativeGit keeps explicit store selectors and CLI-backed reference
+// stores on the native read path. Detect reftable before opening a repository:
+// even opening its adapter performs a native reference lookup.
+// Failed discovery also stays native, never guessing a CWD repository.
 // GIT_INDEX_FILE is intentionally absent: these reads never consult the index.
-func ReadsNeedNativeGit() bool {
+func ReadsNeedNativeGit(ctx context.Context) bool {
 	for _, key := range []string{
 		"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY",
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
@@ -24,7 +27,16 @@ func ReadsNeedNativeGit() bool {
 			return true
 		}
 	}
-	return false
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return true
+	}
+	metadata, err := ResolveWorktreeMetadata(root)
+	if err != nil {
+		return true
+	}
+	reftable, err := inspectRepoUsesReftable(metadata.GitDir, metadata.CommonDir)
+	return err != nil || reftable
 }
 
 // CommitAtReference reads an exact reference and peels annotated tags to a

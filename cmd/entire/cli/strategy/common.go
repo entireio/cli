@@ -1631,7 +1631,7 @@ func branchExistsFresh(ctx context.Context, branchName string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("check branch %s: %w", branchName, err)
 	}
-	if gitrepo.ReadsNeedNativeGit() {
+	if gitrepo.ReadsNeedNativeGit(ctx) {
 		return branchExistsNative(ctx, branchName)
 	}
 	repo, err := OpenRepository(ctx)

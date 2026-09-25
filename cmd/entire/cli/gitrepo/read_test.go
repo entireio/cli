@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -60,16 +61,21 @@ func TestCommitAtReference_LocalObjects(t *testing.T) {
 
 func TestReadsNeedNativeGit_Selectors(t *testing.T) {
 	gitenv.IsolateRepository(t)
-	require.False(t, gitrepo.ReadsNeedNativeGit())
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	t.Chdir(root)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	require.False(t, gitrepo.ReadsNeedNativeGit(t.Context()))
 	for _, key := range []string{
 		"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY",
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
 	} {
 		t.Run(key, func(t *testing.T) {
 			t.Setenv(key, "explicit-selector")
-			require.True(t, gitrepo.ReadsNeedNativeGit())
+			require.True(t, gitrepo.ReadsNeedNativeGit(t.Context()))
 		})
 	}
 	t.Setenv("GIT_INDEX_FILE", "index-is-not-read")
-	require.False(t, gitrepo.ReadsNeedNativeGit())
+	require.False(t, gitrepo.ReadsNeedNativeGit(t.Context()))
 }

@@ -521,7 +521,7 @@ func metadataTrackingRefExists(ctx context.Context, remoteName string) bool {
 		return false
 	}
 	trackingRef := plumbing.NewRemoteReferenceName(remoteName, refs.Primary.Short())
-	if !gitrepo.ReadsNeedNativeGit() {
+	if !gitrepo.ReadsNeedNativeGit(ctx) {
 		repo, err := openRepository(ctx)
 		if err == nil {
 			defer repo.Close()

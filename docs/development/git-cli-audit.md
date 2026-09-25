@@ -28,7 +28,7 @@ Always open via `gitrepo.OpenCurrent` / `OpenPath`, not a new direct `PlainOpen`
 - HEAD checkpoint messages and metadata tracking tips use `gitrepo.CommitAtReference`, including symbolic-ref resolution and nested tag peeling. Replace refs, explicit store selectors, and missing objects retain native compatibility paths.
 - Fresh shadow-branch existence checks reopen the storer after native deletion; tracking-ref detection iterates refs with an exact remote prefix. Explicit store selectors and bare repositories retain native Git. Branch deletion and its pre-check are unchanged.
 
-These are normal-path migrations, not wholesale subprocess removal. Discovery and reftable reference access remain native. The retained compatibility boundaries are documented in [Git safety](git-safety.md#local-ref-and-commit-reads). Arbitrary revision expressions, history counts, doctor ref reports, and object-tree diffs remain follow-ups.
+These migrations apply to files-backed worktrees without explicit store selectors, not all local reads. Discovery stays native; reftable is detected before opening its adapter and these reads retain their single native commands. Linked-worktree hooks export `GIT_DIR` and also retain native reads. Files-backed tracking-ref detection enumerates all refs because the current storer has no prefix iterator; this is an accepted cost for repositories with many loose refs. The retained compatibility boundaries are documented in [Git safety](git-safety.md#local-ref-and-commit-reads). Arbitrary revision expressions, history counts, doctor ref reports, and object-tree diffs remain follow-ups.
 
 ## 1. Strong replacement candidates
 
