@@ -414,7 +414,7 @@ func TestTryAgentCommitFastPath_SkipsAntigravityWithUnflushedTranscript(t *testi
 			Phase:          session.PhaseActive,
 			TranscriptPath: path,
 		}
-		result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message")
+		result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message", nil)
 		assert.False(t, result, "fast path must not fire for agy with %s", name)
 	}
 
@@ -431,7 +431,7 @@ func TestTryAgentCommitFastPath_SkipsAntigravityWithUnflushedTranscript(t *testi
 		Phase:          session.PhaseActive,
 		TranscriptPath: populated,
 	}
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message")
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message", nil)
 	assert.True(t, result, "fast path should fire for agy with a flushed transcript")
 	content, err = os.ReadFile(commitMsgFile)
 	require.NoError(t, err)
