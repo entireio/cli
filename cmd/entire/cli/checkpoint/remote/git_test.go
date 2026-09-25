@@ -73,6 +73,17 @@ func TestResolveTargetForTokenAuth(t *testing.T) {
 		assert.Equal(t, ProtocolHTTPS, proto)
 	})
 
+	t.Run("git+ssh alias URL rewrites to HTTPS", func(t *testing.T) {
+		t.Parallel()
+		// This call site reaches deriveTokenOriginURL only through its own
+		// ProtocolSSH check, so an alias admitted in that helper's allow-list
+		// alone would still reach newCommand's default branch: no token, and
+		// not even the SSH path's warning.
+		got, proto := resolveTargetForTokenAuth(ctx, "git+ssh://git@github.com/org/repo.git")
+		assert.Equal(t, "https://github.com/org/repo.git", got)
+		assert.Equal(t, ProtocolHTTPS, proto)
+	})
+
 	t.Run("local path returns empty protocol", func(t *testing.T) {
 		t.Parallel()
 		got, proto := resolveTargetForTokenAuth(ctx, "/tmp/some-bare-repo")

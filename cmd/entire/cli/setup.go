@@ -892,7 +892,7 @@ Examples:
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", checkpointRemoteFlagUsage)
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
-	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, opencode, cursor, copilot-cli)")
+	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, pi, opencode, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
@@ -1788,6 +1788,10 @@ func localExists(ctx context.Context) bool {
 
 // runRemoveAgent removes hooks for a specific agent.
 func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
+	if types.AgentName(name) == retiredGeminiAgentName && !retiredGeminiNameClaimed() {
+		return runRemoveRetiredGeminiHooks(ctx, w)
+	}
+
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
 		printWrongAgentError(w, name)
@@ -1819,6 +1823,25 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	warnCodexHooksAfterRemoval(ctx, w, ag)
 
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	return nil
+}
+
+// runRemoveRetiredGeminiHooks answers `entire agent remove gemini`, the command
+// a user reaches for to clear the hooks removed Gemini CLI support left behind.
+func runRemoveRetiredGeminiHooks(ctx context.Context, w io.Writer) error {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to remove Gemini CLI hooks: %w", err)
+	}
+	changed, err := removeRetiredGeminiHooks(worktreeRoot)
+	if err != nil {
+		return fmt.Errorf("failed to remove Gemini CLI hooks: %w", err)
+	}
+	if !changed {
+		fmt.Fprintln(w, "Gemini CLI hooks are not installed.")
+		return nil
+	}
+	fmt.Fprintln(w, "Removed Gemini CLI hooks. Gemini CLI is no longer supported.")
 	return nil
 }
 
@@ -2124,6 +2147,10 @@ func printMissingAgentError(w io.Writer) {
 
 // printWrongAgentError writes a helpful error when an unknown agent name is provided.
 func printWrongAgentError(w io.Writer, name string) {
+	if types.AgentName(name) == retiredGeminiAgentName && !retiredGeminiNameClaimed() {
+		printAgentError(w, "Gemini CLI is no longer supported.")
+		return
+	}
 	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name))
 }
 
@@ -2742,6 +2769,10 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// One sweep, threaded onwards: each external plugin costs a subprocess to ask,
 	// and the removal below must act on exactly what the summary showed.
 	agHookState := getAgentHookState(ctx)
+	// Separate from the sweep above: Gemini CLI is no longer a registered
+	// agent, but the hooks its support installed can outlive everything else
+	// (a partial uninstall that already removed .entire/, say).
+	geminiHooks, geminiHooksErr := retiredGeminiHooksInstalled(repoRoot)
 	entireDirExists := checkEntireDirExists(ctx)
 
 	p := newUninstallPrinter(w, errW)
@@ -2750,10 +2781,11 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// "not installed" claim: its hooks may or may not be on disk, which is not
 	// the same as cleanly reporting none — fall through so the removal below
 	// reports it with its remedy, and the run exits non-zero rather than
-	// asserting an absence it could not verify.
+	// asserting an absence it could not verify. The retired Gemini hooks get
+	// the same treatment when their config could not be read.
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
 		shadowBranchCount == 0 && len(agHookState.installed) == 0 &&
-		len(agHookState.unchecked) == 0 {
+		len(agHookState.unchecked) == 0 && !geminiHooks && geminiHooksErr == nil {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -2766,6 +2798,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 			sessionStateCount: sessionStateCount,
 			shadowBranchCount: shadowBranchCount,
 			hookState:         agHookState,
+			geminiHooks:       geminiHooks,
+			geminiHooksErr:    geminiHooksErr,
 		})
 		if err != nil {
 			return err
@@ -2783,6 +2817,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// errors, and returns only whether it succeeded. ok is the single fact
 	// tracked across the run; the steps are otherwise isolated from each other.
 	ok := uninstallAgentHooks(ctx, p, repoRoot, agHookState)
+	ok = uninstallRetiredGeminiHooks(p, repoRoot) && ok
 	ok = uninstallGitHooks(ctx, p) && ok
 	ok = uninstallSessionStates(ctx, p) && ok
 	ok = uninstallEntireDir(ctx, p, entireDirExists) && ok
@@ -2875,6 +2910,11 @@ type uninstallSummary struct {
 	sessionStateCount int
 	shadowBranchCount int
 	hookState         agentHookState
+	// geminiHooks reports Entire hooks left in .gemini/settings.json by removed
+	// Gemini CLI support; geminiHooksErr is set when that file could not be
+	// checked.
+	geminiHooks    bool
+	geminiHooksErr error
 }
 
 // confirmUninstall prints the removal summary and asks the user to confirm.
@@ -2884,7 +2924,7 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	p.blank()
 	p.plain("This will completely remove Entire from this repository:")
 	p.blank()
-	rows := make([]explainRow, 0, 6)
+	rows := make([]explainRow, 0, 7)
 	if len(summary.hookState.installed) > 0 {
 		rows = append(rows, explainRow{Label: "agent hooks", Value: strings.Join(agentDisplayNames(summary.hookState.installed), ", ")})
 	}
@@ -2892,6 +2932,12 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	// installed, which for these plugins is exactly what we could not find out.
 	if len(summary.hookState.unchecked) > 0 {
 		rows = append(rows, explainRow{Label: "unchecked", Value: strings.Join(agentDisplayNames(summary.hookState.uncheckedNames()), ", ") + " (could not be checked)"})
+	}
+	switch {
+	case summary.geminiHooksErr != nil:
+		rows = append(rows, explainRow{Label: "retired hooks", Value: "Gemini CLI (could not be checked)"})
+	case summary.geminiHooks:
+		rows = append(rows, explainRow{Label: "retired hooks", Value: "Gemini CLI"})
 	}
 	if summary.gitHooksInstalled {
 		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, pre-push"})
@@ -3111,6 +3157,24 @@ func uninstallAgentHooks(ctx context.Context, p *uninstallPrinter, repoRoot stri
 	}
 
 	return !builtinProblem && !externalProblem
+}
+
+// uninstallRetiredGeminiHooks removes the Entire hook entries that removed
+// Gemini CLI support left in .gemini/settings.json. uninstallAgentHooks cannot:
+// it walks registered agents, and Gemini CLI is no longer one. Silent when there
+// is nothing to remove, so repositories that never used Gemini see no new line.
+func uninstallRetiredGeminiHooks(p *uninstallPrinter, repoRoot string) bool {
+	changed, err := removeRetiredGeminiHooks(repoRoot)
+	if err != nil {
+		p.stepFailed("Failed to remove retired Gemini CLI hooks")
+		p.warnUnder("%v", err)
+		p.warnUnderDetail("Delete the entries running 'entire hooks gemini ...' from %s by hand.", retiredGeminiHookConfigRelPath)
+		return false
+	}
+	if changed {
+		p.step("Removed retired Gemini CLI hooks")
+	}
+	return true
 }
 
 // uninstallAgentHooksInterrupted reports a user cancellation mid-removal and

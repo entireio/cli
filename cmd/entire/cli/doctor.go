@@ -64,12 +64,16 @@ Checks performed:
      no longer fire, or a committed Pi/OpenCode extension has gone stale).
      Fix by re-running 'entire enable --force'.
 
-  5. Summary provider: warn when summary_generation.provider names a registered
+  5. Retired Gemini CLI hooks: remove Entire hook entries left in
+     .gemini/settings.json. Gemini CLI support was removed; the entries now do
+     nothing but run a no-op on every Gemini event.
+
+  6. Summary provider: warn when summary_generation.provider names a registered
      agent that cannot generate text (e.g. factoryai-droid), which makes
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 
-  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -174,6 +178,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Retired permission rule that makes ordinary commands need approval.
 	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
 	checkRetiredDenyRule(cmd)
+
+	// Hooks left by removed Gemini CLI support. Fixes rather than only
+	// reporting, for the same reason: every entry it removes is Entire's own.
+	checkRetiredGeminiHooks(cmd)
 
 	// A configured summary provider that cannot generate text. After the hook
 	// checks: it breaks three commands, not capture, so it is the milder fault.
@@ -769,7 +777,7 @@ func printCappedList(w io.Writer, names []string, render func(string) string) {
 
 // checkAgentDirSymlinks reports a symlink at any directory component Entire
 // creates or writes through for an agent: the agents' own config directories
-// (.claude, .codex, .cursor, .gemini, .factory, .opencode, .pi, .github/hooks)
+// (.claude, .codex, .cursor, .factory, .opencode, .pi, .github/hooks)
 // and the managed skill scaffolds' parents (.claude/skills, .codex/agents, ...).
 //
 // The condition is otherwise invisible after the fact. `entire enable` fails
@@ -1084,7 +1092,7 @@ func agentSymlinkCheckPaths() []string {
 		// The pre-skill subagent Entire scaffolded and now deletes. Uninstall
 		// goes through osroot.LstatNoSymlinks, which refuses a symlinked parent,
 		// so .claude/agents/ has to be here or a link there is refused with
-		// nothing said about it. .codex/agents and .gemini/agents were already
+		// nothing said about it. .codex/agents was already
 		// covered, but only as a side effect of the agent-help template living
 		// under them.
 		add(legacySearchSubagentPath(name))
@@ -1334,6 +1342,33 @@ func checkRetiredDenyRule(cmd *cobra.Command) {
 	}
 }
 
+// checkRetiredGeminiHooks removes the Entire hook entries Gemini CLI support
+// installed in .gemini/settings.json. Nothing else will: that agent is no
+// longer registered, so `entire enable`, `entire agent remove` and the uninstall
+// sweep over installed agents never visit its config. The user's own hooks and
+// settings in the file are kept.
+func checkRetiredGeminiHooks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return // no repository: nothing to check
+	}
+	changed, err := removeRetiredGeminiHooks(worktreeRoot)
+	if err != nil {
+		fmt.Fprintln(w, "Gemini CLI hooks: CHECK FAILED")
+		fmt.Fprintf(w, "  Could not remove Entire hooks left by removed Gemini CLI support: %v\n", err)
+		fmt.Fprintf(w, "  Delete the entries running 'entire hooks gemini ...' from %s by hand.\n", retiredGeminiHookConfigRelPath)
+		return
+	}
+	if changed {
+		fmt.Fprintln(w, "Gemini CLI hooks: RETIRED")
+		fmt.Fprintf(w, "  Entire no longer supports Gemini CLI, but %s still ran Entire hooks.\n", retiredGeminiHookConfigRelPath)
+		fmt.Fprintln(w, "  ✓ Fixed: Entire's entries removed (your other hooks and settings are untouched).")
+		fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
+	}
+}
+
 // checkSummaryProvider reports a configured summary_generation.provider naming
 // a registered agent that cannot generate text. See
 // unsupportedSummaryProviderError for how such a value gets written.
@@ -1368,14 +1403,21 @@ func checkSummaryProvider(cmd *cobra.Command) {
 
 	name := types.AgentName(s.SummaryGeneration.Provider)
 	_, registered, capable := summaryCapableAgent(name)
-	if !registered || capable {
+	// The retired name is unregistered, but unlike a plugin's it is known not
+	// to be coming back, so it is reported rather than left to the resolver.
+	retired := !registered && name == retiredGeminiAgentName && !retiredGeminiNameClaimed()
+	if (!registered && !retired) || capable {
 		return
 	}
 
 	w := cmd.OutOrStdout()
 	sourceFile, isLocal := summaryProviderSourceLayer(ctx, s)
 	fmt.Fprintln(w, "Summary provider: UNUSABLE")
-	fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
+	if retired {
+		fmt.Fprintf(w, "  summary_generation.provider is %q in %s, but Gemini CLI is no longer supported.\n", name, sourceFile)
+	} else {
+		fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
+	}
 	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
 	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
 	// The command names an INSTALLED provider, not merely a capable one.

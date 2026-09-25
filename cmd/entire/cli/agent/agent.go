@@ -23,10 +23,10 @@ import (
 type Agent interface {
 	// --- Identity ---
 
-	// Name returns the agent registry key (e.g., "claude-code", "gemini")
+	// Name returns the agent registry key (e.g., "claude-code", "codex")
 	Name() types.AgentName
 
-	// Type returns the agent type identifier (e.g., "Claude Code", "Gemini CLI")
+	// Type returns the agent type identifier (e.g., "Claude Code", "Codex")
 	// This is stored in metadata and trailers.
 	Type() types.AgentType
 
@@ -38,7 +38,7 @@ type Agent interface {
 
 	// ProtectedDirs returns repo-root-relative directories that Entire must never
 	// record as session changes or capture into a checkpoint.
-	// Examples: [".claude"] for Claude, [".gemini"] for Gemini.
+	// Examples: [".claude"] for Claude, [".codex"] for Codex.
 	ProtectedDirs() []string
 
 	// --- Transcript Storage ---
@@ -206,13 +206,13 @@ type TranscriptAnalyzer interface {
 
 	// GetTranscriptPosition returns the current position (length) of a transcript.
 	// For JSONL formats (Claude Code), this is the line count.
-	// For JSON formats (Gemini CLI), this is the message count.
+	// For JSON formats (OpenCode), this is the message count.
 	// Returns 0 if the file doesn't exist or is empty.
 	GetTranscriptPosition(path string) (int, error)
 
 	// ExtractModifiedFilesFromOffset extracts files modified since a given offset.
 	// For JSONL formats (Claude Code), offset is the starting line number.
-	// For JSON formats (Gemini CLI), offset is the starting message index.
+	// For JSON formats (OpenCode), offset is the starting message index.
 	// Returns:
 	//   - files: list of file paths modified by the agent (from Write/Edit tools)
 	//   - currentPosition: the current position (line count or message count)
@@ -541,7 +541,7 @@ type SessionBaseDirProvider interface {
 	Agent
 
 	// GetSessionBaseDir returns the base directory containing per-project
-	// session subdirectories (e.g., ~/.claude/projects, ~/.gemini/tmp).
+	// session subdirectories (e.g., ~/.claude/projects, ~/.cursor/projects).
 	GetSessionBaseDir() (string, error)
 }
 

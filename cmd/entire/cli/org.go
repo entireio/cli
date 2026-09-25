@@ -46,10 +46,11 @@ func newOrgCreateCmd() *cobra.Command {
 				if region != "" {
 					body.Region = coreapi.NewOptString(region)
 				}
-				org, err := c.CreateOrg(ctx, body)
+				created, err := c.CreateOrg(ctx, body)
 				if err != nil {
 					return "", nil, err
 				}
+				org := &created.Response
 				return fmt.Sprintf("✓ Created org %s (%s)", org.Name, org.ID), org, nil
 			})
 		},
@@ -110,11 +111,12 @@ func newOrgDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "org", args[0],
-				func(ctx context.Context, c *coreapi.Client) (string, error) {
-					return resolveOrgRef(ctx, c, args[0])
+				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
+					return resolveOrgRefResolved(ctx, c, args[0])
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
-					return c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+					_, err := c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+					return err
 				})
 		},
 	}

@@ -421,3 +421,76 @@ func TestListOrgsAndProjects_UnsentCapabilitiesDecode(t *testing.T) {
 		})
 	}
 }
+
+// TestListOrgInvitations_UnknownEnumValuesPassThrough locks in the
+// forward-compat contract for spec/normalize.go's loosenReadModelEnums on
+// Invitation: future consumers must be able to display `role` and `status`,
+// so a lifecycle state or role the server adds later must decode rather than
+// fail the whole listing in ogen's Validate().
+func TestListOrgInvitations_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"invitations":[{"id":"01H0000000000000000000000I","email":"dev@example.com","role":"auditor","status":"bounced","invitedBy":"01H0000000000000000000000A","createdAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-08T00:00:00Z"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListOrgInvitations(context.Background(), ListOrgInvitationsParams{OrgId: "01H000000000000000000000O1"})
+	if err != nil {
+		t.Fatalf("ListOrgInvitations with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if len(out.Invitations) != 1 {
+		t.Fatalf("Invitations len = %d, want 1", len(out.Invitations))
+	}
+	inv := out.Invitations[0]
+	if inv.Role != "auditor" {
+		t.Errorf("Role = %q, want the unknown value %q passed through verbatim", inv.Role, "auditor")
+	}
+	if inv.Status != "bounced" {
+		t.Errorf("Status = %q, want the unknown value %q passed through verbatim", inv.Status, "bounced")
+	}
+}
+
+// TestListOrgMembers_UnknownEnumValuesPassThrough is the same contract for
+// Membership, which `entire org grant list` prints the same way.
+func TestListOrgMembers_UnknownEnumValuesPassThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"members":[{"id":"01H0000000000000000000000M","orgId":"01H000000000000000000000O1","accountId":"01H0000000000000000000000A","role":"auditor","status":"suspended","createdAt":"2026-01-01T00:00:00Z"}]}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListOrgMembers(context.Background(), ListOrgMembersParams{OrgId: "01H000000000000000000000O1"})
+	if err != nil {
+		t.Fatalf("ListOrgMembers with unknown enum values must not fail (forward-compat), got: %v", err)
+	}
+	if len(out.Members) != 1 {
+		t.Fatalf("Members len = %d, want 1", len(out.Members))
+	}
+	member := out.Members[0]
+	if member.Role != "auditor" {
+		t.Errorf("Role = %q, want the unknown value %q passed through verbatim", member.Role, "auditor")
+	}
+	if member.Status != "suspended" {
+		t.Errorf("Status = %q, want the unknown value %q passed through verbatim", member.Status, "suspended")
+	}
+}

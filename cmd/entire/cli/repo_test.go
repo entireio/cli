@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"strings"
 	"testing"
 
@@ -390,35 +391,24 @@ func TestRepoCreate_WarnsOnInvalidServerHost(t *testing.T) {
 	require.Contains(t, stderr, "evil.com")
 }
 
-// TestRepoCreate_RejectsGitSuffix pins that the CLI refuses a name it would not
-// be able to address afterwards. The server accepts "web.git" — an interior dot
-// is legal — but every ref parser drops the suffix (see gitDirSuffix), so such
-// a repo would be reachable only by ULID. The check must fire before the
-// request, since the server would happily create it.
+// TestRepoCreate_AllowsGitSuffix pins that the CLI forwards a name ending in
+// .git instead of refusing it. The API and the frontend both accept such a name
+// -- entiredb permits an interior dot -- so the CLI was the only create path
+// that refused, which is COR-1891. The refusal existed because every ref parser
+// dropped the suffix and the repo would have been unaddressable; native refs
+// are verbatim now, so the premise is gone.
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
-func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
+func TestRepoCreate_AllowsGitSuffix(t *testing.T) {
 	for _, name := range []string{"web.git", "trails.el.git"} {
 		t.Run(name, func(t *testing.T) {
 			bodyCh := serveRepoCreate(t)
-			err := execRepoCreateNamed(t, name)
-			require.ErrorContains(t, err, gitDirSuffix)
-			require.ErrorContains(t, err, strings.TrimSuffix(name, gitDirSuffix))
-			select {
-			case raw := <-bodyCh:
-				t.Fatalf("no create request expected, got body %s", raw)
-			default:
-			}
+			require.NoError(t, execRepoCreateNamed(t, name))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+			require.Equal(t, name, body["name"], "the name must reach the server verbatim")
 		})
 	}
-
-	t.Run("a dotted name that does not end in the suffix is accepted", func(t *testing.T) {
-		bodyCh := serveRepoCreate(t)
-		require.NoError(t, execRepoCreateNamed(t, "trails.el"))
-		var body map[string]any
-		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
-		require.Equal(t, "trails.el", body["name"])
-	})
 }
 
 // TestRepoCreate_HasNoClusterHostFlag pins that a repo's home cluster is not
@@ -822,4 +812,68 @@ func TestRepoEdit_Visibility(t *testing.T) {
 		require.ErrorContains(t, err, "invalid visibility")
 		require.Empty(t, bodies)
 	})
+}
+
+// TestRepoDelete_GitSuffixTargetsTheNamedRepo is COR-1892's regression test.
+//
+// Two sibling repos, "victim" and "victim.git". Deleting the second used to
+// resolve the first -- every ref parser dropped the suffix before the lookup
+// -- and the confirmation printed the path the user typed beside the OTHER
+// repo's ULID, so it read as success while the wrong repo was gone.
+//
+// Asserts all three links: the server is asked for "audit1/victim.git", the
+// ULID deleted is victim.git's, and the confirmation names what was resolved.
+//
+// Not parallel: swaps the package-level activeCoreClient seam (via runCoreCmd).
+func TestRepoDelete_GitSuffixTargetsTheNamedRepo(t *testing.T) {
+	const (
+		victimID    = "01M3427KZ83C8662KJ1DC2ADP8"
+		victimGitID = "01M3427PK3T21NMN3N7Q1EHBG1"
+	)
+	var askedName, deletedID string
+
+	// Serve the two calls a /et/audit1/victim.git ref makes: the native path
+	// lookup, then the delete. The lookup answers by name, so a request for
+	// "audit1/victim" would return the WRONG id -- which is exactly the bug,
+	// and why the asked-for name is recorded rather than assumed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/repos/resolve"):
+			var in coreapi.ResolveReposInputBody
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				t.Errorf("decode resolve body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(in.Repositories) != 1 {
+				t.Errorf("resolve body = %+v, want one reference", in.Repositories)
+			}
+			if len(in.Repositories) > 0 {
+				askedName = in.Repositories[0].FullName
+			}
+			id := victimID
+			if askedName == "audit1/victim.git" {
+				id = victimGitID
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := printJSON(w, nativeResolution(askedName, id)); err != nil {
+				t.Errorf("encode resolution: %v", err)
+			}
+		case r.Method == http.MethodDelete:
+			deletedID = path.Base(r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	stdout, _, err := runCoreCmd(t, newRepoDeleteCmd, srv.URL, "/et/audit1/victim.git", "--force")
+	require.NoError(t, err)
+
+	require.Equal(t, "audit1/victim.git", askedName, "the server must be asked for the name the user typed")
+	require.Equal(t, victimGitID, deletedID, "the ULID deleted must be victim.git's, not victim's")
+	require.Contains(t, stdout, "/et/audit1/victim.git")
+	require.Contains(t, stdout, victimGitID)
+	require.NotContains(t, stdout, victimID, "the surviving repo's ULID must not appear")
 }

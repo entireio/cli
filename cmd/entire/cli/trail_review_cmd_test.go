@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -139,9 +140,8 @@ func TestTrailReviewCommentsPathUsesReviewQueryContract(t *testing.T) {
 		Freshness:        "any",
 		IncludeDismissed: true,
 		Limit:            25,
-		Offset:           50,
 	})
-	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/comments?include_dismissed=true&limit=25&offset=50&severity=high%2Cmedium&stale=any&status=open%2Cresolved"
+	want := "/api/v1/trails/trail%20id%2Fwith%20slash/reviews/comments?include_dismissed=true&per_page=25&severity%5Beq%5D=high%2Cmedium&stale=any&status%5Beq%5D=open%2Cresolved"
 	if got != want {
 		t.Fatalf("trailReviewCommentsPath = %q, want %q", got, want)
 	}
@@ -178,7 +178,6 @@ func TestNormalizeTrailReviewListOptionsRejectsInvalidFilters(t *testing.T) {
 		{Status: trailReviewStatusAny, Severity: "urgent", Freshness: trailReviewFreshnessAny, Limit: 1},
 		{Status: trailReviewStatusAny, Freshness: "old", Limit: 1},
 		{Status: trailReviewStatusAny, Freshness: trailReviewFreshnessAny, Limit: 0},
-		{Status: trailReviewStatusAny, Freshness: trailReviewFreshnessAny, Limit: 1, Offset: -1},
 	}
 	for _, opts := range cases {
 		if _, err := normalizeTrailReviewListOptions(opts); err == nil {
@@ -866,7 +865,7 @@ func TestPrintTrailReviewDashboard(t *testing.T) {
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, comments, false, defaultTrailReviewListOptions(), countTrailReviewComments(comments))
+	}}, comments, "", defaultTrailReviewListOptions(), countTrailReviewComments(comments))
 	text := out.String()
 	for _, want := range []string{
 		"Trail #42  Add token refresh",
@@ -898,7 +897,7 @@ func TestPrintTrailReviewDashboard_UsesSeparateCountsWhenFilteredCommentsEmpty(t
 		Status: "open",
 		Branch: "feat/token-refresh",
 		Base:   "main",
-	}}, nil, false, defaultTrailReviewListOptions(), counts)
+	}}, nil, "", defaultTrailReviewListOptions(), counts)
 	text := out.String()
 	for _, want := range []string{
 		"Open findings: 0  high 0  medium 0  low 0",
@@ -916,7 +915,7 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/trl_1/reviews/comments":
-			if got := r.URL.Query().Get("status"); got != "open" {
+			if got := r.URL.Query().Get("status[eq]"); got != "open" {
 				t.Fatalf("status query = %q, want open", got)
 			}
 			encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentsResponse{Comments: []api.TrailReviewComment{
@@ -935,12 +934,12 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	t.Setenv(api.BaseURLEnvVar, srv.URL)
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 
-	comments, hasMore, err := fetchTrailReviewComments(context.Background(), client, "trl_1", defaultTrailReviewListOptions())
+	comments, nextCursor, err := fetchTrailReviewComments(context.Background(), client, "trl_1", defaultTrailReviewListOptions())
 	if err != nil {
 		t.Fatalf("fetchTrailReviewComments: %v", err)
 	}
-	if hasMore || len(comments) != 1 || comments[0].ID != trailReviewTestCommentID {
-		t.Fatalf("comments = %#v, hasMore=%v", comments, hasMore)
+	if nextCursor != "" || len(comments) != 1 || comments[0].ID != trailReviewTestCommentID {
+		t.Fatalf("comments = %#v, nextCursor=%q", comments, nextCursor)
 	}
 	updated, err := patchTrailReviewCommentStatus(context.Background(), client, "trl_1", comments[0], trailReviewStatusResolved, "fixed")
 	if err != nil {
@@ -954,31 +953,26 @@ func TestFetchTrailReviewCommentsAndPatchStatus(t *testing.T) {
 	}
 }
 
-func TestFetchAllTrailReviewCommentsStopsOnRepeatedPage(t *testing.T) {
+func TestFetchAllTrailReviewCommentsStopsOnRepeatedCursor(t *testing.T) {
+	t.Parallel()
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if got := r.URL.Query().Get("include_dismissed"); got != strconv.FormatBool(true) {
-			t.Errorf("include_dismissed = %q, want true", got)
-		}
-		wantOffset := ""
+		wantCursor := ""
 		if requests == 2 {
-			wantOffset = strconv.Itoa(defaultTrailReviewLimit)
+			wantCursor = "repeated-cursor"
 		}
-		if got := r.URL.Query().Get("offset"); got != wantOffset {
-			t.Errorf("offset = %q, want %q", got, wantOffset)
+		if got := r.URL.Query().Get("cursor"); got != wantCursor {
+			t.Errorf("cursor = %q, want %q", got, wantCursor)
 		}
-		encodeTrailReviewTestJSON(t, w, api.TrailReviewCommentsResponse{
-			Comments: []api.TrailReviewComment{{ID: trailReviewTestCommentID}},
-			HasMore:  true,
-		})
+		_, _ = fmt.Fprint(w, `{"comments":[{"id":"cmt_1"}],"next_cursor":"repeated-cursor"}`)
 	}))
 	defer srv.Close()
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 
 	_, err := fetchAllTrailReviewComments(context.Background(), client, "trl_1", trailReviewSummaryOptions())
-	if err == nil || !strings.Contains(err.Error(), "repeated page") {
-		t.Fatalf("error = %v, want repeated page", err)
+	if err == nil || !strings.Contains(err.Error(), "repeated cursor") {
+		t.Fatalf("error = %v, want repeated cursor", err)
 	}
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
@@ -991,31 +985,24 @@ func TestFetchTrailReviewStateFollowsCursor(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/trails/trl_1/reviews/rvw_1" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
-		if got := r.URL.Query().Get("include_dismissed"); got != strconv.FormatBool(true) {
+		if got := r.URL.Query().Get("include_dismissed"); requests == 0 && got != strconv.FormatBool(true) {
 			t.Fatalf("include_dismissed = %q, want true", got)
 		}
-		if got := r.URL.Query().Get("limit"); got != strconv.Itoa(defaultTrailReviewLimit) {
-			t.Fatalf("limit = %q, want %d", got, defaultTrailReviewLimit)
+		if got := r.URL.Query().Get("per_page"); got != strconv.Itoa(defaultTrailReviewLimit) {
+			t.Fatalf("per_page = %q, want %d", got, defaultTrailReviewLimit)
 		}
-		if got := r.URL.Query().Get("stale"); got != trailReviewFreshnessAny {
+		if got := r.URL.Query().Get("stale"); requests == 0 && got != trailReviewFreshnessAny {
 			t.Fatalf("stale = %q, want %q", got, trailReviewFreshnessAny)
 		}
 		requests++
 		switch r.URL.Query().Get("cursor") {
 		case "":
-			next := "cursor-2"
-			encodeTrailReviewTestJSON(t, w, api.TrailReviewStateResponse{
-				Review:      api.TrailReview{ID: "rvw_1"},
-				CodeVersion: api.TrailReviewCodeVersion{ID: "cv_1"},
-				Comments:    []api.TrailReviewComment{{ID: trailReviewTestCommentID}},
-				NextCursor:  &next,
-			})
+			_, _ = fmt.Fprint(w, `{"review":{"id":"rvw_1"},"code_version":{"id":"cv_1"},"comments":[{"id":"cmt_1"}],"next_cursor":"cursor-2"}`)
 		case "cursor-2":
-			encodeTrailReviewTestJSON(t, w, api.TrailReviewStateResponse{
-				Review:      api.TrailReview{ID: "rvw_1"},
-				CodeVersion: api.TrailReviewCodeVersion{ID: "cv_1"},
-				Comments:    []api.TrailReviewComment{{ID: "cmt_2"}},
-			})
+			if len(r.URL.Query()) != 2 {
+				t.Errorf("continuation = %s", r.URL.RawQuery)
+			}
+			_, _ = fmt.Fprint(w, `{"review":{"id":"rvw_1"},"code_version":{"id":"cv_1"},"comments":[{"id":"cmt_2"}]}`)
 		default:
 			t.Fatalf("unexpected cursor %q", r.URL.Query().Get("cursor"))
 		}
@@ -1215,5 +1202,27 @@ func TestTrailReviewSelectedTextFromWorktree_RejectsSymlink(t *testing.T) {
 	selected, fileOK, selectedOK := trailReviewSelectedTextFromWorktree(worktree, "reviewed.txt", 1, 1)
 	if selected != "" || fileOK || selectedOK {
 		t.Fatalf("symlinked file was read: selected=%q fileOK=%v selectedOK=%v", selected, fileOK, selectedOK)
+	}
+}
+
+// A continuation carries only cursor+per_page: the opaque cursor holds the
+// active filters (RFD-026 §8) and the server restores them each page. The
+// user's explicit flags still override on the first page and on explicit
+// re-supply (the *Changed fields).
+func TestTrailReviewCommentsPathContinuationOmitsFiltersTheCursorCarries(t *testing.T) {
+	t.Parallel()
+	first := trailReviewCommentsPath("trl_1", trailReviewListOptions{
+		Status: "open", Severity: "high", Freshness: "current", IncludeDismissed: true, Limit: 50,
+	})
+	for _, param := range []string{"status%5Beq%5D=open", "severity%5Beq%5D=high", "stale=current", "include_dismissed=true"} {
+		if !strings.Contains(first, param) {
+			t.Errorf("first page missing %s: %s", param, first)
+		}
+	}
+
+	continuation := trailReviewCommentsPath("trl_1", trailReviewListOptions{Limit: 50, Cursor: "c2"})
+	want := trailReviewListCommentsPath("trl_1") + "?cursor=c2&per_page=50"
+	if continuation != want {
+		t.Fatalf("continuation = %q, want %q (filters ride the cursor)", continuation, want)
 	}
 }

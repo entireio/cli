@@ -11,12 +11,12 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/redact"
 )
 
@@ -150,7 +150,7 @@ var minimalDetailTools = map[string]bool{
 
 // BuildCondensedTranscriptFromBytes parses pre-redacted transcript bytes and extracts a condensed view.
 // This is a convenience function that combines parsing and condensing.
-// The agentType parameter determines which parser to use (Claude/OpenCode JSONL vs Gemini JSON).
+// The agentType parameter determines which parser to use (Claude/OpenCode JSONL vs JSON from historical Gemini CLI checkpoints).
 func BuildCondensedTranscriptFromBytes(content redact.RedactedBytes, agentType types.AgentType) ([]Entry, error) {
 	switch agentType {
 	case agent.AgentTypeGemini:
@@ -234,7 +234,7 @@ func buildCondensedTranscriptFromCompact(redacted redact.RedactedBytes) ([]Entry
 
 // buildCondensedTranscriptFromGemini parses Gemini JSON transcript and extracts a condensed view.
 func buildCondensedTranscriptFromGemini(redacted redact.RedactedBytes) ([]Entry, error) {
-	geminiTranscript, err := geminicli.ParseTranscript(redacted.Bytes())
+	geminiTranscript, err := geminilegacy.ParseTranscript(redacted.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse Gemini transcript: %w", err)
 	}
@@ -242,14 +242,14 @@ func buildCondensedTranscriptFromGemini(redacted redact.RedactedBytes) ([]Entry,
 	var entries []Entry
 	for _, msg := range geminiTranscript.Messages {
 		switch msg.Type {
-		case geminicli.MessageTypeUser:
+		case geminilegacy.MessageTypeUser:
 			if msg.Content != "" {
 				entries = append(entries, Entry{
 					Type:    EntryTypeUser,
 					Content: msg.Content,
 				})
 			}
-		case geminicli.MessageTypeGemini:
+		case geminilegacy.MessageTypeGemini:
 			// Add assistant content
 			if msg.Content != "" {
 				entries = append(entries, Entry{

@@ -20,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -2863,13 +2862,13 @@ func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
 	}
 }
 
-func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
+func TestDetectOrSelectAgent_CursorDetected(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
 
-	// Create .gemini directory so Gemini agent is detected
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	// Create .cursor directory so Cursor agent is detected
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -2878,12 +2877,12 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 		t.Fatalf("detectOrSelectAgent() error = %v", err)
 	}
 
-	// Should detect Gemini
+	// Should detect Cursor
 	if len(agents) != 1 {
 		t.Fatalf("detectOrSelectAgent() returned %d agents, want 1", len(agents))
 	}
-	if agents[0].Name() != agent.AgentNameGemini {
-		t.Errorf("detectOrSelectAgent() agent name = %v, want %v", agents[0].Name(), agent.AgentNameGemini)
+	if agents[0].Name() != agent.AgentNameCursor {
+		t.Errorf("detectOrSelectAgent() agent name = %v, want %v", agents[0].Name(), agent.AgentNameCursor)
 	}
 
 	output := buf.String()
@@ -3032,7 +3031,7 @@ func TestDetectOrSelectAgent_NoDetection_NoTTY_FallsBackToDefault(t *testing.T) 
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
 
-	// No .claude or .gemini directory - detection will fail
+	// No .claude or .cursor directory - detection will fail
 
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
@@ -3062,7 +3061,7 @@ func TestDetectOrSelectAgent_NoDetection_WithTTY_ShowsPromptMessages(t *testing.
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	// No .claude or .gemini directory - detection will fail
+	// No .claude or .cursor directory - detection will fail
 
 	// Inject selector to avoid blocking on interactive form.Run().
 	// The selector receives available agent names so tests can validate the options.
@@ -3136,12 +3135,12 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	// Create both .claude and .gemini directories
+	// Create both .claude and .cursor directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	// Inject selector — receives available names, returns both
@@ -3149,7 +3148,7 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 		if len(available) < 2 {
 			t.Errorf("expected at least 2 available agents, got %d", len(available))
 		}
-		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -3170,8 +3169,8 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 	if !strings.Contains(output, "Claude Code") {
 		t.Errorf("Expected output to mention Claude Code, got: %s", output)
 	}
-	if !strings.Contains(output, "Gemini CLI") {
-		t.Errorf("Expected output to mention Gemini CLI, got: %s", output)
+	if !strings.Contains(output, string(agent.AgentTypeCursor)) {
+		t.Errorf("Expected output to mention Cursor, got: %s", output)
 	}
 	if !strings.Contains(output, "Selected agents:") {
 		t.Errorf("Expected output to contain 'Selected agents:', got: %s", output)
@@ -3182,12 +3181,12 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_NoTTY_UsesAll(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
 
-	// Create both .claude and .gemini directories
+	// Create both .claude and .cursor directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -3219,21 +3218,21 @@ func writeClaudeHooksFixture(t *testing.T) {
 	}
 }
 
-// writeGeminiHooksFixture writes a minimal .gemini/settings.json with Entire hooks installed.
-// AreHooksInstalled() checks for any hook command starting with "entire ".
-func writeGeminiHooksFixture(t *testing.T) {
+// writeCursorHooksFixture writes a minimal .cursor/hooks.json with Entire hooks installed.
+// AreHooksInstalled() checks each hook list for an Entire-managed command.
+func writeCursorHooksFixture(t *testing.T) {
 	t.Helper()
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 	hooksJSON := `{
+		"version": 1,
 		"hooks": {
-			"enabled": true,
-			"SessionStart": [{"hooks": [{"type": "command", "command": "entire hooks gemini session-start"}]}]
+			"sessionStart": [{"command": "entire hooks cursor session-start"}]
 		}
 	}`
-	if err := os.WriteFile(".gemini/settings.json", []byte(hooksJSON), 0o644); err != nil {
-		t.Fatalf("Failed to write .gemini/settings.json: %v", err)
+	if err := os.WriteFile(".cursor/hooks.json", []byte(hooksJSON), 0o644); err != nil {
+		t.Fatalf("Failed to write .cursor/hooks.json: %v", err)
 	}
 }
 
@@ -3318,9 +3317,9 @@ func checkClaudeCodeHooksInstalled() bool {
 	return err == nil && installed
 }
 
-// checkGeminiCLIHooksInstalled checks if Gemini CLI hooks are installed.
-func checkGeminiCLIHooksInstalled() bool {
-	ag, err := agent.Get(agent.AgentNameGemini)
+// checkCursorHooksInstalled checks if Cursor hooks are installed.
+func checkCursorHooksInstalled() bool {
+	ag, err := agent.Get(agent.AgentNameCursor)
 	if err != nil {
 		return false
 	}
@@ -3638,9 +3637,9 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
 
-	// Install both Claude Code and Gemini hooks
+	// Install both Claude Code and Cursor hooks
 	writeClaudeHooksFixture(t)
-	writeGeminiHooksFixture(t)
+	writeCursorHooksFixture(t)
 
 	// Verify both are installed
 	installed := GetAgentsWithHooksInstalled(context.Background())
@@ -3648,7 +3647,7 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 		t.Fatalf("Expected at least 2 agents installed, got %d", len(installed))
 	}
 
-	// Keep only Claude Code selected (deselect Gemini)
+	// Keep only Claude Code selected (deselect Cursor)
 	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
 	if err != nil {
 		t.Fatalf("Failed to get claude-code agent: %v", err)
@@ -3665,9 +3664,9 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 		t.Error("Expected Claude Code hooks to remain installed")
 	}
 
-	// Gemini hooks should be removed
-	if checkGeminiCLIHooksInstalled() {
-		t.Error("Expected Gemini CLI hooks to be uninstalled after deselection")
+	// Cursor hooks should be removed
+	if checkCursorHooksInstalled() {
+		t.Error("Expected Cursor hooks to be uninstalled after deselection")
 	}
 
 	output := buf.String()
@@ -3689,9 +3688,9 @@ func TestManageAgents_DeselectRemovesAgent(t *testing.T) {
 		t.Fatal("Expected Claude Code hooks to be installed before test")
 	}
 
-	// Deselect claude-code, select gemini instead
+	// Deselect claude-code, select cursor instead
 	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -3965,9 +3964,9 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 	// Install Claude Code hooks
 	writeClaudeHooksFixture(t)
 
-	// Deselect claude-code, add gemini
+	// Deselect claude-code, add cursor
 	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -3984,12 +3983,98 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 		t.Errorf("Expected 'Removed agents' in output, got: %s", output)
 	}
 
-	// Verify hooks on disk: Claude removed, Gemini added
+	// Verify hooks on disk: Claude removed, Cursor added
 	if checkClaudeCodeHooksInstalled() {
 		t.Error("Expected Claude Code hooks to be uninstalled after deselection")
 	}
-	if !checkGeminiCLIHooksInstalled() {
-		t.Error("Expected Gemini CLI hooks to be installed after selection")
+	if !checkCursorHooksInstalled() {
+		t.Error("Expected Cursor hooks to be installed after selection")
+	}
+}
+
+func TestManageAgents_ExternalAgentSettingDoesNotLeakAcrossScopes(t *testing.T) {
+	// Cannot use t.Parallel because setupTestRepo changes the working directory
+	// and the external agent registry is process-global.
+	tests := []struct {
+		name string
+		opts EnableOptions
+	}{
+		{
+			name: "default scope",
+		},
+		{
+			name: "project scope",
+			opts: EnableOptions{UseProjectSettings: true},
+		},
+		{
+			name: "local scope",
+			opts: EnableOptions{UseLocalSettings: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const externalAgentName = "external-settings-scope-test"
+			const projectSettings = `{"log_level":"warn"}`
+			const localSettings = `{"strategy_options":{"push":false},"absolute_git_hook_path":true}`
+
+			setupTestRepo(t)
+			writeSettings(t, projectSettings)
+			writeLocalSettings(t, localSettings)
+
+			externalDir := t.TempDir()
+			writeExternalAgentBinary(t, externalDir, externalAgentName)
+			t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ENTIRE_TEST_EXTERNAL_PRESENT", "1")
+
+			selectExternalAgent := func(_ []string) ([]string, error) {
+				return []string{externalAgentName}, nil
+			}
+			if err := runManageAgents(t.Context(), &bytes.Buffer{}, tt.opts, selectExternalAgent); err != nil {
+				t.Fatalf("runManageAgents() error = %v", err)
+			}
+
+			if projectData := readSetupTestFile(t, EntireSettingsFile); projectData != projectSettings {
+				t.Fatalf("adding an external agent changed project settings:\n%s", projectData)
+			}
+
+			data, err := os.ReadFile(EntireSettingsLocalFile)
+			if err != nil {
+				t.Fatalf("read target settings: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("parse target settings: %v", err)
+			}
+			if _, exists := raw["log_level"]; exists {
+				t.Fatalf("project log_level leaked into local settings:\n%s", data)
+			}
+			var original map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(localSettings), &original); err != nil {
+				t.Fatalf("parse original local settings: %v", err)
+			}
+			for key, want := range original {
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, raw[key]); err != nil || !bytes.Equal(compact.Bytes(), want) {
+					t.Errorf("local setting %s changed: got %s, want %s", key, raw[key], want)
+				}
+			}
+			var externalAgents bool
+			if err := json.Unmarshal(raw["external_agents"], &externalAgents); err != nil || !externalAgents {
+				t.Fatalf("external_agents was not enabled in local settings:\n%s", data)
+			}
+			if len(raw) != len(original)+1 {
+				t.Fatalf("adding an external agent changed fields other than external_agents in local settings:\n%s", data)
+			}
+			effective, err := settings.Load(t.Context())
+			if err != nil {
+				t.Fatalf("load effective settings: %v", err)
+			}
+			if !effective.ExternalAgents {
+				reason, _ := effective.ExternalAgentsRejection()
+				t.Fatalf("external_agents grant was not honored by the settings loader: %s", reason)
+			}
+		})
 	}
 }
 
@@ -4156,9 +4241,9 @@ func TestDetectOrSelectAgent_ReRun_NewlyDetectedAgentAvailableNotPreSelected(t *
 	// Simulate: Claude Code hooks installed from a previous run
 	writeClaudeHooksFixture(t)
 
-	// Simulate: user added .gemini directory since last enable (detected but not installed)
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	// Simulate: user added .cursor directory since last enable (detected but not installed)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	// Track which agents the selector receives
@@ -4751,7 +4836,7 @@ func TestConfigureCmd_SummarizeModel_UsesExistingProvider(t *testing.T) {
 
 func TestSelectAllAgents_ReturnsAll(t *testing.T) {
 	t.Parallel()
-	available := []string{"claude-code", "gemini-cli", "opencode"}
+	available := []string{"claude-code", "cursor", "opencode"}
 	selected, err := selectAllAgents(available)
 	if err != nil {
 		t.Fatalf("selectAllAgents() error = %v", err)
@@ -4780,7 +4865,7 @@ func TestDetectOrSelectAgent_YesSelectsAll(t *testing.T) {
 		t.Fatalf("detectOrSelectAgent() with selectAllAgents error = %v", err)
 	}
 
-	// Should return at least 2 agents (claude-code + gemini-cli are registered in test imports)
+	// Should return at least 2 agents (every built-in agent is registered in package cli)
 	if len(agents) < 2 {
 		t.Errorf("expected at least 2 agents with selectAllAgents, got %d", len(agents))
 	}

@@ -5,7 +5,7 @@ package cli
 // access (headHasReviewCheckpoint) and per-agent reviewer constructors
 // (launchableReviewerFor) live here to avoid the import cycle:
 //   review → checkpoint → codex → review
-//   review → claudecode/codex/geminicli/pi → review
+//   review → claudecode/codex/pi → review
 
 import (
 	"context"
@@ -20,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
@@ -383,15 +382,13 @@ func trailReviewWebURL(target trailReviewTarget) string {
 // adapter, or nil for agents that are known to Entire but not yet wired into
 // `entire review` fan-out. This lives in the cli package to avoid the import cycle:
 //
-//	review/cmd.go → claudecode/codex/geminicli/pi → review
+//	review/cmd.go → claudecode/codex/pi → review
 func launchableReviewerFor(agentName string) reviewtypes.AgentReviewer {
 	switch agentName {
 	case string(agent.AgentNameClaudeCode):
 		return claudecode.NewReviewer()
 	case string(agent.AgentNameCodex):
 		return codex.NewReviewer()
-	case string(agent.AgentNameGemini):
-		return geminicli.NewReviewer()
 	case string(agent.AgentNamePi):
 		return pi.NewReviewer()
 	default:

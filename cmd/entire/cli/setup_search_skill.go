@@ -93,8 +93,6 @@ func legacySearchSubagentPath(agentName types.AgentName) string {
 		return filepath.Join(claudeDirName, "agents", strategy.EntireSearchSubagentName+".md")
 	case agent.AgentNameCodex:
 		return filepath.Join(".codex", "agents", strategy.EntireSearchSubagentName+".toml")
-	case agent.AgentNameGemini:
-		return filepath.Join(".gemini", "agents", strategy.EntireSearchSubagentName+".md")
 	default:
 		return ""
 	}
@@ -194,7 +192,7 @@ const claudeDirName = ".claude"
 // splitting the two.
 //
 // Codex has no project-level .codex skills directory; its documented repo
-// path is .agents/skills, which Gemini, Cursor, OpenCode, Pi, and Factory
+// path is .agents/skills, which Cursor, OpenCode, Pi, and Factory
 // also read as a shared fallback. Two consequences, both accepted: installing
 // for Codex alone also serves those agents, and installing for Codex plus one
 // of them leaves two skills named entire-search (.agents/skills and the
@@ -220,8 +218,6 @@ func searchSkillTemplatePath(agentName types.AgentName) string {
 		root = ".cursor"
 	case agent.AgentNameFactoryAIDroid:
 		root = ".factory"
-	case agent.AgentNameGemini:
-		root = ".gemini"
 	case agent.AgentNameOpenCode:
 		root = ".opencode"
 	case agent.AgentNamePi:

@@ -360,7 +360,7 @@ func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
 func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
 	hooksCmd := newHooksCmd()
 
-	for _, agentSubcommand := range []string{testAgentName, "gemini"} {
+	for _, agentSubcommand := range []string{testAgentName, string(agent.AgentNameCodex)} {
 		t.Run(agentSubcommand, func(t *testing.T) {
 			var agentCmd *cobra.Command
 			for _, sub := range hooksCmd.Commands() {

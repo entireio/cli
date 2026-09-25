@@ -15,7 +15,7 @@ import (
 
 // newRepoCmd is the `entire repo` command group: control-plane
 // repository lifecycle (create, list within a project, view, edit, delete),
-// the `mirror`, `remote`, `access`, `visibility`, `protection` and `grant`
+// the `mirror`, `remote`, `visibility`, `protection` and `grant`
 // subtrees, plus the `clone` convenience that resolves a mirror and shells
 // out to `git clone`. Other git content operations (log, diff, …) remain
 // intentionally out of scope here.
@@ -33,7 +33,6 @@ func newRepoCmd() *cobra.Command {
 	cmd.AddCommand(newRepoCloneCmd())
 	cmd.AddCommand(newRepoMirrorCmd())
 	cmd.AddCommand(newRepoRemoteCmd())
-	cmd.AddCommand(newRepoAccessCmd())
 	cmd.AddCommand(newRepoVisibilityCmd())
 	cmd.AddCommand(newRepoProtectionCmd())
 	cmd.AddCommand(newRepoGrantCmd())
@@ -144,18 +143,6 @@ and recovery instructions go to stderr.`,
 		},
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Refuse a name Entire could not address once it existed: every ref
-			// parser drops a trailing `.git` (see gitDirSuffix), so the repo
-			// would be reachable only by ULID. The server would accept it —
-			// an interior dot is legal — which is exactly why the check is here.
-			if name := strings.TrimSpace(args[0]); strings.HasSuffix(name, gitDirSuffix) {
-				cmd.SilenceUsage = true
-				err := fmt.Errorf("repo name %q must not end in %s: Entire treats that suffix as never part of a name, so the repo could not be addressed by name afterwards", name, gitDirSuffix)
-				if trimmed := strings.TrimSuffix(name, gitDirSuffix); trimmed != "" {
-					err = fmt.Errorf("%w (use %q)", err, trimmed)
-				}
-				return err
-			}
 			var format coreapi.CreateRepoInputBodyObjectFormat
 			if objectFormat != "" {
 				parsed, err := parseObjectFormat(objectFormat)
@@ -176,7 +163,11 @@ and recovery instructions go to stderr.`,
 				if format != "" {
 					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
 				}
-				created, err := c.CreateRepo(ctx, body)
+				response, err := c.CreateRepo(ctx, body)
+				if err != nil {
+					return err
+				}
+				created, err := createdRepoAsRepo(&response.Response)
 				if err != nil {
 					return err
 				}
@@ -375,11 +366,12 @@ func newRepoDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "repo", args[0],
-				func(ctx context.Context, c *coreapi.Client) (string, error) {
-					return resolveRepoRef(ctx, c, args[0], project)
+				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
+					return resolveRepoRefResolved(ctx, c, args[0], project)
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
-					return c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
+					_, err := c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
+					return err
 				})
 		},
 	}

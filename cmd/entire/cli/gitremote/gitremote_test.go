@@ -85,6 +85,27 @@ func TestParseURL(t *testing.T) {
 			wantInfo: &Info{Protocol: ProtocolSSH, Host: "gitlab.com", Owner: "org", Repo: "repo"},
 		},
 		{
+			// git dispatches git+ssh:// and ssh+git:// to ssh (verified on git
+			// 2.54.0: GIT_SSH_COMMAND runs for both), so Protocol must report
+			// the transport rather than the spelling in .git/config.
+			name:     "git+ssh alias reports the ssh transport",
+			url:      "git+ssh://git@github.com/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "ssh+git alias reports the ssh transport",
+			url:      "ssh+git://git@git.example.com:2222/org/repo.git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "git.example.com", Port: "2222", Owner: "org", Repo: "repo"},
+		},
+		{
+			// An unrecognized scheme is a remote helper to git (`git ls-remote
+			// bogus+ssh://…` → "remote helper 'bogus+ssh' aborted session"),
+			// so it stays itself and keeps failing closed downstream.
+			name:     "unknown scheme alias is not normalized",
+			url:      "bogus+ssh://git@github.com/org/repo.git",
+			wantInfo: &Info{Protocol: "bogus+ssh", Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
 			name:    "empty string",
 			url:     "",
 			wantErr: true,
@@ -111,6 +132,26 @@ func TestParseURL(t *testing.T) {
 			url:     "git@github.com:org/re\rpo",
 			wantErr: true,
 		},
+		{
+			name:     "entire:// native keeps a .git suffix as part of the name",
+			url:      "entire://entirehost/et/audit1/foo.git",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "et", Owner: "audit1", Repo: "foo.git"},
+		},
+		{
+			name:     "entire:// native without a suffix is unchanged",
+			url:      "entire://entirehost/et/audit1/foo",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "et", Owner: "audit1", Repo: "foo"},
+		},
+		{
+			name:     "entire:// native keeps a doubled suffix verbatim",
+			url:      "entire://entirehost/et/audit1/foo.git.git",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "et", Owner: "audit1", Repo: "foo.git.git"},
+		},
+		{
+			name:     "entire:// mirror drops only one .git",
+			url:      "entire://entirehost/gh/entireio/cli.git.git",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "gh", Owner: "entireio", Repo: "cli.git"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -124,6 +165,7 @@ func TestParseURL(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantInfo.Protocol, info.Protocol)
 			assert.Equal(t, tt.wantInfo.Host, info.Host)
+			assert.Equal(t, tt.wantInfo.Port, info.Port)
 			assert.Equal(t, tt.wantInfo.Forge, info.Forge)
 			assert.Equal(t, tt.wantInfo.Owner, info.Owner)
 			assert.Equal(t, tt.wantInfo.Repo, info.Repo)
@@ -291,4 +333,43 @@ func TestCanonicalHostIgnoresPathForges(t *testing.T) {
 	assert.Equal(t, "aws-us-east-2.entire.io", native.CanonicalHost())
 	mirror := &Info{Host: "aws-us-east-2.entire.io", Forge: "gh", Owner: "entireio", Repo: "cli"}
 	assert.Equal(t, "github.com", mirror.CanonicalHost())
+}
+
+// TestParseURL_NativeSuffixDoesNotBypassControlCharGuard pins that making the
+// .git strip forge-aware did not move the shared control-character chokepoint.
+// A literal control character in the raw URL never gets this far: net/url.Parse
+// scans the still-encoded string up front and rejects it before ParseURL sees a
+// path at all. Percent-encoding is the bypass — url.Parse only inspects the raw
+// bytes, so "%0A" sails through and only becomes a real newline once u.Path is
+// decoded, after the forge (here ForgeNative) is already known and the "don't
+// trim .git for et" branch has run. splitOwnerRepo's guard is the only thing
+// stopping that decoded escape from reaching owner/repo and, from there,
+// plain-text consumers like `entire agent-help`.
+func TestParseURL_NativeSuffixDoesNotBypassControlCharGuard(t *testing.T) {
+	t.Parallel()
+	_, err := ParseURL("entire://entirehost/et/audit1/foo%0A.git")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "control character")
+}
+
+// TestParseURL_RejectsDotOnlySegments pins that stripping cannot MANUFACTURE a
+// dot-only name: "..git" trims to "." and "...git" trims to "..", neither of
+// which addresses a repo and both of which are path-traversal shapes if a
+// caller ever joins them. The /gh/ ref grammar guards this case already
+// (parseMirrorCloneRef's gitHubDotOnlyRe); this is the URL half, which
+// ResolveRemoteRepo actually uses.
+func TestParseURL_RejectsDotOnlySegments(t *testing.T) {
+	t.Parallel()
+	for _, rawURL := range []string{
+		"entire://entirehost/gh/acme/..git",  // trims to "."
+		"entire://entirehost/gh/acme/...git", // trims to ".."
+		"entire://entirehost/gh/../app",      // typed, not manufactured
+		"entire://entirehost/et/acme/..",     // native: never trimmed, still refused
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseURL(rawURL)
+			require.Error(t, err)
+		})
+	}
 }

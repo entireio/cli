@@ -315,6 +315,47 @@ func TestCheckResponse_ErrorWithObjectEnvelope(t *testing.T) {
 	}
 }
 
+func TestCheckResponse_CarriesStableCode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"problem details", `{"type":"https://entire.io/errors/rate_limited","title":"Too Many Requests","status":429,"detail":"slow down","code":"rate_limited","request_id":"r1"}`, "rate_limited"},
+		{"compact cell error with code", `{"code":"wrong_cell","error":"not the primary"}`, "wrong_cell"},
+		{"legacy nested envelope", `{"error":{"code":"not_found","message":"session not found"}}`, "not_found"},
+		{"no code", `{"error":"insufficient permissions"}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", jsonContentType)
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Write([]byte(tc.body)) //nolint:errcheck // test handler
+			}))
+			defer server.Close()
+
+			resp, err := http.Get(server.URL) //nolint:noctx // test helper
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			err = CheckResponse(resp)
+			var httpErr *HTTPError
+			if !errors.As(err, &httpErr) {
+				t.Fatalf("CheckResponse = %v, want *HTTPError", err)
+			}
+			if httpErr.Code != tc.want {
+				t.Errorf("Code = %q, want %q", httpErr.Code, tc.want)
+			}
+		})
+	}
+}
+
 func TestCheckResponse_ErrorWithPlainText(t *testing.T) {
 	t.Parallel()
 
@@ -519,12 +560,13 @@ func TestClient_Request_RespectsCallerContentType(t *testing.T) {
 	}
 }
 
-func TestCheckResponse_ErrorWithHumaDetail(t *testing.T) {
+func TestCheckResponse_ErrorWithProblemDetail(t *testing.T) {
 	t.Parallel()
 
 	resp := &http.Response{
 		StatusCode: http.StatusNotFound,
-		Body:       io.NopCloser(strings.NewReader(`{"title":"Not Found","status":404,"detail":"repository not found: a/b"}`)),
+		Header:     http.Header{"Content-Type": {"application/problem+json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"type":"https://example.test/problems/not_found","title":"Not Found","status":404,"detail":"repository not found: a/b","code":"not_found","request_id":"request-example"}`)),
 	}
 	err := CheckResponse(resp)
 	var httpErr *HTTPError
@@ -532,6 +574,35 @@ func TestCheckResponse_ErrorWithHumaDetail(t *testing.T) {
 		t.Fatalf("expected *HTTPError, got %T", err)
 	}
 	if httpErr.Message != "repository not found: a/b" {
-		t.Fatalf("expected huma detail as message, got %q", httpErr.Message)
+		t.Fatalf("expected problem detail as message, got %q", httpErr.Message)
+	}
+	if httpErr.RequestID != "request-example" {
+		t.Fatalf("request id = %q, want request-example", httpErr.RequestID)
+	}
+	if want := "API error: repository not found: a/b (status 404) [request request-example]"; httpErr.Error() != want {
+		t.Fatalf("error = %q, want %q", httpErr.Error(), want)
+	}
+}
+
+// A problem body may carry only the coarse title; it is still better for the
+// user than echoing raw JSON, and request_id must survive that path too.
+func TestCheckResponse_ProblemDetailTitleOnly(t *testing.T) {
+	t.Parallel()
+
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Header:     http.Header{"Content-Type": {"application/problem+json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"type":"https://example.test/problems/forbidden","title":"Forbidden","status":403,"request_id":"req-42"}`)),
+	}
+	err := CheckResponse(resp)
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected *HTTPError, got %T", err)
+	}
+	if httpErr.Message != "Forbidden" {
+		t.Fatalf("message = %q, want Forbidden", httpErr.Message)
+	}
+	if httpErr.RequestID != "req-42" {
+		t.Fatalf("request id = %q, want req-42", httpErr.RequestID)
 	}
 }

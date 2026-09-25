@@ -84,6 +84,9 @@ type repoJSON struct {
 // clone coordinates. The create response already carries them, but the read
 // path can lag behind it for a few seconds, either as a repo that is not yet
 // active or as a by-name lookup that does not find the project or repo yet.
+// An /et/ path resolves through repos/resolve, whose miss reads "not found or
+// not shared with you". The older by-name lookups report their own misses;
+// those are kept here in case a caller passes a bare name.
 func waitForRepoClonable(t *testing.T, dir, ref string) repoJSON {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
@@ -91,7 +94,8 @@ func waitForRepoClonable(t *testing.T, dir, ref string) repoJSON {
 		stdout, stderr, err := runEntire(t, dir, "repo", "view", ref, "--json")
 		var pending string
 		if err != nil {
-			require.True(t, strings.Contains(stderr, "no repo named") || strings.Contains(stderr, "no project named"),
+			require.True(t, strings.Contains(stderr, "not found or not shared with you") ||
+				strings.Contains(stderr, "no repo named") || strings.Contains(stderr, "no project named"),
 				"entire repo view %s --json: %v\nstdout:\n%s\nstderr:\n%s", ref, err, stdout, stderr)
 			pending = strings.TrimSpace(stderr)
 		} else {

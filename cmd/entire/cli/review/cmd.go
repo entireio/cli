@@ -2,7 +2,7 @@
 //
 // cmd.go provides NewCommand(), the cobra entry point for `entire review`.
 // It routes through the new AgentReviewer / Sink / Run architecture for
-// agents with review-runner adapters (claude-code, codex, gemini, pi) and falls
+// agents with review-runner adapters (claude-code, codex, pi) and falls
 // back to RunMarkerFallback for agents that are not yet wired into that review
 // runner contract.
 package review
@@ -418,7 +418,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 }
 
 // runReviewListModels prints the models each review-runner agent advertises
-// (claude-code, codex, gemini, ...). It needs no git repo or profile: model
+// (claude-code, codex, pi, ...). It needs no git repo or profile: model
 // lists are advisory metadata. With agentFilter set, only that agent is shown.
 func runReviewListModels(ctx context.Context, cmd *cobra.Command, agentFilter string, deps Deps) error {
 	out := cmd.OutOrStdout()
@@ -578,7 +578,7 @@ type reviewAgentCatalogEntry struct {
 }
 
 // availableReviewAgents lists every registered agent that has a review-runner
-// adapter (claude-code, codex, gemini, pi, ...), marking which have hooks
+// adapter (claude-code, codex, pi, ...), marking which have hooks
 // installed in this repo. Derived from the registry + deps.ReviewerFor so it
 // never drifts from the set of agents `entire review` can actually launch.
 func availableReviewAgents(installed []types.AgentName, reviewerFor func(string) reviewtypes.AgentReviewer) []reviewAgentCatalogEntry {

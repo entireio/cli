@@ -66,7 +66,6 @@ func TestCreateAndAwaitMirror_AsyncSuccess(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
-		require.False(t, outcome.created.Created)
 		require.Equal(t, coreapi.MirrorStatusReady, outcome.status)
 		require.Equal(t, []mirrorAddPhase{mirrorAddPhaseQueued, mirrorAddPhasePlacing, mirrorAddPhaseCloning}, phases)
 		require.Equal(t, []string{

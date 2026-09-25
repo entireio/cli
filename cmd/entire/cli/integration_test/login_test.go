@@ -371,7 +371,6 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
 		// The login records its credential in contexts.json and the token
