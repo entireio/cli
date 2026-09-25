@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -51,21 +50,6 @@ func TestCommitLinking_AgentCommitInForeignWorktreeReHomesSession(t *testing.T) 
 	feature.GitCommitWithShadowHooksAsAgent("Second commit in the worktree", "feature2.txt")
 	require.Contains(t, headMessage(t, feature.RepoDir), "Entire-Checkpoint:",
 		"after re-homing, the worktree's own commits link by exact match")
-}
-
-// worktreeEnv adds a linked worktree, with Entire initialised, as a TestEnv.
-func worktreeEnv(t *testing.T, parent *TestEnv, name string) *TestEnv {
-	t.Helper()
-	base := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(base); err == nil {
-		base = resolved
-	}
-	dir := filepath.Join(base, name)
-	testutil.RunGit(t, parent.RepoDir, "worktree", "add", "-b", "wt/"+name, dir)
-	env := *parent
-	env.RepoDir = dir
-	env.InitEntire()
-	return &env
 }
 
 // disownSession records an owner outside this test's ancestry.
