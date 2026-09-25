@@ -44,6 +44,8 @@ type TrailResource struct {
 	CheckpointCount    int                `json:"checkpoint_count,omitempty"`
 	CommitsAhead       int                `json:"commits_ahead,omitempty"`
 	BodyDocument       *TrailBodyDocument `json:"body_document,omitempty"`
+	// Mergeability is served on the detail resource only; list items omit it.
+	Mergeability *TrailMergeability `json:"mergeability,omitempty"`
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot

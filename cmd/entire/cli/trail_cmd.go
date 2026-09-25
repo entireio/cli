@@ -198,7 +198,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 		},
 	}
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (same object shape as one entry of 'trail list --json')")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (one entry of 'trail list --json' plus a mergeability snapshot, null when unknown)")
 	return cmd
 }
 
@@ -227,10 +227,11 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	}
 
 	// Enrich the list result with the detail endpoint, which carries the
-	// rendered description (trail.body_document.text_snapshot) the list
-	// omits, and surface a browser URL. The detail fetch is best-effort:
-	// the core metadata already came from the list, so a detail failure
-	// falls back to the list body with a warning rather than failing.
+	// rendered description (trail.body_document.text_snapshot) and the
+	// mergeability snapshot the list omits, and surface a browser URL. The
+	// detail fetch is best-effort: the core metadata already came from the
+	// list, so a detail failure falls back to the list body, leaves
+	// mergeability unknown, and warns rather than failing.
 	m := found.ToMetadata()
 	m.URL = trailDisplayURL(*found, forge, owner, repo)
 	// Seed the description from the list body so a failed (or skipped)
@@ -238,32 +239,35 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	// supersedes it with the richer body_document text below.
 	bodyText := found.Body
 	descriptionLoaded := strings.TrimSpace(found.Body) != ""
+	// A numeric selector already resolved through the detail route, so the
+	// detail is in hand — re-requesting the same URL would double the round
+	// trips for every `trail show <number>`.
+	var detail *api.TrailResource
 	switch {
 	case found.BodyDocument != nil:
-		// A numeric selector already resolved through the detail route, so the
-		// description is in hand — re-requesting the same URL would double the
-		// round trips for every `trail show <number>`. Same precedence as the
-		// fetch below: authoritative, but only supersedes a non-empty snapshot.
-		descriptionLoaded = true
-		if snapshot := strings.TrimSpace(found.BodyDocument.TextSnapshot); snapshot != "" {
-			bodyText = snapshot
-		}
+		detail = found
 	case found.Number > 0:
-		if bt, _, derr := fetchTrailDescriptionAtPath(ctx, client, basePath, found.Number); derr == nil {
-			// A successful fetch means we authoritatively consulted the
-			// description, but it only supersedes the seeded list body when
-			// it actually carries text: an older/partial server that omits
-			// body_document returns "" here and must not blank out a list
-			// body that is present.
-			descriptionLoaded = true
-			if strings.TrimSpace(bt) != "" {
-				bodyText = bt
-			}
+		if d, derr := fetchTrailDetailAtPath(ctx, client, basePath, found.Number); derr == nil {
+			detail = &d
 		} else {
 			// Best-effort: warn but still render metadata + URL (and the
 			// list body) rather than failing the whole command.
-			fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
+			fmt.Fprintf(errW, "Warning: could not load trail detail (description, mergeability): %v\n", derr)
 		}
+	}
+	var mergeability *api.TrailMergeability
+	if detail != nil {
+		// A successful fetch means we authoritatively consulted the
+		// description, but it only supersedes the seeded list body when it
+		// actually carries text: an older/partial server that omits
+		// body_document must not blank out a list body that is present.
+		descriptionLoaded = true
+		if detail.BodyDocument != nil {
+			if snapshot := strings.TrimSpace(detail.BodyDocument.TextSnapshot); snapshot != "" {
+				bodyText = snapshot
+			}
+		}
+		mergeability = detail.Mergeability
 	}
 	// The list body is the weaker source; carry the resolved description on the
 	// metadata so JSON callers read the same text the human view renders.
@@ -272,16 +276,17 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	if opts.JSON {
 		// Emit the raw body — never the "no description" placeholder, which is
 		// display text, not data. A single object mirrors one entry of
-		// `trail list --json` so both can feed the same parser.
+		// `trail list --json` so both can feed the same parser; the
+		// detail-only mergeability snapshot is the one addition.
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(m); err != nil {
+		if err := enc.Encode(trailShowJSON{Metadata: m, Mergeability: toTrailMergeabilityJSON(mergeability)}); err != nil {
 			return fmt.Errorf("failed to encode JSON: %w", err)
 		}
 		return nil
 	}
 
-	printTrailDetails(w, m, m.URL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
+	printTrailDetails(w, m, m.URL, mergeability, trailDescriptionForDisplay(bodyText, descriptionLoaded))
 	return nil
 }
 
@@ -315,7 +320,9 @@ func resolveTrailBySelectorAtPath(ctx context.Context, client *api.Client, baseP
 	return found, nil
 }
 
-func printTrailDetails(w io.Writer, m *trail.Metadata, webURL, bodyText string) {
+// printTrailDetails renders the human `trail show` view. A nil mergeability
+// means the detail could not be loaded, and renders as unknown.
+func printTrailDetails(w io.Writer, m *trail.Metadata, webURL string, mergeability *api.TrailMergeability, bodyText string) {
 	// Color the same fields as the list view (STATUS/PHASE/AUTHOR); everything
 	// else stays plain. Values are pre-colored, so alignment is unaffected.
 	styles := newStatusStyles(w)
@@ -373,6 +380,7 @@ func printTrailDetails(w io.Writer, m *trail.Metadata, webURL, bodyText string) 
 	}
 	fmt.Fprintf(w, "  %s%s\n", label("Created: "), m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	fmt.Fprintf(w, "  %s%s\n", label("Updated: "), m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	printTrailMergeability(w, styles, label, mergeability)
 	if strings.TrimSpace(bodyText) != "" {
 		fmt.Fprintf(w, "\n%s\n%s\n", label("Description:"), bodyText)
 	}
@@ -434,24 +442,33 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
 }
 
-// fetchTrailDescriptionAtPath fetches a trail's rendered description text
-// (`trail.body_document.text_snapshot`) and its etag, which the list endpoint
-// omits, by integer number. It returns only the description and etag — the
-// list result already supplies the metadata — and decodes only the fields it
-// needs, so it is unaffected by the shape of sibling fields like
-// `checkpoints`/`discussion`.
-func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePath string, number int) (string, string, error) {
+// fetchTrailDetailAtPath fetches a trail's detail resource by integer number.
+// The detail carries what the list endpoint omits: the rendered description
+// (body_document) and the mergeability snapshot.
+func fetchTrailDetailAtPath(ctx context.Context, client *api.Client, basePath string, number int) (api.TrailResource, error) {
 	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to fetch trail detail: %w", err)
+		return api.TrailResource{}, fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		return "", "", err
+		return api.TrailResource{}, err
 	}
 	detail, err := decodeTrailResource(resp)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to decode trail detail: %w", err)
+		return api.TrailResource{}, fmt.Errorf("failed to decode trail detail: %w", err)
+	}
+	return detail, nil
+}
+
+// fetchTrailDescriptionAtPath fetches a trail's rendered description text
+// (`trail.body_document.text_snapshot`) and its etag, which the list endpoint
+// omits, by integer number. It returns only the description and etag — the
+// list result already supplies the metadata.
+func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePath string, number int) (string, string, error) {
+	detail, err := fetchTrailDetailAtPath(ctx, client, basePath, number)
+	if err != nil {
+		return "", "", err
 	}
 	if detail.BodyDocument == nil {
 		return "", "", nil
