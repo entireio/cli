@@ -46,6 +46,7 @@ var claudeLaunchPolicy = map[string]string{
 	// Text generation processes untrusted input (dispatch data, transcripts) and
 	// needs no repository context at all, so it is isolated harder than review:
 	// --setting-sources "" plus a temp working directory. See buildGenerateArgs.
+	"GenerateText":          "isolated via buildGenerateArgs + temp cwd",
 	"GenerateTextStreaming": "isolated via buildStreamingGenerateArgs + temp cwd",
 
 	// The interactive launch is the user starting their own agent session in
@@ -65,6 +66,17 @@ func TestNoUnreviewedClaudeLaunchSites(t *testing.T) {
 		t.Fatalf("read package dir: %v", err)
 	}
 
+	// Any "claude" string literal counts, not only a direct call argument:
+	// `bin := "claude"; exec.CommandContext(ctx, bin, ...)` is the same launch.
+	isClaudeLit := func(n ast.Node) (*ast.BasicLit, bool) {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return nil, false
+		}
+		// Unquote so `"claude"` matches but `"claude-code"` does not.
+		v, err := strconv.Unquote(lit.Value)
+		return lit, err == nil && v == claudeBinaryName
+	}
 	found := map[string]string{} // function name -> file:line
 	for _, entry := range entries {
 		name := entry.Name()
@@ -75,25 +87,27 @@ func TestNoUnreviewedClaudeLaunchSites(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		var enclosing string
-		ast.Inspect(file, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.FuncDecl:
-				enclosing = node.Name.Name
-			case *ast.CallExpr:
-				for _, arg := range node.Args {
-					lit, ok := arg.(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				// A package-level literal can't be attributed to a launch site, so
+				// it would hide one from this guard; make it a function-local.
+				ast.Inspect(decl, func(n ast.Node) bool {
+					if lit, ok := isClaudeLit(n); ok {
+						t.Errorf("%s:%d: package-level %q literal hides launch sites from this guard; inline it where claude is spawned",
+							name, fset.Position(lit.Pos()).Line, claudeBinaryName)
 					}
-					// Unquote so `"claude"` matches but `"claude-code"` does not.
-					if v, err := strconv.Unquote(lit.Value); err == nil && v == claudeBinaryName && enclosing != "" {
-						found[enclosing] = name + ":" + strconv.Itoa(fset.Position(lit.Pos()).Line)
-					}
-				}
+					return true
+				})
+				continue
 			}
-			return true
-		})
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if lit, ok := isClaudeLit(n); ok {
+					found[fn.Name.Name] = name + ":" + strconv.Itoa(fset.Position(lit.Pos()).Line)
+				}
+				return true
+			})
+		}
 	}
 
 	if len(found) == 0 {
