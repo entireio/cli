@@ -20,7 +20,7 @@ func TestEntireTrailContextInjection_StripsControlChars(t *testing.T) {
 	if strings.ContainsAny(tampered, "\n\x1b") {
 		t.Errorf("control characters must not reach the injected string, got: %q", tampered)
 	}
-	if !strings.Contains(tampered, "Entire auto-detects the repo from the git origin remote") {
+	if !strings.Contains(tampered, "Trail commands auto-detect the repo from the git origin remote") {
 		t.Errorf("a tampered scope should degrade to the generic message, got: %s", tampered)
 	}
 }
