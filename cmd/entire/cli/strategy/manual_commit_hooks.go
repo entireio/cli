@@ -331,7 +331,8 @@ func isGitSequenceOperation(ctx context.Context) bool {
 // The source parameter indicates how the commit was initiated:
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
-//   - "merge", "squash": skip trailer entirely (auto-generated messages)
+//   - "merge": skip trailer entirely (the merged commits keep their own)
+//   - "squash": git's seeded squash message - inherits the squashed trailers, then matches as usual
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -348,10 +349,13 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
-	// Skip for merge and squash sources
-	// These are auto-generated messages - not from Claude sessions
-	switch source {
-	case "merge", "squash":
+	// Inherited trailers link the squashed commits' checkpoints; matching still
+	// runs so work the session holds gets a checkpoint of its own.
+	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
+	recordInheritedTrailers(ctx, inherited)
+
+	// A merge commit is skipped: the merged commits keep their own trailers.
+	if source == "merge" {
 		logging.Debug(logCtx, "prepare-commit-msg: skipped for source",
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
@@ -403,7 +407,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	s.warnIfAttributionDiverged(ctx, sessions)
 
 	// Fast path: skip content detection for mid-turn agent commits.
-	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source) {
+	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source, inherited) {
 		return nil
 	}
 
@@ -433,8 +437,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	message := string(content)
 
-	// Check if trailer already exists (ParseCheckpoint validates format, so found==true means valid)
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	// A trailer prepare already stamped is kept (e.g. amend); inherited ones are links
+	if existingCpID, found := stampedTrailer(message, inherited); found {
 		readCommitMessageSpan.End()
 		// Trailer already exists (e.g., amend) - keep it
 		logging.Debug(logCtx, "prepare-commit-msg: trailer already exists",
@@ -480,7 +484,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	// NOTE: TTY confirmation (askConfirmTTY) is intentionally NOT wrapped in a span
 	// because it blocks on user input and would skew timing.
 	switch source {
-	case "message":
+	case commitSourceMessage:
 		// Using -m or -F: behavior depends on TTY availability and commit_linking setting
 		switch {
 		case !interactive.CanPromptInteractively():
@@ -538,6 +542,160 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	// Reserve only once the trailer reached the message.
 	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
 	return nil
+}
+
+// inheritSquashedCheckpointTrailers handles a commit made while `git merge
+// --squash` is in progress (SQUASH_MSG present): the squashed commits'
+// Entire-Checkpoint trailers are carried into the message when a staged path is
+// one the recorded commits changed. `commit -m` reports source "message", not "squash", so this runs
+// before the source switch — but only for those two sources: an amend must
+// keep its own logic even when an abandoned squash left SQUASH_MSG behind.
+// Returns the inherited IDs; nil when there are none or the message is
+// unusable. Ordinary matching runs afterwards either way.
+func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) []id.CheckpointID {
+	if source != commitSourceMessage && source != "squash" {
+		return nil
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return nil
+	}
+	// SQUASH_MSG lives in the PER-WORKTREE git dir, like the sequencer markers.
+	// The root is the shared registry handle (gitdir.OpenAt): never close it.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return nil
+	}
+	squashMsg, err := osroot.ReadFileNoFollow(root, "SQUASH_MSG")
+	if err != nil {
+		return nil // no squash in progress (or unreadable: fall through to normal matching)
+	}
+
+	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	if len(inherited) == 0 {
+		return nil
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil
+	}
+	defer repo.Close()
+	if !squashTouchesStagedPath(ctx, repo, squashMsg) {
+		stripInheritedCheckpointTrailers(commitMsgFile, inherited)
+		logging.Debug(logCtx, "prepare-commit-msg: ignored stale squash message whose commits changed none of the staged paths",
+			slog.String("source", source),
+			slog.Int("inherited", len(inherited)))
+		return nil
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return nil // nothing inherited; let ordinary matching report its own failure
+	}
+	message := string(content)
+	present := make(map[string]bool)
+	for _, cpID := range trailers.ParseAllCheckpoints(message) {
+		present[cpID.String()] = true
+	}
+	added := 0
+	for _, cpID := range inherited {
+		if present[cpID.String()] {
+			continue
+		}
+		message = addInheritedCheckpointTrailer(message, cpID, source)
+		added++
+	}
+	if added == 0 {
+		logging.Debug(logCtx, "prepare-commit-msg: squash in progress, message already carries the squashed trailers",
+			slog.String("source", source),
+			slog.Int("inherited", len(inherited)))
+		return inherited
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return nil // nothing landed; hooks stay silent, ordinary matching may still try
+	}
+	logging.Info(logCtx, "prepare-commit-msg: inherited checkpoint trailers from the squashed commits",
+		slog.String("strategy", "manual-commit"),
+		slog.String("source", source),
+		slog.Int("inherited", len(inherited)),
+		slog.Int("added", added))
+	return inherited
+}
+
+// squashTouchesStagedPath reports whether a staged path is one that a
+// commit Git recorded in SQUASH_MSG changed. Git leaves SQUASH_MSG behind when a
+// squash is abandoned, so the file alone is not proof that the current staged
+// work belongs to those commits; matching paths rather than content keeps a
+// squash whose files were touched up before committing.
+func squashTouchesStagedPath(ctx context.Context, repo *git.Repository, squashMsg []byte) bool {
+	files, err := getStagedFiles(ctx)
+	if err != nil || len(files) == 0 {
+		return false
+	}
+	staged := make(map[string]bool, len(files))
+	for _, f := range files {
+		staged[f] = true
+	}
+	for _, line := range strings.Split(string(squashMsg), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "commit" || !plumbing.IsHash(fields[1]) {
+			continue
+		}
+		commit, err := repo.CommitObject(plumbing.NewHash(fields[1]))
+		if err != nil {
+			continue
+		}
+		if commitChangesAnyPath(commit, staged) {
+			return true
+		}
+	}
+	return false
+}
+
+// commitChangesAnyPath reports whether c changed one of wanted relative to its
+// first parent (or added it, for a root commit).
+func commitChangesAnyPath(c *object.Commit, wanted map[string]bool) bool {
+	tree, err := c.Tree()
+	if err != nil {
+		return false
+	}
+	var parentTree *object.Tree
+	if parent, err := c.Parents().Next(); err == nil {
+		if parentTree, err = parent.Tree(); err != nil {
+			return false
+		}
+	}
+	changes, err := object.DiffTree(parentTree, tree)
+	if err != nil {
+		return false
+	}
+	for _, change := range changes {
+		if wanted[change.To.Name] || wanted[change.From.Name] {
+			return true
+		}
+	}
+	return false
+}
+
+func stripInheritedCheckpointTrailers(commitMsgFile string, inherited []id.CheckpointID) {
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return
+	}
+	remove := make(map[string]bool, len(inherited))
+	for _, cpID := range inherited {
+		remove[trailers.CheckpointTrailerKey+": "+cpID.String()] = true
+	}
+	lines := strings.Split(string(content), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !remove[strings.TrimSpace(line)] {
+			kept = append(kept, line)
+		}
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(strings.Join(kept, "\n")), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return // hooks stay silent on failure
+	}
 }
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
@@ -935,8 +1093,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if commit has checkpoint trailer (ParseCheckpoint validates format)
-	checkpointID, found := trailers.ParseCheckpoint(commit.Message)
+	// Condense into the trailer prepare stamped, never into an inherited one.
+	stamped := stampedTrailersOf(ctx, commit)
+	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, stamped)
 	openRepoSpan.End()
 
 	if !found {
@@ -944,6 +1103,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		// Still update BaseCommit for active sessions so future commits can match.
 		s.postCommitUpdateBaseCommitOnly(ctx, head)
 		return nil
+	}
+	if targetPreexisting {
+		ctx = withPreexistingTarget(ctx)
 	}
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
@@ -1554,6 +1716,12 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	opts condenseOpts,
 ) (condensed bool, newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
+	if stampedByAnotherCommit(ctx, checkpointID, state) {
+		logging.Warn(logCtx, "refusing to condense into a checkpoint this session did not stamp",
+			slog.String("session_id", state.SessionID),
+			slog.String("checkpoint_id", checkpointID.String()))
+		return false, nil, nil
+	}
 	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts)
 	if err != nil {
 		logging.Warn(logCtx, "condensation failed",
@@ -2336,7 +2504,7 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 // A session is eligible when it is ACTIVE, or IDLE with a fresh task record
 // (a background subagent committing between the parent's turns; the widened
 // no-TTY trust window is an accepted trade-off — see PR #2034).
-func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
+func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string, inherited []id.CheckpointID) bool {
 	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
 	if !skipContentDetection {
@@ -2367,7 +2535,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			)
 			continue
 		}
-		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source) //nolint:errcheck // always returns nil; kept for signature stability
+		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source, inherited) //nolint:errcheck // always returns nil; kept for signature stability
 		return true
 	}
 	// Log why fast path didn't fire — task_records spans ALL sessions so
@@ -2481,7 +2649,7 @@ func lstatLateTranscript(ag agent.Agent, state *SessionState) (os.FileInfo, erro
 // this commit's checkpoint ID and merge unrelated transcript ranges. The ended
 // session loses nothing: without touched files PostCommit does not condense it,
 // and `entire doctor` remains its retry path.
-func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
+func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string, inherited []id.CheckpointID) error { //nolint:unparam // kept for signature stability
 	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
@@ -2494,8 +2662,8 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 
 	message := string(content)
 
-	// Don't add if trailer already exists
-	if _, found := trailers.ParseCheckpoint(message); found {
+	// Don't add if prepare already stamped one (inherited trailers are links)
+	if _, found := stampedTrailer(message, inherited); found {
 		return nil
 	}
 
@@ -2556,6 +2724,28 @@ func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.Ch
 // Delegates to trailers.AppendCheckpointTrailer for trailer-aware formatting.
 func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
 	return trailers.AppendCheckpointTrailer(message, checkpointID.String())
+}
+
+// commitSourceMessage is prepare-commit-msg's source for `-m`/`-F` messages.
+const commitSourceMessage = "message"
+
+// addInheritedCheckpointTrailer adds an inherited trailer above git's comment
+// block rather than after it: with `commit -v` git discards everything below
+// the scissors line, and the trailer with it. Only an editor message has that
+// block; a `-m`/`-F` message (source "message") keeps `#` lines as content, so
+// its trailer is appended as usual.
+func addInheritedCheckpointTrailer(message string, checkpointID id.CheckpointID, source string) string {
+	if source == commitSourceMessage {
+		return addCheckpointTrailer(message, checkpointID)
+	}
+	lines := strings.Split(message, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "#") {
+			head := strings.TrimRight(addCheckpointTrailer(strings.Join(lines[:i], "\n"), checkpointID), "\n")
+			return head + "\n\n" + strings.Join(lines[i:], "\n")
+		}
+	}
+	return addCheckpointTrailer(message, checkpointID)
 }
 
 // addCheckpointTrailerWithComment adds the Entire-Checkpoint trailer with an explanatory comment.
@@ -3017,7 +3207,7 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
@@ -3025,12 +3215,9 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 	}
 
 	staged := []string{}
-	trimmed := strings.TrimSpace(string(output))
-	// Normalize Windows line endings (\r\n) to Unix (\n) for cross-platform git output
-	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
-	for _, line := range strings.Split(trimmed, "\n") {
-		if line != "" {
-			staged = append(staged, filepath.ToSlash(line))
+	for _, name := range bytes.Split(output, []byte{0}) {
+		if len(name) != 0 {
+			staged = append(staged, filepath.ToSlash(string(name)))
 		}
 	}
 	return staged, nil

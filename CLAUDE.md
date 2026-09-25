@@ -53,6 +53,7 @@ at session start. Follow its related links when the task crosses those boundarie
 | Format and lint | `mise run fmt && mise run lint` |
 | Before every commit | **`mise run check`** (format, lint, all CI tests) |
 | Before any push or remote code update | **`mise run lint` on the current tree**, after the latest formatting pass |
+| After every push to an open PR | **check the trail's findings** (`entire trail finding list <n>`); fix real ones, resolve with `-m`, and re-check after the fix lands. Not done until findings are clear |
 | Duplication checks | `mise run dup` or `mise run dup:staged`; normal lint also checks duplication |
 | Windows installer | `mise run test:ps1`; see testing reference for prerequisites |
 
