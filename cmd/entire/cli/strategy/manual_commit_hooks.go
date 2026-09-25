@@ -2981,28 +2981,23 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 // Returns (non-nil empty slice, nil) when no files are staged — callers can
 // distinguish "no staged files" from "error resolving staged files" (nil, err).
 func getStagedFiles(ctx context.Context) ([]string, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("resolve worktree root: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
-	cmd.Dir = repoRoot
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git diff --cached: %w", err)
-	}
-
-	staged := []string{}
-	trimmed := strings.TrimSpace(string(output))
-	// Normalize Windows line endings (\r\n) to Unix (\n) for cross-platform git output
-	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
-	for _, line := range strings.Split(trimmed, "\n") {
-		if line != "" {
-			staged = append(staged, filepath.ToSlash(line))
-		}
-	}
-	return staged, nil
+        repoRoot, err := paths.WorktreeRoot(ctx)
+        if err != nil {
+                return nil, fmt.Errorf("resolve worktree root: %w", err)
+        }
+        cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
+        cmd.Dir = repoRoot
+        output, err := cmd.Output()
+        if err != nil {
+                return nil, fmt.Errorf("git diff --cached: %w", err)
+        }
+        staged := []string{}
+        for _, file := range strings.Split(string(output), "\x00") {
+                if file != "" {
+                        staged = append(staged, filepath.ToSlash(file))
+                }
+        }
+        return staged, nil
 }
 
 // getLastPrompt retrieves the most recent user prompt from a session's shadow branch.
