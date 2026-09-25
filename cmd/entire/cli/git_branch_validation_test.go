@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -39,9 +43,8 @@ func TestValidateBranchName_LiteralParity(t *testing.T) {
 	}
 }
 
-// Native --branch expands checkout history. This is intentionally separate
-// from literal validation: a future pure validator must make this compatibility
-// decision explicitly rather than silently changing it in a mechanical port.
+// Native --branch expands checkout history. The library's literal validator
+// cannot replace this repository-dependent behavior.
 func TestValidateBranchName_PreviousCheckout(t *testing.T) {
 	gitenv.IsolateRepository(t)
 	dir := t.TempDir()
@@ -50,4 +53,73 @@ func TestValidateBranchName_PreviousCheckout(t *testing.T) {
 	testutil.RunGit(t, dir, "commit", "--allow-empty", "--no-gpg-sign", "-m", "initial")
 	testutil.RunGit(t, dir, "checkout", "-b", "other")
 	require.NoError(t, ValidateBranchName(t.Context(), "@{-1}"))
+	for _, name := range []string{
+		"@{-1}", "@{-2}", "@{-0}", "@{-1}/topic", "@{-1}.lock", "@{-1}..topic",
+		"@{upstream}", "other@{upstream}", "@{push}", "other@{0}", "@{-", "a@{b",
+	} {
+		oracle := execx.NonInteractive(t.Context(), "git", "check-ref-format", "--branch", name)
+		oracle.Env = testutil.GitIsolatedEnv()
+		require.Equal(t, oracle.Run() == nil, ValidateBranchName(t.Context(), name) == nil, "expression %q", name)
+	}
+}
+
+func TestValidateBranchName_LiteralsDoNotNeedGit(t *testing.T) {
+	gitenv.IsolateRepository(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	for _, name := range []string{"main", "@", "topic/@/name", "feature/nested", "refs/heads/HEAD", "HEAD/topic"} {
+		require.NoError(t, ValidateBranchName(t.Context(), name), "literal %q must not start Git", name)
+	}
+	for _, name := range []string{"HEAD", "-topic", "a..b", "a.lock/b", "a\x00b"} {
+		require.EqualError(t, ValidateBranchName(t.Context(), name), fmt.Sprintf("invalid branch name %q", name))
+	}
+	// Expressions still require native Git; absence is not a reason to accept
+	// unresolved syntax as a literal branch name.
+	require.Error(t, ValidateBranchName(t.Context(), "@{-1}"))
+}
+
+func TestValidateBranchName_ContextErrors(t *testing.T) {
+	t.Parallel()
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			t.Parallel()
+			ctx := branchValidationErrorContext(t, cause)
+			for _, name := range []string{"main", "-topic", "@{-1}"} {
+				err := ValidateBranchName(ctx, name)
+				require.ErrorIs(t, err, cause)
+				require.NotContains(t, err.Error(), "invalid branch name")
+			}
+			// Public callers must keep the context cause in their error chains.
+			require.ErrorIs(t, CheckoutBranch(ctx, "main"), cause)
+			require.ErrorIs(t, FetchAndCheckoutRemoteBranch(ctx, "main"), cause)
+			_, err := BranchExistsLocally(ctx, "main")
+			require.ErrorIs(t, err, cause)
+			_, err = BranchExistsOnRemote(ctx, "main")
+			require.ErrorIs(t, err, cause)
+		})
+	}
+}
+
+func branchValidationErrorContext(t *testing.T, cause error) context.Context {
+	t.Helper()
+	if errors.Is(cause, context.DeadlineExceeded) {
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	return ctx
+}
+
+func TestValidateBranchName_ASCIIParity(t *testing.T) {
+	gitenv.IsolateRepository(t)
+	t.Chdir(t.TempDir())
+	for char := range 128 {
+		for _, name := range []string{string(rune(char)) + "topic", "to" + string(rune(char)) + "pic", "topic" + string(rune(char))} {
+			oracle := execx.NonInteractive(t.Context(), "git", "check-ref-format", "--branch", name)
+			oracle.Env = testutil.GitIsolatedEnv()
+			require.Equal(t, oracle.Run() == nil, ValidateBranchName(t.Context(), name) == nil, "literal %q", name)
+		}
+	}
 }

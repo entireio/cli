@@ -561,7 +561,7 @@ func pickRoles(cmd *cobra.Command, t grantPickerTarget, chosen []grantCandidate,
 	}
 	out := make([]grantSelection, len(chosen))
 	for i, g := range chosen {
-		if err := validateRole(roles[i], t.roles); err != nil {
+		if err := validateChoice("role", roles[i], t.roles); err != nil {
 			return nil, err
 		}
 		out[i] = grantSelection{handle: g.ref, role: roles[i]}

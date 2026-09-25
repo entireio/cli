@@ -24,13 +24,13 @@ concurrency:
 jobs:
   smoke:
     runs-on: ${{ matrix.os }}
-    # Above the sum of the agents' own retry ceilings (~85m: 9 + 18 + 13.5 +
-    # 13.5 + 18 + 13.5, see the step caps below) plus setup, so the per-step cap
-    # is always the one that binds — a step timeout leaves an attributable row
-    # in the table, a job timeout kills Summarize and the artifact upload with
-    # it. Legs measure 6m30s-8m40s; this only binds on a hang in one of the
-    # uncapped setup steps.
-    timeout-minutes: 90
+    # Above the sum of the agents' own retry ceilings (~108m: 9 + 18 + 13.5 +
+    # 13.5 + 18 + 13.5 + 22.5, see the step caps below) plus setup, so the
+    # per-step cap is always the one that binds — a step timeout leaves an
+    # attributable row in the table, a job timeout kills Summarize and the
+    # artifact upload with it. Legs measure 6m30s-8m40s; this only binds on a
+    # hang in one of the uncapped setup steps.
+    timeout-minutes: 115
     permissions:
       contents: read
       actions: read
@@ -63,14 +63,58 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict -- run 36007855846 lost two e2e legs at once to a
+          # gzipped installer and an unreachable version endpoint. Retry rather
+          # than redden a scheduled run. (pipefail is already set above, which
+          # `curl ... | bash` needs: the pipeline reports BASH's status, so a
+          # failed fetch otherwise exits 0 having installed nothing.)
+          retry() {
+            local attempt=1
+            while true; do
+              if bash -euo pipefail -c "$1"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::install failed after $attempt attempts: $1"
+                return 1
+              fi
+              echo "install attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          retry 'curl -fsSL --compressed https://entire.io/install.sh | bash -s -- --channel nightly'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly CLI (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           set -euo pipefail
-          brew install --cask entireio/tap/entire@nightly
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict -- run 36007855846 lost two e2e legs at once to a
+          # gzipped installer and an unreachable version endpoint. Retry rather
+          # than redden a scheduled run. (pipefail is already set above, which
+          # `curl ... | bash` needs: the pipeline reports BASH's status, so a
+          # failed fetch otherwise exits 0 having installed nothing.)
+          retry() {
+            local attempt=1
+            while true; do
+              if bash -euo pipefail -c "$1"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::install failed after $attempt attempts: $1"
+                return 1
+              fi
+              echo "install attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          retry 'brew install --cask entireio/tap/entire@nightly'
 
       # The README's nightly invocation. The installer updates only the stored
       # user PATH, which later steps do not re-read, hence GITHUB_PATH.
@@ -80,7 +124,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly"
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846 lost two Unix legs to a gzipped
+          # installer and an unreachable version endpoint). Retry each install.
+          #
+          # Limit worth stating: this retries the THROW path only. An installer
+          # that calls exit instead ends the step before the catch runs -- per
+          # the notes below that is droid's shape, so its transient failures
+          # still redden the run. Isolating each installer in a child pwsh
+          # would close that, and is untested here.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly" }
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # Pin the checkout to the tag that produced the installed binary, so the
@@ -174,39 +241,104 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           set -euo pipefail
-          curl -fsSL https://claude.ai/install.sh | bash
-          curl https://cursor.com/install -fsS | bash
-          curl -fsSL https://app.factory.ai/cli | sh
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict -- run 36007855846 lost two e2e legs at once to a
+          # gzipped installer and an unreachable version endpoint. Retry rather
+          # than redden a scheduled run. (pipefail is already set above, which
+          # `curl ... | bash` needs: the pipeline reports BASH's status, so a
+          # failed fetch otherwise exits 0 having installed nothing.)
+          retry() {
+            local attempt=1
+            while true; do
+              if bash -euo pipefail -c "$1"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                echo "::error::install failed after $attempt attempts: $1"
+                return 1
+              fi
+              echo "install attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          retry 'curl -fsSL --compressed https://claude.ai/install.sh | bash'
+          retry 'curl https://cursor.com/install -fsS --compressed | bash'
+          retry 'curl -fsSL --compressed https://app.factory.ai/cli | sh'
           # opencode by npm: its install script resolves its version through an
           # unauthenticated api.github.com call it gives no way to authenticate,
           # so it is rate-limited at random.
-          npm install -g @openai/codex @github/copilot opencode-ai
+          retry 'npm install -g @openai/codex @github/copilot opencode-ai'
+          # agy's official installer: it resolves OS and architecture itself,
+          # verifies a SHA-512 from the release manifest, and installs latest
+          # into ~/.local/bin, which the line below puts on PATH.
+          retry 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "AGENTS=claude-code opencode codex cursor-cli factoryai-droid copilot-cli" >> "$GITHUB_ENV"
+          echo "AGENTS=claude-code opencode codex cursor-cli factoryai-droid copilot-cli antigravity" >> "$GITHUB_ENV"
 
-      # cursor-cli is absent: its E2E driver sends every prompt through tmux
-      # (e2e/agents/cursor_cli.go), because Cursor's headless -p mode fires no
-      # hooks — and there is no tmux on Windows.
+      # cursor-cli is the only absence here: its E2E driver sends every prompt
+      # through tmux (e2e/agents/cursor_cli.go), because Cursor's headless -p
+      # mode fires no hooks — and there is no tmux on Windows.
+      #
+      # antigravity matters most on this leg: it is the one agent whose Windows
+      # hook path differs from its Unix one (agy hands hook commands to
+      # cmd.exe, not sh), and a hook that fails there is silent — agy still
+      # reports success. Nothing else exercises that path automatically.
       - name: Install agent CLIs (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          irm https://claude.ai/install.ps1 | iex
-          irm https://app.factory.ai/cli/windows | iex
-          npm install -g @openai/codex @github/copilot opencode-ai
-          # Stop does not cover native commands ($PSNativeCommandUseError-
-          # ActionPreference defaults to $false), so npm's failure needs this.
-          if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
-          # Neither iex line needs such a guard: both installers throw or exit
-          # on every failure path, and that ends this step. Verified 2026-09-09
-          # for claude, 2026-09-10 for droid, whose installer shadows
-          # Write-Error with one that exits 1.
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846 lost two Unix legs to a gzipped
+          # installer and an unreachable version endpoint). Retry each install.
+          #
+          # Limit worth stating: this retries the THROW path only. An installer
+          # that calls exit instead ends the step before the catch runs -- per
+          # the notes below that is droid's shape, so its transient failures
+          # still redden the run. Isolating each installer in a child pwsh
+          # would close that, and is untested here.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://claude.ai/install.ps1 | iex }
+          Invoke-WithRetry { irm https://app.factory.ai/cli/windows | iex }
+          Invoke-WithRetry { irm https://antigravity.google/cli/install.ps1 | iex }
+          Invoke-WithRetry {
+            npm install -g @openai/codex @github/copilot opencode-ai
+            # Stop does not cover native commands ($PSNativeCommandUseError-
+            # ActionPreference defaults to $false), so npm's failure needs this.
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed (exit $LASTEXITCODE)" }
+          }
+          # None of the three iex lines needs such a guard: each installer
+          # throws or exits on every failure path, and that ends this step.
+          # Verified 2026-09-09 for claude, 2026-09-10 for droid, whose
+          # installer shadows Write-Error with one that exits 1, and
+          # 2026-09-23 for agy, which throws rather than exits when it is run
+          # sourced, as `| iex` runs it.
           "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           # droid's Windows installer puts droid.exe in %USERPROFILE%\bin, not
           # .local\bin, and updates only the stored user PATH, which later
           # steps do not re-read.
           "$HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "AGENTS=claude-code codex copilot-cli opencode factoryai-droid" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # agy lands in %LOCALAPPDATA%\agy\bin, and its installer updates the
+          # stored user PATH the same way. It picks the architecture itself and
+          # always serves latest, so there is nothing to keep in sync here;
+          # e2e.yml downloads a release tarball instead only because it pins an
+          # exact version, which this installer has no flag for.
+          "$env:LOCALAPPDATA\agy\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "AGENTS=claude-code codex copilot-cli opencode factoryai-droid antigravity" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # One step per agent: a step timeout is the only per-agent bound that
       # works on all three runners (macOS has no timeout(1)), and one hung agent
@@ -233,7 +365,8 @@ jobs:
       # E2E_ENTIRE_BIN (job env, set above) is what makes this the *installed*
       # nightly: the mise task skips its build when it is set.
       #
-      # The six bodies are byte-identical; only AGENT and the key differ.
+      # The seven bodies are byte-identical; only AGENT, the key and (for
+      # antigravity, whose TimeoutMultiplier is 2.5x) the step cap differ.
       - name: Smoke test claude-code
         if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' claude-code ') }}
         timeout-minutes: 20
@@ -339,6 +472,28 @@ jobs:
         env:
           AGENT: copilot-cli
           COPILOT_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p e2e/artifacts
+          go run ./e2e/bootstrap "$AGENT" &&
+            E2E_ARTIFACT_DIR="$ARTIFACT_ROOT/$AGENT" \
+              mise run test:e2e --agent "$AGENT" "$TEST_FILTER"
+          rc=$?
+          grep -q '^Total: 0 ' "$ARTIFACT_ROOT/$AGENT/report.txt" 2>/dev/null && rc=1
+          echo "$AGENT $rc" >> e2e/artifacts/results.txt
+          exit "$rc"
+
+      # 25 minutes: 3 attempts x 3 min x the 2.5x multiplier is 22.5 min.
+      # GEMINI_API_KEY selects agy's API-key mode (no account session); the
+      # harness writes modelProvider=gemini into an isolated HOME itself.
+      - name: Smoke test antigravity
+        if: ${{ !cancelled() && contains(format(' {0} ', env.AGENTS), ' antigravity ') }}
+        timeout-minutes: 25
+        shell: bash
+        env:
+          AGENT: antigravity
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set +e
           set -uo pipefail

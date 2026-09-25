@@ -407,28 +407,59 @@ func (s *SessionStore) WriteFile(name string, data []byte, perm os.FileMode) err
 	return jsonutil.WriteFileAtomicIn(root, name, data, perm) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
 }
 
+// Lstat returns the FileInfo for name inside the store without following a
+// symlink at any component. The leaf is returned as-is, so a caller can tell a
+// symlink from a regular file and refuse it. A missing name is reported
+// unwrapped for os.IsNotExist / errors.Is(err, fs.ErrNotExist).
+func (s *SessionStore) Lstat(name string) (os.FileInfo, error) {
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return osroot.LstatNoSymlinks(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
+}
+
+// CreateExclusive creates name as an empty file inside the store, creating
+// parent directories, and fails when anything already exists there — the
+// error wraps fs.ErrExist so callers can treat "the agent wrote it first" as
+// success. A symlink in any component, including the leaf, is refused rather
+// than followed. It exists for the late-transcript agents that must
+// materialise a placeholder without ever replacing a file the agent has since
+// written, which an atomic rename would do.
+func (s *SessionStore) CreateExclusive(name string, perm os.FileMode) error {
+	root, err := s.openRootForWrite()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if dir := filepath.ToSlash(filepath.Dir(filepath.FromSlash(name))); dir != "." {
+		if err := osroot.MkdirAllNoSymlink(root, dir, 0o700); err != nil {
+			return fmt.Errorf("create session directory: %w", err)
+		}
+	}
+	f, err := osroot.OpenFileNoFollow(root, name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err //nolint:wrapcheck // preserved for errors.Is(err, fs.ErrExist) at call sites
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close session file: %w", err)
+	}
+	return nil
+}
+
 // Exists reports whether name is present in the store. Lstat, not Stat: a
 // dangling symlink is still a file that exists and must not be overwritten
 // silently (see the rewind restore path, which distinguishes the two).
 func (s *SessionStore) Exists(name string) bool {
-	root, err := s.openRoot()
-	if err != nil {
-		return false
-	}
-	defer root.Close()
-	_, err = osroot.LstatNoSymlinks(root, name)
+	_, err := s.Lstat(name)
 	return err == nil
 }
 
 // IsDir reports whether name is a real directory in the store. Symlinks in the
 // path are rejected by LstatNoSymlinks rather than followed.
 func (s *SessionStore) IsDir(name string) bool {
-	root, err := s.openRoot()
-	if err != nil {
-		return false
-	}
-	defer root.Close()
-	info, err := osroot.LstatNoSymlinks(root, name)
+	info, err := s.Lstat(name)
 	return err == nil && info.IsDir()
 }
 

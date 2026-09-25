@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,21 @@ import (
 // JWT. Session management must target the auth host (entire-core), never the
 // data host.
 const coreAuthSessionsPath = "/api/auth/tokens"
+
+// authTokenRowLabel labels the `auth status` row naming where the bearer comes
+// from. Two branches render it — a stored credential and ENTIRE_TOKEN — so it
+// is named once rather than spelled at each.
+const authTokenRowLabel = "token"
+
+// activeSessionsRowLabel labels the session-count row. It says "active" to
+// match the section heading and `logout --everywhere`, which both describe the
+// same set.
+const activeSessionsRowLabel = "active sessions"
+
+// availableContextsRowLabel labels the saved-login count. "available" rather
+// than "login", because the row sits beside `context` (the one in use) and the
+// pair reads as "this one, of that many".
+const availableContextsRowLabel = "available contexts"
 
 // User-visible placeholder strings. lastUsedJustNow is consumed by
 // formatRelativeDuration in status.go.
@@ -126,14 +142,21 @@ func newAuthCmd() *cobra.Command {
 
 // --- token ------------------------------------------------------------------
 
-// newAuthTokenCmd prints an Entire bearer to stdout for scripting. By default
-// that's the active control-plane bearer (resolved the same way the API client's
-// is: ENTIRE_TOKEN verbatim when set, otherwise the active context's login JWT,
-// refreshed if near expiry); with --jurisdiction it mints a data-plane cell
-// identity token for that jurisdiction instead. The user-facing Long and Example
-// carry the detail and the "treat the output as a secret" caveat; only the token
-// is printed — errors and the not-logged-in hint go to stderr so command
-// substitution stays clean.
+// errJurisdictionFlagDeprecated is returned when `auth token --jurisdiction`
+// is used: the default token is accepted at every entire-api cell, so the
+// flag has nothing to add.
+var errJurisdictionFlagDeprecated = errors.New("--jurisdiction is deprecated; use 'entire auth token' without it")
+
+// newAuthTokenCmd prints an Entire bearer to stdout for scripting: the active
+// control-plane bearer (resolved the same way the API client's is: ENTIRE_TOKEN
+// verbatim when set, otherwise the active context's login JWT, refreshed if
+// near expiry). The same token works at every entire-api cell. The user-facing
+// Long and Example carry the detail and the "treat the output as a secret"
+// caveat; only the token is printed — errors and the not-logged-in hint go to
+// stderr so command substitution stays clean.
+//
+// --jurisdiction is deprecated and hidden: it stays registered so existing
+// scripts fail with a migration hint instead of an unknown-flag error.
 func newAuthTokenCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	var jurisdiction string
@@ -142,44 +165,26 @@ func newAuthTokenCmd() *cobra.Command {
 		Short: "Print an Entire bearer token — a live credential, treat as a secret",
 		Long: "Print an Entire bearer token to stdout so scripts and ad-hoc curl can\n" +
 			"authenticate without plumbing auth themselves.\n\n" +
-			"By default it prints the control-plane bearer: the same one the API client\n" +
-			"uses (ENTIRE_TOKEN verbatim when set, otherwise the active context's login\n" +
-			"JWT, refreshed if near expiry), for the control-plane API (orgs, repos,\n" +
-			"clusters, /me).\n\n" +
-			"With --jurisdiction <slug> it instead mints a jurisdictional identity token\n" +
-			"for that jurisdiction's entire-api cells (e.g.\n" +
-			"https://aws-us-east-2.api.entire.io/api/v1), which reject the control-plane\n" +
-			"bearer. The slug is a jurisdiction like 'us' or 'eu' (find yours with\n" +
-			"'entire auth status'); the token works against any cell in that\n" +
-			"jurisdiction. It is minted by exchanging your login (or ENTIRE_TOKEN, when\n" +
-			"set) for the jurisdiction's audience.\n\n" +
+			"It prints the same bearer the API client uses (ENTIRE_TOKEN verbatim when\n" +
+			"set, otherwise the active context's login JWT, refreshed if near expiry).\n" +
+			"The token works against the control-plane API (orgs, repos, clusters, /me)\n" +
+			"and against every entire-api cell (e.g.\n" +
+			"https://aws-us-east-2.api.entire.io/api/v1).\n\n" +
 			"The output is a live credential — treat it as a secret. Only the token is\n" +
 			"printed to stdout; errors and the not-logged-in hint go to stderr so command\n" +
 			"substitution stays clean.",
 		Example: "  curl -H \"Authorization: Bearer $(entire auth token)\" \"https://us.console.entire.io/api/v1/clusters\"\n" +
-			"  curl -H \"Authorization: Bearer $(entire auth token --jurisdiction us)\" \"https://aws-us-east-2.api.entire.io/api/v1/me/activity\"",
+			"  curl -H \"Authorization: Bearer $(entire auth token)\" \"https://aws-us-east-2.api.entire.io/api/v1/me/activity\"",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Refresh may exchange/refresh over the network; honor the
-			// plain-HTTP opt-in before resolving so local dev cores work.
-			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
-
-			// --jurisdiction mints a data-plane cell identity token instead of the
-			// control-plane bearer. JurisdictionToken performs its own TLS/exchange
-			// guards and returns context-rich errors.
-			if strings.TrimSpace(jurisdiction) != "" {
-				token, err := auth.JurisdictionToken(cmd.Context(), insecure, jurisdiction)
-				if err != nil {
-					cmd.SilenceUsage = true
-					if errors.Is(err, auth.ErrNotLoggedIn) {
-						fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
-						return NewSilentError(err)
-					}
-					return err //nolint:wrapcheck // JurisdictionToken already returns contextual auth errors
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), token)
-				return nil
+			if cmd.Flags().Changed("jurisdiction") {
+				cmd.SilenceUsage = true
+				return errJurisdictionFlagDeprecated
 			}
+
+			// Refresh may go over the network; honor the plain-HTTP opt-in
+			// before resolving so local dev cores work.
+			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
 
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
@@ -206,7 +211,10 @@ func newAuthTokenCmd() *cobra.Command {
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-	cmd.Flags().StringVarP(&jurisdiction, "jurisdiction", "j", "", "mint a jurisdictional identity token for this jurisdiction slug (e.g. us, eu) for use against that jurisdiction's entire-api cells")
+	cmd.Flags().StringVarP(&jurisdiction, "jurisdiction", "j", "", "deprecated; the default token works at every cell")
+	if err := cmd.Flags().MarkHidden("jurisdiction"); err != nil {
+		panic(fmt.Sprintf("hide jurisdiction flag: %v", err))
+	}
 	return cmd
 }
 
@@ -214,23 +222,50 @@ func newAuthTokenCmd() *cobra.Command {
 
 func newAuthStatusCmd() *cobra.Command {
 	var insecureHTTPAuth bool
+	var showSessions bool
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   cmdStatus,
 		Short: "Show authentication status",
+		// `auth status sessions` is a natural guess now that --sessions
+		// exists; without this it prints the collapsed default and drops the
+		// word, which reads as the flag having no effect.
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Argument validation has already run, so every failure from here
+			// is a runtime one and a usage dump is noise. The root command
+			// silences usage for everything mounted under it, and cobra writes
+			// the dump to OutOrStderr in any case, so neither the --json
+			// envelope on stdout nor today's behaviour depends on this line;
+			// it keeps the command self-contained wherever it is mounted.
+			cmd.SilenceUsage = true
+			// The --json contract covers every way this command can fail, not
+			// just the ones inside runAuthStatus: a caller piping to jq gets a
+			// parseable object whether the login server was unreachable or the
+			// contexts file never parsed.
+			fail := func(coreURL string, err error) error {
+				if !asJSON {
+					return err
+				}
+				return authStatusJSONFailure(cmd.OutOrStdout(), coreURL, err)
+			}
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
-				return err
+				// No target resolved, so no server to name.
+				return fail("", err)
 			}
 			// We send the session token to target.coreURL; enforce TLS on it.
 			if !applyInsecureHTTPAuth(insecureHTTPAuth) && target.coreURL != "" {
 				if err := api.RequireSecureURL(target.coreURL); err != nil {
-					return fmt.Errorf("context login server URL check: %w", err)
+					return fail(target.coreURL, fmt.Errorf("context login server URL check: %w", err))
 				}
 			}
-			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), defaultFetchProfile, defaultListAuthSessions, target)
+			opts := authStatusOptions{Sessions: showSessions, JSON: asJSON}
+			return runAuthStatus(cmd.Context(), cmd.OutOrStdout(), defaultFetchProfile, defaultListAuthSessions, target, opts)
 		},
 	}
+	cmd.Flags().BoolVar(&showSessions, "sessions", false, "List every active login session")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Output as JSON")
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 	return cmd
 }
@@ -253,9 +288,9 @@ type authProfile struct {
 	Jurisdiction string
 	// ForeignRegion is true when the core that served /me is not the
 	// account's home region — /me signals this with a regionalUnavailable
-	// block. It explains both the region shown on the "Logged in to" line and
-	// the absent display name and email, which that core deliberately
-	// withholds for an account it doesn't host.
+	// block. It reaches `auth status --json` as foreign_region and is not
+	// rendered in the text view; the display name and email that core withholds
+	// are read by setup_identity, which is not this view.
 	ForeignRegion bool
 }
 
@@ -290,7 +325,13 @@ type statusTarget struct {
 	token         string
 	activeContext string
 	totalContexts int
-	envToken      bool
+	// distinctServers counts the login servers the saved contexts are spread
+	// across. It is what decides whether naming the host tells the reader
+	// anything: with every login on one server the host is the same fact
+	// repeated, and only a split across servers makes it the thing that
+	// separates one login from another.
+	distinctServers int
+	envToken        bool
 }
 
 // resolveAuthStatusTarget picks the target for `entire auth status`, honouring
@@ -346,21 +387,28 @@ func resolveStatusTarget(ctx context.Context, listContexts contextsProvider, res
 		return statusTarget{}, fmt.Errorf("load contexts: %w", err)
 	}
 	total := len(all)
+	servers := make(map[string]struct{}, total)
+	for _, c := range all {
+		if host := authServerHost(c.CoreURL); host != "" {
+			servers[host] = struct{}{}
+		}
+	}
+	distinct := len(servers)
 	for _, c := range all {
 		if c.Name != current || c.CoreURL == "" {
 			continue
 		}
 		if tok, terr := resolveLogin(ctx, c); terr == nil && tok != "" {
-			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
+			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 		}
 		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
-			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
+			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 		}
 		// Active context with no readable token: report against its core so
 		// the not-logged-in message names the right login server.
-		return statusTarget{coreURL: c.CoreURL, activeContext: c.Name, totalContexts: total}, nil
+		return statusTarget{coreURL: c.CoreURL, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
 	}
-	return statusTarget{totalContexts: total}, nil
+	return statusTarget{totalContexts: total, distinctServers: distinct}, nil
 }
 
 // defaultFetchProfile fetches a user's profile from coreURL's GET /me with the
@@ -381,6 +429,19 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 		ProviderUserID: me.Auth.ProviderUserId,
 	}
 	p.Handle, _ = me.Global.Handle.Get()
+	if p.Handle == "" {
+		// global.handle is optional; global.handles is not. Take the handle of
+		// the identity the bearer actually authenticated with, rather than the
+		// providerUserId beside it — that id is not a handle, and resolving a
+		// grantee by it answers 404, which would make the `user` value a
+		// spelling no command accepts.
+		for _, h := range me.Global.Handles {
+			if strings.EqualFold(h.Provider, p.Provider) && h.Handle != "" {
+				p.Handle = h.Handle
+				break
+			}
+		}
+	}
 	// global.homeJurisdiction is the account's own home region. The top-level
 	// me.Jurisdiction field is the serving node's region — reading that one is
 	// what used to make a geo-routed login report the wrong slug.
@@ -408,29 +469,60 @@ func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.
 	return newAuthSessionsClient(coreURL, token).ListAuthSessions(ctx) //nolint:wrapcheck // ListAuthSessions already wraps with action context
 }
 
-// runAuthStatus reports auth state against the target core: GET /me validates
-// the token and supplies the profile header, the active login context is shown
-// locally, and the active sessions (refresh-token families) on that core are
-// listed so the effect of `logout` / `logout --everywhere` is visible.
-func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget) error {
+// authStatusOptions selects what `entire auth status` renders. A struct rather
+// than positional bools so a call site says which view it wants.
+type authStatusOptions struct {
+	// Sessions expands the session count into the full listing.
+	Sessions bool
+	// JSON emits the machine-readable envelope instead of the styled block.
+	JSON bool
+}
+
+// authStatusData is everything `auth status` resolved, independent of how it is
+// rendered. The text and JSON views both derive from this one value, so the two
+// cannot drift into disagreeing about the same login.
+type authStatusData struct {
+	target statusTarget
+	// loggedIn is false both when there is no token and when the core rejected
+	// the one we have; invalid distinguishes the two.
+	loggedIn bool
+	invalid  bool
+	profile  *authProfile
+	sessions []api.AuthSession
+	// sessionErr is non-fatal: the token is already known good, so a listing
+	// failure is reported rather than raised.
+	sessionErr error
+	// current indexes sessions, or -1 when the caller could not be identified.
+	current int
+	// revoked means the login was ended somewhere else and cannot be renewed:
+	// the caller holds a working bearer for a session that is no longer listed.
+	revoked bool
+	// tokenExpiry is when the bearer in hand lapses. Only meaningful alongside
+	// revoked: normally the token is renewed long before this and the number
+	// would say nothing about being logged out.
+	tokenExpiry time.Time
+}
+
+// resolveAuthStatus reports auth state against the target core: GET /me
+// validates the token and supplies the identity, and the active sessions
+// (refresh-token families) on that core are listed so the effect of `logout` /
+// `logout --everywhere` is visible.
+//
+// The listing is fetched whether or not the caller asked for it, because even
+// the collapsed view needs the count and the current session's expiry.
+func resolveAuthStatus(ctx context.Context, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget) (authStatusData, error) {
+	d := authStatusData{target: t, current: -1}
 	if t.token == "" {
-		if t.coreURL == "" {
-			fmt.Fprintln(w, "Not logged in.")
-		} else {
-			fmt.Fprintf(w, "Not logged in to %s\n", t.coreURL)
-		}
-		fmt.Fprintln(w, "Run 'entire login' to authenticate.")
-		return nil
+		return d, nil
 	}
 
 	profile, err := fetchProfile(ctx, t.coreURL, t.token)
 	if err != nil {
 		if isKeychainTokenRejected(err) {
-			fmt.Fprintf(w, "Login for %s is no longer valid.\n", t.coreURL)
-			fmt.Fprintln(w, "Run 'entire login' to re-authenticate.")
-			return nil
+			d.invalid = true
+			return d, nil
 		}
-		return fmt.Errorf("validate token: %w", err)
+		return d, fmt.Errorf("validate token: %w", err)
 	}
 
 	// Last resort for the home jurisdiction: the login token carries it as a
@@ -443,88 +535,527 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 			profile.Jurisdiction = juris
 		}
 	}
+	d.loggedIn = true
+	d.profile = profile
 
-	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
-	writeProfileLines(w, profile)
-	// Without this the block reads as a contradiction: "Logged in to
-	// eu.auth.entire.io" sitting directly above "Jurisdiction: au", with the
-	// display name and email silently missing. Name the split rather than
-	// leaving the user to infer it.
-	if profile.ForeignRegion {
-		writeAuthStatusLine(w, "Note:", fmt.Sprintf(
-			"served by %s, outside your home region; profile details live at home",
-			api.OriginOnly(t.coreURL)))
-	}
-
-	// ENTIRE_TOKEN mode: no stored context, keychain slot, or revocable
-	// session — the bearer is the env var itself. Name that and stop, rather
-	// than printing context/keychain/session lines that don't apply.
+	// ENTIRE_TOKEN mode: the bearer is the env var itself, with no stored
+	// context, keychain slot, or revocable session family behind it. There is
+	// nothing to list and no expiry to report.
 	if t.envToken {
-		writeAuthStatusLine(w, "Token:", auth.EnvTokenVar+" environment variable")
-		return nil
+		return d, nil
 	}
 
-	if t.activeContext != "" {
-		writeAuthStatusLine(w, "Context:", t.activeContext)
+	d.sessions, d.sessionErr = listSessions(ctx, t.coreURL, t.token)
+	if d.sessionErr == nil {
+		sortAuthSessionsByRecency(d.sessions)
+		d.current = currentSessionIndex(t.token, d.sessions)
+		d.revoked, d.tokenExpiry = detectRevokedLogin(t.token, d.sessions, d.current)
 	}
-	writeAuthStatusLine(w, "Token:", "stored in "+tokenstore.BackendDescription())
+	return d, nil
+}
 
-	// Active sessions on this core. The token is already known good, so a
-	// listing failure is non-fatal — note it and carry on.
-	sessions, serr := listSessions(ctx, t.coreURL, t.token)
-	switch {
-	case serr != nil:
-		fmt.Fprintf(w, "\n(could not list active sessions: %v)\n", serr)
-	case len(sessions) > 0:
-		sortAuthSessionsByRecency(sessions)
-		fmt.Fprintf(w, "\nActive sessions (%d):\n", len(sessions))
-		renderAuthSessionsTable(w, newAuthTableStyles(w), sessions)
-		fmt.Fprintln(w, "\nRun 'entire logout --everywhere' to end all of them.")
+// detectRevokedLogin reports whether this login was ended elsewhere, and when
+// the bearer in hand lapses.
+//
+// /me accepted the token moments ago, so the bearer is live; what is gone is
+// the session behind it. An access token outlives its family's revocation by
+// its own lifetime, so the login keeps working for minutes and then stops with
+// nothing to renew it — which is worth saying, since "Logged in" is true and
+// about to silently become false.
+//
+// Both signals are required. A fid naming no listed session could be a
+// truncated listing; a failed refresh could be a network blip. Neither alone
+// earns a claim this alarming. A token with no fid claim at all (a core too old
+// to mint one) is not evidence of anything and stays quiet.
+func detectRevokedLogin(token string, sessions []api.AuthSession, current int) (bool, time.Time) {
+	if current >= 0 {
+		return false, time.Time{}
+	}
+	// An unreadable expiry is fine: the claim is about the session being gone,
+	// and the deadline only sharpens it. A zero time renders no "expires".
+	expiry, err := auth.LoginTokenExpiry(token)
+	if err != nil {
+		expiry = time.Time{}
 	}
 
-	if t.totalContexts > 1 {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "%d login contexts saved; run 'entire auth contexts' to list or 'entire auth switch <name>' to switch.\n", t.totalContexts)
+	// An empty listing settles it alone. The endpoint includes the caller's own
+	// session — that is how a matched fid finds itself — so none listed means
+	// none exist, the caller's included. No truncation explains zero.
+	if len(sessions) == 0 {
+		return true, expiry
 	}
+
+	// With sessions listed but the caller's absent, absence is the only
+	// evidence and a short listing could in principle explain it, so require a
+	// fid to have actually named something. A core too old to mint one tells us
+	// nothing and stays quiet.
+	fid, ferr := auth.SessionFamilyIDFromLoginJWT(token)
+	if ferr != nil || fid == "" {
+		return false, time.Time{}
+	}
+	return true, expiry
+}
+
+// authStatusJSONFailure reports a failure as the --json envelope: a parseable
+// object naming it on stdout, and a silent error so the exit stays non-zero
+// without main.go also printing the reason as plain text.
+//
+// `entire auth status --json | jq .logged_in` must answer false rather than
+// fail to parse, and a promise like that is worth nothing if it holds only for
+// the failures raised past a certain point in the command. Every exit that can
+// happen once --json is set goes through here.
+func authStatusJSONFailure(w io.Writer, coreURL string, err error) error {
+	if perr := printJSON(w, authStatusJSON{Error: err.Error(), Server: authServerHost(coreURL)}); perr != nil {
+		return perr
+	}
+	return NewSilentError(err)
+}
+
+func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget, opts authStatusOptions) error {
+	d, err := resolveAuthStatus(ctx, fetchProfile, listSessions, t)
+	if err != nil {
+		if !opts.JSON {
+			return err
+		}
+		return authStatusJSONFailure(w, t.coreURL, err)
+	}
+	if opts.JSON {
+		return printJSON(w, buildAuthStatusJSON(d, opts))
+	}
+	writeAuthStatusText(w, d, opts)
 	return nil
 }
 
-// writeAuthStatusLine writes one aligned "  Label   value" row of the
-// `entire auth status` block. writeProfileLines and runAuthStatus both render
-// into this same column, so the label width lives here in one place (it must be
-// ≥ the longest label, currently "Jurisdiction:").
-func writeAuthStatusLine(w io.Writer, label, value string) {
-	fmt.Fprintf(w, "  %-13s %s\n", label, value)
+// writeAuthStatusText renders the human view: a verdict line, an aligned
+// label/value block, and — when asked — the session table.
+func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) {
+	sty := newStatusStyles(w)
+	t := d.target
+
+	if !d.loggedIn {
+		if d.invalid {
+			fmt.Fprintln(w, sty.render(sty.red, "✕")+" "+sty.render(sty.bold, "Login for "+authServerHost(t.coreURL)+" is no longer valid"))
+			fmt.Fprintln(w, sty.render(sty.dim, "Run 'entire login' to re-authenticate."))
+			return
+		}
+		headline := "Not logged in"
+		if host := authServerHost(t.coreURL); host != "" {
+			// Naming the server is the whole point of this message: the user
+			// may well be logged in to a different one. Bare host, as every
+			// other row spells it.
+			headline += " to " + host
+		}
+		fmt.Fprintln(w, sty.render(sty.red, "○")+" "+sty.render(sty.bold, headline))
+		fmt.Fprintln(w, sty.render(sty.dim, "Run 'entire login' to authenticate."))
+		return
+	}
+
+	if t.envToken {
+		fmt.Fprintln(w, sty.render(sty.green, "●")+" "+sty.render(sty.bold, "Logged in"))
+		fmt.Fprintln(w)
+		rows := authProfileRows(d.profile)
+		// With no context to name the server, say it outright — otherwise
+		// env-token mode names no server anywhere.
+		rows = append(rows,
+			explainRow{Label: "server", Value: authServerHost(t.coreURL)},
+			explainRow{Label: authTokenRowLabel, Value: auth.EnvTokenVar + " environment variable"},
+		)
+		fmt.Fprint(w, sty.metadataRows(rows))
+		return
+	}
+
+	// The verdict line answers both halves of "what is my login doing": am I
+	// in, and for how much longer. The expiry is the current session family's,
+	// so it is stated only when that session was actually identified — showing
+	// some other session's expiry as yours would be worse than showing none.
+	headline := sty.render(sty.green, "●") + " " + sty.render(sty.bold, "Logged in")
+	var deadline string
+	switch {
+	case d.current >= 0:
+		deadline = authDeadlineClause(parseAuthTimestamp(d.sessions[d.current].ExpiresAt))
+	case d.revoked:
+		// The bearer's own expiry, not a session's. Here they mean the same
+		// thing — there is nothing left to renew it, so this is when the user
+		// is logged out.
+		deadline = authDeadlineClause(d.tokenExpiry)
+	}
+	if deadline != "" {
+		headline += sty.render(sty.dim, " · ") + deadline
+	}
+	fmt.Fprintln(w, headline)
+	if d.revoked {
+		fmt.Fprintln(w, sty.render(sty.yellow, "  ! this login was ended elsewhere and cannot be renewed")+
+			sty.render(sty.dim, " · run 'entire login'"))
+	}
+	fmt.Fprintln(w)
+
+	rows := authProfileRows(d.profile)
+	// Both context rows are a way to say "this login, not the others", so both
+	// wait until there are others. With a sole login there is nothing to
+	// distinguish it from, and naming it describes a choice the user does not
+	// have.
+	if t.totalContexts > 1 {
+		if t.activeContext != "" {
+			rows = append(rows, authContextRow(sty, t.activeContext, t.coreURL, t.distinctServers > 1))
+		}
+		rows = append(rows, authContextsCountRow(sty, t.totalContexts))
+	}
+	rows = append(rows, explainRow{Label: authTokenRowLabel, Value: tokenstore.BackendDescription()})
+	if row, ok := authSessionsRow(sty, d.sessions, d.sessionErr, opts.Sessions, d.current, deadline != ""); ok {
+		rows = append(rows, row)
+	}
+	fmt.Fprint(w, sty.metadataRows(rows))
+
+	if opts.Sessions && d.sessionErr == nil && len(d.sessions) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, sty.sectionRule("Active Sessions", sty.width))
+		fmt.Fprintln(w)
+		renderAuthSessionsTable(w, newAuthTableStyles(w), d.sessions, d.current)
+		fmt.Fprintln(w, sty.horizontalRule(sty.width))
+		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("%d %s", len(d.sessions), pluralize("session", len(d.sessions)))))
+	}
+
+	// Nothing to offer when the caller's own session is already gone: the
+	// sessions that are listed belong to the login that replaced this one, so
+	// there is nothing here worth ending. The banner's `entire login` is the
+	// action.
+	if d.sessionErr == nil && len(d.sessions) > 0 && !d.revoked {
+		// --everywhere is offered only alongside the table. It ends every
+		// session at once — browser logins included — and in the collapsed view
+		// those sessions are a count the reader cannot inspect. The count row
+		// already says how to bring them on screen; once they are, the bulk
+		// action arrives with its subject attached.
+		hint := "Run 'entire logout' to end every CLI session."
+		if opts.Sessions && len(d.sessions) > 1 {
+			// No count: logout sweeps every saved login on every login server,
+			// while these rows are one server's. Naming the smaller number
+			// beside the wider command understates what it destroys.
+			hint += " Add --everywhere to end browser and web sessions too."
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, hint)
+	}
 }
 
-// writeProfileLines renders the user identity from GET /me as aligned
-// label/value lines, omitting any field the server didn't populate.
-func writeProfileLines(w io.Writer, p *authProfile) {
-	var parts []string
-	if p.DisplayName != "" {
-		parts = append(parts, p.DisplayName)
+// authStatusJSON is the `entire auth status --json` envelope.
+//
+// Timestamps stay in the wire's RFC3339 rather than the relative form the text
+// view shows: the humanised "in 30d" is a reading aid, and a machine reader
+// wants the instant.
+type authStatusJSON struct {
+	LoggedIn bool `json:"logged_in"`
+	// Error names a non-fatal condition that stopped a full answer, in-band
+	// rather than as an exit code, so a script always gets a parseable object.
+	Error string `json:"error,omitempty"`
+	// Server is the login server's bare host; Context is the local name for it.
+	Server  string `json:"server,omitempty"`
+	Context string `json:"context,omitempty"`
+	// User is the provider-qualified handle. The bare handle and provider are
+	// deliberately not split out: one field beats two a caller has to rejoin.
+	//
+	// It is the spelling `entire grant` takes wherever the provider issues real
+	// usernames. Where one is synthesised from a subject id (Google), the
+	// duplicated provider is dropped for legibility and the result no longer
+	// resolves as a grantee — see authIdentityLabel.
+	User string `json:"user,omitempty"`
+	// DisplayName is the account's human name where the server has one. Spelled
+	// display_name, not name: `sessions[].name` in this same envelope is a
+	// session's name, and one document must not use `name` for two subjects.
+	// It also matches the only other CLI envelope carrying this concept
+	// (`entire experts`), and /me's own `displayName`.
+	//
+	// Uncollapsed, unlike the text row it feeds: --json never applies a
+	// text-view collapse, so it is emitted even when it restates the handle.
+	DisplayName   string `json:"display_name,omitempty"`
+	Jurisdiction  string `json:"jurisdiction,omitempty"`
+	ForeignRegion bool   `json:"foreign_region,omitempty"`
+	// TokenSource is the same description the text view prints; EnvToken is the
+	// field to branch on, since an env bearer has no revocable session.
+	TokenSource string `json:"token_source,omitempty"`
+	EnvToken    bool   `json:"env_token,omitempty"`
+	// CurrentSessionID and ExpiresAt are present only when the caller's own
+	// session was identified; absent means unidentified, never "no expiry".
+	CurrentSessionID string `json:"current_session_id,omitempty"`
+	ExpiresAt        string `json:"expires_at,omitempty"`
+	// LoginRevoked reports a login ended elsewhere: the bearer still works but
+	// nothing can renew it, so the caller is logged out when TokenExpiresAt
+	// passes. Absent unless established.
+	LoginRevoked   bool   `json:"login_revoked,omitempty"`
+	TokenExpiresAt string `json:"token_expires_at,omitempty"`
+	// ActiveSessions is a pointer so a failed listing is absent rather than
+	// reported as zero sessions.
+	ActiveSessions *int   `json:"active_sessions,omitempty"`
+	SessionsError  string `json:"sessions_error,omitempty"`
+	// Sessions is populated only when --sessions was passed, mirroring the text
+	// view; ActiveSessions is the authoritative count either way. It is a
+	// pointer so that asking for the list and getting none emits an explicit
+	// [], distinguishable from the collapsed default where the key is absent.
+	Sessions *[]authSessionJSON `json:"sessions,omitempty"`
+	// AvailableContexts is a pointer for the same reason ActiveSessions is: a
+	// genuine zero must be emitted, while "not counted" (ENTIRE_TOKEN mode
+	// never reads contexts.json) must be absent.
+	AvailableContexts *int `json:"available_contexts,omitempty"`
+}
+
+// authSessionJSON is one login session (an OAuth refresh-token family).
+type authSessionJSON struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Scope      string `json:"scope,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+	// Current marks the session this command is running under.
+	Current bool `json:"current"`
+}
+
+func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSON {
+	t := d.target
+	out := authStatusJSON{
+		LoggedIn: d.loggedIn,
+		Server:   authServerHost(t.coreURL),
+		Context:  t.activeContext,
 	}
-	if p.Handle != "" {
-		parts = append(parts, "@"+p.Handle)
+	// ENTIRE_TOKEN mode never reads contexts.json, so its zero means "not
+	// counted" rather than "none saved"; every other path counted for real,
+	// zero included.
+	if !t.envToken {
+		total := t.totalContexts
+		out.AvailableContexts = &total
 	}
-	if p.Email != "" {
-		parts = append(parts, "<"+p.Email+">")
-	}
-	if len(parts) > 0 {
-		writeAuthStatusLine(w, "User:", strings.Join(parts, " "))
-	}
-	if p.Provider != "" {
-		identity := p.Provider
-		if p.ProviderUserID != "" {
-			identity += "/" + p.ProviderUserID
+	// Where a bearer came from is settled before /me is consulted, so it is
+	// reported whatever /me said of it. A script told only
+	// `{"logged_in":false}` has no way to see that ENTIRE_TOKEN supplied the
+	// rejected token and is still winning over every stored context — which is
+	// also why the text view's "run entire login" cannot help there.
+	//
+	// Gated on a bearer actually existing: with no token there is no source to
+	// name, and naming the keychain would assert a token is filed there.
+	if t.token != "" {
+		if t.envToken {
+			out.EnvToken = true
+			out.TokenSource = auth.EnvTokenVar + " environment variable"
+		} else {
+			out.TokenSource = tokenstore.BackendDescription()
 		}
-		writeAuthStatusLine(w, "Identity:", identity)
 	}
-	// The home jurisdiction slug is what 'entire auth token --jurisdiction'
-	// takes; surface it so it's discoverable non-interactively.
+	if d.invalid {
+		out.Error = "login is no longer valid; run 'entire login' to re-authenticate"
+	}
+	if !d.loggedIn {
+		return out
+	}
+
+	out.ForeignRegion = d.profile.ForeignRegion
+	out.Jurisdiction = d.profile.Jurisdiction
+	out.User = authIdentityLabel(d.profile)
+	out.DisplayName = strings.TrimSpace(d.profile.DisplayName)
+
+	if t.envToken {
+		return out
+	}
+
+	if d.sessionErr != nil {
+		out.SessionsError = d.sessionErr.Error()
+		return out
+	}
+	if d.revoked {
+		out.LoginRevoked = true
+		if !d.tokenExpiry.IsZero() {
+			out.TokenExpiresAt = d.tokenExpiry.UTC().Format(time.RFC3339)
+		}
+	}
+	count := len(d.sessions)
+	out.ActiveSessions = &count
+	if d.current >= 0 {
+		out.CurrentSessionID = d.sessions[d.current].ID
+		out.ExpiresAt = d.sessions[d.current].ExpiresAt
+	}
+	if opts.Sessions {
+		listed := make([]authSessionJSON, 0, len(d.sessions))
+		for i, sess := range d.sessions {
+			row := authSessionJSON{
+				ID:        sess.ID,
+				Name:      sess.Name,
+				Scope:     sess.Scope,
+				CreatedAt: sess.CreatedAt,
+				ExpiresAt: sess.ExpiresAt,
+				Current:   i == d.current,
+			}
+			if sess.LastUsedAt != nil {
+				row.LastUsedAt = *sess.LastUsedAt
+			}
+			listed = append(listed, row)
+		}
+		// Assigned after the loop: an explicit [] when the listing was asked
+		// for and came back empty, never a nil the encoder would drop.
+		out.Sessions = &listed
+	}
+	return out
+}
+
+// authIdentityLabel names the account provider-qualified — "github:alice".
+//
+// The handle it qualifies is resolved in defaultFetchProfile, which falls back
+// to global.handles when the scalar global.handle is absent, so an account
+// missing the latter is still named. What it will not do is qualify a
+// providerUserId out of nowhere: that produces a well-formed string the
+// resolver answers 404 for, so an account naming no handle at all gets no row.
+//
+// A synthetic handle is unqualified first. A provider with no username concept
+// gets one minted as "<provider>-<providerUserId>" (Google), and qualifying
+// that spells the provider twice — `google:google-100164574874856813796`.
+// The prefix is dropped only when what follows it IS the providerUserId, so
+// the handle is provably the minted form: a GitHub user genuinely named
+// `github-foo` keeps their name, since `github-<their id>` is not what they
+// are called.
+func authIdentityLabel(p *authProfile) string {
+	if p.Handle == "" {
+		return ""
+	}
+	handle := p.Handle
+	if p.Provider != "" && p.ProviderUserID != "" &&
+		strings.EqualFold(handle, p.Provider+"-"+p.ProviderUserID) {
+		handle = p.ProviderUserID
+	}
+	return formatQualifiedHandle(p.Provider, handle)
+}
+
+// authProfileRows renders the user identity from GET /me, omitting any field
+// the server didn't populate.
+//
+// The handle is provider-qualified ("github:alice") because that is the
+// grantee spelling every `entire grant` command accepts and `grant … list`
+// prints — so what status shows is a value the user can paste into the next
+// command, rather than a display form unique to this one.
+//
+// A foreign-region login gets no note here. The note this replaces existed
+// mostly to explain a display name and email that a foreign core withholds,
+// and neither is rendered any more; what was left restated the `jurisdiction`
+// and `context` rows it sat between. The condition still reaches machine
+// readers as the JSON `foreign_region` flag.
+func authProfileRows(p *authProfile) []explainRow {
+	var rows []explainRow
+	if user := authIdentityLabel(p); user != "" {
+		rows = append(rows, explainRow{Label: "user", Value: user})
+	}
+	// A display name only earns a line where the handle is not already that
+	// name. The test is the value, not the provider: Google mints a synthetic
+	// `google-<subject id>` handle and supplies a display name, so it is named
+	// by both halves, while a GitHub account is named by its handle alone
+	// whenever it carries no display name, or one that merely restates it.
+	// A GitHub account that does carry a distinct display name gets the row
+	// like any other — which is what okProfile in the tests exercises.
+	if name := strings.TrimSpace(p.DisplayName); name != "" && !strings.EqualFold(name, p.Handle) {
+		rows = append(rows, explainRow{Label: "name", Value: name})
+	}
+	// The home jurisdiction slug is what 'entire api --jurisdiction' takes;
+	// surface it so it's discoverable non-interactively.
 	if p.Jurisdiction != "" {
-		writeAuthStatusLine(w, "Jurisdiction:", p.Jurisdiction)
+		rows = append(rows, explainRow{Label: "jurisdiction", Value: p.Jurisdiction})
 	}
+	return rows
+}
+
+// authContextRow names the active login context, appending the login server's
+// host when that host is what tells this login apart from the others.
+//
+// splitServers is the caller's count of distinct servers across the saved
+// contexts, and it gates the host for the same reason the row itself is gated
+// on there being more than one context: several logins that all live on one
+// server are distinguished by their names, and printing the shared host beside
+// one of them says nothing about which login this is. Spread across servers,
+// the host is precisely the distinguishing fact.
+//
+// A name that already spells the host is never doubled — context names default
+// to the issuer host, so the common multi-server case needs no suffix either.
+func authContextRow(sty statusStyles, name, coreURL string, splitServers bool) explainRow {
+	value := name
+	if host := authServerHost(coreURL); splitServers && host != "" && !strings.EqualFold(name, host) {
+		value += sty.render(sty.dim, " · ") + host
+	}
+	return explainRow{Label: "context", Value: value}
+}
+
+// authSessionsRow reports how many login sessions exist, and how to see them.
+// A listing failure is reported in the row rather than raised: the token is
+// already known good, so the rest of the status is still worth printing.
+//
+// The second return is false when the row should be dropped: a single session
+// that IS the caller's is already described by the verdict line's expiry, so
+// counting it adds a row and no information. Zero still reports — logged in
+// with no sessions is a contradiction worth seeing.
+//
+// headlineDeadline is that premise, passed rather than assumed. ExpiresAt is a
+// plain string with no omitempty, so a session can arrive with none, and an
+// unreadable one is dropped from the headline too; dropping the row as well
+// would leave the default view with no count, no expiry and no route to
+// --sessions.
+//
+// current gates that drop, and must not be assumed. A caller whose session was
+// not identified gets no expiry on the verdict line, so dropping the row there
+// would leave the default view with no count, no expiry and no route to
+// --sessions — and the one listed session is precisely the one worth looking
+// at, being some other login than the token in hand. That happens when a
+// family is revoked while its access token is still inside its own lifetime:
+// resolveStatusTarget falls back to the stale bearer, /me still honours it, and
+// fid names a family the listing no longer contains.
+func authSessionsRow(sty statusStyles, sessions []api.AuthSession, listErr error, showSessions bool, current int, headlineDeadline bool) (explainRow, bool) {
+	if listErr != nil {
+		return explainRow{Label: activeSessionsRowLabel, Value: fmt.Sprintf("(unavailable: %v)", listErr)}, true
+	}
+	if len(sessions) == 1 && current >= 0 && headlineDeadline {
+		return explainRow{}, false
+	}
+	value := strconv.Itoa(len(sessions))
+	if !showSessions && len(sessions) > 0 {
+		value += sty.render(sty.dim, " · ") + "run 'entire auth status --sessions' to list them"
+	}
+	return explainRow{Label: activeSessionsRowLabel, Value: value}, true
+}
+
+// authContextsCountRow reports how many saved logins exist, and how to see
+// them — the same count-plus-hint shape as the session row. Callers gate on
+// total > 1, which is also when the context row above it appears: a count of
+// one would be counting the only thing there is.
+func authContextsCountRow(sty statusStyles, total int) explainRow {
+	return explainRow{
+		Label: availableContextsRowLabel,
+		Value: strconv.Itoa(total) + sty.render(sty.dim, " · ") + "run 'entire auth contexts' to list them",
+	}
+}
+
+// authServerHost reduces a login server URL to its bare host for display,
+// falling back to the raw value when it will not parse — a host we cannot
+// extract is still better named than not named at all.
+func authServerHost(coreURL string) string {
+	host, err := hostFromPublicURL(coreURL)
+	if err != nil {
+		return strings.TrimSpace(coreURL)
+	}
+	return host
+}
+
+// currentSessionIndex finds the session this CLI is authenticating with by
+// matching the login token's fid (refresh-token family id) claim against the
+// listed session ids — a login session IS a refresh-token family, so fid
+// identifies it.
+//
+// Returns -1 when the claim is absent, unreadable, or names no listed session.
+// The caller then shows no marker and no expiry rather than guessing a row:
+// every action reachable from here (logout, revoke) ends a session, and ending
+// someone else's is worse than saying nothing.
+func currentSessionIndex(token string, sessions []api.AuthSession) int {
+	fid, err := auth.SessionFamilyIDFromLoginJWT(token)
+	if err != nil || fid == "" {
+		return -1
+	}
+	for i, s := range sessions {
+		if s.ID == fid {
+			return i
+		}
+	}
+	return -1
 }
 
 // --- auth tables -------------------------------------------------------------
@@ -621,23 +1152,36 @@ func orDash(s string) string {
 	return s
 }
 
+// currentSessionMarker labels the row belonging to the caller's own session.
+// The contexts table marks its active row the same way, with an unheaded
+// trailing column, so both auth tables say "you are here" identically.
+const currentSessionMarker = "(current)"
+
 // renderAuthSessionsTable prints the active login sessions as an aligned table.
 // No id column: there's no per-session CLI action (revoke-by-id is gone), so
-// NAME/CREATED/LAST USED/EXPIRES is what's useful.
-func renderAuthSessionsTable(w io.Writer, sty authTableStyles, sessions []api.AuthSession) {
+// NAME/CREATED/LAST USED/EXPIRES is what's useful, plus a marker naming the
+// session this command is running under. current is an index into sessions, or
+// -1 when the caller could not be identified.
+func renderAuthSessionsTable(w io.Writer, sty authTableStyles, sessions []api.AuthSession, current int) {
 	header := []string{
 		sty.render(sty.header, "NAME"),
 		sty.render(sty.header, "CREATED"),
 		sty.render(sty.header, "LAST USED"),
 		sty.render(sty.header, "EXPIRES"),
+		"", // marker column: the cells label themselves
 	}
 	rows := make([][]string, 0, len(sessions))
-	for _, s := range sessions {
+	for i, s := range sessions {
+		marker := ""
+		if i == current {
+			marker = sty.render(sty.id, currentSessionMarker)
+		}
 		rows = append(rows, []string{
 			sty.render(sty.name, orDash(s.Name)),
-			sty.render(sty.value, formatAuthDate(s.CreatedAt)),
+			sty.render(sty.value, formatAuthTimestamp(s.CreatedAt)),
 			sty.render(sty.value, formatLastUsed(s.LastUsedAt)),
-			sty.render(sty.value, formatAuthDate(s.ExpiresAt)),
+			sty.render(sty.value, formatSessionExpiry(s.ExpiresAt)),
+			marker,
 		})
 	}
 	renderAlignedTable(w, header, rows)
@@ -666,21 +1210,91 @@ func lastUsedSortKey(s api.AuthSession) string {
 	return *s.LastUsedAt
 }
 
-// formatAuthDate renders an RFC3339 timestamp as YYYY-MM-DD in its encoded zone,
-// falling back to a dash (empty) or the raw value (unparseable).
-func formatAuthDate(s string) string {
+// formatSessionExpiry renders the session table's EXPIRES cell: the remaining
+// time ("in 27d") while the session is live, a flat "expired" once it is not.
+//
+// The column header already supplies the verb, so the cell carries only the
+// time — and "19h ago" under a heading reading EXPIRES states its tense by
+// implication alone, which a reader scanning the column for a dead session will
+// not pick up. CREATED and LAST USED keep the plain relative formatter, where
+// the past IS the tense being reported.
+//
+// An unreadable value still reaches the cell verbatim: a column of its own is
+// exactly where a value the server sent and this code could not parse should be
+// shown, which is the distinction authDeadlineClause draws for the prose line.
+func formatSessionExpiry(s string) string {
 	if s == "" {
 		return placeholderDash
 	}
-	if ts, err := time.Parse(time.RFC3339, s); err == nil {
-		return ts.Format("2006-01-02")
+	ts := parseAuthTimestamp(s)
+	if ts.IsZero() {
+		return s
 	}
-	return s
+	if !ts.After(time.Now()) {
+		return "expired"
+	}
+	return timeAgo(ts)
+}
+
+// parseAuthTimestamp reads an RFC3339 instant, reporting the zero time for a
+// value that is missing or unreadable. Both are "no deadline to state" to the
+// verdict line, which is the only distinction it needs.
+func parseAuthTimestamp(s string) time.Time {
+	ts, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts
+}
+
+// authDeadlineClause renders a deadline for the verdict line: "expires in 30d"
+// while it is ahead, a flat "expired" once it has passed, and nothing at all
+// for an instant that is missing or unreadable.
+//
+// Tense matters more here than anywhere else in the output, because the clause
+// shares its line with the word "Logged in": rendering a lapsed deadline as
+// "expires 19h ago" contradicts the verdict beside it. A past instant is
+// genuinely reachable — a session's ExpiresAt is server-supplied and
+// independent of the bearer /me has just accepted, so clock skew or a family
+// that lapsed mid-command lands here.
+//
+// An unreadable value yields nothing rather than the raw wire string, which in
+// the middle of a sentence reads as corruption of the line rather than of the
+// field. The session table still shows it verbatim in a cell of its own, and
+// --json carries it untouched.
+func authDeadlineClause(deadline time.Time) string {
+	switch {
+	case deadline.IsZero():
+		return ""
+	case !deadline.After(time.Now()):
+		return "expired"
+	default:
+		return "expires " + timeAgo(deadline)
+	}
+}
+
+// formatAuthTimestamp renders an RFC3339 timestamp as a relative duration
+// ("3h ago" for the past, "in 30d" for the future), falling back to a dash
+// (empty) or the raw value (unparseable). The raw fallback belongs to the
+// table, where a cell of its own is the right place to show a value the server
+// sent and this code could not read; the verdict line drops it instead (see
+// authDeadlineClause). Relative rather than absolute because a session table is
+// read for recency: three rows all stamped the same day say nothing about which
+// one is live.
+func formatAuthTimestamp(s string) string {
+	if s == "" {
+		return placeholderDash
+	}
+	ts, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	return timeAgo(ts)
 }
 
 func formatLastUsed(s *string) string {
 	if s == nil || *s == "" {
 		return lastUsedNever
 	}
-	return formatAuthDate(*s)
+	return formatAuthTimestamp(*s)
 }

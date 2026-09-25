@@ -73,6 +73,13 @@ type PrePromptState struct {
 
 	// unreadable marks a baseline that exists but could not be read.
 	unreadable bool
+
+	// TokenBaseline is an opaque, agent-defined token position captured at turn
+	// start for OutOfBandTokenSource agents (currently Antigravity). At TurnEnd
+	// the lifecycle passes it back to CalculateTokenUsageSince to compute the
+	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
+	// token data.
+	TokenBaseline json.RawMessage `json:"token_baseline,omitempty"`
 }
 
 // NewFilesUndetectable reports that this baseline cannot tell the hook's tree's
@@ -172,6 +179,18 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 	}
 	if existing, readErr := entiredir.ReadFile(root, sessionMetadataName(sessionID)+"/"+paths.PromptFileName); readErr == nil {
 		state.PromptOffset = len(existing)
+	}
+
+	// Out-of-band token baseline: agents whose token usage lives outside the
+	// transcript (Antigravity) snapshot their cumulative token position now so
+	// TurnEnd can compute the per-checkpoint delta.
+	if src, ok := agent.AsOutOfBandTokenSource(ag); ok {
+		baseline, blErr := src.SnapshotTokenBaseline(ctx, sessionID)
+		if blErr != nil {
+			logging.Warn(logging.WithComponent(ctx, "state"), "failed to snapshot out-of-band token baseline", "error", blErr.Error())
+		} else {
+			state.TokenBaseline = baseline
+		}
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")

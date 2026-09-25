@@ -148,15 +148,17 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		}
 
 		// Skip and cleanup orphaned sessions whose shadow branch no longer exists.
-		// Keep active sessions (shadow branch may not be created yet) and sessions
-		// with LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
-		// Clean up everything else: stale pre-state-machine sessions (empty phase),
-		// IDLE/ENDED sessions that were never condensed, etc.
+		// Keep non-ended sessions (including legacy empty phases normalized to IDLE)
+		// and sessions with LastCheckpointID (needed for checkpoint ID reuse on
+		// subsequent commits). Ended states that were never condensed are cleared.
 		// Record-bearing sessions hold condensable content off the shadow branch — never orphaned.
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
-			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
+			if isOrphanedSessionState(state) {
+				logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state without a shadow branch",
+					slog.String("session_id", state.SessionID),
+					slog.String("phase", string(state.Phase)))
 				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
 				store.Clear(ctx, state.SessionID)
 				continue
@@ -166,6 +168,15 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		states = append(states, state)
 	}
 	return states, nil
+}
+
+// isOrphanedSessionState reports whether a state with no shadow branch may be
+// deleted: only a finalized session (State.IsEnded) that was never condensed
+// and carries no task records. IDLE states — including legacy empty phases,
+// which normalize to IDLE — are live sessions between turns or belong to the
+// exited-owner finalizer, so they age out through StaleSessionThreshold.
+func isOrphanedSessionState(state *SessionState) bool {
+	return state.IsEnded() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent()
 }
 
 // IsCondensableEndedSession reports whether an ENDED session still carries

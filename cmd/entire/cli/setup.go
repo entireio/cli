@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -892,7 +893,7 @@ Examples:
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", checkpointRemoteFlagUsage)
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
-	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, pi, opencode, cursor, copilot-cli)")
+	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, antigravity, pi, opencode, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
@@ -1171,13 +1172,12 @@ func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
 	}
 
 	// Sequential, but each under its OWN deadline rather than sharing one: the
-	// trails probe now costs ~4 sequential round trips (repos index, cluster
-	// catalog, identity-token exchange, TrailsEnabled) since it moved onto the
-	// repo's cell, so a slow enable report sharing a single budget could starve
-	// it to nothing. Separate budgets give the probe a floor it cannot lose,
-	// and their sum is the same 5s ceiling this function used to impose.
+	// trails probe costs ~4 sequential round trips (repos index, cluster
+	// catalog, login refresh, TrailsEnabled), so a slow enable report sharing
+	// a single budget could starve it to nothing. Separate budgets give the
+	// probe a floor it cannot lose, and their sum is a 5s ceiling.
 	//
-	// The probe gets the larger share because it is the step that grew, and
+	// The probe gets the larger share because it is the longer step, and
 	// because its failure self-heals — SessionStart's detached refresh retries
 	// it — whereas the enable report has no retry.
 	reportEnableToBackend(ctx, insecureHTTPAuth, info)
@@ -1822,7 +1822,32 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	}
 	warnCodexHooksAfterRemoval(ctx, w, ag)
 
+	// Antigravity's title tee lives in agy's GLOBAL settings.json, not in
+	// this repo. `entire agent remove` is itself a per-repo command (it edits
+	// only this repo's .agents/hooks.json), and there is no machine-wide
+	// "remove Antigravity everywhere" command, so this is the one place the
+	// global slot is released: `entire disable` deliberately leaves it alone.
+	// The cost is real and stated to the user below — removing the tee here
+	// disables token capture for every OTHER repo still using Antigravity
+	// until `entire agent add antigravity` (or doctor) repairs it there.
+	// Counting the repos that still depend on the slot before releasing it
+	// is a deferred product decision, tracked on trail 444.
+	teeRemoved := false
+	if ag.Name() == agent.AgentNameAntigravity && antigravity.TitleTeeInstalled() {
+		if err := antigravity.UninstallTitleTee(); err != nil {
+			logging.Warn(ctx, "failed to uninstall antigravity title tee",
+				"error", err.Error())
+		} else {
+			teeRemoved = true
+		}
+	}
+
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	if teeRemoved {
+		fmt.Fprintln(w, "Note: the Antigravity title-tee was removed from agy's global settings —")
+		fmt.Fprintln(w, "this disables token capture in any other repositories still using Antigravity.")
+		fmt.Fprintln(w, "Run `entire agent add antigravity` (or `entire doctor`) there to restore it.")
+	}
 	return nil
 }
 

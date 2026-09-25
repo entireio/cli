@@ -95,8 +95,8 @@ func (w *wrappedAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 func (w *wrappedAgent) GetTranscriptPosition(path string) (int, error) {
 	return w.ea.GetTranscriptPosition(path)
 }
-func (w *wrappedAgent) ExtractModifiedFilesFromOffset(path string, offset int) ([]string, int, error) {
-	return w.ea.ExtractModifiedFilesFromOffset(path, offset)
+func (w *wrappedAgent) ExtractModifiedFilesFromOffset(ctx context.Context, path string, offset int) ([]string, int, error) {
+	return w.ea.ExtractModifiedFilesFromOffset(ctx, path, offset)
 }
 func (w *wrappedAgent) ExtractPrompts(ref string, offset int) ([]string, error) {
 	return w.ea.ExtractPrompts(ref, offset)

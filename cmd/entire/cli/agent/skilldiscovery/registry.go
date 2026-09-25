@@ -74,6 +74,18 @@ var installHints = map[string][]InstallHint{
 			ProvidesAny: []string{"$codex:adversarial-review"},
 		},
 	},
+	// Antigravity has no built-in review command and no predictable plugin
+	// skill names, so the hint is always shown (ProvidesAny nil). The path is
+	// agy 1.1+'s global skills root; ~/.gemini/skills is a pre-1.1 layout (see
+	// antigravity/discovery.go). Entire scans both, so a skill placed at the
+	// old path still reaches Entire's prompt — but agy itself will not load
+	// it, which is the half a hint pointing there would silently get wrong.
+	"antigravity": {
+		{
+			Message:     "Add a review skill under ~/.gemini/config/skills/<name>/SKILL.md, e.g.: npx antigravity-awesome-skills --agy",
+			ProvidesAny: nil,
+		},
+	},
 }
 
 // CuratedBuiltinsFor returns the curated built-in list for agentName, or

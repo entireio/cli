@@ -34,6 +34,7 @@ const transcriptReadPattern = `os\.(ReadFile|Open)\((sessionRef|transcriptPath)\
 // nothing while looking like it does. See
 // docs/development/filesystem-safety.md#the-root-anchors.
 var unconfinedTranscriptReads = map[string]int{
+	"cmd/entire/cli/agent/antigravity/transcript.go":        1,
 	"cmd/entire/cli/agent/claudecode/lifecycle.go":          1,
 	"cmd/entire/cli/agent/codex/codex.go":                   1,
 	"cmd/entire/cli/agent/codex/transcript.go":              1,

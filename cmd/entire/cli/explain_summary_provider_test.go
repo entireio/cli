@@ -1375,7 +1375,7 @@ func TestSummaryCapableProviderNames_MatchesTheBuiltInAgents(t *testing.T) {
 
 	// factoryai-droid is deliberately absent: it is a registered agent with no
 	// GenerateText, and naming it is the fault this feature reports.
-	want := []string{"claude-code", "codex", "copilot-cli", "cursor", "opencode", "pi"}
+	want := []string{"antigravity", "claude-code", "codex", "copilot-cli", "cursor", "opencode", "pi"}
 	got := summaryCapableProviderNames()
 	if !slices.Equal(got, want) {
 		t.Errorf("summary-capable providers = %v, want %v\n"+

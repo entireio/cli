@@ -235,7 +235,7 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
 | git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
 | the working tree | `worktreedir` | worktree root |
-| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`; also `.gemini/` for the retired Gemini CLI hook cleanup) |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`, `.agents/`; also `.gemini/` for the retired Gemini CLI hook cleanup) |
 | an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
 | the active git hooks dir | `strategy.hooksRootForInstall` / `ForRemoval` | `git rev-parse --git-path hooks`, absolutized |
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |

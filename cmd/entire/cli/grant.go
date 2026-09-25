@@ -145,7 +145,7 @@ func newGrantAddCmd[Row any](t grantTarget[Row]) *cobra.Command {
 			// An omitted --role means the server default where the target has
 			// one, and otherwise is resolved per grantee below.
 			if cmd.Flags().Changed("role") {
-				if err := validateRole(role, t.roles); err != nil {
+				if err := validateChoice("role", role, t.roles); err != nil {
 					return err
 				}
 			}
@@ -574,15 +574,15 @@ func refuseUnwritableRef[Row any](t grantTarget[Row]) func(*cobra.Command, []str
 	}
 }
 
-// validateRole rejects a --role outside the target's set at the CLI boundary
-// so the user gets a clear message instead of a server 422. The generated
-// bodies type their role field as an enum, so the targets cast the validated
-// string to whichever type they need.
-func validateRole(role string, allowed []string) error {
-	if slices.Contains(allowed, role) {
+// validateChoice rejects a value outside an enum flag's set at the CLI
+// boundary so the user gets a clear message instead of a server 422. The
+// generated bodies type these fields as enums, so callers cast the validated
+// string to whichever type they need. flag is the flag name without dashes.
+func validateChoice(flag, value string, allowed []string) error {
+	if slices.Contains(allowed, value) {
 		return nil
 	}
-	return fmt.Errorf("invalid --role %q: must be one of %s", role, strings.Join(allowed, ", "))
+	return fmt.Errorf("invalid --%s %q: must be one of %s", flag, value, strings.Join(allowed, ", "))
 }
 
 // revokeGrant runs a grant-removal API call idempotently. A 404 means the
@@ -648,8 +648,15 @@ var accessRoles = []string{"reader", "writer", "admin"}
 
 const leastAccessRole = "reader"
 
-// orgRoleMember is the org's least-privileged role and the server's default.
-const orgRoleMember = "member"
+// orgRoles are the org membership roles, in help order. Invitations share the
+// set: accepting one creates a membership.
+var orgRoles = []string{roleOwner, roleAdmin, orgRoleMember}
+
+const (
+	roleOwner     = "owner"
+	roleAdmin     = "admin"
+	orgRoleMember = "member" // the least-privileged role and the server's default
+)
 
 // grantAccessBody builds the request body the project and repo grant routes
 // share. Provider and providerUserId are optional on the wire because the
@@ -670,7 +677,7 @@ var orgGrantTarget = grantTarget[coreapi.Membership]{
 	noun:        cmdOrg,
 	refUsage:    "name or ULID",
 	exampleRef:  "acme",
-	roles:       []string{"owner", "admin", orgRoleMember},
+	roles:       orgRoles,
 	leastRole:   orgRoleMember,
 	defaultRole: orgRoleMember,
 	columns:     orgMemberColumns,

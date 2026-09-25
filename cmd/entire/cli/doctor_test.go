@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -1351,6 +1352,102 @@ trusted_hash = "sha256:ccc"
 	require.NotContains(t, out, "Codex hook trust: REVIEW NEEDED")
 }
 
+// antigravityHooksJSON returns a minimal .agents/hooks.json declaring the
+// Entire PreInvocation hook, enough for AreHooksInstalled to report true.
+func antigravityHooksJSON() string {
+	return `{"entire":{"PreInvocation":[{"type":"command","command":"entire hooks antigravity pre-invocation"}]}}`
+}
+
+// stubAgyOnPath prepends a directory containing a fake executable `agy` to
+// PATH so the doctor check's binary-presence guard passes deterministically.
+func stubAgyOnPath(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "agy")
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestCheckAntigravityTitleTee_SilentWhenAgyNotInstalled stays quiet for
+// developers who don't use agy at all: .agents/hooks.json is committable, so
+// a teammate's checkout can have Antigravity hooks "installed" on a machine
+// with no agy binary — warning there (and suggesting a repair that writes
+// agy's global settings) is a false positive.
+func TestCheckAntigravityTitleTee_SilentWhenAgyNotInstalled(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
+		[]byte(antigravityHooksJSON()), 0o600))
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", filepath.Join(t.TempDir(), "agy"))
+	t.Setenv("PATH", t.TempDir()) // no agy binary anywhere on PATH
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+	require.NotContains(t, stdout.String(), "Antigravity title-tee")
+}
+
+// TestCheckAntigravityTitleTee_SilentWhenHooksNotInstalled stays quiet when
+// the repo has no Antigravity hooks — nothing to check.
+func TestCheckAntigravityTitleTee_SilentWhenHooksNotInstalled(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", filepath.Join(t.TempDir(), "agy"))
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+	require.NotContains(t, stdout.String(), "Antigravity title-tee")
+}
+
+// TestCheckAntigravityTitleTee_OKWhenConfigured reports OK when hooks are
+// installed and agy's title slot routes through the title-tee shim.
+func TestCheckAntigravityTitleTee_OKWhenConfigured(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	stubAgyOnPath(t)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
+		[]byte(antigravityHooksJSON()), 0o600))
+
+	cfgDir := filepath.Join(t.TempDir(), "agy")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+		[]byte(`{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`), 0o600))
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+	require.Contains(t, stdout.String(), "✓ Antigravity title-tee: OK")
+}
+
+// TestCheckAntigravityTitleTee_WarnsWhenNotConfigured surfaces the missing
+// token-usage surface when hooks are installed but the title slot is unclaimed.
+func TestCheckAntigravityTitleTee_WarnsWhenNotConfigured(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	stubAgyOnPath(t)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(agentsDir, "hooks.json"),
+		[]byte(antigravityHooksJSON()), 0o600))
+
+	// Empty agy config dir — no title slot claimed.
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", filepath.Join(t.TempDir(), "agy"))
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityTitleTee(cmd)
+
+	out := stdout.String()
+	require.Contains(t, out, "Antigravity title-tee: NOT CONFIGURED")
+	require.Contains(t, out, "token counts")
+	require.Contains(t, out, "entire agent add antigravity")
+}
+
 // TestConfirmDoctorFix_CancelledContext verifies that a cancelled command
 // context makes the confirm prompt return (false, nil) rather than surfacing a
 // wrapped error — doctor fixes are skipped cleanly on interrupt.
@@ -1478,6 +1575,90 @@ func TestCheckDisconnectedMetadata_Aligned_StaysQuiet(t *testing.T) {
 
 	assert.Contains(t, output, "✓ Metadata branches: OK")
 	assert.NotContains(t, output, "DIVERGED")
+}
+
+// stubAgyHooksProbeOnPath installs a fake agy that answers `--version` with
+// version and `-p /hooks` with a JSON envelope listing hooksSource as an
+// enabled "entire" entry (or no hooks when hooksSource is empty).
+func stubAgyHooksProbeOnPath(t *testing.T, version, hooksSource string) {
+	t.Helper()
+	binDir := t.TempDir()
+	hooks := "[]"
+	if hooksSource != "" {
+		hooks = `[{"name":"entire","enabled":true,"source":"` + hooksSource + `"}]`
+	}
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo '" + version + "' ;;\n" +
+		"  -p) printf '%s' '{\"status\":\"SUCCESS\",\"command\":{\"name\":\"hooks\",\"data\":{\"hooks\":" + hooks + "}}}' ;;\n" +
+		"  *) exit 0 ;;\n" +
+		"esac\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "agy"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func writeAntigravityHooksForDoctor(t *testing.T, dir string) string {
+	t.Helper()
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	hooksPath := filepath.Join(agentsDir, "hooks.json")
+	require.NoError(t, os.WriteFile(hooksPath, []byte(antigravityHooksJSON()), 0o600))
+	return hooksPath
+}
+
+func TestCheckAntigravityHooksLoaded_OKWhenAgyListsWorkspaceHooks(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv(antigravity.DoctorProbeEnv, "1")
+	hooksPath := writeAntigravityHooksForDoctor(t, dir)
+	stubAgyHooksProbeOnPath(t, "1.1.22", hooksPath)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "✓ Antigravity hooks: LOADED by agy")
+}
+
+func TestCheckAntigravityHooksLoaded_WarnsWhenAgyDoesNotLoadThem(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv(antigravity.DoctorProbeEnv, "1")
+	writeAntigravityHooksForDoctor(t, dir)
+	stubAgyHooksProbeOnPath(t, "1.1.22", "")
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "Antigravity hooks: NOT LOADED by agy")
+	require.Contains(t, stdout.String(), "--add-dir")
+}
+
+// TestCheckAntigravityHooksLoaded_SkipsOldAgy pins the quota guard: before
+// 1.1.12, `agy -p "/hooks"` is a real model turn, so doctor must not run it.
+func TestCheckAntigravityHooksLoaded_SkipsOldAgy(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv(antigravity.DoctorProbeEnv, "1")
+	hooksPath := writeAntigravityHooksForDoctor(t, dir)
+	stubAgyHooksProbeOnPath(t, "1.1.1", hooksPath)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "NOT VERIFIED")
+	require.Contains(t, stdout.String(), "agy update")
+	require.NotContains(t, stdout.String(), "LOADED by agy")
+}
+
+func TestCheckAntigravityHooksLoaded_SilentWithoutHooksOrAgy(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("PATH", t.TempDir())
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Empty(t, stdout.String())
+
+	writeAntigravityHooksForDoctor(t, dir) // hooks present but no agy on PATH
+	checkAntigravityHooksLoaded(cmd)
+	require.Empty(t, stdout.String())
 }
 
 // A symlinked agent directory arrives by clone and is invisible everywhere else:
@@ -1953,4 +2134,72 @@ func TestCheckAgentDirSymlinks_VouchedLinkWithCleanTargetReportsOnlyTheLink(t *t
 	assert.Contains(t, got, "FOLLOWING SYMLINKS")
 	assert.NotContains(t, got, "SYMLINKS PRESENT", "a clean target is not a fault")
 	assert.NotContains(t, got, "NOT READABLE")
+}
+
+// The `/hooks` probe spends quota on at least one platform (agy 1.2.7 on
+// Windows ran a full model turn for it), so a default doctor run must not
+// invoke it at all — only ENTIRE_ANTIGRAVITY_DOCTOR_PROBE=1 does.
+func TestCheckAntigravityHooksLoaded_ProbeIsOptIn(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	writeAntigravityHooksForDoctor(t, dir)
+	marker := filepath.Join(t.TempDir(), "probe-ran")
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo '1.2.7' ;;\n" +
+		"  -p) : > '" + marker + "'; printf '%s' '{\"status\":\"SUCCESS\",\"command\":{\"name\":\"hooks\",\"data\":{\"hooks\":[]}}}' ;;\n" +
+		"  *) exit 0 ;;\n" +
+		"esac\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "agy"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(antigravity.DoctorProbeEnv, "")
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("doctor ran `agy -p /hooks` without the opt-in (stat err = %v)", err)
+	}
+	require.NotContains(t, stdout.String(), "LOADED by agy")
+	require.NotContains(t, stdout.String(), "NOT VERIFIED")
+}
+
+// The zero-cost check that replaces the probe by default: an installed entry
+// that is not what this host needs (here a bare command with no wrapper at all)
+// is reported with the reinstall remedy, and a freshly installed one is not.
+func TestCheckAntigravityHooksLoaded_ReportsAnEntryStaleForThisHost(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", t.TempDir())
+	stubAgyOnPath(t)
+	writeAntigravityHooksForDoctor(t, dir)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "Antigravity hooks: STALE FOR THIS HOST")
+	require.Contains(t, stdout.String(), "entire agent add antigravity")
+
+	// A current install is silent.
+	_, err := (&antigravity.AntigravityAgent{}).InstallHooks(cmd.Context(), true)
+	require.NoError(t, err)
+	cmd, stdout = newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.NotContains(t, stdout.String(), "STALE FOR THIS HOST")
+}
+
+// A version string semver cannot parse is not "too old": the agy may be newer
+// than the requirement, so the advice must not be `agy update`.
+func TestCheckAntigravityHooksLoaded_UnparseableVersionSkipsProbeWithoutUpgradeAdvice(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv(antigravity.DoctorProbeEnv, "1")
+	hooksPath := writeAntigravityHooksForDoctor(t, dir)
+	stubAgyHooksProbeOnPath(t, "Antigravity CLI build 2026.09", hooksPath)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "could not determine the agy version")
+	require.NotContains(t, stdout.String(), "agy update")
+	require.NotContains(t, stdout.String(), "LOADED by agy")
 }

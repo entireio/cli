@@ -44,22 +44,15 @@ func GetCurrentHookAgent() (agent.Agent, error) {
 // newAgentHooksCmd creates a hooks subcommand for an agent that implements HookSupport.
 // It dynamically creates subcommands for each hook the agent supports.
 func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cobra.Command {
+	// No PersistentPreRun here: it would also run for every command attached
+	// to this one that is not a lifecycle verb. title-tee is such a command,
+	// and agy fires it on every state change during a turn, so the session
+	// scan and redactor construction ran roughly once a second per turn to
+	// append one JSON line. The hook session is set up per verb instead.
 	cmd := &cobra.Command{
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
-		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-			// withHookSession scans session state and loads redactors, so it must
-			// not run in a repo that never enabled Entire. Same fail-closed gate
-			// the git-hook tree applies before its own call.
-			if !settings.IsSetUpAndEnabled(cmd.Context()) {
-				return
-			}
-			// Cobra invokes this PersistentPreRun with the leaf command, so
-			// SetContext hands the session-stamped context straight to the
-			// hook verb's RunE via cmd.Context().
-			cmd.SetContext(withHookSession(cmd.Context()))
-		},
 	}
 
 	for _, hookName := range handler.HookNames() {
@@ -93,9 +86,10 @@ func getHookType(hookName string) string {
 // parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
 // When stampSession is true, it attaches the hook session context itself (used by
-// the RunE fallback since it doesn't go through PersistentPreRun). Built-in agent
-// subcommands pass false since their parent command's PersistentPreRun already
-// did it.
+// the RunE fallback since it doesn't go through PersistentPreRun). Built-in hook
+// verbs pass false because each verb's OWN PersistentPreRun already did it — not
+// an inherited one: the shared per-agent command deliberately defines no hook, so
+// anything else attached to it (Antigravity's title-tee) is not stamped either.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
 	if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
@@ -195,6 +189,19 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 		Use:    hookName,
 		Hidden: true,
 		Short:  "Called on " + hookName,
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// On the verb rather than the shared agent command, so only
+			// lifecycle verbs pay for it. withHookSession scans session state
+			// and loads redactors, so it must not run in a repo that never
+			// enabled Entire. Same fail-closed gate the git-hook tree applies
+			// before its own call.
+			if !settings.IsSetUpAndEnabled(cmd.Context()) {
+				return
+			}
+			// SetContext hands the session-stamped context straight to this
+			// command's RunE via cmd.Context().
+			cmd.SetContext(withHookSession(cmd.Context()))
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return executeAgentHook(cmd, agentName, hookName, false)
 		},

@@ -6,7 +6,7 @@ Entire stores AI session transcripts and metadata in your git repository. This d
 
 ### Where data is stored
 
-When you use Entire with an AI agent (Claude Code, Codex, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi), session transcripts, user prompts, and checkpoint metadata are committed to **your own git repository**. They stay out of your working branches' history, but they live in the same repo and travel with it.
+When you use Entire with an AI agent (Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi), session transcripts, user prompts, and checkpoint metadata are committed to **your own git repository**. They stay out of your working branches' history, but they live in the same repo and travel with it.
 
 Exactly where depends on the [checkpoint backend](architecture/ref-checkpoint-backend.md) the repo uses:
 
@@ -18,6 +18,8 @@ Exactly where depends on the [checkpoint backend](architecture/ref-checkpoint-ba
 Which one a repo is on is recorded as `checkpoints.primary.type` in `.entire/settings.json` (or `settings.local.json`); an absent `checkpoints` block means `git-branch`. The redaction described in this document applies identically to both — the pipeline is shared, and only the destination differs. Where the distinction matters below, it is called out.
 
 Entire also creates temporary local **shadow branches** (e.g. `entire/<commit>-<worktree>`) as working storage during a session, on both backends. Metadata written there — transcripts, prompts, incremental checkpoint data, subagent transcripts — goes through the same redaction pipeline as a committed checkpoint. **Code-file snapshots, however, are written as raw blobs of your working tree without redaction**, so any hardcoded secrets in your source code would appear unredacted on the shadow branch. Gitignored files (e.g., `.env`) are filtered out of these snapshots as a partial defense. Shadow branches are **not** pushed by Entire; do not push them manually, because unredacted source content would be visible on the remote. They are cleaned up when session data is condensed into a checkpoint at commit time.
+
+**Antigravity title-tee (machine-global):** setting up the Antigravity agent installs `entire hooks antigravity title-tee` into agy's *global* settings (`~/.gemini/antigravity-cli/settings.json`), because agy exposes token usage only through its window-title/statusline feed. Once installed, the tee runs on every agy state change on the machine — including in repositories where Entire is not enabled — and persists **only** the conversation ID and token counts (`context_window` totals) to Entire's local cache directory; the rest of the payload is discarded and no prompt or file content is captured. Stale per-conversation snapshots are cleaned up after 14 days. Removing the Antigravity agent (`entire agent remove antigravity`) uninstalls the tee.
 
 Anyone with access to your repository can read committed checkpoint data: the full prompt/response history and session metadata. Note that transcripts capture all tool interactions — including file contents, MCP server calls, and other data exchanged during the session. Per-checkpoint refs are less *visible* than a branch, but they are not less accessible: a `git fetch` of `refs/entire/checkpoints/*` reads them just as well.
 

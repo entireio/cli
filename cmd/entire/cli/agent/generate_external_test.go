@@ -57,6 +57,9 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 			agent:         &cursor.CursorAgent{},
 			requiredFlags: []string{"--print", "--force", "--trust", "--workspace"},
 		},
+		// antigravity is deliberately absent: agy 1.2.x ignores stdin in print
+		// mode, so its prompt travels in argv. That contract is pinned in the
+		// antigravity package (TestGenerateText_PassesPromptInArgv).
 	}
 
 	for _, tt := range tests {

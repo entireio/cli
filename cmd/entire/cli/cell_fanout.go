@@ -306,10 +306,10 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 				"cluster_slug", cells[i].clusterSlug, "cell", cells[i].cell)
 			continue
 		}
-		// A concrete baseURL needs a jurisdiction to mint the matching token
-		// for — mirroring resolveRepoCellTarget, which refuses a target unless
-		// both are present. Setting baseURL with an unknown jurisdiction would
-		// dial the cell with a home-jurisdiction token.
+		// A concrete baseURL needs its jurisdiction alongside it — mirroring
+		// resolveRepoCellTarget, which refuses a target unless both are
+		// present, so a pinned cell is never paired with the caller's home
+		// jurisdiction.
 		jurisdiction := cells[i].jurisdiction
 		if j := strings.ToLower(strings.TrimSpace(cl.Jurisdiction)); j != "" {
 			jurisdiction = j
@@ -377,14 +377,14 @@ func (g cellGroup) label() string {
 
 // cellClientBuilder is what fanOutCells needs from the auth layer;
 // *auth.CellClientFactory satisfies it. A seam so fan-out tests don't run the
-// real discovery/exchange stack.
+// real discovery/refresh stack.
 type cellClientBuilder interface {
 	ClientFor(ctx context.Context, target *auth.CellTarget) (*api.Client, error)
 }
 
 // newCellClientBuilder builds the per-operation cell client factory: the
-// subject is resolved once and identity tokens are minted once per
-// jurisdiction, however many cells the fan-out touches. Swapped in tests.
+// login subject is resolved and refreshed once, however many cells the
+// fan-out touches. Swapped in tests.
 var newCellClientBuilder = func(ctx context.Context, insecureHTTP bool) (cellClientBuilder, error) {
 	return auth.NewEntireAPICellClientFactory(ctx, insecureHTTP)
 }

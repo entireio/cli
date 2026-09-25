@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -134,7 +135,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// From beginning — should find all files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"hello.txt", "docs/readme.md"}, files)
@@ -146,7 +147,7 @@ func TestExtractModifiedFilesFromOffset_WithOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// Skip first 7 lines (past the first apply_patch) — should only find second patch files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 7)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 7)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"docs/readme.md", "hello.txt"}, files)
@@ -157,7 +158,7 @@ func TestExtractModifiedFilesFromOffset_PastEnd(t *testing.T) {
 	ag := &CodexAgent{}
 	path := writeSampleRollout(t)
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 100)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 100)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.Empty(t, files)

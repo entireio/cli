@@ -51,14 +51,130 @@ the commands are always runnable in every build.
   options, summary provider). Agent CRUD lives under `entire agent`.
 - `auth`: `login`, `logout`, `status`, `contexts`, `switch`, plus
   `token` (prints the active control-plane bearer to stdout for scripting/curl;
-  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). `token`
-  also takes `--jurisdiction <slug>` (e.g. `us`, `eu`), which instead mints a
-  jurisdictional identity token (RFC 8693 exchange, `scope=openid`,
-  `aud=<jurisdiction host>`) for that jurisdiction's entire-api cells (e.g.
-  `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
-  bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
-  env token's `aud`), else the active login. `auth status` shows the caller's
-  home jurisdiction so the slug is discoverable. `logout` sweeps every saved
+  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). That
+  token is also accepted directly at every entire-api cell (e.g.
+  `https://aws-us-east-2.api.entire.io/api/v1`), so `token --jurisdiction
+  <slug>` is deprecated: the flag stays registered but hidden and fails with
+  a migration hint. `auth status` takes no positional
+  arguments (`auth status sessions` is refused rather than silently read as the
+  default view). It shows the caller's
+  home jurisdiction. A login served by a core
+  outside that home region reaches `--json` as `foreign_region` and is not
+  called out in the text view: the note that used to sit there existed mostly
+  to explain the display name and email a foreign core withholds, neither of
+  which this view renders any more, and what remained restated the
+  `jurisdiction` row beside it. It reports a count of active
+  sessions rather than the list — `--sessions` prints the full table, and
+  `--json` reports the same facts without the text view's collapse; timestamps
+  stay RFC3339 there, since the relative form the text view shows is a reading
+  aid. A second count row, `available contexts`,
+  does the same for saved logins and replaces the trailing "N login contexts
+  saved" sentence. **Both count rows are dropped at exactly one**, and with the
+  context count goes the `context` row naming the active login. Both of those
+  rows exist to say "this login, not the others", so both wait until there are
+  others: a sole login is not a choice, and describing it as one costs two lines
+  to tell the reader nothing they can act on. The **login server** is held to the
+  same test: the `context` row appends the host only when the saved logins are
+  spread across more than one server, because logins that all sit on one server
+  are told apart by their names and the host they share names none of them. A
+  sole login therefore shows neither row, and `--json` still carries `server`
+  for anyone who needs it. ENTIRE_TOKEN mode is the one place the host is stated
+  outright, having no context to carry it. The sole session is likewise
+  already described by the verdict line's expiry. The session half
+  additionally requires that sole session to have been
+  *identified* as the caller's: without a `fid` match there is no expiry on the
+  verdict line to stand in for it, and dropping the row would leave the default
+  view with no count, no expiry and no route to `--sessions` — while the one
+  session listed is the login that replaced yours, which is the one worth
+  looking at. That window is reachable whenever a family is revoked inside its
+  access token's lifetime: `resolveStatusTarget` falls back to the stale bearer,
+  `/me` honours it, and `fid` names a family the listing no longer holds. That
+  state is named rather than left to be inferred — `! this login was ended
+  elsewhere and cannot be renewed`, with the verdict line carrying the *bearer's*
+  remaining life instead of a session lifetime, since with nothing left to renew
+  it that is when the user is logged out (`login_revoked` / `token_expires_at`
+  in JSON; `expires_at` stays absent, no session having been attributed).
+  What settles it differs by listing. **Zero sessions settles it alone**: the
+  endpoint includes the caller's own session — that is how a matched `fid` finds
+  itself — so none listed means none exist, the caller's included, and no
+  truncation explains zero. **With sessions listed**, absence is the only
+  evidence, so a `fid` must have actually named something; a core too old to
+  mint one is evidence of nothing and stays quiet. Do not gate this on the
+  refresh having failed: that only becomes known when a refresh is *attempted
+  and fails*, and a token still far from expiry is returned without contacting
+  the server, so requiring it left the notice silent in the commonest case —
+  every session revoked while the current bearer still had hours to run. Zero sessions still reports, being a contradiction worth seeing.
+  `logout --everywhere` is offered **only alongside the table**: it ends every
+  session at once, browser logins included, and in the collapsed view those
+  sessions are a count the reader cannot inspect. It is named as a flag and
+  never sized by a number: `logout` sweeps every saved login on every login
+  server, while the rows on screen are one server's, so a count there would
+  understate what the command destroys. The whole logout hint is
+  withheld once a login is known revoked — any session still listed belongs to
+  the login that replaced this one, so there is nothing here worth ending, and
+  the notice above already names `entire login` as the action.
+  The verdict line's deadline is tense-checked before it is printed: a lapsed
+  instant renders as a flat `expired` rather than `expires 19h ago`, which would
+  contradict the "Logged in" beside it, and an unreadable one is dropped rather
+  than echoed mid-sentence (the session table still shows it verbatim in a cell
+  of its own, and `--json` carries it untouched). The `--sessions` table's
+  `EXPIRES` column is held to the same tense rule and for a sharper reason: its
+  heading supplies the verb, so a cell reading `19h ago` says "expired" only by
+  implication, which a reader scanning the column will not pick up. `CREATED`
+  and `LAST USED` keep the plain relative form, the past being the tense they
+  report. Because that deadline is the
+  sole-session row's whole premise, the drop is gated on it having actually
+  rendered — a session whose `expires_at` is empty or unparseable keeps its
+  count row, or the default view would carry no session information at all.
+  The drop-at-one collapse is text-only — `--json` never applies it. What the
+  JSON does omit is anything it could not determine, which is why
+  `active_sessions`, `available_contexts` and `sessions` are **pointers**:
+  absent means "not known", never zero. An unreadable listing omits
+  `active_sessions` while a real zero emits `0`; ENTIRE_TOKEN mode omits
+  `available_contexts`, never having read contexts.json, while every other path
+  emits its genuine count; and `sessions` is emitted whenever `--sessions`
+  reached the listing, as `[]` when empty, so a satisfied request stays
+  distinguishable from the default where the key is absent. Paths that return
+  before the listing — not logged in, env token, a failed fetch — omit it
+  along with the rest. `env_token` and `token_source` are the exception: where
+  the bearer came from is settled before `/me` is consulted, so they are emitted
+  even for a bearer `/me` rejected — a script told only `logged_in:false` could
+  not otherwise see that `ENTIRE_TOKEN` supplied the token and is still winning
+  over every stored context. Every runtime failure reachable once `--json`
+  is set likewise prints an envelope carrying `error`, so `--json | jq
+  .logged_in` parses: a hard fetch failure (network, DNS, 5xx), an unresolvable
+  target (malformed `ENTIRE_TOKEN`, unreadable `contexts.json`, unknown
+  `--context`) and the TLS refusal on an `http://` login server all route
+  through one helper. A usage error is the deliberate exception: `auth status
+  --json sessions` is refused by `cobra.NoArgs` before `RunE` runs, so it exits
+  non-zero with empty stdout and a suggestion on stderr. The command keeps its
+  non-zero exit and prints nothing further to stderr. The JSON carries the provider-qualified
+  `user` and deliberately not a split `handle`/`provider`: one field beats two a
+  caller has to rejoin. **Identity is split across providers**, so the view takes
+  whichever half each one has. GitHub supplies a human handle
+  (`github:gtrrz-victor`); Google supplies a display name and a handle
+  synthesised as `google-<subject id>`, which qualifies to `google:google-100…`
+  — the provider twice. That prefix is dropped when what
+  follows it IS the `providerUserId`, so the handle is provably the minted form
+  and a GitHub user genuinely named `github-foo` keeps their name. A `name` row
+  carries the display name, and earns its line only where the handle is not
+  already that name — the test is the value, not the provider, so a GitHub
+  account that does carry a display name grows the row like any other. In JSON
+  the field is `display_name`, not `name`: `sessions[].name` in the same
+  envelope is a session's name, and one document must not spell two subjects
+  the same way — it also matches `entire experts` and /me's own `displayName`.
+  It is uncollapsed, as `--json` never applies a text-view collapse.
+  **The trade-off is deliberate and worth knowing:** the de-duplicated spelling
+  does not resolve as a grantee — `GET /identity/handles/google/<subject id>`
+  answers 404 while the doubled form resolves — so for synthetic handles `user`
+  is a legible identity, not a value to paste into `entire grant`. It stays
+  grant-able for every provider that issues real usernames. `auth status` also marks the caller's
+  own row `(current)`, matching the login JWT's `fid` (refresh-token family id)
+  claim against the listed session ids, since a session IS a refresh-token
+  family. That match is the only thing entitling the verdict line to state an
+  expiry: an unmatched claim renders neither marker nor expiry rather than
+  borrowing another session's, because everything reachable from here
+  (`logout`, `logout --everywhere`) ends sessions. `logout` sweeps every saved
   login: one `DELETE /api/auth/tokens` per login server ends every CLI session
   there (core tells them apart by `issuer_client_id`), then the login is
   removed locally. Nothing narrows it: an explicit `--context` is refused
@@ -529,9 +645,9 @@ attaches the right bearer and dials the right host so callers don't plumb auth
 themselves. `--to core` (default) hits the control plane; `--to cell` hits an
 entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
-(cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
-via `auth.CellTarget`). **The cell path acts as the same login `--to core`
-does** — `ENTIRE_TOKEN` when set, else the selected context: with no
+(cell routing lives in `auth.NewEntireAPICellClient` via `auth.CellTarget`;
+the login JWT is the bearer). **The cell path acts as the same login
+`--to core` does** — `ENTIRE_TOKEN` when set, else the selected context: with no
 `ENTIRE_API_BASE_URL`, the cell `apiUrl` is read from the cluster catalog of
 that login's core, so a staging login lands on a staging cell and a local-dev
 login on the cell its local core advertises (never on the core itself); only an

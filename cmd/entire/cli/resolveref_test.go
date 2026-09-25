@@ -952,6 +952,38 @@ func TestParseQualifiedHandle(t *testing.T) {
 	}
 }
 
+// formatQualifiedHandle is the inverse of parseQualifiedHandle; they live
+// together so the grantee spelling cannot drift between what the CLI prints and
+// what it accepts.
+func TestFormatQualifiedHandle_RoundTripsThroughTheParser(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ provider, handle string }{
+		{"github", "alice"},
+		{"github", "alice:bob"}, // only the first colon splits, so this survives
+		{"gitlab", "a"},
+	} {
+		t.Run(tt.provider+":"+tt.handle, func(t *testing.T) {
+			t.Parallel()
+			provider, handle, err := parseQualifiedHandle(formatQualifiedHandle(tt.provider, tt.handle))
+			if err != nil {
+				t.Fatalf("parseQualifiedHandle(formatQualifiedHandle(%q, %q)): %v", tt.provider, tt.handle, err)
+			}
+			if provider != tt.provider || handle != tt.handle {
+				t.Errorf("round trip = (%q, %q), want (%q, %q)", provider, handle, tt.provider, tt.handle)
+			}
+		})
+	}
+}
+
+// An empty provider yields the bare handle: ":alice" parses as nothing and
+// would be a grantee string no command accepts.
+func TestFormatQualifiedHandle_OmitsAnEmptyProvider(t *testing.T) {
+	t.Parallel()
+	if got := formatQualifiedHandle("", "alice"); got != "alice" {
+		t.Errorf("formatQualifiedHandle(\"\", \"alice\") = %q, want %q", got, "alice")
+	}
+}
+
 func TestToProjectList(t *testing.T) {
 	t.Parallel()
 

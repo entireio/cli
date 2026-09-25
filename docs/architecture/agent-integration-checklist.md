@@ -46,7 +46,7 @@ See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [T
 - [ ] **Working directory on every lifecycle event**: populate `Event.CWD` from the hook payload (Claude Code, Codex, Copilot, Factory Droid and pi all send one), including subagent and tool-use events. Hooks run where the agent was launched; the dispatcher follows `CWD` into another worktree of the same repository and the session re-homes there, so an agent that moves into a worktree keeps linking without process ancestry. Without `CWD` the session still follows the agent's own commits and the edits its turn-end hook captures, but never a hook that merely runs in the launch directory
 - [ ] **Full transcript on every turn**: At turn-end, capture the complete session transcript, not just events since the last checkpoint
 - [ ] **Resumed session handling**: When a user resumes an existing session, the transcript must include all historical messages, not just new ones since the plugin/hook loaded
-- [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Cursor's JSONL, Factory AI Droid's JSONL, Copilot CLI's JSONL, OpenCode's `opencode export` JSON, Pi's JSONL session file) over manually reconstructing from events
+- [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Cursor's JSONL, Factory AI Droid's JSONL, Copilot CLI's JSONL, OpenCode's `opencode export` JSON, Pi's JSONL session file, Antigravity's brain-dir transcript_full.jsonl) over manually reconstructing from events
 - [ ] **No custom formats**: Store the agent's native format directly in `NativeData` - do not convert between formats (e.g., JSON to JSONL) or create intermediate representations
 - [ ] **Graceful degradation**: If the canonical source is unavailable (e.g., agent shutting down), fall back to best-effort capture with clear documentation of limitations
 
@@ -55,7 +55,7 @@ See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [T
 See Guide: [Step 3 - Core Agent Interface](agent-guide.md#step-3-implement-core-agent-interface-youragentgo)
 
 - [ ] **`WriteSession` implementation**: Agent must implement `WriteSession(AgentSession)` to restore sessions
-- [ ] **File-based agents** (Claude, Cursor, Factory AI Droid, Copilot CLI, Pi): Write `NativeData` to `SessionRef` path
+- [ ] **File-based agents** (Claude, Cursor, Factory AI Droid, Copilot CLI, Pi, Antigravity): Write `NativeData` to `SessionRef` path
 - [ ] **Database-backed agents** (OpenCode): Write `NativeData` to file, then import into native storage (the native format should be what the agent's import command expects)
 - [ ] **Single format per agent**: Store only the agent's native format in `NativeData` - no separate fields for different representations of the same data
 

@@ -108,12 +108,13 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 const openCodeBinary = "opencode"
 
 var summaryProviderBinaries = map[types.AgentName]string{
-	AgentNameClaudeCode: "claude",
-	AgentNameCodex:      "codex",
-	AgentNameCopilotCLI: "copilot",
-	AgentNameCursor:     "agent",
-	AgentNamePi:         "pi",
-	AgentNameOpenCode:   openCodeBinary,
+	AgentNameAntigravity: "agy",
+	AgentNameClaudeCode:  "claude",
+	AgentNameCodex:       "codex",
+	AgentNameCopilotCLI:  "copilot",
+	AgentNameCursor:      "agent",
+	AgentNamePi:          "pi",
+	AgentNameOpenCode:    openCodeBinary,
 }
 
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable
