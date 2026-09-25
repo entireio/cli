@@ -407,14 +407,17 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 		if !strings.HasPrefix(ref.Name().String(), prefix) {
 			continue
 		}
+		// Any one usable ref proves the remote was fetched or pushed before, so
+		// a dangling, unreadable, or incomplete ref only skips to the next one.
+		// Loose refs iterate before packed ones, so stopping at the first bad
+		// ref would hide a valid packed ref native Git's sorted scan finds.
 		resolved, err := repo.Reference(ref.Name(), true)
-		if errors.Is(err, plumbing.ErrReferenceNotFound) {
-			continue // for-each-ref omits dangling symbolic references
-		}
 		if err != nil {
-			return false
+			continue
 		}
-		return repo.Storer.HasEncodedObject(resolved.Hash()) == nil && ctx.Err() == nil
+		if repo.Storer.HasEncodedObject(resolved.Hash()) == nil {
+			return ctx.Err() == nil
+		}
 	}
 }
 
