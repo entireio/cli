@@ -22,32 +22,293 @@ import (
 )
 
 // Not parallel: runCoreCmd replaces the process-global client seam.
-func TestRepoGetAuthoritativeSnapshot(t *testing.T) {
+// serveRepoView answers the four reads `repo view` makes for a native repo:
+// the plain repo read, the cluster catalog, the native-mirror list, and the
+// authoritative repo read that fills the primary's STATUS. repoJSON is the
+// body for both repo reads; authoritative, when non-nil, overrides the status
+// and body of the authoritative one so a readiness failure can be simulated
+// without breaking the plain read.
+func serveRepoView(t *testing.T, repoJSON string, authoritative func(w http.ResponseWriter) bool) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var authReads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		// A /et/<project>/<repo> ref resolves through repos/resolve, so this
+		// harness serves the path spelling as well as the ULID one. The
+		// resolution carries the server's own full name, which is what names a
+		// repo whose own path has not been minted yet.
+		case r.URL.Path == "/api/v1/repos/resolve":
+			w.Header().Set("Content-Type", "application/json")
+			assert.NoError(t, printJSON(w, nativeResolution("acme/web", testDeleteULID)))
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"nativeMirrors":[]}`)
+		case r.URL.Path == "/api/v1/clusters":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.URL.Query().Get("authoritative") == "true":
+			authReads.Add(1)
+			if authoritative != nil && authoritative(w) {
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, repoJSON)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, repoJSON)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &authReads
+}
+
+// TestRepoView_AuthoritativeSnapshot pins that `repo view` always reads the
+// repo authoritatively, so the primary's STATUS says whether it is usable
+// rather than dashing. The provision reason rides along, which is the field
+// that says why a repo stopped where it did.
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_AuthoritativeSnapshot(t *testing.T) {
 	for _, state := range []string{"provisioning", "active", "failed", "", "future"} {
 		t.Run(state, func(t *testing.T) {
-			var reads atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				reads.Add(1)
-				if r.Method != http.MethodGet || r.URL.Query().Get("authoritative") != "true" {
-					t.Errorf("expected authoritative GET, got %s %s", r.Method, r.URL)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":%q,"provisionReason":"max retries exhausted","capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, testDeleteULID, testProjectULID, state)
-			}))
-			defer srv.Close()
-			for _, args := range [][]string{{testDeleteULID}, {testDeleteULID, "--json"}} {
-				out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, append(args, "--authoritative")...)
-				require.NoError(t, err)
-				require.Contains(t, out, "max retries exhausted")
-				if len(args) > 1 {
-					var obj map[string]any
-					require.NoError(t, json.Unmarshal([]byte(out), &obj))
-					require.Equal(t, state, obj["state"])
-				}
-			}
-			require.EqualValues(t, 2, reads.Load(), "one snapshot per invocation")
+			body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","state":%q,"provisionReason":"max retries exhausted","capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, testDeleteULID, testProjectULID, state)
+			srv, authReads := serveRepoView(t, body, nil)
+
+			// The header is Name and Visibility only, so the reason a repo
+			// stopped provisioning rides on stderr with the other detail the
+			// table has no column for — never on stdout, which is the view.
+			out, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+			require.NoError(t, err)
+			require.Contains(t, stderr, "max retries exhausted")
+			require.NotContains(t, out, "max retries exhausted")
+
+			out, _, err = runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--json")
+			require.NoError(t, err)
+			var row repoDirRow
+			require.NoError(t, json.Unmarshal([]byte(out), &row))
+			require.Equal(t, "max retries exhausted", row.ProvisionReason)
+			require.Equal(t, testDeleteULID, row.ID)
+
+			require.EqualValues(t, 2, authReads.Load(), "one authoritative snapshot per invocation")
 		})
 	}
+}
+
+// TestRepoView_ReasonFollowsTheAuthoritativeState pins that the why comes from
+// the same read as the state it explains. The registry copy can carry a reason
+// from an earlier attempt, or none for a failure it has not caught up with, and
+// either way the STATUS cell would be left with nothing that accounts for it.
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_ReasonFollowsTheAuthoritativeState(t *testing.T) {
+	repoJSON := func(state, reason string) string {
+		return fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","state":%q,"provisionReason":%q}`,
+			testDeleteULID, testProjectULID, state, reason)
+	}
+	for _, tc := range []struct {
+		name         string
+		plain, fresh string
+		wantReason   string
+	}{
+		{
+			name:       "a failure the registry has not caught up with",
+			plain:      repoJSON("provisioning", ""),
+			fresh:      repoJSON("failed", "cluster quota exceeded"),
+			wantReason: "cluster quota exceeded",
+		},
+		{
+			name:       "a reason left over from an earlier attempt",
+			plain:      repoJSON("failed", "max retries exhausted"),
+			fresh:      repoJSON("active", ""),
+			wantReason: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := serveRepoView(t, tc.plain, func(w http.ResponseWriter) bool {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tc.fresh)
+				return true
+			})
+
+			_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+			require.NoError(t, err)
+			out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--json")
+			require.NoError(t, err)
+			var row repoDirRow
+			require.NoError(t, json.Unmarshal([]byte(out), &row))
+
+			require.Equal(t, tc.wantReason, row.ProvisionReason)
+			if tc.wantReason == "" {
+				require.Empty(t, stderr)
+				return
+			}
+			require.Contains(t, stderr, tc.wantReason)
+		})
+	}
+}
+
+// TestRepoView_BeforeThePrimaryIsPlaced pins the read that lands in the seconds
+// between `repo create` returning clone coordinates and the registry carrying
+// them — the window waitForRepoClonable polls through, where clusterSlug and
+// path are both absent.
+//
+// A native repo always has exactly one primary, so neither of the two lines
+// this view prints may suggest otherwise: the repo is still named by its path,
+// and the empty table says the READ was early rather than that the repo is
+// mirrored nowhere.
+//
+// Both names come from the server — the repo's own path when it has one, and
+// otherwise the full name the resolution carried. The path the user typed is
+// never promoted to a canonical one the server has not confirmed (COR-1892).
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_BeforeThePrimaryIsPlaced(t *testing.T) {
+	// No clusterSlug, no path: only what the schema makes required, plus the
+	// state. Both fields are optional on the wire for exactly this reason.
+	body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":"provisioning","visibility":"private"}`,
+		testDeleteULID, testProjectULID)
+
+	t.Run("the resolution's full name stands in until the repo has a path", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body, nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, "/et/acme/web")
+		require.NoError(t, err)
+		requireOrder(t, out, "Name:", "/et/acme/web", "Visibility:", "Private")
+		require.Contains(t, out, "Not placed yet")
+		require.NotContains(t, out, "Not mirrored on any cluster",
+			"a repo Entire holds a record for has a primary; the read was merely early")
+	})
+
+	t.Run("a ULID ref looks nothing up, so the repo's own name is all there is", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body, nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		requireOrder(t, out, "Name:", "web")
+		require.NotContains(t, out, "/et/", "nothing was resolved, and a path is never invented")
+	})
+
+	t.Run("--json carries the project the resolved name spells", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body, nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, "/et/acme/web", "--json")
+		require.NoError(t, err)
+		var row repoDirRow
+		require.NoError(t, json.Unmarshal([]byte(out), &row))
+		require.Equal(t, "/et/acme/web", row.Repo)
+		require.Equal(t, "acme", row.Project, "the resolved full name is the only place the project NAME appears")
+		require.Empty(t, row.Placements)
+	})
+}
+
+// TestRepoView_UnplacedRepoStatesItsLifecycle pins the two answers an empty
+// placements table can have, and that they are told apart by the repo's own
+// lifecycle rather than by the mere existence of a record.
+//
+// A failed repo has no placement either, so explaining that away as a read that
+// arrived early sends the reader back to wait for something never coming — and
+// `repo create`'s own recovery hint sends them to this very command.
+//
+// Not parallel: runCoreCmd replaces the shared client constructor.
+func TestRepoView_UnplacedRepoStatesItsLifecycle(t *testing.T) {
+	body := func(state, extra string) string {
+		return fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","state":%q%s}`,
+			testDeleteULID, testProjectULID, state, extra)
+	}
+
+	t.Run("a failed repo says so, with the reason, not that the read was early", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("failed", `,"provisionReason":"cluster quota exceeded"`), nil)
+		out, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		require.Contains(t, out, "failed")
+		require.NotContains(t, out, "Not placed yet",
+			"the lifecycle already answered; the read was not early")
+		// The reason has no cluster to name, so it stands alone rather than
+		// arriving behind an empty prefix.
+		require.Contains(t, stderr, "cluster quota exceeded")
+		require.NotContains(t, stderr, ": cluster quota exceeded")
+	})
+
+	t.Run("a provisioning repo is still the early read", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("provisioning", ""), nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		require.Contains(t, out, "Not placed yet")
+	})
+
+	// Visibility is a security assertion, so the absent case is not the
+	// permissive one: an operator reads this to confirm a repo is restricted.
+	t.Run("an unstated visibility is dashed, never rendered Public", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("provisioning", ""), nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+		require.NoError(t, err)
+		requireOrder(t, out, "Visibility:", "-")
+		require.NotContains(t, out, "Public")
+	})
+
+	t.Run("--json omits private when unstated and carries the raw state", func(t *testing.T) {
+		srv, _ := serveRepoView(t, body("failed", `,"provisionReason":"cluster quota exceeded"`), nil)
+		out, _, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--json")
+		require.NoError(t, err)
+		require.NotContains(t, out, `"private"`, "an absent visibility is absent, not false")
+		var row repoDirRow
+		require.NoError(t, json.Unmarshal([]byte(out), &row))
+		require.Nil(t, row.Private)
+		require.Equal(t, "failed", row.State, "the server's own lifecycle word survives the placement shape")
+	})
+}
+
+// TestRepoView_AnInterruptedReadinessReadIsNotSwallowed pins the arm that tells
+// a cancelled command apart from a server that cannot answer.
+//
+// The authoritative read is best-effort, so a server failure costs a dashed
+// STATUS and the table still prints. A context error is not that: the command
+// was STOPPED. Without the distinction it fell through every case, printed a
+// table built on the plain read's stale state, and exited 0 — success reported
+// for work the user interrupted.
+//
+// The cancellation tests elsewhere in this file all exercise awaitRepoActive,
+// the create/poll path; this is the view's own read, which had none.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoView_AnInterruptedReadinessReadIsNotSwallowed(t *testing.T) {
+	body := fmt.Sprintf(`{"id":%q,"name":"web","owningProjectId":%q,"provider":"entire","path":"/et/acme/web","clusterSlug":"us","state":"active","visibility":"private"}`,
+		testDeleteULID, testProjectULID)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			fmt.Fprint(w, `{"nativeMirrors":[]}`)
+		case r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.URL.Query().Get("authoritative") == "true":
+			// Ctrl-C lands while this read is in flight. Block until the
+			// cancellation actually reaches the transport, so the client sees a
+			// context error rather than racing a written body.
+			cancel()
+			<-r.Context().Done()
+		default:
+			fmt.Fprint(w, body)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	prev := activeCoreClient
+	activeCoreClient = func(context.Context) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srv.URL, "tok")
+	}
+	t.Cleanup(func() { activeCoreClient = prev })
+
+	cmd := newRepoViewCmd()
+	var out, errW bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errW)
+	cmd.SetArgs([]string{testDeleteULID})
+	err := cmd.ExecuteContext(ctx)
+
+	require.Error(t, err, "an interrupted command must not report success")
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotContains(t, out.String(), "CLUSTER",
+		"no table may be built on the state the interrupted read failed to refresh")
 }
 
 func TestRepoCreateReadinessFlags(t *testing.T) {
@@ -509,78 +770,80 @@ func TestRepoCreateMirrorReadinessFlags(t *testing.T) {
 	}
 }
 
+// TestRepoViewAuthoritativeFlag pins what --authoritative now decides. The
+// authoritative read happens either way — it is what makes the primary's
+// STATUS mean anything — so the flag says only whether a readiness answer is
+// REQUIRED: without it a failed readiness read dashes the cell and the view
+// still renders; with it the command fails.
+//
+// hint marks the failures a plain read could still answer. Every other status
+// is a statement about the repository, so retrying without the readiness check
+// changes nothing and the hint must stay away.
+//
 // Not parallel: runCoreCmd replaces the shared client constructor.
 func TestRepoViewAuthoritativeFlag(t *testing.T) {
-	// hint marks the failures a plain read could still answer. Every other
-	// status is a statement about the repository, so retrying without the
-	// readiness check changes nothing and the hint must stay away.
+	const repoBody = `{"id":"` + testDeleteULID + `","name":"web","owningProjectId":"` + testProjectULID + `","provider":"entire","path":"/et/acme/web","capabilities":{"canManage":false,"canPush":false,"canPull":true}}`
 	for _, tc := range []struct {
-		name, flag, query, body string
-		status                  int
-		hint                    bool
+		name, body string
+		status     int
+		hint       bool
 	}{
-		{name: "default"},
-		{name: "explicit", flag: "--authoritative=true", query: "true"},
-		{name: "plain", flag: "--authoritative=false"},
-		{name: "unavailable", flag: "--authoritative", query: "true", status: 503, hint: true},
-		{name: "rejected parameter", flag: "--authoritative", query: "true", status: 422, hint: true,
+		{name: "unavailable", status: 503, hint: true},
+		{name: "rejected parameter", status: 422, hint: true,
 			body: `{"detail":"repository read failed","errors":[{"message":"unknown query parameter","location":"query.authoritative"}]}`},
-		{name: "unrelated validation", flag: "--authoritative", query: "true", status: 422,
+		{name: "unrelated validation", status: 422,
 			body: `{"detail":"repository read failed","errors":[{"message":"expected a ULID","location":"path.repo_id"}]}`},
-		{name: "forbidden", flag: "--authoritative", query: "true", status: 403},
-		{name: "missing", flag: "--authoritative", query: "true", status: 404},
+		{name: "forbidden", status: 403},
+		{name: "missing", status: 404},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var calls atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				assert.Equal(t, tc.query, r.URL.Query().Get("authoritative"))
-				assert.Equal(t, tc.query != "", r.URL.Query().Has("authoritative"))
-				if tc.status != 0 {
-					w.Header().Set("Content-Type", "application/problem+json")
-					w.WriteHeader(tc.status)
-					if tc.body != "" {
-						fmt.Fprint(w, tc.body)
-					} else {
-						fmt.Fprintf(w, `{"status":%d,"detail":"repository read failed"}`, tc.status)
-					}
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"id":%q,"name":"web","owningProjectId":%q,"capabilities":{"canManage":false,"canPush":false,"canPull":true}}`, testDeleteULID, testProjectULID)
-			}))
-			defer srv.Close()
-			args := []string{testDeleteULID}
-			if tc.flag != "" {
-				args = append(args, tc.flag)
-			}
-			_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, args...)
-			if tc.status != 0 {
-				require.Error(t, err)
-				var silent *SilentError
-				if !errors.As(err, &silent) {
-					stderr += err.Error()
-				}
-				// The server's own message reaches the user either way.
-				require.Contains(t, stderr, "repository read failed")
-				if tc.hint {
-					require.Contains(t, stderr, "entire repo view "+testDeleteULID+" to inspect")
-					require.Contains(t, stderr, "without a readiness check")
+			fail := func(w http.ResponseWriter) bool {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					fmt.Fprint(w, tc.body)
 				} else {
-					require.NotContains(t, stderr, "readiness check")
+					fmt.Fprintf(w, `{"status":%d,"detail":"repository read failed"}`, tc.status)
 				}
-				if tc.hint && tc.status == 422 {
-					require.Contains(t, stderr, "query.authoritative")
-					require.Contains(t, stderr, "unknown query parameter")
-				}
-				// The plain read is the default; naming a flag value would send
-				// the user to restate one they never had to pass.
-				require.NotContains(t, stderr, "--authoritative=false")
-				require.NotContains(t, stderr, "--no-wait")
-			} else {
-				require.NoError(t, err)
+				return true
 			}
-			require.EqualValues(t, 1, calls.Load(), "no silent fallback")
+
+			// Without the flag the view still prints — losing it costs more
+			// than a dashed STATUS — but the failure is DISCLOSED. Silence let
+			// a core outage downgrade every `repo view` to a table asserting
+			// nothing was wrong, at exit 0.
+			srv, _ := serveRepoView(t, repoBody, fail)
+			out, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID)
+			require.NoError(t, err, "a failed readiness read must not sink the view")
+			require.Contains(t, out, "/et/acme/web")
+			require.Contains(t, stderr, "could not confirm provisioning state")
+			// The --authoritative recovery hint stays out of the flagless path:
+			// it tells the reader to drop a flag they never passed.
+			require.NotContains(t, stderr, "to inspect repository details")
+
+			srv, _ = serveRepoView(t, repoBody, fail)
+			_, stderr, err = runCoreCmd(t, newRepoViewCmd, srv.URL, testDeleteULID, "--authoritative")
+			require.Error(t, err)
+			var silent *SilentError
+			if !errors.As(err, &silent) {
+				stderr += err.Error()
+			}
+			// The server's own message reaches the user either way.
+			require.Contains(t, stderr, "repository read failed")
+			if tc.hint {
+				require.Contains(t, stderr, "entire repo view "+testDeleteULID+" to inspect")
+				require.Contains(t, stderr, "without a readiness check")
+			} else {
+				require.NotContains(t, stderr, "readiness check")
+			}
+			if tc.hint && tc.status == 422 {
+				require.Contains(t, stderr, "query.authoritative")
+				require.Contains(t, stderr, "unknown query parameter")
+			}
+			// The plain read is the default; naming a flag value would send the
+			// user to restate one they never had to pass.
+			require.NotContains(t, stderr, "--authoritative=false")
+			require.NotContains(t, stderr, "--no-wait")
 		})
 	}
 }

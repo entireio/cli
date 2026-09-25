@@ -294,7 +294,7 @@ func renderNativeMirrorCreateError(err error, ref, clusterSlug string) error {
 	if !strings.Contains(detail, "being deleted") {
 		return rendered
 	}
-	return fmt.Errorf("%w; a previous mirror of %s on %s is still being torn down \u2014 wait for it to disappear from `entire repo mirror get %s`, then add it again",
+	return fmt.Errorf("%w; a previous mirror of %s on %s is still being torn down \u2014 wait for it to disappear from `entire repo view %s`, then add it again",
 		rendered, ref, clusterSlug, ref)
 }
 
@@ -400,53 +400,146 @@ func regionHosts(regions []regionChoice) []string {
 	return out
 }
 
-// runNativeMirrorGet is `repo mirror get /et/<project>/<repo>`: the repo's
-// identity, then every cluster holding a copy of it.
+// runNativeRepoView is `repo view` for an Entire-native repo: its identity,
+// then every cluster holding a copy of it.
 //
 // The view joins two reads because neither is complete on its own: the repo
 // carries its primary placement, and /native-mirrors lists only the ADDITIONAL
 // ones. It deliberately does not go through the /repos directory that the
 // GitHub path uses — only this endpoint carries stage and lastError, the two
 // fields that say anything useful about a placement that is stuck.
-func runNativeMirrorGet(cmd *cobra.Command, ref mirrorRepoRef) error {
-	name := nativeRefOf(ref)
-	return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-		repo, clusters, err := loadNativeRepo(ctx, c, ref)
+//
+// The ref is resolved by the shared repo resolver, so every spelling `repo
+// view` has always taken reaches this view: the /et/<project>/<repo> path, a
+// bare name with --project, and a repo ULID.
+//
+// clusterHost is empty for every one of those, which name no cluster and so
+// resolve on the active context's core. An entire:// clone URL names one, and
+// is resolved there instead (coreRunnerFor).
+func runNativeRepoView(cmd *cobra.Command, ref, project, clusterHost string, authoritative bool) error {
+	return coreRunnerFor(clusterHost)(cmd, func(ctx context.Context, c *coreapi.Client) error {
+		resolved, err := resolveRepoRefResolved(ctx, c, ref, project)
 		if err != nil {
 			return err
 		}
+		repoID := resolved.ID
+		repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+		if err != nil {
+			return err
+		}
+		cat, err := c.ListClusters(ctx)
+		if err != nil {
+			return err
+		}
+		clusters := cat.Clusters
 		mirrors, err := listNativeMirrors(ctx, c, repo.ID)
 		if err != nil {
 			return err
+		}
+		// The name is the server's, never a ref rebuilt from what the user
+		// typed: `repo view` also takes a ULID and a bare name, neither of which
+		// spells the /et/<project>/<repo> form the other verbs want back, and
+		// echoing the typed path beside whatever ULID resolved reads as success
+		// even when the two disagree (COR-1892).
+		//
+		// Two server answers, most specific first. The repo's own path is
+		// absent in the seconds after create, before the coordinates the create
+		// response already carried reach the registry; the resolution that
+		// found this repo carries the server's full name for it and covers that
+		// window. A ULID ref looked nothing up, so neither exists and the bare
+		// name is all there is.
+		name := strings.TrimSpace(repo.Path.Or(""))
+		if name == "" {
+			name = resolved.Name
+		}
+		if name == "" {
+			name = repo.Name
 		}
 		// A plain repo read leaves `state` unset, which would dash the one cell
 		// in this table that says whether the primary is usable — and a dashed
 		// primary next to a "ready" mirror reads as broken. The authoritative
 		// read is the one that answers it (the same flag `repo view` exposes).
 		//
-		// Only `state` is taken from it, never the whole repo: an authoritative
-		// lifecycle response can omit clusterSlug and path (see the fixture in
-		// repo_readiness_test.go), and swapping the object wholesale would drop
-		// the primary placement and every clone URL this view exists to show.
-		// Best-effort for the same reason it is narrow — a registry-only
-		// fallback cannot answer the readiness question, and a dash is a better
-		// trade than losing the table.
-		if authoritative, aerr := c.GetRepo(ctx, coreapi.GetRepoParams{
+		// Only the lifecycle pair is taken from it, never the whole repo: an
+		// authoritative lifecycle response can omit clusterSlug and path (see
+		// the fixture in repo_readiness_test.go), and swapping the object
+		// wholesale would drop the primary placement and every clone URL this
+		// view exists to show. Best-effort for the same reason it is narrow — a
+		// registry-only fallback cannot answer the readiness question, and a
+		// dash is a better trade than losing the table.
+		auth, aerr := c.GetRepo(ctx, coreapi.GetRepoParams{
 			RepoId:        repo.ID,
 			Authoritative: coreapi.NewOptBool(true),
-		}); aerr == nil {
-			if state, ok := authoritative.State.Get(); ok {
+		})
+		switch {
+		case aerr == nil:
+			// State and reason are one answer: the reason is why the state is
+			// what it is, and it is all the STATUS cell has to explain a primary
+			// that failed. Taking the state fresh and the reason from the plain
+			// read would pair them across two moments — so they move together,
+			// including when the fresh answer carries no reason at all
+			// (retainRepoCreation replaces the field for the same reason).
+			if state, ok := auth.State.Get(); ok {
 				repo.State = coreapi.NewOptString(state)
+				repo.ProvisionReason = auth.ProvisionReason
 			}
+		case errors.Is(aerr, context.Canceled), errors.Is(aerr, context.DeadlineExceeded):
+			// An interrupted read is not a readiness answer, so it is never
+			// swallowed the way a server that cannot answer is: without this the
+			// default (flagless) path printed a table built on the plain read's
+			// stale state and exited 0, reporting success for a command the user
+			// stopped.
+			return aerr
+		case authoritative && readinessCheckUnavailable(aerr):
+			// --authoritative is the caller saying the readiness answer is the
+			// point of the command, so a registry-only fallback that cannot give
+			// one is an error rather than a dashed cell. Print here so
+			// renderCoreError cannot strip the recovery hint with the API error
+			// wrapper; the plain read is the default, so the hint names no flag.
+			fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo view %s to inspect repository details without a readiness check.\n", renderRepoReadError(aerr), repoID)
+			return NewSilentError(aerr)
+		case authoritative:
+			// Any other failure of the authoritative read is a real error under
+			// the flag, and reads better as itself than as a readiness hint.
+			return aerr
+		default:
+			// Without the flag the table still renders — losing it costs more
+			// than a dashed cell — but the failure is disclosed. Silence here
+			// let a core outage downgrade every `repo view` to a table that
+			// asserts nothing is wrong, at exit 0; fetchRepoDirCatalog refuses
+			// exactly that trade for the same reason.
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not confirm provisioning state: %v\nThe primary's STATUS is unknown; pass --authoritative to fail instead.\n", renderRepoReadError(aerr))
 		}
 		row := nativeRepoDetailRow(name, repo, mirrors, clusters)
 		if jsonRequested(cmd) {
 			return printJSON(cmd.OutOrStdout(), row)
 		}
 		renderRepoDetail(cmd.OutOrStdout(), row)
-		reportNativeMirrorNotes(cmd.ErrOrStderr(), mirrors)
+		reportNativeMirrorNotes(cmd.ErrOrStderr(), repo, mirrors, clusterHostBySlug(clusters))
 		return nil
 	})
+}
+
+// primaryPlacementStatus renders a repo's own lifecycle state in the vocabulary
+// the rest of the STATUS column speaks. A repo says "active" where a placement
+// says "ready", and "provisioning" where one says "processing": the same two
+// facts under two names, which in a single column reads as a difference that is
+// not there.
+//
+// An unrecognised value passes through unchanged. State is an open string on
+// the wire, so translating one the server added later would be a guess printed
+// as fact — and the mapping lives on the FIELD, not the rendering, so --json
+// and `mirror list --status ready` agree with the table rather than needing
+// the repo vocabulary nobody else uses.
+func primaryPlacementStatus(state string) string {
+	switch state {
+	case repoStateActive:
+		return string(coreapi.NativeMirrorPlacementStatusReady)
+	case repoStateProvisioning:
+		return string(coreapi.NativeMirrorPlacementStatusProcessing)
+	default:
+		return state
+	}
 }
 
 // nativeRepoDetailRow shapes a native repo and its mirrors into the same row
@@ -454,36 +547,72 @@ func runNativeMirrorGet(cmd *cobra.Command, ref mirrorRepoRef) error {
 // --json shape. The primary comes first; the mirrors follow in slug order.
 func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.NativeMirrorPlacement, clusters []coreapi.Cluster) repoDirRow {
 	hostBySlug := clusterHostBySlug(clusters)
+	// The catalog is the source of truth for a cluster's host, because the
+	// record and the catalog drift. But falling to "" on a catalog miss made
+	// `repo view` report no clone URL for a repo `repo clone` and `repo create
+	// --json` both resolve from repo.ClusterHost — one repo, two answers. The
+	// record is the fallback, and only through validateClusterHost: an
+	// unvalidated host in a pasted clone URL is the spoofing risk this view
+	// refuses to hand out.
 	cloneURL := func(slug string) string {
-		host, path := hostBySlug[slug], strings.TrimSpace(repo.Path.Or(""))
-		if host == "" || path == "" {
+		path := strings.TrimSpace(repo.Path.Or(""))
+		if path == "" {
+			return ""
+		}
+		host := hostBySlug[slug]
+		if host == "" && slug == repo.ClusterSlug.Or("") {
+			if recorded := strings.TrimSpace(repo.ClusterHost.Or("")); validateClusterHost(recorded) == nil {
+				host = recorded
+			}
+		}
+		if host == "" {
 			return ""
 		}
 		return entireCloneURLScheme + host + "/" + strings.TrimPrefix(path, "/")
+	}
+
+	jurisdictionOf := func(slug string) string {
+		if cl, ok := clusterBySlug(clusters, slug); ok {
+			return cl.Jurisdiction
+		}
+		return ""
 	}
 
 	placements := make([]repoDirPlacement, 0, len(mirrors)+1)
 	if primary := repo.ClusterSlug.Or(""); primary != "" {
 		// The primary has no placement record of its own here, so its status is
 		// the repo's provisioning state — the same question, answered by the
-		// only field that answers it.
+		// only field that answers it, in the column's own vocabulary.
 		placements = append(placements, repoDirPlacement{
-			Cluster:  primary,
-			Status:   repo.State.Or("-"),
-			Role:     placementRolePrimary,
-			CloneURL: cloneURL(primary),
+			Cluster:      placementCluster(hostBySlug, primary),
+			ClusterSlug:  primary,
+			Jurisdiction: jurisdictionOf(primary),
+			Status:       primaryPlacementStatus(repo.State.Or("")),
+			Role:         placementRolePrimary,
+			CloneURL:     cloneURL(primary),
 		})
 	}
+	// Sorted by the CLUSTER cell itself, which is what a reader follows — the
+	// GitHub half of this shared table sorts on the same value. Ordering by the
+	// slug put the rows in a sequence unrelated to the column displayed; so
+	// does ordering by the raw host, because placementCluster falls back to the
+	// slug when the catalog has no host, and then the key and the cell are
+	// different strings. The slug breaks ties for determinism.
 	sorted := slices.Clone(mirrors)
 	slices.SortFunc(sorted, func(a, b coreapi.NativeMirrorPlacement) int {
+		if c := strings.Compare(placementCluster(hostBySlug, a.ClusterSlug), placementCluster(hostBySlug, b.ClusterSlug)); c != 0 {
+			return c
+		}
 		return strings.Compare(a.ClusterSlug, b.ClusterSlug)
 	})
 	for _, m := range sorted {
 		p := repoDirPlacement{
-			Cluster:  m.ClusterSlug,
-			Status:   string(m.Status),
-			Role:     placementRoleNativeMirror,
-			CloneURL: cloneURL(m.ClusterSlug),
+			Cluster:      placementCluster(hostBySlug, m.ClusterSlug),
+			ClusterSlug:  m.ClusterSlug,
+			Jurisdiction: jurisdictionOf(m.ClusterSlug),
+			Status:       string(m.Status),
+			Role:         placementRoleMirror,
+			CloneURL:     cloneURL(m.ClusterSlug),
 		}
 		if m.Status == coreapi.NativeMirrorPlacementStatusProcessing {
 			p.Stage = string(m.Stage)
@@ -491,10 +620,29 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 		p.Removing = m.DesiredState == coreapi.NativeMirrorPlacementDesiredStateDeleted
 		placements = append(placements, p)
 	}
+	// The project's NAME comes out of the repo's own path, which already spells
+	// it — the repo record carries only the owning project's ULID, and resolving
+	// that to a name would cost a round trip to print something the path in the
+	// row above already shows.
+	project, _, perr := parseNativeCloneRef(name)
+	if perr != nil {
+		project = ""
+	}
 	return repoDirRow{
-		Repo:       name,
-		Private:    strings.EqualFold(repo.Visibility.Or(""), "private"),
-		Placements: placements,
+		Repo:    name,
+		Private: visibilityOf(repo.Visibility.Or("")),
+		// The same fold the GitHub path applies. Leaving it unset emitted
+		// `"status": ""` for a repo whose placements plainly agreed, which is
+		// half of a row shape the two forges are supposed to share.
+		Status: sharedPlacementStatus(placements),
+		ID:     repo.ID,
+		// The repo's own lifecycle word, unmapped. A repo with no placement
+		// yet has one of these and no status at all, so this is what tells a
+		// failed repo from a read that landed too early.
+		State:           strings.TrimSpace(repo.State.Or("")),
+		Project:         project,
+		ProvisionReason: strings.TrimSpace(repo.ProvisionReason.Or("")),
+		Placements:      placements,
 	}
 }
 
@@ -502,10 +650,22 @@ func nativeRepoDetailRow(name string, repo *coreapi.Repo, mirrors []coreapi.Nati
 // own reason for a placement that is not healthy. It goes to stderr so a piped
 // table or --json stays clean, and names the cluster so a multi-placement repo
 // stays legible.
-func reportNativeMirrorNotes(w io.Writer, mirrors []coreapi.NativeMirrorPlacement) {
+func reportNativeMirrorNotes(w io.Writer, repo *coreapi.Repo, mirrors []coreapi.NativeMirrorPlacement, hostBySlug map[string]string) {
+	// The primary's equivalent of a mirror's lastError: the STATUS cell says a
+	// repo failed to provision, and this is the only place that says why.
+	if reason := strings.TrimSpace(repo.ProvisionReason.Or("")); reason != "" {
+		// A repo that never got placed has no cluster to name, and prefixing
+		// the one line carrying the failure reason with ": " loses its subject
+		// without gaining one.
+		if cluster := placementCluster(hostBySlug, repo.ClusterSlug.Or("")); cluster != "" {
+			fmt.Fprintf(w, "%s: %s\n", cluster, reason)
+		} else {
+			fmt.Fprintln(w, reason)
+		}
+	}
 	for _, m := range mirrors {
 		if detail := strings.TrimSpace(m.LastError.Or("")); detail != "" {
-			fmt.Fprintf(w, "%s: %s\n", m.ClusterSlug, detail)
+			fmt.Fprintf(w, "%s: %s\n", placementCluster(hostBySlug, m.ClusterSlug), detail)
 		}
 	}
 }

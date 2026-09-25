@@ -413,18 +413,10 @@ func runCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []st
 	return runCore(cmd, renderCoreObject(cmd, headers, row, fn))
 }
 
-// runCoreObjectForCluster is runCoreObject for a resource-provider command (see
-// runCoreForCluster): identical field/JSON rendering, but dialing the core that
-// fronts clusterHost rather than the active context.
-func runCoreObjectForCluster[T any](cmd *cobra.Command, clusterHost string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) error {
-	return runCoreForCluster(cmd, clusterHost, renderCoreObject(cmd, headers, row, fn))
-}
-
-// renderCoreObject builds the run-function shared by runCoreObject and
-// runCoreObjectForCluster: fetch via fn, then render as a field/value list
-// (default) or raw JSON (--json). Kept separate from the client-selection so
-// the two object variants differ only in which core they dial (mirroring
-// renderCoreList).
+// renderCoreObject builds the run-function runCoreObject uses: fetch via fn,
+// then render as a field/value list (default) or raw JSON (--json). Kept
+// separate from the client-selection so a caller that must dial a specific
+// cluster's core can reuse the rendering (mirroring renderCoreList).
 func renderCoreObject[T any](cmd *cobra.Command, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) (*T, error)) func(context.Context, *coreapi.Client) error {
 	return func(ctx context.Context, c *coreapi.Client) error {
 		item, err := fn(ctx, c)
@@ -660,6 +652,21 @@ func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx conte
 	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
 		return clusterCoreClient(ctx, clusterHost)
 	}, fn)
+}
+
+// coreRunnerFor picks which core a ref is resolved on. Most refs name no
+// cluster and resolve on the active context's; a clone URL names its own, and
+// is resolved on the core fronting it — that is the whole reason the URL form
+// exists, since a repo in another federation is invisible to the active
+// context's core. Shared by the two record views so both forges answer a clone
+// URL the same way.
+func coreRunnerFor(clusterHost string) func(*cobra.Command, func(context.Context, *coreapi.Client) error) error {
+	if clusterHost == "" {
+		return runCore
+	}
+	return func(cmd *cobra.Command, fn func(context.Context, *coreapi.Client) error) error {
+		return runCoreForCluster(cmd, clusterHost, fn)
+	}
 }
 
 // runCoreClient owns the control-plane preamble shared by the active-context

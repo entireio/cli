@@ -193,10 +193,9 @@ the commands are always runnable in every build.
   `repo mirror list` already make to map slugs to hosts) sorted by region then
   slug. The table's columns are the values other commands take: REGION is the
   jurisdiction slug behind `org create --region` and `project create
-  --region`; CLUSTER is the placement slug `repo mirror list --cluster` filters
-  on and the key the native-mirror API is addressed by; HOST is the bare public
-  host every targeting `--cluster` takes (`repo mirror add`/`remove`, `repo
-  clone`, `repo remote add`), reduced through
+  --region`; CLUSTER is the catalog slug the native-mirror API is addressed by;
+  HOST is the bare public host every targeting `--cluster` takes (`repo mirror
+  add`/`remove`, `repo clone`, `repo remote add`), reduced through
   `hostFromPublicURL` so a publicUrl that fails validation renders `-` rather
   than a spoofable host. It is also what goes into an `entire://` clone URL and
   what `runCoreForCluster` dials. `--json` is the wire model, `apiUrl` and `isDefault`
@@ -231,9 +230,12 @@ the commands are always runnable in every build.
   same coordinate the `entire://` URL carries and `runCoreForCluster` dials. The
   native-mirror API is keyed by the catalog *slug* instead, so the native path
   resolves host → slug through one `GET /clusters` rather than asking for a
-  second spelling. `repo mirror list --cluster` is the exception and predates
-  this: it is a filter the server resolves, and takes either. Settling the CLI
-  on one spelling is worth doing on its own; it is not this change.
+  second spelling. `repo mirror list --cluster` takes the host too, and
+  must: it is a **client-side** filter over the rows that command prints, so it
+  can only match the spelling its CLUSTER column carries — naming a host there
+  returned "No repos found" for as long as that column printed a slug.
+  `entire cluster list` is now the last place a column headed CLUSTER prints a
+  slug; settling that is worth doing on its own and is not this change.
   `repo create` takes no cluster at all: a repo's home cluster is the primary
   cell of its owning project's region.
   `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
@@ -245,7 +247,7 @@ the commands are always runnable in every build.
   branch without the flag never lowers it and `--server-side-merge-only=false`
   is the explicit way down. A short branch name expands to `refs/heads/`,
   `HEAD` and `refs/...` pass through. The `mirror` subtree is
-  server-side (`add`, `list`, `get`, `remove`; `add` and `remove` name clusters
+  server-side (`add`, `list`, `remove`; `add` and `remove` name clusters
   with `--cluster <host>`, repeatable or comma-separated, and place or tear down
   every named cluster in parallel through one engine — `mirrorTargets` →
   `createMirrors`/`removeMirrors` → a summary table — so a one-shot verb reports
@@ -288,7 +290,7 @@ the commands are always runnable in every build.
   its only record. Saving it under a second remote the caller never named was
   the previous design, and its failure mode was a name collision that reported
   a clean ✓ over a URL that had left git config for good.
-  There is no URL-printing verb: `repo mirror get` already lists a clone URL per
+  There is no URL-printing verb: `repo view` already lists a clone URL per
   cluster for both forges, in a table and in `--json`.
   `remote add` and `clone` choose a placement through the shared
   `selectPlacement` picker, each passing its own `placementPicker` wording. The
@@ -380,9 +382,10 @@ the commands are always runnable in every build.
   and branch on what they get, and `repo grant list` serves both as well, so
   `unsupportedForgeErr` is reached only by the tests that pin the refusal — the
   parser keeps the narrowing because it is its contract, not because a caller
-  exercises it. `repo mirror get` takes a mirror ULID or an
-  `entire://` clone URL besides, since those address a placement rather than
-  name a repo.
+  exercises it. `repo view` takes a repo ULID, a bare name with `--project`, and
+  an `entire://` clone URL besides — the URL because it is the only form naming
+  its own cluster, so it is the only one that reaches a repo in another
+  federation.
   `clone`
   accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
   ref, or a full `entire://` URL passed through verbatim. **Every ref names its
@@ -410,7 +413,30 @@ the commands are always runnable in every build.
   or repo can be *named* like a ULID, so path segments never touch the
   `looksLikeULID` passthrough). The other two clone shapes are not: a `/gh/`
   mirror ref is refused there (a mirror is in no project, so it is addressed by
-  ULID), and an `entire://` URL is not parsed at all.
+  ULID), and an `entire://` URL is not parsed at all. `repo view` serves both
+  anyway, by routing on the ref before the resolver is reached: a `/gh/` ref
+  goes to the mirror directory, and an `entire://` URL to the core fronting the
+  cluster it names — in **either** forge, since the CLONE URL column prints the
+  native `entire://<host>/et/<project>/<repo>` form and a URL a view prints has
+  to be one it takes back. `parseEntireCloneURL` reads the path with
+  `parseMirrorRepoRef`, the same grammar the bare refs take, so a URL and the
+  ref it was built from can never disagree about what a name may contain —
+  a trailing `.git` included, which is part of a native name and decoration on
+  a `/gh/` one. `--authoritative` and `--project` say nothing about a GitHub
+  upstream — Entire holds no repo record for one — so the `/gh/` route warns
+  that it ignored them rather than exiting 0 with the check the flag promised
+  never performed.
+  `repo view --json` emits the `repoDirRow` shape `mirror list --json` uses, so
+  both forges answer one way. Three consequences a consumer must be told about,
+  because two of them keep a key's name while changing what it holds:
+  `placements[].cluster` is the public **host** where it used to be the catalog
+  slug (the slug moved to `placements[].clusterSlug`, so nothing is lost);
+  `.state` is the repo's own lifecycle word and `placements[].status` the
+  placement vocabulary, which are **different spellings of related facts**
+  (`active` there is `ready` here) and so are both carried rather than one
+  folded into the other; and `.private` is **absent** when the server stated no
+  visibility, because an absent field must not read as `false` on a question
+  asked to confirm a repo is restricted.
   Every `<project>/<repo>` name pair resolves through **one** call,
   `POST /repos/resolve` (`resolveNativeRepoByPath`), because that route needs
   `repo#pull` alone. The project-scoped routes (`GET /projects?name=`,

@@ -451,7 +451,7 @@ func TestRepoRemoteAddCmd_ArgValidation(t *testing.T) {
 
 // `add` is the whole `repo remote` surface: it must be reachable, visible, and
 // the only verb there — the URL-printing half was removed in favour of
-// `entire repo mirror get`, which lists a clone URL per cluster.
+// `entire repo view`, which lists a clone URL per cluster.
 func TestRepoRemoteCmd_AddIsTheOnlyVerb(t *testing.T) {
 	t.Parallel()
 	names := make([]string, 0, 1)

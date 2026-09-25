@@ -353,13 +353,13 @@ func TestRepoGrantList_GuessedClusterSaysSo(t *testing.T) {
 		_, _, err := runCoreCmd(t, newRepoGrantCmd, invisible.URL, "list", "/gh/acme/widget")
 		require.ErrorContains(t, err, "is visible to this login")
 		require.ErrorContains(t, err, "--context acts as one",
-			"`repo mirror get` reads a narrower directory, so it cannot answer what the placements lookup could not")
-		require.NotContains(t, err.Error(), "entire repo mirror get")
+			"`repo view` reads a narrower directory, so it cannot answer what the placements lookup could not")
+		require.NotContains(t, err.Error(), "entire repo view")
 
 		var dialPaths []string
 		undialable := grantActiveCoreServer(t, &dialPaths, "https://eu.example/mirrors")
 		_, _, err = runCoreCmd(t, newRepoGrantCmd, undialable.URL, "list", "/gh/acme/widget")
-		require.ErrorContains(t, err, "entire repo mirror get /gh/acme/widget",
+		require.ErrorContains(t, err, "entire repo view /gh/acme/widget",
 			"placements resolved, so the verb that lists them can answer")
 	})
 }
