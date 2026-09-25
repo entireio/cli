@@ -521,6 +521,121 @@ await handlers.event({
 	}
 }
 
+// TestPlugin_V2SetupSpawnsHooksUnderNode is the OpenCode 2 counterpart to the
+// V1 canary above. OpenCode 2 does not load the V1 hook map, so the generated
+// plugin must default-export `{ id, setup }`. This loads that default export
+// under Node, drives the V2 event stream and session hooks, and asserts the
+// same lifecycle hooks fire.
+func TestPlugin_V2SetupSpawnsHooksUnderNode(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	ag := &OpenCodeAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	pluginPath, err := filepath.Abs(filepath.Join(dir, ".opencode", "plugins", "entire.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(dir, "hook-ran.txt")
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeEntire := filepath.Join(binDir, "entire")
+	script := "#!/bin/sh\n" +
+		"echo \"$3\" >> " + markerPath + "\n" +
+		"cat >/dev/null\n"
+	if err := os.WriteFile(fakeEntire, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	driverPath := filepath.Join(dir, "canary-v2.mjs")
+	driver := `
+import { pathToFileURL } from "node:url"
+
+const pluginPath = process.argv[2]
+const { default: plugin } = await import(pathToFileURL(pluginPath).href)
+if (typeof plugin !== "object" || plugin.id !== "entire" || typeof plugin.setup !== "function") {
+  throw new Error("default export is not a V2 plugin definition with id + setup")
+}
+if (typeof plugin.server !== "function") {
+  throw new Error("default export is missing the V1 server() factory")
+}
+
+const queue = []
+let notify
+const events = {
+  [Symbol.asyncIterator]() {
+    return {
+      next: () =>
+        queue.length
+          ? Promise.resolve({ value: queue.shift(), done: false })
+          : new Promise((resolve) => {
+              notify = () => resolve({ value: queue.shift(), done: false })
+            }),
+      return: () => Promise.resolve({ value: undefined, done: true }),
+    }
+  },
+}
+const hooks = {}
+const ctx = {
+  location: { directory: process.cwd() },
+  event: { subscribe: () => events },
+  session: {
+    hook: async (name, cb) => {
+      hooks[name] = cb
+      return { dispose: async () => {} }
+    },
+  },
+}
+await plugin.setup(ctx)
+if (typeof hooks.prompt !== "function" || typeof hooks.context !== "function") {
+  throw new Error("setup did not register the prompt/context session hooks")
+}
+
+const push = (event) => {
+  queue.push(event)
+  if (notify) notify()
+}
+
+push({ type: "session.created", data: { sessionID: "sess-v2" } })
+await new Promise((resolve) => setTimeout(resolve, 50))
+hooks.prompt({ sessionID: "sess-v2", messageID: "msg-1", prompt: { text: "hello entire" } })
+hooks.context({ model: { id: "test-model" }, system: [] })
+push({ type: "session.idle", data: { sessionID: "sess-v2" } })
+await new Promise((resolve) => setTimeout(resolve, 200))
+`
+	if err := os.WriteFile(driverPath, []byte(driver), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pluginPath)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node V2 canary failed: %v\n%s", err, out)
+	}
+
+	got, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("hook never spawned (marker missing): %v\nnode output:\n%s", err, out)
+	}
+	marker := string(got)
+	for _, want := range []string{"session-start", "turn-start", "turn-end"} {
+		if !strings.Contains(marker, want) {
+			t.Fatalf("expected %s in marker, got %q\nnode output:\n%s", want, marker, out)
+		}
+	}
+}
+
 // legacyLocalDevRender reproduces the plugin the removed local-dev mode wrote: the
 // same template, but shelling out to a launcher script inside the working tree.
 func legacyLocalDevRender() string {
