@@ -97,7 +97,7 @@ const trailMergeabilityWireJSON = `{
   }
 }`
 
-const trailMergeabilityDetailJSON = `{"id": "trl_1", "number": 7, "branch": "feature/x", "base": "main", "title": "T", "status": "open",
+const trailMergeabilityDetailJSON = `{"$schema": "https://cell.example/api/v1/schemas/TrailDetailResponse.json", "id": "trl_1", "number": 7, "branch": "feature/x", "base": "main", "title": "T", "status": "open",
   "body_document": {"text_snapshot": "detail body"},
   "mergeability": ` + trailMergeabilityWireJSON + `}`
 
@@ -141,8 +141,8 @@ func runTrailShowForMergeabilityTest(t *testing.T, srv *httptest.Server, selecto
 	return out.String(), errOut.String(), err
 }
 
-// --json is the detail resource exactly as served plus the synthesized url,
-// on both selector paths: a number resolves through the detail route
+// --json is the detail resource as served, minus "$schema", plus the
+// synthesized url, on both selector paths: a number resolves through the detail route
 // directly, a branch resolves through the list (a different, smaller shape)
 // and then fetches the detail.
 func TestRunTrailShowJSONIsTheDetailResourcePlusURL(t *testing.T) {
@@ -150,6 +150,7 @@ func TestRunTrailShowJSONIsTheDetailResourcePlusURL(t *testing.T) {
 
 	var want map[string]any
 	require.NoError(t, json.Unmarshal([]byte(trailMergeabilityDetailJSON), &want))
+	delete(want, "$schema")
 	want["url"] = "https://entire.test/gh/acme/repo/trails/7"
 	wantJSON, err := json.Marshal(want)
 	require.NoError(t, err)

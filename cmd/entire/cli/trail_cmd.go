@@ -198,7 +198,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 		},
 	}
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail detail as JSON, exactly as the API serves it plus the trail's browser url")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail detail as JSON, as the API serves it plus the trail's browser url")
 	return cmd
 }
 
@@ -286,10 +286,11 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	return nil
 }
 
-// writeTrailDetailJSON writes `trail show --json`: the detail resource exactly
-// as entire-api served it, with one synthesized field — the trail's browser
-// url, which the API does not return. The field is additive-only, so a url
-// the server starts sending wins.
+// writeTrailDetailJSON writes `trail show --json`: the detail resource as
+// entire-api served it, minus the response's "$schema" pointer (metadata about
+// the payload, not trail data), plus one synthesized field — the trail's
+// browser url, which the API does not return. The url is additive-only, so a
+// url the server starts sending wins.
 func writeTrailDetailJSON(w io.Writer, detail *api.TrailResource, forge, owner, repo string) error {
 	obj, err := mergeSynthesizedFieldRaw(detail.Raw, "url", func() string {
 		return trailDisplayURL(*detail, forge, owner, repo)
@@ -297,6 +298,7 @@ func writeTrailDetailJSON(w io.Writer, detail *api.TrailResource, forge, owner, 
 	if err != nil {
 		return fmt.Errorf("failed to encode JSON: %w", err)
 	}
+	delete(obj, "$schema")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	// Keep server strings byte-for-byte rather than \u-escaping &, <, and >.
