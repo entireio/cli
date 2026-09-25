@@ -96,18 +96,22 @@ func otherBaselineWorktrees(ctx context.Context, sessionID string) []baselineWor
 }
 
 // read returns the first copy of the baseline file found and the worktree it
-// came from ("" for the hook's own tree). A missing file is (nil, "", nil).
+// came from ("" for the hook's own tree). A copy that cannot be read does not
+// end the search: a later worktree may hold the real one. Nothing found is
+// (nil, "", nil), or the first read error when a copy existed but could not
+// be read.
 func (s baselineSearch) read(ctx context.Context, name string) ([]byte, string, error) {
+	var firstErr error
 	for _, root := range s {
 		data, err := readBaselineIn(ctx, root, name)
 		if err == nil {
 			return data, root, nil
 		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, "", err
+		if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil, "", nil
+	return nil, "", firstErr
 }
 
 func readBaselineIn(ctx context.Context, worktree, name string) ([]byte, error) {

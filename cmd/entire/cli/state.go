@@ -70,13 +70,17 @@ type PrePromptState struct {
 	// capturedIn is the other worktree this baseline was loaded from, or "" when
 	// it describes the hook's own tree.
 	capturedIn string
+
+	// unreadable marks a baseline that exists but could not be read.
+	unreadable bool
 }
 
 // NewFilesUndetectable reports that this baseline cannot tell the hook's tree's
-// pre-existing untracked files from new ones: the scan was skipped, or it
-// describes the worktree the agent has since moved away from.
+// pre-existing untracked files from new ones: the scan was skipped, the
+// baseline could not be read, or it describes the worktree the agent has since
+// moved away from.
 func (s *PrePromptState) NewFilesUndetectable() bool {
-	return s != nil && (s.UntrackedScanSkipped || s.capturedIn != "")
+	return s != nil && (s.UntrackedScanSkipped || s.unreadable || s.capturedIn != "")
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -192,9 +196,13 @@ func LoadPrePromptState(ctx context.Context, sessionID string) (*PrePromptState,
 		return nil, fmt.Errorf("invalid session ID for pre-prompt state: %w", err)
 	}
 
+	// A baseline that exists but cannot be read still means "not this turn's
+	// work": callers get an unreadable state alongside the error, so new-file
+	// detection degrades instead of claiming every untracked file.
+	unreadable := &PrePromptState{SessionID: sessionID, unreadable: true}
 	data, capturedIn, err := turnBaselineSearch(ctx, sessionID).read(ctx, prePromptStateName(sessionID))
 	if err != nil {
-		return nil, fmt.Errorf("failed to read state file: %w", err)
+		return unreadable, fmt.Errorf("failed to read state file: %w", err)
 	}
 	if data == nil {
 		return nil, nil //nolint:nilnil // already present in codebase
@@ -202,7 +210,7 @@ func LoadPrePromptState(ctx context.Context, sessionID string) (*PrePromptState,
 
 	var state PrePromptState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+		return unreadable, fmt.Errorf("failed to unmarshal state: %w", err)
 	}
 	state.capturedIn = capturedIn
 
@@ -615,11 +623,14 @@ type PreTaskState struct {
 	// capturedIn is the other worktree this baseline was loaded from, or "" when
 	// it describes the hook's own tree.
 	capturedIn string
+
+	// unreadable marks a baseline that exists but could not be read.
+	unreadable bool
 }
 
 // NewFilesUndetectable is PrePromptState.NewFilesUndetectable for a task.
 func (s *PreTaskState) NewFilesUndetectable() bool {
-	return s != nil && (s.UntrackedScanSkipped || s.capturedIn != "")
+	return s != nil && (s.UntrackedScanSkipped || s.unreadable || s.capturedIn != "")
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -692,9 +703,11 @@ func LoadSessionPreTaskState(ctx context.Context, sessionID, toolUseID string) (
 		return nil, fmt.Errorf("invalid tool use ID for pre-task state: %w", err)
 	}
 
+	// See LoadPrePromptState: an unreadable baseline degrades detection.
+	unreadable := &PreTaskState{ToolUseID: toolUseID, unreadable: true}
 	data, capturedIn, err := taskBaselineSearch(ctx, sessionID).read(ctx, preTaskStateName(toolUseID))
 	if err != nil {
-		return nil, fmt.Errorf("failed to read state file: %w", err)
+		return unreadable, fmt.Errorf("failed to read state file: %w", err)
 	}
 	if data == nil {
 		return nil, nil //nolint:nilnil // already present in codebase
@@ -702,7 +715,7 @@ func LoadSessionPreTaskState(ctx context.Context, sessionID, toolUseID string) (
 
 	var state PreTaskState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+		return unreadable, fmt.Errorf("failed to unmarshal state: %w", err)
 	}
 	state.capturedIn = capturedIn
 
