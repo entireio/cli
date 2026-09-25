@@ -5,6 +5,9 @@ import "testing"
 func TestTraceCommands(t *testing.T) {
 	IsolateRepository(t)
 	commands := TraceCommands(t)
+	if calls := commands(); len(calls) != 0 {
+		t.Fatalf("got %v before any Git process started, want none", calls)
+	}
 	root := t.TempDir()
 	for count := 1; count <= 2; count++ {
 		Run(t, root, "version")

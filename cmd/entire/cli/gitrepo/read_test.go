@@ -2,6 +2,7 @@ package gitrepo_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -67,10 +68,7 @@ func TestReadsNeedNativeGit_Selectors(t *testing.T) {
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	require.False(t, gitrepo.ReadsNeedNativeGit(t.Context()))
-	for _, key := range []string{
-		"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
-	} {
+	for _, key := range append(gitrepo.NativeReadSelectorEnvVars(), "ENTIRE_NATIVE_GIT_READS") {
 		t.Run(key, func(t *testing.T) {
 			t.Setenv(key, "explicit-selector")
 			require.True(t, gitrepo.ReadsNeedNativeGit(t.Context()))
@@ -78,6 +76,22 @@ func TestReadsNeedNativeGit_Selectors(t *testing.T) {
 	}
 	t.Setenv("GIT_INDEX_FILE", "index-is-not-read")
 	require.False(t, gitrepo.ReadsNeedNativeGit(t.Context()))
+}
+
+// gitenv cannot import gitrepo (gitrepo's own tests import gitenv), so it keeps
+// its own selector list. This catches the two drifting apart.
+func TestIsolateRepository_ClearsNativeReadSelectors(t *testing.T) {
+	keys := append(gitrepo.NativeReadSelectorEnvVars(), "GIT_INDEX_FILE")
+	for _, key := range keys {
+		t.Setenv(key, "inherited-selector")
+	}
+	t.Run("isolated", func(t *testing.T) {
+		gitenv.IsolateRepository(t)
+		for _, key := range keys {
+			_, set := os.LookupEnv(key)
+			require.False(t, set, "gitenv.IsolateRepository must clear %s", key)
+		}
+	})
 }
 
 func TestReadsNeedNativeGit_DiscoveredGitDir(t *testing.T) {

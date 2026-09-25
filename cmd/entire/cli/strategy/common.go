@@ -1627,6 +1627,13 @@ func DeleteBranchCLI(ctx context.Context, branchName string) error {
 // branchExists checks a branch through the caller's repository. Packed refs
 // are reread on lookup, so native deletions are visible through the same handle.
 // Like show-ref --verify, it also checks that the target object exists.
+//
+// When gitrepo.ReadsNeedNativeGit selects native Git, repo is ignored and
+// show-ref resolves the repository from the process CWD and Git's selectors,
+// so repo must be the CWD repository (as OpenRepository returns). Any non-nil
+// error means the branch is absent or unreadable; the wrapped cause differs by
+// path (plumbing.ErrReferenceNotFound or an *exec.ExitError), so callers must
+// not match a specific sentinel.
 func branchExists(ctx context.Context, repo *git.Repository, branchName string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("check branch %s: %w", branchName, err)

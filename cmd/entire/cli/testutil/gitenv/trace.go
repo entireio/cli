@@ -3,13 +3,17 @@ package gitenv
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 // TraceCommands records native Git process starts after this call. The returned
-// reader includes all starts so far, including nested Git invocations. Call only
+// reader includes all starts so far, including nested Git invocations, and
+// returns an empty list when no Git process started: Git creates the trace file
+// only on its first start. Call only
 // after fixture setup and root-cache warming when measuring a read operation.
 // It changes process-global state and cannot be used in parallel tests.
 func TraceCommands(t *testing.T) func() [][]string {
@@ -19,6 +23,9 @@ func TraceCommands(t *testing.T) func() [][]string {
 	return func() [][]string {
 		t.Helper()
 		data, err := os.ReadFile(path) //nolint:gosec // fixed filename inside this test's t.TempDir, not caller input
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // no Git process started, so Git never created the trace file
+		}
 		if err != nil {
 			t.Fatalf("read Git trace: %v", err)
 		}

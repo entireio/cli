@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -70,7 +71,12 @@ func TestHeadCommitMessage_NativeCompatibility(t *testing.T) {
 				t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 				t.Setenv("GIT_WORK_TREE", other)
 			}
-			want := testutil.RunGit(t, root, "log", "-1", "--format=%B")
+			want := strings.TrimSuffix(testutil.RunGit(t, root, "log", "-1", "--format=%B"), "\n")
+			// Mirror headCheckpointFlags: the gate decides, and a nil repo means native.
+			if gitrepo.ReadsNeedNativeGit(t.Context()) {
+				require.Equal(t, "store override", mode, "only a selector forces the native gate")
+				repo = nil
+			}
 			message, err := headCommitMessage(t.Context(), repo, root)
 			require.NoError(t, err)
 			require.Equal(t, want, message, "retain native replacement/selector semantics")
@@ -109,4 +115,35 @@ func TestHeadCommitMessage_MissingObjectIsNotSuccess(t *testing.T) {
 	message, err := headCommitMessage(t.Context(), repo, root)
 	require.Error(t, err)
 	require.Empty(t, message)
+}
+
+// Both read paths must return the stored message bytes, including a message
+// without a trailing newline, which git log's %B terminator would otherwise
+// make path-dependent.
+func TestHeadCommitMessage_PathsReturnSameBytes(t *testing.T) {
+	for _, message := range []string{"subject\n\nbody\n", "no trailing newline"} {
+		t.Run(strings.Fields(message)[0], func(t *testing.T) {
+			gitenv.IsolateRepository(t)
+			root := t.TempDir()
+			testutil.InitRepo(t, root)
+			testutil.RunGit(t, root, "commit", "--allow-empty", "--no-gpg-sign", "-m", "initial")
+			tree := strings.TrimSpace(testutil.RunGit(t, root, "rev-parse", "HEAD^{tree}"))
+			cmd := execx.NonInteractive(t.Context(), "git", "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", "HEAD", "-F", "-")
+			cmd.Dir = root
+			cmd.Env = gitenv.Isolated()
+			cmd.Stdin = strings.NewReader(message)
+			out, err := cmd.Output()
+			require.NoError(t, err)
+			testutil.RunGit(t, root, "update-ref", "HEAD", strings.TrimSpace(string(out)))
+			repo, err := gitrepo.OpenPath(root)
+			require.NoError(t, err)
+			defer repo.Close()
+			viaGoGit, err := headCommitMessage(t.Context(), repo, root)
+			require.NoError(t, err)
+			viaNative, err := headCommitMessage(t.Context(), nil, root)
+			require.NoError(t, err)
+			require.Equal(t, message, viaGoGit)
+			require.Equal(t, viaGoGit, viaNative)
+		})
+	}
 }

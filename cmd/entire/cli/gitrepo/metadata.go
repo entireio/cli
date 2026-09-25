@@ -252,7 +252,7 @@ func requireMetadataDirectory(label, path string) error {
 }
 
 func metadataDirectoriesIdentifySameFile(a, b string) (bool, error) {
-	aInfo, err := os.Stat(a)
+	aInfo, err := os.Stat(a) //nolint:gosec // identity comparison only; nothing is read or written through either path.
 	if err != nil {
 		return false, fmt.Errorf("inspect %s: %w", a, err)
 	}

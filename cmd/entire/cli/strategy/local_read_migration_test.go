@@ -20,8 +20,6 @@ func TestLocalRefReads_NoGitAfterResolution(t *testing.T) {
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	testutil.RunGit(t, root, "update-ref", "refs/heads/shadow", head)
-	testutil.RunGit(t, root, "update-ref", "refs/remotes/origin/topic", head)
-	testutil.RunGit(t, root, "symbolic-ref", "refs/remotes/origin/dangling", "refs/remotes/origin/absent")
 	testutil.RunGit(t, root, "pack-refs", "--all")
 	repo, err := OpenRepository(t.Context())
 	require.NoError(t, err)
@@ -29,8 +27,6 @@ func TestLocalRefReads_NoGitAfterResolution(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	require.NoError(t, branchExists(t.Context(), repo, "shadow"))
 	require.Error(t, branchExists(t.Context(), repo, "absent"))
-	require.True(t, remoteHasTrackingRefs(t.Context(), "origin"))
-	require.False(t, remoteHasTrackingRefs(t.Context(), "other"))
 }
 
 func TestBranchExists_SameHandleObservesPackedDeletion(t *testing.T) {
@@ -78,12 +74,11 @@ func TestLocalRefReads_StoreOverrideAndBare(t *testing.T) {
 }
 
 // Git exports GIT_DIR to hooks in linked worktrees. When it names the
-// discovered Git directory, the reads stay on go-git and spawn no Git.
+// discovered Git directory, the read stays on go-git and spawns no Git.
 func TestLocalRefReads_LinkedWorktreeHookEnvironment(t *testing.T) {
 	gitenv.IsolateRepository(t)
 	root, _, head := initCountTestRepo(t)
 	testutil.RunGit(t, root, "update-ref", "refs/heads/shadow", head)
-	testutil.RunGit(t, root, "update-ref", "refs/remotes/origin/topic", head)
 	linked := filepath.Join(t.TempDir(), "linked")
 	testutil.RunGit(t, root, "worktree", "add", "--detach", linked)
 	gitDir := strings.TrimSpace(testutil.RunGit(t, linked, "rev-parse", "--absolute-git-dir"))
@@ -97,6 +92,4 @@ func TestLocalRefReads_LinkedWorktreeHookEnvironment(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	require.NoError(t, branchExists(t.Context(), repo, "shadow"))
 	require.ErrorIs(t, branchExists(t.Context(), repo, "absent"), plumbing.ErrReferenceNotFound)
-	require.True(t, remoteHasTrackingRefs(t.Context(), "origin"))
-	require.False(t, remoteHasTrackingRefs(t.Context(), "other"))
 }

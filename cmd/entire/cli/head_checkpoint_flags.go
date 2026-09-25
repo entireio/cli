@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -38,11 +39,11 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		logging.Debug(ctx, "head checkpoint flags: locate worktree root", slog.String("error", err.Error()))
 		return false, false, ""
 	}
+	// On the native path the repository is opened only once a trailer exists:
+	// opening a reftable repository itself spawns Git.
 	var repo *git.Repository
 	if !gitrepo.ReadsNeedNativeGit(ctx) {
-		repo, err = gitrepo.OpenPath(repoRoot)
-		if err != nil {
-			logging.Debug(ctx, "head checkpoint flags: open repository", slog.String("error", err.Error()))
+		if repo = openHeadRepository(ctx, repoRoot); repo == nil {
 			return false, false, ""
 		}
 		defer repo.Close()
@@ -58,9 +59,7 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		return false, false, ""
 	}
 	if repo == nil {
-		repo, err = gitrepo.OpenPath(repoRoot)
-		if err != nil {
-			logging.Debug(ctx, "head checkpoint flags: open repository", slog.String("error", err.Error()))
+		if repo = openHeadRepository(ctx, repoRoot); repo == nil {
 			return false, false, ""
 		}
 		defer repo.Close()
@@ -80,24 +79,41 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 	return summary.HasReview, summary.HasInvestigation, fmt.Sprintf("checkpoint %s", cpID)
 }
 
-// headCommitMessage uses the already-open repository for normal local reads.
-// Native Git remains the compatibility path for explicit store overrides,
-// replace refs, and missing promisor objects that Git can fetch on demand.
+// openHeadRepository opens repoRoot for headCheckpointFlags, logging and
+// returning nil on failure.
+func openHeadRepository(ctx context.Context, repoRoot string) *git.Repository {
+	repo, err := gitrepo.OpenPath(repoRoot)
+	if err != nil {
+		logging.Debug(ctx, "head checkpoint flags: open repository", slog.String("error", err.Error()))
+		return nil
+	}
+	return repo
+}
+
+// headCommitMessage returns HEAD's raw commit message. A nil repo means the
+// caller's gitrepo.ReadsNeedNativeGit check chose native Git; with a repo it
+// reads through go-git and keeps native Git as the fallback for replace refs
+// and missing promisor objects that Git can fetch on demand.
+//
+// Both paths return the stored message bytes: git log's %B appends a format
+// terminator, which is trimmed. The native path also transcodes a non-UTF-8
+// commit encoding header, which go-git does not (see git-safety.md).
 func headCommitMessage(ctx context.Context, repo *git.Repository, repoRoot string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("read HEAD message: %w", err)
 	}
-	if repo != nil && !gitrepo.ReadsNeedNativeGit(ctx) {
+	if repo != nil {
 		commit, err := gitrepo.CommitAtReference(ctx, repo, plumbing.HEAD)
 		if err == nil {
 			return commit.Message, nil
 		}
+		logging.Debug(ctx, "head commit message: go-git read failed, using native Git", slog.String("error", err.Error()))
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-1", "--format=%B").Output()
 	if err != nil {
 		return "", fmt.Errorf("read HEAD message with Git: %w", err)
 	}
-	return string(out), nil
+	return strings.TrimSuffix(string(out), "\n"), nil
 }
 
 // headHasReviewCheckpoint checks whether HEAD's checkpoint metadata includes

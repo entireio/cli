@@ -13,19 +13,30 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// ReadsNeedNativeGit keeps explicit store selectors and CLI-backed reference
-// stores on the native read path. Detect reftable before opening a repository:
-// even opening its adapter performs a native reference lookup.
-// Failed discovery also stays native, never guessing a CWD repository.
-// A GIT_DIR naming the discovered Git directory selects the store go-git would
-// open anyway; Git exports exactly that to hooks in linked worktrees.
-// GIT_INDEX_FILE is intentionally absent: these reads never consult the index.
+// nativeGitReadsEnvVar forces every migrated local read back onto native Git,
+// so a go-git misbehavior in the field can be worked around without a release.
+const nativeGitReadsEnvVar = "ENTIRE_NATIVE_GIT_READS"
+
+// ReadsNeedNativeGit reports whether a local ref or commit read must use native
+// Git instead of go-git. It keeps explicit store selectors
+// (NativeReadSelectorEnvVars) and CLI-backed reference stores on the native
+// path, and ENTIRE_NATIVE_GIT_READS forces native for every caller. Detect
+// reftable before opening a repository: even opening its adapter performs a
+// native reference lookup. Failed discovery also stays native, never guessing
+// a CWD repository. A GIT_DIR naming the discovered Git directory selects the
+// store go-git would open anyway; Git exports exactly that to hooks in linked
+// worktrees.
+//
+// Caller contract: the gate covers ref and object reads only. Callers must not
+// read the index, attributes, or pathspecs on the go-git path; GIT_INDEX_FILE,
+// GIT_ATTR_* and pathspec variables are deliberately not consulted. The guard
+// test in read_guard_test.go lists the approved call sites.
 func ReadsNeedNativeGit(ctx context.Context) bool {
-	for _, key := range []string{
-		"GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
-	} {
-		if os.Getenv(key) != "" {
+	if os.Getenv(nativeGitReadsEnvVar) != "" {
+		return true
+	}
+	for _, key := range NativeReadSelectorEnvVars() {
+		if key != "GIT_DIR" && os.Getenv(key) != "" {
 			return true
 		}
 	}
@@ -37,25 +48,16 @@ func ReadsNeedNativeGit(ctx context.Context) bool {
 	if err != nil {
 		return true
 	}
-	if gitDir := os.Getenv("GIT_DIR"); gitDir != "" && !sameDirectory(gitDir, metadata.GitDir) {
-		return true
+	if gitDir := os.Getenv("GIT_DIR"); gitDir != "" {
+		// Relative, symlinked, and case-folded spellings of the discovered
+		// directory match; an unreadable GIT_DIR never does.
+		same, err := metadataDirectoriesIdentifySameFile(gitDir, metadata.GitDir)
+		if err != nil || !same {
+			return true
+		}
 	}
 	reftable, err := inspectRepoUsesReftable(metadata.GitDir, metadata.CommonDir)
 	return err != nil || reftable
-}
-
-// sameDirectory compares by file identity, so relative, symlinked, and
-// case-folded spellings of one directory match. Unreadable paths never match.
-func sameDirectory(a, b string) bool {
-	aInfo, err := os.Stat(a) //nolint:gosec // identity comparison only; nothing is read or written through the Git-selected path.
-	if err != nil {
-		return false
-	}
-	bInfo, err := os.Stat(b)
-	if err != nil {
-		return false
-	}
-	return aInfo.IsDir() && os.SameFile(aInfo, bInfo)
 }
 
 // CommitAtReference reads an exact reference and peels annotated tags to a

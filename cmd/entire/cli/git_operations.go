@@ -533,6 +533,8 @@ func metadataTrackingRefExists(ctx context.Context, remoteName string) bool {
 				return false
 			}
 		}
+		logging.Debug(ctx, "metadata tracking ref: go-git read failed, using native Git",
+			slog.String("ref", trackingRef.String()), slog.String("error", err.Error()))
 	}
 	// Preserve native selection and object backfill for stores go-git cannot
 	// read. This also retains support for bare repositories.

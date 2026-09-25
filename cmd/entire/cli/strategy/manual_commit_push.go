@@ -15,7 +15,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -382,49 +381,15 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 // before and so already has at least one branch. Local-only and best-effort:
 // any error is treated as "no tracking refs" so the caller fails safe (defers).
 func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
-	if remote == "" || ctx.Err() != nil {
+	if remote == "" {
 		return false
 	}
-	if gitrepo.ReadsNeedNativeGit(ctx) {
-		return remoteHasTrackingRefsNative(ctx, remote)
-	}
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return remoteHasTrackingRefsNative(ctx, remote)
-	}
-	defer repo.Close()
-	refs, err := repo.References()
-	if err != nil {
-		return false
-	}
-	defer refs.Close()
-	prefix := "refs/remotes/" + remote + "/"
-	for {
-		ref, err := refs.Next()
-		if err != nil || ctx.Err() != nil {
-			return false
-		}
-		if !strings.HasPrefix(ref.Name().String(), prefix) {
-			continue
-		}
-		// Any one usable ref proves the remote was fetched or pushed before, so
-		// a dangling, unreadable, or incomplete ref only skips to the next one.
-		// Loose refs iterate before packed ones, so stopping at the first bad
-		// ref would hide a valid packed ref native Git's sorted scan finds.
-		resolved, err := repo.Reference(ref.Name(), true)
-		if err != nil {
-			continue
-		}
-		if repo.Storer.HasEncodedObject(resolved.Hash()) == nil {
-			return ctx.Err() == nil
-		}
-	}
-}
-
-func remoteHasTrackingRefsNative(ctx context.Context, remote string) bool {
 	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--count=1", "refs/remotes/"+remote+"/")
 	out, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(out)) != ""
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the
