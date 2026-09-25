@@ -306,10 +306,10 @@ func resolveCellBaseURLs(ctx context.Context, c cellCoreClient, cells []cellGrou
 				"cluster_slug", cells[i].clusterSlug, "cell", cells[i].cell)
 			continue
 		}
-		// A concrete baseURL needs a jurisdiction to mint the matching token
-		// for — mirroring resolveRepoCellTarget, which refuses a target unless
-		// both are present. Setting baseURL with an unknown jurisdiction would
-		// dial the cell with a home-jurisdiction token.
+		// A concrete baseURL needs its jurisdiction alongside it — mirroring
+		// resolveRepoCellTarget, which refuses a target unless both are
+		// present, so a pinned cell is never paired with the caller's home
+		// jurisdiction.
 		jurisdiction := cells[i].jurisdiction
 		if j := strings.ToLower(strings.TrimSpace(cl.Jurisdiction)); j != "" {
 			jurisdiction = j

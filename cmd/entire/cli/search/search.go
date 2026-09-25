@@ -21,8 +21,8 @@ const apiTimeout = 30 * time.Second
 
 // v4ServicePath is the per-repo v4 query-serve route exposed by the entire-api
 // cell gateway. It takes repo=<ULID>. The BFF (entire.io /api/v1/search)
-// forwards to this same path; the CLI dials the cell directly with a
-// jurisdictional identity token, skipping the BFF hop.
+// forwards to this same path; the CLI dials the cell directly with the
+// login JWT as bearer, skipping the BFF hop.
 const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
 
 // ErrCellUnavailable reports that a cell's gateway does not expose the

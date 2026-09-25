@@ -12,9 +12,8 @@ import (
 // contexts.json and the keyring entirely: its value is used verbatim as the
 // bearer for control-plane and git data-plane requests. This is the CI /
 // workload-identity path — a runner injects a short-lived login or sa-session
-// JWT and clones without an interactive `entire login`. The explicit
-// `entire auth token --jurisdiction` command remains a separate path and uses
-// the value as the subject of its requested jurisdiction-token exchange.
+// JWT and clones without an interactive `entire login`. `entire auth token`
+// prints the value verbatim.
 const EnvTokenVar = "ENTIRE_TOKEN"
 
 // ParseEnvToken is the single owner of the ENTIRE_TOKEN validation sequence
@@ -45,9 +44,8 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 // enforces the *shape* of a safe core origin (https, bare origin). The git
 // helper uses the result only after checking it against the target cluster's
 // advertised CoreURLs, then sends the env token directly to the data plane.
-// Control-plane clients use the result as their bearer target, while the
-// explicit `entire auth token --jurisdiction` path uses it as the STS host for
-// that command's requested exchange.
+// Control-plane clients use the result as their bearer target; cell routing
+// uses it as the environment signal when no data host is configured.
 //
 // Structural rules, all required:
 //   - the aud is a well-formed absolute URL,
