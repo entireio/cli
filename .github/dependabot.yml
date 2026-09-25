@@ -22,6 +22,14 @@ updates:
       # betterleaks); upgrade deliberately, never automatically.
       - dependency-name: "github.com/lastpersonlabs/goredact"
 
+  # Pinned agent CLIs for the e2e job (e2e/package.json). A bump PR runs
+  # that agent's e2e leg, which is the compatibility signal we want.
+  - package-ecosystem: "npm"
+    directory: "/e2e"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+
   # Maintain dependencies for GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"

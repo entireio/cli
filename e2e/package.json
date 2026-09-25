@@ -1,0 +1,8 @@
+{
+  "name": "entire-e2e-agents",
+  "private": true,
+  "description": "Pinned npm-distributed agent CLIs for the e2e job. Dependabot bumps them; e2e.yml installs them with npm ci.",
+  "devDependencies": {
+    "@openai/codex": "0.157.0"
+  }
+}

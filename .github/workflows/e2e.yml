@@ -164,11 +164,15 @@ jobs:
               # that job exists to report agy drift.
               retry 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
               ;;
-            # Pinned: codex ships ~twice a week and has broken this job on
-            # upgrade (0.129 hooks trust, 0.157 app-server daemon). Nightly
-            # tracks latest to report drift; PRs run a known version.
-            # e2e/agents/codex.go passes --no-daemon, which needs 0.157+.
-            codex)       retry 'npm install -g @openai/codex@0.157.0' ;;
+            # Pinned in e2e/package.json so dependabot bumps it: codex ships
+            # ~twice a week and has broken this job on upgrade (0.129 hooks
+            # trust, 0.157 app-server daemon). Nightly tracks latest to report
+            # drift; PRs run a known version. e2e/agents/codex.go passes
+            # --no-daemon, which needs 0.157+.
+            codex)
+              retry 'npm ci --prefix "$GITHUB_WORKSPACE/e2e"'
+              echo "$GITHUB_WORKSPACE/e2e/node_modules/.bin" >> "$GITHUB_PATH"
+              ;;
             cursor-cli)  retry 'curl https://cursor.com/install -fsS --compressed | bash' ;;
             factoryai-droid) retry 'curl -fsSL --compressed https://app.factory.ai/cli | sh' ;;
             copilot-cli) retry 'npm install -g @github/copilot' ;;
