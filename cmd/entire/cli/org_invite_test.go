@@ -69,7 +69,7 @@ func TestOrgInviteSend_CreatesAndReportsTheRole(t *testing.T) {
 	assert.Equal(t, "/api/v1/orgs/"+testOrgULID+"/invitations", gotPath)
 	assert.Equal(t, "dev@example.com", gotBody.Email)
 	assert.EqualValues(t, "admin", gotBody.Role)
-	assert.Contains(t, out, "✓ Invited dev@example.com to org "+testOrgULID+" as admin")
+	assert.Contains(t, out, "✓ Invited dev@example.com to org "+testOrgULID+" as admin ("+testInvitationULID+")")
 }
 
 // The wire field is required, so an omitted --role must still send the default
@@ -105,7 +105,7 @@ func TestOrgInviteSend_ResendReportsTheStoredRole(t *testing.T) {
 
 	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID, "--email", "dev@example.com", "--role", "admin")
 	require.NoError(t, err)
-	assert.Contains(t, out, "✓ Resent the open invitation for dev@example.com to org "+testOrgULID+", which invites as member")
+	assert.Contains(t, out, "✓ Resent the open invitation for dev@example.com to org "+testOrgULID+", which invites as member ("+testInvitationULID+")")
 	assert.NotContains(t, out, "as admin", "the request's role must not be reported as the effective one")
 }
 
@@ -196,6 +196,7 @@ func TestOrgInviteList_ListsAndFiltersByStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "open", gotStatus, "the default listing is the open invitations")
 	assert.Contains(t, out, "EMAIL")
+	assert.Contains(t, out, testInvitationULID, "the ID is what `invite revoke` takes")
 	assert.Contains(t, out, testInviteEmail)
 	assert.Contains(t, out, "admin")
 	assert.Contains(t, out, "open")

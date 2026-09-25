@@ -26,12 +26,12 @@ import (
 // name for "every state", not a client-side wildcard.
 var invitationStatuses = []string{"open", "accepted", "revoked", "expired", "all"}
 
-// invitationColumns omits the invitation ULID, which only --json carries;
-// `invite revoke` takes the email address instead.
-var invitationColumns = []string{"EMAIL", colHeaderRole, colHeaderStatus, "EXPIRES"}
+// invitationColumns leads with the invitation ULID, which `invite revoke`
+// takes as well as the email address.
+var invitationColumns = []string{"ID", "EMAIL", colHeaderRole, colHeaderStatus, "EXPIRES"}
 
 func invitationRow(i coreapi.Invitation) []string {
-	return []string{i.Email, i.Role, i.Status, i.ExpiresAt.Format("2006-01-02")}
+	return []string{i.ID, i.Email, i.Role, i.Status, i.ExpiresAt.Format("2006-01-02")}
 }
 
 func newOrgInviteCmd() *cobra.Command {
@@ -80,14 +80,14 @@ func newOrgInviteSendCmd() *cobra.Command {
 					// rather than trust the endpoint's contract never grows one.
 					inv := coreapi.Invitation(*out)
 					inv.AdditionalProps = nil
-					return fmt.Sprintf("✓ Invited %s to org %s as %s", inv.Email, args[0], inv.Role), &inv, nil
+					return fmt.Sprintf("✓ Invited %s to org %s as %s (%s)", inv.Email, args[0], inv.Role, inv.ID), &inv, nil
 				case *coreapi.CreateOrgInvitationOK:
 					// The role here is the stored one, which an earlier invite
 					// chose; saying so stops a --role that did not take effect
 					// from reading as though it had.
 					inv := coreapi.Invitation(*out)
 					inv.AdditionalProps = nil
-					return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s", inv.Email, args[0], inv.Role), &inv, nil
+					return fmt.Sprintf("✓ Resent the open invitation for %s to org %s, which invites as %s (%s)", inv.Email, args[0], inv.Role, inv.ID), &inv, nil
 				default:
 					return "", nil, fmt.Errorf("invite %s: unexpected response %T from the control plane", email, res)
 				}
@@ -160,7 +160,7 @@ func newOrgInviteRevokeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "revoke <org> <email|id>",
 		Short:   "Revoke an organization invitation",
-		Long:    "Revoke an open invitation so its link stops working. The org is addressed by name; the invitation by the invited email address or its own ULID.",
+		Long:    "Revoke an open invitation so its link stops working. The org is addressed by name; the invitation by the invited email address or its ID, as `entire org invite list` shows it.",
 		Example: "  entire org invite revoke acme dev@example.com",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
