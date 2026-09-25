@@ -282,8 +282,8 @@ type OPFRawBytesTooLargeError struct {
 }
 
 func (e *OPFRawBytesTooLargeError) Error() string {
-	return fmt.Sprintf("OPF rewrite would buffer %d raw blob bytes across "+
-		"all unpushed commits (limit %d, ~%d× the prose-leaf cap as a RAM ceiling). "+
+	return fmt.Sprintf("OPF rewrite would buffer %d raw blob bytes in one "+
+		"unit of work (limit %d, ~%d× the prose-leaf cap as a RAM ceiling). "+
 		"Bump ENTIRE_OPF_BATCH_LIMIT (the raw ceiling scales with it) "+
 		"or push without OPF (ENTIRE_OPF=no git push) and let a smaller "+
 		"follow-up push run OPF",
