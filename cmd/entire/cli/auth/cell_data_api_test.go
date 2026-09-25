@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -10,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +22,7 @@ import (
 )
 
 // usEntireAudience is the prod "us" jurisdiction audience, reused across the
-// cell/jurisdiction tests.
+// cell tests.
 const usEntireAudience = "https://us.entire.io"
 
 func TestHomeJurisdictionFromLoginJWT(t *testing.T) {
@@ -77,49 +75,6 @@ func TestEntireSite(t *testing.T) {
 		if got := EntireSite(tc.core); got != tc.want {
 			t.Errorf("EntireSite(%q) = %q, want %q", tc.core, got, tc.want)
 		}
-	}
-}
-
-func TestJurisdictionAudienceFollowsLoginFamily(t *testing.T) {
-	// No env override: the audience must follow the environment family so a
-	// staging (partial.to) login mints a partial.to audience, not a prod one.
-	t.Setenv("ENTIRE_API_AUDIENCE_TEMPLATE", "")
-	if got := jurisdictionAudience("us", "https://entire.io", "https://us.auth.entire.io"); got != usEntireAudience {
-		t.Errorf("prod audience = %q, want https://us.entire.io", got)
-	}
-	if got := jurisdictionAudience("eu", "https://partial.to", "https://us.auth.partial.to"); got != "https://eu.partial.to" {
-		t.Errorf("staging audience = %q, want https://eu.partial.to", got)
-	}
-}
-
-func TestJurisdictionCoreURLHonorsLoopbackAndFamily(t *testing.T) {
-	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "")
-	// Local dev: a loopback discovered core must be honored verbatim, NOT
-	// replaced by the production template (which would send the local login JWT
-	// to prod).
-	if got := jurisdictionCoreURL("us", "http://127.0.0.1:8099", "http://127.0.0.1:9000"); got != "http://127.0.0.1:9000" {
-		t.Errorf("loopback core = %q, want http://127.0.0.1:9000", got)
-	}
-	// Staging: core follows the environment family and target jurisdiction.
-	if got := jurisdictionCoreURL("eu", "https://partial.to", "https://us.auth.partial.to"); got != "https://eu.auth.partial.to" {
-		t.Errorf("staging core = %q, want https://eu.auth.partial.to", got)
-	}
-	// Prod: mirrors the audience test's prod/staging pair.
-	if got := jurisdictionCoreURL("eu", "https://entire.io", "https://us.auth.entire.io"); got != "https://eu.auth.entire.io" {
-		t.Errorf("prod core = %q, want https://eu.auth.entire.io", got)
-	}
-}
-
-func TestJurisdictionCoreURLHonorsFixedTemplate(t *testing.T) {
-	// A placeholder-less template names a single core for every jurisdiction
-	// (single-core deployments), matching the BFF and the audience handler.
-	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "https://single-core.example")
-	if got := jurisdictionCoreURL("eu", "https://entire.io", "https://us.auth.entire.io"); got != "https://single-core.example" {
-		t.Errorf("fixed-template core = %q, want https://single-core.example", got)
-	}
-	// A loopback discovered core still wins over any template (local dev).
-	if got := jurisdictionCoreURL("eu", "https://entire.io", "http://127.0.0.1:9000"); got != "http://127.0.0.1:9000" {
-		t.Errorf("loopback core = %q, want http://127.0.0.1:9000", got)
 	}
 }
 
@@ -186,7 +141,6 @@ func TestTargetJurisdictionRejectsBadLabel(t *testing.T) {
 
 func TestNewEntireAPICellClient_RoutesThroughHomeCell(t *testing.T) {
 	isolateCellClientEnv(t, "https://entire.io")
-	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "https://fixed-core.test")
 
 	var gotReposHost, gotAuthorization string
 	coreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +199,6 @@ func TestNewEntireAPICellClient_RoutesThroughHomeCell(t *testing.T) {
 func TestNewEntireAPICellClient_KeepsDirectCellBaseURL(t *testing.T) {
 	const cellBase = "https://aws-us-east-2.api.entire.io"
 	isolateCellClientEnv(t, cellBase)
-	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "https://fixed-core.test")
 
 	var exchangeHit, clustersHit bool
 	coreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -398,160 +351,6 @@ func TestNewEntireAPICellClient_TargetRoutesToRepoCell(t *testing.T) {
 	}
 }
 
-// TestJurisdictionToken_StoredContext proves the stored path mints from the
-// ACTIVE login context (like plain `entire auth token`), deriving the
-// environment from that context's core rather than the data host. No
-// ENTIRE_API_BASE_URL is set, so the default (entire.io) data host must NOT
-// influence the result — only the active context does. Not parallel: manipulates
-// env + token store.
-func TestJurisdictionToken_StoredContext(t *testing.T) {
-	configDir := isolateCellClientEnv(t, "")
-
-	const core = prodCoreURL
-	svc := tokenstore.CoreKeyringService(core)
-	loginJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"home_jurisdiction":"us","exp":%d}`, core, time.Now().Add(2*time.Hour).Unix()))
-	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(loginJWT, 7200)); err != nil {
-		t.Fatalf("seed token: %v", err)
-	}
-	writeActiveContext(t, configDir, "me@entire", core, "me", svc)
-
-	ct := &captureTransport{token: "cell-identity-token"}
-	t.Cleanup(SetCellExchangeTransportForTest(t, ct))
-
-	token, err := JurisdictionToken(context.Background(), false, "us")
-	if err != nil {
-		t.Fatalf("JurisdictionToken: %v", err)
-	}
-	if token != "cell-identity-token" {
-		t.Fatalf("token = %q, want cell-identity-token", token)
-	}
-	if got := ct.form.Get("audience"); got != usEntireAudience {
-		t.Errorf("audience = %q, want %s", got, usEntireAudience)
-	}
-	if got := ct.form.Get("scope"); got != JurisdictionIdentityScope {
-		t.Errorf("scope = %q, want %q", got, JurisdictionIdentityScope)
-	}
-	if got := ct.form.Get("subject_token"); got != loginJWT {
-		t.Errorf("subject_token = %q, want the login JWT", got)
-	}
-	if got := ct.form.Get("grant_type"); got != "urn:ietf:params:oauth:grant-type:token-exchange" {
-		t.Errorf("grant_type = %q, want token-exchange", got)
-	}
-}
-
-// TestJurisdictionToken_StoredContextFollowsActiveContext is the regression for
-// the reported bug: with two contexts (prod entire.io + staging partial.to) and
-// partial.to ACTIVE, `auth token --jurisdiction us` must mint a partial.to token
-// — not switch to entire.io because the default data host trusts the prod
-// context. The exchange audience/subject/core all follow the active partial.to
-// context.
-func TestJurisdictionToken_StoredContextFollowsActiveContext(t *testing.T) {
-	configDir := isolateCellClientEnv(t, "") // default entire.io data host must not win
-	_, stagingJWT := seedProdAndStagingContexts(t, configDir, stagingFixture.name)
-
-	ct := &captureTransport{token: "partial-identity-token"}
-	t.Cleanup(SetCellExchangeTransportForTest(t, ct))
-
-	token, err := JurisdictionToken(context.Background(), false, "us")
-	if err != nil {
-		t.Fatalf("JurisdictionToken: %v", err)
-	}
-	if token != "partial-identity-token" {
-		t.Fatalf("token = %q, want partial-identity-token", token)
-	}
-	if got := ct.form.Get("audience"); got != "https://us.partial.to" {
-		t.Errorf("audience = %q, want https://us.partial.to (active partial.to context, not entire.io)", got)
-	}
-	if got := ct.form.Get("subject_token"); got != stagingJWT {
-		t.Errorf("subject_token = %q, want the partial.to login JWT", got)
-	}
-	if got := ct.url; got != stagingCoreURL+oauthTokenPath {
-		t.Errorf("exchange URL = %q, want %s%s", got, stagingCoreURL, oauthTokenPath)
-	}
-}
-
-// captureTransport counts exchanges and records the last request's parsed
-// form body, URL, and Authorization header, returning a canned RFC 8693
-// token-exchange success response. The minted access_token is `token`, or
-// "repo-scoped.jwt" when unset.
-type captureTransport struct {
-	calls int
-	form  url.Values
-	url   string
-	auth  string
-	token string
-}
-
-func (c *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-	form, err := url.ParseQuery(string(body))
-	if err != nil {
-		return nil, err
-	}
-	c.calls++
-	c.form = form
-	c.url = req.URL.String()
-	c.auth = req.Header.Get("Authorization")
-	accessToken := c.token
-	if accessToken == "" {
-		accessToken = "repo-scoped.jwt"
-	}
-	resp := fmt.Sprintf(`{"access_token":%q,"token_type":"Bearer",`+
-		`"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_in":300}`, accessToken)
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(bytes.NewBufferString(resp)),
-		Request:    req,
-	}, nil
-}
-
-// TestJurisdictionToken_EnvToken proves ENTIRE_TOKEN is used as the exchange
-// subject with no stored context or discovery, and that its own aud drives the
-// environment family (no ENTIRE_API_BASE_URL set). Not parallel: sets env.
-func TestJurisdictionToken_EnvToken(t *testing.T) {
-	// Empty config dir: if the env-token path fell through to stored-login
-	// resolution this would fail "not logged in", so success proves the env path.
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	envToken := makeJWT(t, fmt.Sprintf(`{"aud":"https://us.auth.entire.io","home_jurisdiction":"us","exp":%d}`, time.Now().Add(2*time.Hour).Unix()))
-	t.Setenv("ENTIRE_TOKEN", envToken)
-
-	// captureTransport intercepts the /oauth/token POST and records the form, so
-	// the ENTIRE_TOKEN path is tested without a real (https) core server.
-	rt := &captureTransport{token: "env-cell-token"}
-	t.Cleanup(SetCellExchangeTransportForTest(t, rt))
-
-	// Explicit jurisdiction: audience follows the requested region, subject is the
-	// env token verbatim.
-	token, err := JurisdictionToken(context.Background(), false, "eu")
-	if err != nil {
-		t.Fatalf("JurisdictionToken(eu): %v", err)
-	}
-	if token != "env-cell-token" {
-		t.Fatalf("token = %q, want env-cell-token", token)
-	}
-	if got := rt.form.Get("subject_token"); got != envToken {
-		t.Errorf("subject_token = %q, want the ENTIRE_TOKEN value", got)
-	}
-	if got := rt.form.Get("audience"); got != "https://eu.entire.io" {
-		t.Errorf("audience = %q, want https://eu.entire.io", got)
-	}
-	if got := rt.form.Get("scope"); got != JurisdictionIdentityScope {
-		t.Errorf("scope = %q, want %q", got, JurisdictionIdentityScope)
-	}
-
-	// Empty jurisdiction falls back to the env token's home_jurisdiction claim.
-	if _, err := JurisdictionToken(context.Background(), false, ""); err != nil {
-		t.Fatalf("JurisdictionToken(home): %v", err)
-	}
-	if got := rt.form.Get("audience"); got != usEntireAudience {
-		t.Errorf("home-fallback audience = %q, want https://us.entire.io", got)
-	}
-}
-
 // TestCellClientFactory_UsesLoginJWTDirectly pins the factory's credential
 // contract: cell routing still follows the target, but the resolved login JWT
 // is attached directly without a jurisdiction-token exchange.
@@ -689,8 +488,6 @@ func isolateCellClientEnv(t *testing.T, baseURL string) string {
 	configDir := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
 	t.Setenv("ENTIRE_API_BASE_URL", baseURL)
-	t.Setenv("ENTIRE_API_AUDIENCE_TEMPLATE", "")
-	t.Setenv("ENTIRE_CORE_BASE_URL_TEMPLATE", "")
 	t.Setenv("ENTIRE_CONTEXT", "")
 	// t.Setenv registers the restore; a blank ENTIRE_TOKEN is "set but blank"
 	// (fail-closed), so it must be absent rather than empty.

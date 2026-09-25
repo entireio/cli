@@ -51,14 +51,12 @@ the commands are always runnable in every build.
   options, summary provider). Agent CRUD lives under `entire agent`.
 - `auth`: `login`, `logout`, `status`, `contexts`, `switch`, plus
   `token` (prints the active control-plane bearer to stdout for scripting/curl;
-  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). `token`
-  also takes `--jurisdiction <slug>` (e.g. `us`, `eu`), which instead mints a
-  jurisdictional identity token (RFC 8693 exchange, `scope=openid`,
-  `aud=<jurisdiction host>`) for that jurisdiction's entire-api cells (e.g.
-  `https://aws-us-east-2.api.entire.io/api/v1`), which reject the control-plane
-  bearer; it exchanges `ENTIRE_TOKEN` when set (deriving the environment from the
-  env token's `aud`), else the active login. `auth status` shows the caller's
-  home jurisdiction so the slug is discoverable. `logout` sweeps every saved
+  honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). That
+  token is also accepted directly at every entire-api cell (e.g.
+  `https://aws-us-east-2.api.entire.io/api/v1`, `aud == iss`, ADR 20260729), so
+  `token --jurisdiction <slug>` is deprecated: the flag stays registered but
+  hidden and fails with a migration hint. `auth status` shows the caller's
+  home jurisdiction. `logout` sweeps every saved
   login: one `DELETE /api/auth/tokens` per login server ends every CLI session
   there (core tells them apart by `issuer_client_id`), then the login is
   removed locally. Nothing narrows it: an explicit `--context` is refused
