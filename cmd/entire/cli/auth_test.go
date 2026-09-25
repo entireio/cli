@@ -93,7 +93,7 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 }
 
 // TestWriteProfileLines_Jurisdiction verifies the home jurisdiction slug is
-// rendered (so `auth token --jurisdiction` is discoverable) and omitted when the
+// rendered (so `api --jurisdiction` is discoverable) and omitted when the
 // server didn't populate it.
 func TestWriteProfileLines_Jurisdiction(t *testing.T) {
 	t.Parallel()

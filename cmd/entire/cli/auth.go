@@ -512,8 +512,8 @@ func writeProfileLines(w io.Writer, p *authProfile) {
 		}
 		writeAuthStatusLine(w, "Identity:", identity)
 	}
-	// The home jurisdiction slug is what 'entire auth token --jurisdiction'
-	// takes; surface it so it's discoverable non-interactively.
+	// The home jurisdiction slug is what 'entire api --jurisdiction' takes;
+	// surface it so it's discoverable non-interactively.
 	if p.Jurisdiction != "" {
 		writeAuthStatusLine(w, "Jurisdiction:", p.Jurisdiction)
 	}
