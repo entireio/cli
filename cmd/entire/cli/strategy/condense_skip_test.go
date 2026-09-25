@@ -379,7 +379,7 @@ func TestTryAgentCommitFastPath_SkipsEmptySession(t *testing.T) {
 	}
 
 	// Fast path should NOT add a trailer for the empty session
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession}, "message")
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession}, "message", nil)
 	assert.False(t, result, "fast path should not fire for empty session")
 
 	// Verify no trailer was added
@@ -456,7 +456,7 @@ func TestTryAgentCommitFastPath_AcceptsSessionWithContent(t *testing.T) {
 		StepCount:      1,
 	}
 
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{contentSession}, "message")
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{contentSession}, "message", nil)
 	assert.True(t, result, "fast path should fire for session with content")
 
 	// Verify trailer was added
@@ -488,7 +488,7 @@ func TestTryAgentCommitFastPath_SkipsEmptyButAcceptsContentSession(t *testing.T)
 		StepCount:      1,
 	}
 
-	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession, contentSession}, "message")
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{emptySession, contentSession}, "message", nil)
 	assert.True(t, result, "fast path should fire for the content session")
 
 	content, err := os.ReadFile(commitMsgFile)
@@ -583,7 +583,7 @@ func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 				TaskRecords:    tt.taskRecords,
 			}
 
-			result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{state}, "message")
+			result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{state}, "message", nil)
 			assert.Equal(t, tt.wantLinked, result, "fast path taken")
 
 			content, err := os.ReadFile(commitMsgFile)

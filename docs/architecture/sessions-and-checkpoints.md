@@ -203,6 +203,28 @@ identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
 shadow-branch realignment) — those follow only the session's own worktree HEAD.
 
+**Squashes inherit their trailers** (`inheritSquashedCheckpointTrailers`). A
+commit made while `git merge --squash` is in progress (SQUASH_MSG present in
+the per-worktree git dir) contains the squashed commits' work, so every
+`Entire-Checkpoint` trailer in SQUASH_MSG is carried into the message when
+missing when a staged path is one a commit Git recorded there changed; a file
+touched up before committing still counts. An abandoned squash can leave
+SQUASH_MSG behind; staged work on other paths therefore inherits nothing, and inherited trailers in Git's seeded message are
+removed. git only reports source `squash` when its seeded message is accepted;
+a squash committed with `-m` reports `message`, which used to run ordinary
+matching and either refuse or mint a fresh, empty checkpoint. Inherited
+trailers are links to checkpoints that already exist. Matching still runs, so
+work a session holds at squash time is stamped as its own trailer after the
+inherited ones, and post-commit condenses only into the trailer that has no
+checkpoint yet (`pickCondensationTarget`) among those prepare stamped: prepare
+records the inherited IDs in the per-worktree git dir, tied to the commit's
+parent (`recordInheritedTrailers`), so an inherited trailer whose checkpoint
+simply is not in this clone's store yet is never mistaken for a fresh one, rechecks whether that target appeared
+between selection and condensation, and never writes into an inherited one; a
+write into a checkpoint the session did not stamp for this commit is refused
+(`stampedByAnotherCommit`). Merge commits stay unlinked by design; the
+merged commits keep their own trailers.
+
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
 `WorktreePath` match first, then sessions from a sibling worktree of the same
