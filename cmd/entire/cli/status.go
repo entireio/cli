@@ -247,7 +247,8 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	// Where checkpoint data syncs (the single elected remote), and how many
 	// checkpoints have not reached it yet. Local-only computation.
 	if s.Enabled {
-		writeCheckpointSyncLines(ctx, &b, s, sty)
+		hooksDeliver := writeHookDeliveryLine(ctx, &b, sty)
+		writeCheckpointSyncLines(ctx, &b, s, sty, hooksDeliver)
 	}
 
 	if s.Enabled {
@@ -392,6 +393,10 @@ type checkpointSyncInfo struct {
 	// where a user finds out why — the hooks only log the rejection.
 	IgnoredRemote string
 	IgnoredReason string
+	// HooksNotDelivering reports that no Git hook will run Entire, so a push
+	// syncs nothing and the unpushed counter must not say it will (#2264).
+	// Text path only: JSON reports delivery through its own hooks_* fields.
+	HooksNotDelivering bool
 }
 
 // resolveDedicatedReadSource records where checkpoint READS land when the
@@ -562,6 +567,37 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 	return n
 }
 
+// writeHookDeliveryLine reports whether Entire's hooks will fire.
+//
+// Without it status named a checkpoint destination while no hook existed to
+// reach it, which is issue #2264. The destination line below is still shown —
+// it is true, and status is the only place it appears — but this line above it
+// removes the claim that delivery is working. It returns whether the hooks
+// deliver in this environment — LEFTHOOK=0 skips them — so the counter below
+// can drop its promise about the next push.
+func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusStyles) bool {
+	delivery := strategy.CheckHookDelivery(ctx)
+	b.WriteString("\n")
+	switch {
+	case delivery.OK && delivery.Manager != "":
+		b.WriteString(sty.render(sty.dim, "  Git hooks · via "+delivery.Manager))
+		if delivery.SkippedBy != "" {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+delivery.SkippedBy+" "+hooksSkippedByEnvSuffix))
+		}
+	case delivery.OK:
+		b.WriteString(sty.render(sty.dim, "  Git hooks · installed"))
+	default:
+		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints are NOT being captured: "+delivery.Reason))
+		b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
+	}
+	return delivery.OK && delivery.SkippedBy == ""
+}
+
+// hooksSkippedByEnvSuffix completes the warning for HookDelivery.SkippedBy,
+// shared by status and doctor so the two say the same thing.
+const hooksSkippedByEnvSuffix = "is set: Lefthook skips Entire's hooks too, so commits made with it are not linked to checkpoints"
+
 // writeCheckpointSyncLines reports the checkpoint sync destination (and the
 // unpushed counter, when non-zero) in the enabled status block, prefixed by the
 // disabled-pushing line when automatic pushing is off. No remotes configured
@@ -571,8 +607,9 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 // pushing off the elected remote is still the read source and the counter still
 // reports local-only data, so the lines are reworded rather than dropped —
 // status is the only surface that names either.
-func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
+func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles, hooksDeliver bool) {
 	info := computeCheckpointSyncInfo(ctx, s)
+	info.HooksNotDelivering = !hooksDeliver
 	destination := "\n  Checkpoints sync to: "
 	if info.PushDisabled {
 		b.WriteString("\n  Automatic checkpoint pushing: disabled")
@@ -651,18 +688,29 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 // destination — and never that the data exists nowhere else. Getting this
 // backwards would falsely reassure someone asking whether checkpoint data has
 // left the machine.
+//
+// With pushing enabled but no hook delivering, the future tense is false for a
+// different reason: no pre-push hook will run, so the next push syncs nothing.
 func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
 	noun := nounCheckpoints
-	pronoun := "they sync"
+	pronoun, notPronoun := "they sync", "they won't sync"
 	if info.Unpushed == 1 {
 		noun = nounCheckpoint
-		pronoun = "it syncs"
+		pronoun, notPronoun = "it syncs", "it won't sync"
 	}
 	if info.PushDisabled {
 		if info.Source == checkpointSyncSourceDedicated {
 			return fmt.Sprintf("%d %s not pushed to the checkpoint remote", info.Unpushed, noun)
 		}
 		return fmt.Sprintf("%d %s not on %s", info.Unpushed, noun, info.Remote)
+	}
+	if info.HooksNotDelivering {
+		// The warning above names the cause; here only the promise goes.
+		pending := fmt.Sprintf("%d %s not yet on %s", info.Unpushed, noun, info.Remote)
+		if info.Source == checkpointSyncSourceDedicated {
+			pending = fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
+		}
+		return fmt.Sprintf("%s — %s until Entire's Git hooks run again", pending, notPronoun)
 	}
 	if info.Source == checkpointSyncSourceDedicated {
 		return fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
@@ -1086,6 +1134,19 @@ type statusJSON struct {
 	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
+	// HooksDeliver reports whether Entire's Git hooks will actually fire, and
+	// HooksManager names the hook manager that owns the files when one does.
+	// Without these, status could report a destination while nothing would
+	// reach it (#2264).
+	HooksDeliver       bool   `json:"hooks_deliver"`
+	HooksManager       string `json:"hooks_manager,omitempty"`
+	HooksDeliverReason string `json:"hooks_deliver_reason,omitempty"`
+	// HooksLefthookDeclined names a Lefthook local config Entire will not
+	// write to, which is why Lefthook is not the one delivering.
+	HooksLefthookDeclined string `json:"hooks_lefthook_declined,omitempty"`
+	// HooksSkippedBy names an environment setting (LEFTHOOK=0) under which the
+	// hook manager skips Entire's otherwise working hooks.
+	HooksSkippedBy string `json:"hooks_skipped_by,omitempty"`
 	// CheckpointReadSourceUnknown reports that the read-source probe failed,
 	// so no read source could be determined. Emitted only alongside
 	// checkpoint_push_disabled, and checkpoint_sync_remote is then absent
@@ -1200,6 +1261,12 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncRemote = syncInfo.Remote
 		result.CheckpointSyncRemoteSource = syncInfo.Source
 		result.CheckpointSyncError = syncInfo.Err
+		delivery := strategy.CheckHookDelivery(ctx)
+		result.HooksDeliver = delivery.OK
+		result.HooksManager = delivery.Manager
+		result.HooksDeliverReason = delivery.Reason
+		result.HooksLefthookDeclined = delivery.Declined
+		result.HooksSkippedBy = delivery.SkippedBy
 		result.CheckpointReadFallback = syncInfo.ReadFallback
 		result.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
 		result.UnpushedCheckpoints = syncInfo.Unpushed

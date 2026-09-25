@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
@@ -2510,7 +2511,7 @@ func assertCheckpointPushDisabledStatus(t *testing.T, jsonOutput, detailed bool,
 	}
 }
 
-// formatUnpushedCheckpointsLine is pure, so its four branches are pinned here
+// formatUnpushedCheckpointsLine is pure, so its branches are pinned here
 // rather than through a repo fixture. What the counter must never say with
 // pushing disabled is that the data is local-only: Unpushed compares against
 // the elected destination alone, so it cannot establish that checkpoints exist
@@ -2531,6 +2532,16 @@ func TestFormatUnpushedCheckpointsLine(t *testing.T) {
 			"1 checkpoint not on origin"},
 		{"pushing_disabled_dedicated", checkpointSyncInfo{PushDisabled: true, Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 2},
 			"2 checkpoints not pushed to the checkpoint remote"},
+		// #2264: with no hook to run pre-push, "your next push" syncs nothing.
+		{"hooks_not_delivering", checkpointSyncInfo{Remote: "origin", Source: "default", Unpushed: 2, HooksNotDelivering: true},
+			"2 checkpoints not yet on origin — they won't sync until Entire's Git hooks run again"},
+		{"hooks_not_delivering_singular", checkpointSyncInfo{Remote: "origin", Source: "default", Unpushed: 1, HooksNotDelivering: true},
+			"1 checkpoint not yet on origin — it won't sync until Entire's Git hooks run again"},
+		{"hooks_not_delivering_dedicated", checkpointSyncInfo{Remote: "org/cp", Source: checkpointSyncSourceDedicated, Unpushed: 2, HooksNotDelivering: true},
+			"2 checkpoints not yet pushed — they won't sync until Entire's Git hooks run again"},
+		// Pushing disabled already promises nothing, so the hooks change nothing.
+		{"hooks_not_delivering_pushing_disabled", checkpointSyncInfo{PushDisabled: true, Remote: "origin", Source: "default", Unpushed: 1, HooksNotDelivering: true},
+			"1 checkpoint not on origin"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -2826,6 +2837,7 @@ func TestRunStatus_CheckpointPushDisabledSettingsPrecedence(t *testing.T) {
 				testutil.WriteFile(t, ".", ".entire/settings.local.json", tc.local)
 			}
 			testutil.AddRemote(t, ".", originRemoteName, "https://github.com/org/repo.git")
+			installStatusTestGitHooks(t)
 			head := checkpointSyncTestCommit(t, "a.txt", "one")
 			testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
 			for _, jsonOutput := range []bool{false, true} {
@@ -2894,6 +2906,17 @@ func TestRunStatus_CheckpointPushDisabledAbsentWithoutEnabledEntire(t *testing.T
 // checkpointSyncTestCommit creates a commit in the cwd test repo and returns
 // its hash. setupTestRepo leaves the repo without commits, and both the v1
 // counter and ref updates need at least one.
+// installStatusTestGitHooks installs Entire's Git hooks in the current test
+// repo. The unpushed counter promises the next push only while a pre-push hook
+// will run it, so a fixture asserting that promise needs the hooks.
+func installStatusTestGitHooks(t *testing.T) {
+	t.Helper()
+	if _, err := strategy.ReinstallGitHooks(t.Context()); err != nil {
+		t.Fatalf("ReinstallGitHooks: %v", err)
+	}
+	strategy.ClearHooksDirCache()
+}
+
 func checkpointSyncTestCommit(t *testing.T, name, content string) string {
 	t.Helper()
 	testutil.WriteFile(t, ".", name, content)
@@ -3050,6 +3073,7 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	installStatusTestGitHooks(t)
 	checkpointSyncTestCommit(t, "a.txt", "one")
 	second := checkpointSyncTestCommit(t, "b.txt", "two")
 	// Local v1 with no origin-tracking ref: every v1 commit counts as unpushed
@@ -3351,5 +3375,186 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	}
 	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
 		t.Errorf("status does not name where the setting must live:\n%s", got)
+	}
+}
+
+// #2264: status named a checkpoint destination while no hook existed to reach
+// it. The delivery line is the answer, and in a Lefthook repo it must be
+// judged on Entire's registration rather than on .git/hooks/*, which Lefthook
+// owns and rewrites.
+func TestRunStatus_HookDeliveryLine(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	if err := os.WriteFile("lefthook.yml", []byte("pre-commit: {}\n"), 0o644); err != nil {
+		t.Fatalf("write lefthook.yml: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	if out := stdout.String(); !strings.Contains(out, "Checkpoints are NOT being captured") {
+		t.Errorf("unregistered Lefthook repo must warn, got:\n%s", out)
+	}
+
+	if _, err := strategy.EnsureLefthookIntegration(context.Background()); err != nil {
+		t.Fatalf("EnsureLefthookIntegration() error = %v", err)
+	}
+	// Registering is not delivery on its own: git runs a hook only if the file
+	// exists, and Lefthook creates one per hook it knew about at its last
+	// install. The native install fills the paths Lefthook has not taken.
+	if _, err := strategy.ReinstallGitHooks(context.Background()); err != nil {
+		t.Fatalf("ReinstallGitHooks() error = %v", err)
+	}
+	strategy.ClearHooksDirCache()
+
+	stdout.Reset()
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Git hooks · via Lefthook") {
+		t.Errorf("registered Lefthook repo must report delivery, got:\n%s", out)
+	}
+	if strings.Contains(out, "NOT being captured") {
+		t.Errorf("registered Lefthook repo must not warn, got:\n%s", out)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runStatusJSON(context.Background(), &jsonOut); err != nil {
+		t.Fatalf("runStatusJSON() error = %v", err)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status JSON: %v", err)
+	}
+	if !got.HooksDeliver || got.HooksManager != "Lefthook" || got.HooksDeliverReason != "" {
+		t.Errorf("hooks fields = %+v, want delivering via Lefthook: %s", got, jsonOut.String())
+	}
+}
+
+// With LEFTHOOK=0 set, Lefthook skips Entire's registered hooks along with the
+// user's, so status must say so — and must not promise that the next push
+// syncs checkpoints, since that push would skip Entire's pre-push too.
+func TestRunStatus_LefthookDisabledByEnv(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	if err := os.WriteFile("lefthook.yml", []byte("pre-commit: {}\n"), 0o644); err != nil {
+		t.Fatalf("write lefthook.yml: %v", err)
+	}
+	if _, err := strategy.EnsureLefthookIntegration(context.Background()); err != nil {
+		t.Fatalf("EnsureLefthookIntegration() error = %v", err)
+	}
+	installStatusTestGitHooks(t)
+	head := checkpointSyncTestCommit(t, "a.txt", "one")
+	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
+	t.Setenv("LEFTHOOK", "0")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Git hooks · via Lefthook") {
+		t.Errorf("registration is still correct and must be reported, got:\n%s", out)
+	}
+	if !strings.Contains(out, "LEFTHOOK=0 is set") {
+		t.Errorf("status must warn that LEFTHOOK=0 skips Entire's hooks, got:\n%s", out)
+	}
+	if !strings.Contains(out, "won't sync until Entire's Git hooks run again") {
+		t.Errorf("status must not promise the next push syncs checkpoints, got:\n%s", out)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runStatusJSON(context.Background(), &jsonOut); err != nil {
+		t.Fatalf("runStatusJSON() error = %v", err)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status JSON: %v", err)
+	}
+	if !got.HooksDeliver || got.HooksManager != "Lefthook" || got.HooksSkippedBy != "LEFTHOOK=0" {
+		t.Errorf("hooks fields = %+v, want delivering via Lefthook, skipped by LEFTHOOK=0: %s", got, jsonOut.String())
+	}
+}
+
+// #2264 is not Lefthook-specific: whatever makes the native hooks unreachable,
+// status must qualify its checkpoint destination with a capture warning. These
+// cases pin the distinct repo states from the issue's acceptance matrix.
+func TestRunStatus_NativeHookDeliveryFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		arrangeFailure func(t *testing.T, dir string)
+	}{
+		{
+			name: "fresh enabled clone",
+			arrangeFailure: func(*testing.T, string) {
+				// Enabled settings arrived with the clone, but its .git directory
+				// is local and has never had Entire's hooks installed.
+			},
+		},
+		{
+			name: "native hook removed",
+			arrangeFailure: func(t *testing.T, dir string) {
+				if _, err := strategy.ReinstallGitHooks(t.Context()); err != nil {
+					t.Fatalf("ReinstallGitHooks: %v", err)
+				}
+				if err := os.Remove(filepath.Join(dir, ".git", "hooks", "pre-push")); err != nil {
+					t.Fatalf("remove pre-push: %v", err)
+				}
+			},
+		},
+		{
+			name: "core hooks path redirected",
+			arrangeFailure: func(t *testing.T, dir string) {
+				if _, err := strategy.ReinstallGitHooks(t.Context()); err != nil {
+					t.Fatalf("ReinstallGitHooks: %v", err)
+				}
+				testutil.RunGit(t, dir, "config", "core.hooksPath", filepath.Join(dir, "other-hooks"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			dir := setupTestRepo(t)
+			writeSettings(t, testSettingsEnabled)
+			testutil.RunGit(t, dir, "remote", "add", "origin", "https://example.invalid/repo.git")
+			tc.arrangeFailure(t, dir)
+			strategy.ClearHooksDirCache()
+			// Unpushed checkpoints: the counter must not promise that a push
+			// no hook will run is going to sync them.
+			checkpointSyncTestCommit(t, "a.txt", "one")
+			testutil.GitUpdateRef(t, dir, "refs/heads/"+paths.MetadataBranchName, checkpointSyncTestCommit(t, "b.txt", "two"))
+
+			var stdout bytes.Buffer
+			if err := runStatus(t.Context(), &stdout, false, false); err != nil {
+				t.Fatalf("runStatus: %v", err)
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "Checkpoints are NOT being captured") {
+				t.Errorf("status must warn when hooks do not deliver, got:\n%s", out)
+			}
+			if !strings.Contains(out, "Checkpoints sync to: origin") {
+				t.Errorf("status must retain the diagnostic destination, got:\n%s", out)
+			}
+			if !strings.Contains(out, "2 checkpoints not yet on origin — they won't sync until Entire's Git hooks run again") {
+				t.Errorf("status must not promise the next push syncs checkpoints, got:\n%s", out)
+			}
+
+			var jsonOut bytes.Buffer
+			if err := runStatusJSON(t.Context(), &jsonOut); err != nil {
+				t.Fatalf("runStatusJSON: %v", err)
+			}
+			var got statusJSON
+			if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+				t.Fatalf("unmarshal status JSON: %v", err)
+			}
+			if got.HooksDeliver || got.HooksManager != "" || got.HooksDeliverReason == "" {
+				t.Errorf("hooks fields = %+v, want failed native delivery: %s", got, jsonOut.String())
+			}
+		})
 	}
 }

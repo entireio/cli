@@ -140,6 +140,46 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
 - `session_state.go` - Package-level session state functions
 - `hooks.go` - Git hook installation
+- `lefthook.go` - Lefthook integration. Lefthook is the one hook manager that
+  does not just overwrite `.git/hooks/*` at install time but **reclaims every
+  hook file at the top of each run**, so Entire's turn-start self-heal always
+  loses the race: the file is taken back by the `pre-commit` of the very commit
+  being made. Owning the files is therefore not a fix, and Entire instead
+  registers with Lefthook itself — `entire-lefthook.yml` (Entire's own config,
+  declaring a command per hook), an `extends:` entry in `lefthook-local.yml`
+  pointing at it, and the scripts under `.lefthook-local/<hook>/entire.sh`.
+  Lefthook resolves `extends` at **run time**, so this needs no `lefthook
+  install`. Load-bearing details: each command names Entire's script directly,
+  avoiding the merged `source_dir_local` setting that would otherwise override
+  the user's script directory, and `{0}` forwards the hook's arguments
+  (pre-push needs the remote and URL); `post-rewrite` also sets `use_stdin` so
+  Git's rewrite pairs reach Entire; `lefthook-local.yml` shadows
+  `lefthook-local.toml`, so Entire
+  refuses to create it beside a non-YAML local config
+  (`ErrLefthookLocalConfigUnwritable`) and keeps the native hooks instead; the
+  local config is edited as a `yaml.Node` so comments and key order survive;
+  artifacts are per-clone and generated, so they are ignored via
+  `.git/info/exclude` rather than the user's `.gitignore`; and every file
+  Entire did not write is backed up rather than replaced. `CheckHookDelivery`
+  is the single question `entire status` and `entire doctor` ask — in a
+  Lefthook repo it is answered by the registration, not by `.git/hooks/*`.
+  **Who owns the hook file** follows from that: once Lefthook dispatches
+  Entire, Entire owning the file too would run every hook twice, so
+  `installSkipsHook` leaves any hook carrying Lefthook's launcher alone and
+  `reconcileHookFiles` moves a launcher Entire had displaced back over its own
+  hook (and clears the `<hook>.old` backups that otherwise make every later
+  Lefthook sync fail, #1349). A hook Lefthook has *not* taken over is still
+  installed natively — in a repo where nobody ran `lefthook install`, Entire's
+  own hooks are the only delivery there is. This is also why `EnsureSetup`
+  runs the Lefthook step *before* the native install.
+  **`LEFTHOOK=0` skips Entire too**, and nothing can prevent it while Entire
+  runs as a Lefthook job: Lefthook's launcher exits on it before reading any
+  config (its `rc:` file is sourced after that exit), and escaping it would
+  mean owning the hook files again, which is the fight above. A commit made
+  under it gets no checkpoint trailer and its turn is attributed to no commit; a push
+  made under it leaves checkpoints for the next push. `CheckHookDelivery`
+  reports it as `SkippedBy` — delivery stays OK because nothing is broken —
+  and `status` / `doctor` warn while it is set in their environment.
 
 Note: `checkpoint/configloader.go` overrides go-git's default config loader with a symlink-following `billy.Basic` (`osSymlinkFS`) — go-git's default reads config via `os.Root`, which rejects absolute symlinks in any path component (e.g. a `~/.config` managed by a dotfile tool), silently dropping global config so author identity fell back to "Unknown" and signing was skipped.
 
