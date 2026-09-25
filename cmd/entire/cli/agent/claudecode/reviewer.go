@@ -22,7 +22,8 @@ const envelopeTypeAssistant = "assistant"
 // NewReviewer returns the AgentReviewer for claude-code.
 //
 // Argv shape: claude -p <prompt> --output-format stream-json --verbose
-// --setting-sources user --settings <Entire hooks JSON> (see buildReviewCmd).
+// --setting-sources user --settings <Entire hooks JSON> --strict-mcp-config
+// (see buildReviewCmd).
 // The prompt is passed as a command-line argument; stdin is unused.
 // Stdout is newline-delimited JSON envelopes (one event per line), which the
 // parser decodes into the review Event stream. This format gives the parser
@@ -48,10 +49,15 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 // own settings still are. Entire's lifecycle hooks, which normally come from
 // the project file, are passed from the binary instead (--settings), so the
 // review is still captured without trusting the branch's copy of them.
+//
+// --strict-mcp-config keeps .mcp.json out explicitly. --setting-sources user
+// also stops it on current Claude Code, but that is not documented behavior of
+// the flag, and the review should not depend on it. The cost is that the
+// reviewer does not get the user's own MCP servers either.
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
 	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose",
-		flagSettingSources, "user", "--settings", reviewHookSettings()}
+		flagSettingSources, "user", "--settings", reviewHookSettings(), "--strict-mcp-config"}
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)

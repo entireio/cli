@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -97,10 +98,10 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	cmd := buildReviewCmd(context.Background(), cfg)
 
 	// Expect: claude -p <prompt> --output-format stream-json --verbose
-	// --setting-sources user --settings <hooks JSON>
+	// --setting-sources user --settings <hooks JSON> --strict-mcp-config
 	wantSuffix := []string{"--output-format", "stream-json", "--verbose", "--setting-sources", "user", "--settings"}
-	if len(cmd.Args) != 3+len(wantSuffix)+1 {
-		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix)+1, len(cmd.Args), cmd.Args)
+	if len(cmd.Args) != 3+len(wantSuffix)+2 {
+		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix)+2, len(cmd.Args), cmd.Args)
 	}
 	if cmd.Args[0] != "claude" {
 		t.Errorf("Args[0] = %q, want %q", cmd.Args[0], "claude")
@@ -152,6 +153,10 @@ func TestReviewer_DoesNotLoadCheckoutSettings(t *testing.T) {
 	}
 	if sources != "user" {
 		t.Errorf("--setting-sources = %q, want %q (project and local settings come from the checkout)", sources, "user")
+	}
+
+	if !slices.Contains(cmd.Args, "--strict-mcp-config") {
+		t.Errorf("--strict-mcp-config missing; the checkout's .mcp.json servers could start: %v", cmd.Args)
 	}
 
 	raw, ok := flagValue("--settings")

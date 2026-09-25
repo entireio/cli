@@ -46,10 +46,10 @@ A reviewer runs inside the checkout it reviews, which for `--target` is a
 branch someone else may control. Reviewers therefore do not load
 execution-capable agent configuration from that checkout:
 
-- claude-code runs with `--setting-sources user`, so the checkout's
-  `.claude/settings.json`, `.claude/settings.local.json`, and `.mcp.json` are
-  not loaded; Entire's lifecycle hooks are passed from the binary via
-  `--settings`.
+- claude-code runs with `--setting-sources user` and `--strict-mcp-config`, so
+  the checkout's `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.mcp.json` are not loaded; Entire's lifecycle hooks are passed from the
+  binary via `--settings`. The user's own MCP servers are not loaded either.
 - pi runs with `--no-extensions`, so `.pi/extensions/` and extensions or
   packages named in `.pi/settings.json` are not loaded; Entire's extension is
   loaded with `--extension` from a copy the binary writes to the per-user
