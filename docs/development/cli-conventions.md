@@ -527,8 +527,8 @@ attaches the right bearer and dials the right host so callers don't plumb auth
 themselves. `--to core` (default) hits the control plane; `--to cell` hits an
 entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
-(cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
-via `auth.CellTarget`). **The cell path acts as the same login `--to core`
+(cell routing lives in `auth.NewEntireAPICellClient` via `auth.CellTarget`;
+the login JWT is the bearer, no per-cell token exchange). **The cell path acts as the same login `--to core`
 does** — `ENTIRE_TOKEN` when set, else the selected context: with no
 `ENTIRE_API_BASE_URL`, the cell `apiUrl` is read from the cluster catalog of
 that login's core, so a staging login lands on a staging cell and a local-dev

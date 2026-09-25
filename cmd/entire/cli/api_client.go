@@ -77,9 +77,9 @@ func requireSecureDataOverride() error {
 }
 
 // NewAuthenticatedEntireAPICellClient creates an API client for repo-scoped
-// entire-api routes (e.g. trails). It exchanges the login JWT for a
-// jurisdictional identity token and dials the entire-api cell directly, because
-// the BFF does not proxy these routes for bearer callers.
+// entire-api routes (e.g. trails). It sends the login JWT as the bearer and
+// dials the entire-api cell directly, because the BFF does not proxy these
+// routes for bearer callers.
 //
 // fullName (owner/repo) identifies the repo whose cell to reach. The repo's
 // PROCESSING cell + jurisdiction are resolved from the control plane

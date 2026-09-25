@@ -215,7 +215,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// Semantic search goes to the v4 query-serve path (entire-api
 			// cell gateway) via newSemanticSearcher, which fans out across
-			// cells and mints per-cell identity tokens itself (ENT-1055).
+			// cells with the login JWT as bearer (ENT-1055).
 			// Instrumented at the seam so the TUI's re-searches and
 			// pagination emit outcome telemetry too, not just this one-shot.
 			searcher := instrumentSemanticSearcher(cmd.CommandPath(), newSemanticSearcher(insecureHTTPAuth))

@@ -34,8 +34,8 @@ const (
 	trailEnablementSessionStartRefreshTimeout = time.Second
 	// trailEnablementRefreshTimeout bounds a full enablement refresh. Since
 	// the probe moved onto the repo's own cell it covers ~4 sequential round
-	// trips (repos index, cluster catalog, identity-token exchange,
-	// TrailsEnabled), so requiredCellResolveTimeout's 15s inner budget is
+	// trips (repos index, cluster catalog, login refresh, TrailsEnabled), so
+	// requiredCellResolveTimeout's 15s inner budget is
 	// inert underneath it — this is the effective bound.
 	//
 	// Kept at 3s rather than grown to match: expiry is soft everywhere it

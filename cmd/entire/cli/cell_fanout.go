@@ -383,8 +383,8 @@ type cellClientBuilder interface {
 }
 
 // newCellClientBuilder builds the per-operation cell client factory: the
-// subject is resolved once and identity tokens are minted once per
-// jurisdiction, however many cells the fan-out touches. Swapped in tests.
+// login subject is resolved and refreshed once, however many cells the
+// fan-out touches. Swapped in tests.
 var newCellClientBuilder = func(ctx context.Context, insecureHTTP bool) (cellClientBuilder, error) {
 	return auth.NewEntireAPICellClientFactory(ctx, insecureHTTP)
 }

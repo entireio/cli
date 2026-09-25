@@ -63,9 +63,9 @@ func loginHintErr(err error) error {
 // path. Control-plane discovery (the repo index, per-slug repo lookups, the
 // cluster catalog) is stable for the life of one command, so it is resolved
 // once and reused across TUI re-searches and pagination instead of paying
-// several network round trips per keystroke-search. Identity tokens are NOT
-// cached here — fanOutCells mints them per search (at most one per
-// jurisdiction), which keeps expiry handling in the auth layer.
+// several network round trips per keystroke-search. The login JWT is NOT
+// cached here — fanOutCells resolves and refreshes it per search, which keeps
+// expiry handling in the auth layer.
 type semanticSearchV4Session struct {
 	insecureHTTP bool
 
