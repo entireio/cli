@@ -262,22 +262,6 @@ func TestOrgInviteList_JSONDropsUnmodeledResponsePropertiesOnEveryItem(t *testin
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInviteRevoke_RevokesByULIDWithoutALookup(t *testing.T) {
-	var gotMethod, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(srv.Close)
-
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, testInvitationULID)
-	require.NoError(t, err)
-	assert.Equal(t, http.MethodDelete, gotMethod)
-	assert.Equal(t, "/api/v1/orgs/"+testOrgULID+"/invitations/"+testInvitationULID, gotPath)
-	assert.Contains(t, out, "✓ Revoked the invitation for "+testInvitationULID)
-}
-
-// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestOrgInviteRevoke_ResolvesAnEmailThroughTheOpenListing(t *testing.T) {
 	var deletedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +280,7 @@ func TestOrgInviteRevoke_ResolvesAnEmailThroughTheOpenListing(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	// Mixed case: the server stores the address lowercased.
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "Dev@Example.com")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "--email", "Dev@Example.com")
 	require.NoError(t, err)
 	assert.Equal(t, "/api/v1/orgs/"+testOrgULID+"/invitations/"+testInvitationULID, deletedPath)
 	assert.Contains(t, out, "✓ Revoked the invitation for Dev@Example.com")
@@ -314,22 +298,30 @@ func TestOrgInviteRevoke_IsANoOpWithoutAnOpenInvitation(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "gone@example.com")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "--email", "gone@example.com")
 	require.NoError(t, err)
 	assert.Contains(t, out, "no open invitation; nothing to revoke")
 }
 
-// A ULID that no longer names an invitation is the end state the user asked
-// for, matching the other revoke verbs.
+// An invitation that disappears between the lookup and the revoke is the end
+// state the user asked for, matching the other revoke verbs.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestOrgInviteRevoke_IsIdempotentOnAMissingInvitation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeNotFoundProblem(t, w)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			writeNotFoundProblem(t, w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		assert.NoError(t, printJSON(w, &coreapi.ListOrgInvitationsOutputBody{
+			Invitations: []coreapi.Invitation{*testInvitation("member", "open")},
+		}))
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, testInvitationULID)
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "--email", testInviteEmail)
 	require.NoError(t, err)
 	assert.Contains(t, out, "no such grant; nothing to revoke")
 }
@@ -350,7 +342,7 @@ func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
 	for _, args := range [][]string{
 		{"invite", "send", "ior", "--email", "dev@example.com"},
 		{"invite", "list", "ior"},
-		{"invite", "revoke", "ior", "dev@example.com"},
+		{"invite", "revoke", "ior", "--email", "dev@example.com"},
 	} {
 		_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, args...)
 		require.EqualError(t, err, "no org named \"ior\" (run `entire org list` to see org names)", "%v", args)
@@ -358,12 +350,14 @@ func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInviteSend_RequiresEmail(t *testing.T) {
+func TestOrgInvite_SendAndRevokeRequireEmail(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("a missing --email must be refused before any request")
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "send", testOrgULID)
-	require.ErrorContains(t, err, `required flag(s) "email" not set`)
+	for _, verb := range []string{"send", "revoke"} {
+		_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", verb, testOrgULID)
+		require.ErrorContains(t, err, `required flag(s) "email" not set`, verb)
+	}
 }

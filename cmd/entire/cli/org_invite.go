@@ -26,8 +26,8 @@ import (
 // name for "every state", not a client-side wildcard.
 var invitationStatuses = []string{"open", "accepted", "revoked", "expired", "all"}
 
-// invitationColumns leads with the invitation ULID, which `invite revoke`
-// takes as well as the email address.
+// invitationColumns leads with the invitation ULID, the stable handle for an
+// invitation, as the org columns lead with the org's.
 var invitationColumns = []string{"ID", "EMAIL", colHeaderRole, colHeaderStatus, "EXPIRES"}
 
 func invitationRow(i coreapi.Invitation) []string {
@@ -157,31 +157,29 @@ func listOrgInvitations(ctx context.Context, c *coreapi.Client, orgID, status st
 }
 
 func newOrgInviteRevokeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:     "revoke <org> <email|id>",
+	var email string
+	cmd := &cobra.Command{
+		Use:     "revoke <org> --email <email>",
 		Short:   "Revoke an organization invitation",
-		Long:    "Revoke an open invitation so its link stops working. The org is addressed by name; the invitation by the invited email address or its ID, as `entire org invite list` shows it.",
-		Example: "  entire org invite revoke acme dev@example.com",
-		Args:    cobra.ExactArgs(2),
+		Long:    "Revoke the open invitation for an email address so its link stops working. The org is addressed by name.",
+		Example: "  entire org invite revoke acme --email dev@example.com",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				orgID, err := resolveInviteOrg(ctx, c, args[0])
 				if err != nil {
 					return err
 				}
-				subject := "the invitation for " + args[1] + " to org " + args[0]
-				invitationID := args[1]
-				if !looksLikeULID(invitationID) {
-					invitationID, err = openInvitationIDForEmail(ctx, c, orgID, args[1])
-					if err != nil {
-						return err
-					}
-					if invitationID == "" {
-						// Same end state as revokeGrant's 404: nothing is open
-						// for that address, so there is nothing to revoke.
-						fmt.Fprintf(cmd.OutOrStdout(), "%s: no open invitation; nothing to revoke\n", subject)
-						return nil
-					}
+				subject := "the invitation for " + email + " to org " + args[0]
+				invitationID, err := openInvitationIDForEmail(ctx, c, orgID, email)
+				if err != nil {
+					return err
+				}
+				if invitationID == "" {
+					// Same end state as revokeGrant's 404: nothing is open for
+					// that address, so there is nothing to revoke.
+					fmt.Fprintf(cmd.OutOrStdout(), "%s: no open invitation; nothing to revoke\n", subject)
+					return nil
 				}
 				return revokeGrant(cmd, subject, func() error {
 					return c.RevokeOrgInvitation(ctx, coreapi.RevokeOrgInvitationParams{OrgId: orgID, ID: invitationID})
@@ -189,6 +187,9 @@ func newOrgInviteRevokeCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().StringVar(&email, "email", "", "Email address whose open invitation to revoke")
+	markRequired(cmd, "email")
+	return cmd
 }
 
 // resolveInviteOrg resolves the <org> the invite commands take. Their help
