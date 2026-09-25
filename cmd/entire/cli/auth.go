@@ -126,10 +126,11 @@ func newAuthCmd() *cobra.Command {
 
 // --- token ------------------------------------------------------------------
 
-// errJurisdictionFlagDeprecated is returned when `auth token --jurisdiction`
-// is used. The account access token printed by default is accepted at every
-// entire-api cell (aud == iss, ADR 20260729), so there is nothing to mint.
-var errJurisdictionFlagDeprecated = errors.New("--jurisdiction is deprecated; use 'entire auth token' without it")
+// jurisdictionFlagDeprecatedWarning goes to stderr when `auth token
+// --jurisdiction` is used. The account access token printed by default is
+// accepted at every entire-api cell (aud == iss, ADR 20260729), so the flag
+// is ignored and the regular token printed.
+const jurisdictionFlagDeprecatedWarning = "WARN: --jurisdiction is deprecated and ignored; the token works at every cell"
 
 // newAuthTokenCmd prints an Entire bearer to stdout for scripting: the active
 // control-plane bearer (resolved the same way the API client's is: ENTIRE_TOKEN
@@ -140,7 +141,9 @@ var errJurisdictionFlagDeprecated = errors.New("--jurisdiction is deprecated; us
 // stderr so command substitution stays clean.
 //
 // --jurisdiction is deprecated and hidden: it stays registered so existing
-// scripts fail with a migration hint instead of an unknown-flag error.
+// scripts keep working, with a one-line stderr warning instead of an
+// unknown-flag error. An explicit Fprintln, not pflag's MarkDeprecated, whose
+// notice lands in cobra's flag error buffer and is only shown on error paths.
 func newAuthTokenCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	var jurisdiction string
@@ -161,9 +164,9 @@ func newAuthTokenCmd() *cobra.Command {
 			"  curl -H \"Authorization: Bearer $(entire auth token)\" \"https://aws-us-east-2.api.entire.io/api/v1/me/activity\"",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Stderr, so $(entire auth token -j us) stays clean.
 			if cmd.Flags().Changed("jurisdiction") {
-				cmd.SilenceUsage = true
-				return errJurisdictionFlagDeprecated
+				fmt.Fprintln(cmd.ErrOrStderr(), jurisdictionFlagDeprecatedWarning)
 			}
 
 			// Refresh may exchange/refresh over the network; honor the

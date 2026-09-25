@@ -83,10 +83,9 @@ func TestAuthTokenCmd(t *testing.T) {
 			var out, errOut bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&errOut)
-			err := cmd.ExecuteContext(t.Context())
-			require.ErrorIs(t, err, errJurisdictionFlagDeprecated, "args %v", args)
-			require.Empty(t, out.String(), "stdout must stay clean for command substitution")
-			require.NotContains(t, errOut.String(), "Usage:", "deprecation error must not print usage")
+			require.NoError(t, cmd.ExecuteContext(t.Context()), "args %v", args)
+			require.Equal(t, token+"\n", out.String(), "stdout carries only the regular token")
+			require.Equal(t, jurisdictionFlagDeprecatedWarning+"\n", errOut.String())
 		}
 
 		cmd := newAuthTokenCmd()
