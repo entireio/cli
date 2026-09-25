@@ -140,6 +140,24 @@ func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 		return
 	}
 	marker := inheritedTrailers{IDs: inherited, Parent: headHash(ctx)}
+	writeInheritedTrailers(ctx, root, marker)
+}
+
+// recordInheritedTrailersOnAmend is recordInheritedTrailers for an amend, whose
+// commit replaces HEAD and so has HEAD's parent as its own.
+func recordInheritedTrailersOnAmend(ctx context.Context, inherited []id.CheckpointID) {
+	root, err := perWorktreeGitRoot(ctx)
+	if err != nil {
+		return
+	}
+	if len(inherited) == 0 {
+		_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent is the usual case
+		return
+	}
+	writeInheritedTrailers(ctx, root, inheritedTrailers{IDs: inherited, Parent: headParentHash(ctx)})
+}
+
+func writeInheritedTrailers(ctx context.Context, root *os.Root, marker inheritedTrailers) {
 	data, err := json.Marshal(marker)
 	if err != nil {
 		return
@@ -148,6 +166,24 @@ func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not record inherited trailers",
 			slog.String("error", err.Error()))
 	}
+}
+
+// headParentHash returns HEAD's first parent, the parent an amend will have.
+func headParentHash(ctx context.Context) string {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return ""
+	}
+	defer repo.Close()
+	head, err := repo.Head()
+	if err != nil {
+		return ""
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil || len(commit.ParentHashes) == 0 {
+		return ""
+	}
+	return commit.ParentHashes[0].String()
 }
 
 // headHash returns HEAD's commit, the parent the commit being prepared will

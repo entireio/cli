@@ -365,7 +365,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// Handle amend (source="commit") separately: preserve or restore trailer
 	if source == "commit" {
-		return s.handleAmendCommitMsg(ctx, commitMsgFile)
+		return s.prepareAmendCommitMsg(ctx, commitMsgFile)
 	}
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
@@ -375,6 +375,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		openRepoSpan.End()
 		return nil
 	}
+	// Commits redone after a reset are links too: their trailers ride along.
+	inherited = s.withRedoneTrailers(ctx, repo, commitMsgFile, source, inherited)
 	defer repo.Close()
 	openRepoSpan.End()
 

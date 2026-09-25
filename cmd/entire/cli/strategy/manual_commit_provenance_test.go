@@ -127,6 +127,27 @@ func TestAddInheritedCheckpointTrailer_StaysAboveGitComments(t *testing.T) {
 		"a message without git comments is unchanged in behaviour")
 }
 
+// An amend that inherits nothing clears a marker an aborted amend left, so the
+// next commit on the same parent is not mistaken for the one prepared.
+func TestRecordInheritedTrailersOnAmend_EmptyClearsStaleMarker(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "base\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "init")
+	testutil.WriteFile(t, dir, "f.txt", "x\n")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "second")
+	t.Chdir(dir)
+	parent := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD~1"))
+	ctx := context.Background()
+
+	recordInheritedTrailersOnAmend(ctx, []id.CheckpointID{id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J52")})
+	recordInheritedTrailersOnAmend(ctx, nil)
+	require.Empty(t, takeInheritedTrailers(ctx, parent))
+}
+
 // A -m message keeps `#` lines as content: "#42 fix login" is the subject, not
 // git's comment block, so the inherited trailer must not go above it.
 func TestAddInheritedCheckpointTrailer_MessageSourceKeepsHashLines(t *testing.T) {
