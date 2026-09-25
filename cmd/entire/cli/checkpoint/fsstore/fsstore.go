@@ -35,6 +35,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/redact"
 )
 
 // Store is a JSON-file-backed persistent checkpoint store. One file per
@@ -335,9 +336,9 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		Attribution:                 opts.Attribution,
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
-		ReviewPrompt:                opts.ReviewPrompt,
+		ReviewPrompt:                redact.String(opts.ReviewPrompt),
 		InvestigateRunID:            opts.InvestigateRunID,
-		InvestigateTopic:            opts.InvestigateTopic,
+		InvestigateTopic:            redact.String(opts.InvestigateTopic),
 	}
 }
 
