@@ -427,6 +427,35 @@ func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
 	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
 }
 
+// ignoredCheckpointRemoteSentence is the one wording `entire status` and
+// `entire enable` share for a refused checkpoint_remote, so the two cannot
+// describe the same clone differently. It matches the pre-push warning's form
+// and leads with where checkpoints DO go: for a fork contributor that
+// destination is the correct outcome, and a bare "not in use" read as a fault
+// in a setup working as intended.
+//
+// It speaks only for the elected remote. Another remote may still reach the
+// store (pushing to it uploads there), so an unscoped "not in use" would be
+// false for such a repo, while "checkpoints sync to <elected>, not to it" is
+// true either way. destination may be empty when no remote is elected; repo
+// must already be sanitized for the terminal.
+func ignoredCheckpointRemoteSentence(repo, reason, destination string) string {
+	if destination == "" {
+		return "The configured checkpoint_remote " + repo + " is not in use: " + reason + "."
+	}
+	return "Checkpoints sync to " + destination + ", not to the configured checkpoint_remote " + repo + ": " + reason + "."
+}
+
+// ignoredCheckpointRemoteFix is the claim hint that follows the sentence above,
+// shared for the same reason. claim is the command from
+// ClaimCheckpointRemoteCommand, empty when the entry cannot be expressed as one.
+func ignoredCheckpointRemoteFix(repo, claim string) string {
+	if claim == "" {
+		return "If " + repo + " is yours, declare checkpoint_remote in .entire/settings.local.json."
+	}
+	return "If " + repo + " is yours, run `" + claim + "` to use it from this clone."
+}
+
 // reportIgnoredCheckpointRemote explains a refused checkpoint_remote and offers
 // a local claim only when it can safely confirm ownership. Reports whether it
 // saved a claim, so the caller can describe the resulting destination.
@@ -449,19 +478,10 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 	// The repo comes from the committed settings file, so it is stripped of
 	// escape sequences before it reaches the terminal.
 	repo := tuiutil.SanitizeDisplayText(cr.Repo)
-	// The verdict above votes with ONE remote — the elected one — and a repo can
-	// have several. A remote whose owner matches still resolves the store, so
-	// "not in use" would be flatly false for a repo where pushing to that remote
-	// uploads checkpoints exactly as configured. `pinned` is the resolver's own
-	// answer to "does this remote reach the checkpoint_remote", so any pinned
-	// destination means the store is in use somewhere and the user is not in the
-	// broken state this message describes.
-	for _, d := range inspectRemoteTopology(ctx).destinations {
-		if d.pinned {
-			return false
-		}
-	}
-	fmt.Fprintf(w, "checkpoint_remote %s is not in use: %s.\n", repo, reason)
+	// Votes with the elected remote only, exactly as `entire status` does, so
+	// the two report the same clone the same way. Another remote that would
+	// reach the store does not silence it: checkpoints go to the elected one.
+	fmt.Fprintln(w, ignoredCheckpointRemoteSentence(repo, reason, tuiutil.SanitizeDisplayText(electedRemote)))
 
 	// Ownership merely UNPROVABLE is the one case a human can settle that local
 	// git config cannot: a single-segment or non-forge origin
@@ -485,11 +505,7 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 		return true
 	}
 
-	if claim := remote.ClaimCheckpointRemoteCommand(cr); claim != "" {
-		fmt.Fprintf(w, "If %s is yours, run `%s` to use it from this clone.\n", repo, claim)
-	} else {
-		fmt.Fprintf(w, "If %s is yours, declare checkpoint_remote in .entire/settings.local.json.\n", repo)
-	}
+	fmt.Fprintln(w, ignoredCheckpointRemoteFix(repo, remote.ClaimCheckpointRemoteCommand(cr)))
 	return false
 }
 

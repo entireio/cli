@@ -2752,6 +2752,9 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 							// the rejection, not only report it, which is the
 							// whole reason the remedy is carried rather than
 							// left for the reader to assemble.
+							if tc.name == "inherited" && string(result["checkpoint_remote_ignored_verdict"]) != `"disproved"` {
+								t.Errorf("an owner mismatch must be reported as disproved: %s", out.String())
+							}
 							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_remedy"]), inheritedClaimCommand) {
 								t.Errorf("missing remedy: %s", out.String())
 							}
@@ -2763,7 +2766,7 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 							}
 							return
 						}
-						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "is not in use:")) {
+						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "not to the configured checkpoint_remote")) {
 							t.Errorf("missing remote diagnostic: %s", out.String())
 						}
 						if tc.name == "inherited" && !strings.Contains(out.String(), inheritedClaimCommand) {

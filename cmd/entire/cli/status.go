@@ -390,14 +390,21 @@ type checkpointSyncInfo struct {
 	// IgnoredRemote and IgnoredReason report a configured checkpoint_remote
 	// that the ownership check rejected as inherited with the clone. Both
 	// reads and pushes then fall back to the elected remote, and status is
-	// where a user finds out why — the hooks only log the rejection.
+	// where a user finds out why.
 	IgnoredRemote string
 	IgnoredReason string
+	// IgnoredDisproved marks a rejection where a remote named a different
+	// owner — the fork case, where checkpoints landing on the elected remote is
+	// the intended outcome — so it renders as information, not a warning. False
+	// for an unprovable owner, which only the user can settle.
+	IgnoredDisproved bool
+	// IgnoredReasonIsReadSide marks the push-disabled report, which comes from
+	// the fetch side's verdict rather than ownership, so it names no verdict.
+	IgnoredReasonIsReadSide bool
 	// IgnoredRemedy is the command that claims the ignored store for this
-	// clone, empty when the configured entry is too malformed to name one or
-	// when the rejection is not one a local declaration fixes. Carried rather
-	// than rebuilt at render time so the text and the JSON cannot offer
-	// different fixes.
+	// clone, empty only when the configured entry is too malformed to name
+	// one. Carried rather than rebuilt at render time so the text and the
+	// JSON cannot offer different fixes.
 	IgnoredRemedy string
 }
 
@@ -534,9 +541,10 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// lives only in the elected remote's push URL shows "not in use" here
 	// even though such a lead-less fetch still resolves the checkpoint remote.
 	if cr := s.GetCheckpointRemote(); cr != nil {
-		if repo, reason, inherited := checkpointremote.InheritedCheckpointRemote(ctx, s, elected.Name); inherited {
-			info.IgnoredRemote = repo
+		if verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, elected.Name); verdict.Refused() {
+			info.IgnoredRemote = cr.Repo
 			info.IgnoredReason = reason
+			info.IgnoredDisproved = verdict == checkpointremote.OwnershipDisproved
 			info.IgnoredRemedy = checkpointremote.ClaimCheckpointRemoteCommand(cr)
 		} else if info.PushDisabled {
 			// That verdict is ownership only, so it accepts a store the fetch
@@ -553,9 +561,23 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 			// where they are decided.
 			info.IgnoredRemote = cr.Repo
 			info.IgnoredReason = "checkpoint reads do not resolve to it (see .entire/logs for the reason)"
+			info.IgnoredReasonIsReadSide = true
 		}
 	}
 	return info
+}
+
+// IgnoredVerdict names the ownership verdict behind IgnoredRemote for --json;
+// empty when nothing is ignored or the refusal was not an ownership verdict.
+func (info checkpointSyncInfo) IgnoredVerdict() string {
+	switch {
+	case info.IgnoredRemote == "" || info.IgnoredReasonIsReadSide:
+		return ""
+	case info.IgnoredDisproved:
+		return "disproved"
+	default:
+		return "unprovable"
+	}
 }
 
 // countUnpushedCheckpointsForStatus counts best-effort: status must never fail
@@ -634,16 +656,19 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString(sty.render(sty.dim, " (fallback; nothing was elected)"))
 	}
 	if info.IgnoredRemote != "" {
-		fix := "set checkpoint_remote in .entire/settings.local.json"
-		if info.IgnoredRemedy != "" {
-			fix = "run `" + info.IgnoredRemedy + "`"
-		}
 		// The repo comes from the committed settings file, so it is stripped
 		// of escape sequences before it reaches the terminal.
+		repo := tuiutil.SanitizeDisplayText(info.IgnoredRemote)
+		line := ignoredCheckpointRemoteSentence(repo, info.IgnoredReason, info.Remote) + " " +
+			ignoredCheckpointRemoteFix(repo, info.IgnoredRemedy)
 		b.WriteString("\n")
-		b.WriteString(sty.render(sty.yellow,
-			"  ! checkpoint_remote "+tuiutil.SanitizeDisplayText(info.IgnoredRemote)+" is not in use: "+info.IgnoredReason+
-				". If this checkpoint repo is yours, "+fix+"."))
+		if info.IgnoredDisproved {
+			// Another owner's store: checkpoints on the elected remote is the
+			// intended outcome for a fork, so this is information, not a fault.
+			b.WriteString(sty.render(sty.dim, "  "+line))
+		} else {
+			b.WriteString(sty.render(sty.yellow, "  ! "+line))
+		}
 	}
 	if info.Unpushed > 0 {
 		b.WriteString("\n  ")
@@ -1094,6 +1119,12 @@ type statusJSON struct {
 	// rejection rather than only report it; absent when no single command
 	// fixes it.
 	CheckpointRemoteIgnoredRemedy string `json:"checkpoint_remote_ignored_remedy,omitempty"`
+	// CheckpointRemoteIgnoredVerdict says why ownership refused the store:
+	// "disproved" when a remote names a different owner (a fork, where the
+	// fallback is the intended outcome) or "unprovable" when no owner could be
+	// read (only the user can settle it). Absent when the refusal was not an
+	// ownership verdict.
+	CheckpointRemoteIgnoredVerdict string `json:"checkpoint_remote_ignored_verdict,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -1195,6 +1226,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
 		result.CheckpointRemoteIgnoredRemedy = syncInfo.IgnoredRemedy
+		result.CheckpointRemoteIgnoredVerdict = syncInfo.IgnoredVerdict()
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			// Read-only, and one entry per session. Collapsing by agent hid a

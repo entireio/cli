@@ -104,7 +104,7 @@ func TestEnableReportsAnIgnoredCheckpointRemote(t *testing.T) {
 	reportIgnoredCheckpointRemote(ctx, &out, s, "origin", false)
 
 	got := out.String()
-	assert.Contains(t, got, "acme/checkpoints is not in use")
+	assert.Contains(t, got, "Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints")
 	assert.Contains(t, got, "entire enable --local --checkpoint-remote github:acme/checkpoints")
 }
 
@@ -142,7 +142,7 @@ func TestEnableCommandSurfacesAnIgnoredCheckpointRemote(t *testing.T) {
 	cmd.SetArgs(nil)
 	require.NoError(t, cmd.Execute())
 
-	assert.Contains(t, output.String(), "checkpoint_remote acme/checkpoints is not in use")
+	assert.Contains(t, output.String(), "Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints")
 	assert.Contains(t, output.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
 }
 
@@ -335,4 +335,53 @@ func TestIgnoredCheckpointRemoteStripsTerminalEscapes(t *testing.T) {
 	assert.Contains(t, statusOut.String(), "acme/store")
 	assert.NotContains(t, statusOut.String(), "\x1b]0;")
 	assert.NotContains(t, statusOut.String(), "\x1b[2J")
+}
+
+// TestEnableAndStatusAgreeWhenCheckpointsSyncToAFork is the clone-upstream,
+// push-to-your-fork flow: origin's owner matches the store, so origin alone
+// would reach it, but checkpoints sync to the fork, whose owner disproves it.
+// enable used to stay silent here because SOME remote reached the store while
+// status reported the elected one; both now describe the elected remote, in
+// the same words.
+//
+// Not parallel: repository CWD is process-global.
+func TestEnableAndStatusAgreeWhenCheckpointsSyncToAFork(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@github.com:acme/app.git")
+	testutil.RunGit(t, dir, "remote", "add", "fork", "git@github.com:alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	const want = `Checkpoints sync to fork, not to the configured checkpoint_remote acme/checkpoints: push remote owner "alice" differs from checkpoint owner "acme".`
+
+	var enableOut bytes.Buffer
+	reportIgnoredCheckpointRemote(t.Context(), &enableOut, s, "fork", false)
+	assert.Contains(t, enableOut.String(), want)
+
+	var statusOut bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+	assert.Contains(t, statusOut.String(), want)
+	assert.NotContains(t, statusOut.String(), "! "+want,
+		"another owner's store is the fork outcome working as intended, not a fault")
+	assert.Equal(t, "disproved", computeCheckpointSyncInfo(t.Context(), s).IgnoredVerdict())
+}
+
+// TestStatusWarnsOnlyWhenOwnershipIsUnprovable: an owner that cannot be read is
+// the one refusal only the user can settle, so it keeps the warning marker the
+// disproved case drops.
+//
+// Not parallel: repository CWD is process-global.
+func TestStatusWarnsOnlyWhenOwnershipIsUnprovable(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	var statusOut bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+	assert.Contains(t, statusOut.String(),
+		"! Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints: origin URL owner could not be determined.")
+	assert.Equal(t, "unprovable", computeCheckpointSyncInfo(t.Context(), s).IgnoredVerdict())
 }
