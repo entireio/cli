@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -162,6 +163,46 @@ func TestRunTrailShowJSONIsTheDetailResourcePlusURL(t *testing.T) {
 			require.Empty(t, errOut)
 			require.JSONEq(t, string(wantJSON), out)
 		})
+	}
+}
+
+// A numeric selector's detail response is recognized as the detail even
+// without body_document (an empty description), so it is neither refetched
+// nor stripped of its mergeability.
+func TestRunTrailShowNumericDetailWithoutBodyIsNotRefetched(t *testing.T) {
+	t.Parallel()
+
+	const detail = `{"id": "trl_1", "number": 7, "url": "u", "mergeability": ` + trailMergeabilityWireJSON + `}`
+	var detailHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != trailTestBasePath+"/7" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// Any refetch fails, so a second request would also lose the snapshot.
+		if detailHits.Add(1) > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(detail)); err != nil {
+			t.Errorf("write detail response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, jsonOut := range []bool{true, false} {
+		detailHits.Store(0)
+		out, errOut, err := runTrailShowForMergeabilityTest(t, srv, "7", jsonOut)
+		require.NoError(t, err)
+		require.Empty(t, errOut)
+		require.EqualValues(t, 1, detailHits.Load(), "json=%v: the detail route must be requested exactly once", jsonOut)
+		if jsonOut {
+			require.JSONEq(t, detail, out)
+		} else {
+			require.Contains(t, out, "Mergeable: no")
+		}
 	}
 }
 
