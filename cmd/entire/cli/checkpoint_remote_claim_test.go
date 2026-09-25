@@ -385,3 +385,44 @@ func TestStatusWarnsOnlyWhenOwnershipIsUnprovable(t *testing.T) {
 		"! Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints: origin URL owner could not be determined.")
 	assert.Equal(t, "unprovable", computeCheckpointSyncInfo(t.Context(), s).IgnoredVerdict())
 }
+
+// TestEnableAndStatusAgreeWithPushingDisabled: with push_sessions=false the
+// store is in use only if checkpoint reads resolve to it, and enable used to
+// return before judging it at all while status reported it. Both refusal kinds
+// are covered: ownership, and a store the fetch side declines for another
+// reason (here a checkpoint token with a provider it has no host for).
+//
+// Not parallel: repository CWD and the token env var are process-global.
+func TestEnableAndStatusAgreeWithPushingDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, origin, token, want string
+	}{
+		{
+			name: "ownership", provider: "github", origin: "https://github.com/alice/app.git",
+			want: `Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints: origin owner "alice" differs from checkpoint owner "acme".`,
+		},
+		{
+			name: "read_side", provider: "bitbucket", origin: "https://bitbucket.org/acme/app.git", token: "token",
+			want: "Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints: checkpoint reads do not resolve to it (see .entire/logs for the reason).",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(checkpointremote.CheckpointTokenEnvVar, tc.token)
+			dir := setupTestRepo(t)
+			testutil.RunGit(t, dir, "remote", "add", "origin", tc.origin)
+			writeSettings(t, `{"enabled":true,"strategy_options":{"push_sessions":false,"checkpoint_remote":{"provider":"`+tc.provider+`","repo":"acme/checkpoints"}}}`)
+
+			cmd := newEnableCmd()
+			var enableOut bytes.Buffer
+			cmd.SetOut(&enableOut)
+			cmd.SetErr(&enableOut)
+			cmd.SetArgs(nil)
+			require.NoError(t, cmd.Execute())
+			assert.Contains(t, enableOut.String(), tc.want)
+
+			var statusOut bytes.Buffer
+			require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+			assert.Contains(t, statusOut.String(), tc.want)
+		})
+	}
+}

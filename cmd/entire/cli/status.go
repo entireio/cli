@@ -540,29 +540,14 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// but a fetch with NO candidate votes on origin alone, so a mismatch that
 	// lives only in the elected remote's push URL shows "not in use" here
 	// even though such a lead-less fetch still resolves the checkpoint remote.
-	if cr := s.GetCheckpointRemote(); cr != nil {
-		if verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, elected.Name); verdict.Refused() {
-			info.IgnoredRemote = cr.Repo
-			info.IgnoredReason = reason
-			info.IgnoredDisproved = verdict == checkpointremote.OwnershipDisproved
-			info.IgnoredRemedy = checkpointremote.ClaimCheckpointRemoteCommand(cr)
-		} else if info.PushDisabled {
-			// That verdict is ownership only, so it accepts a store the fetch
-			// side declined for another reason (an unparseable origin URL, an
-			// unmappable protocol) — and with pushing disabled the fetch side
-			// is the one that decided the line above. Without this the
-			// configured store is reported by nothing at all, which is the
-			// silent-ignore the warning exists to prevent. Ownership itself
-			// cannot split the two: both vote over origin plus the
-			// candidate's push urls.
-			//
-			// No reason is given: the fetch side returns a verdict and not a
-			// cause, so naming one would be a guess. The causes are logged
-			// where they are decided.
-			info.IgnoredRemote = cr.Repo
-			info.IgnoredReason = "checkpoint reads do not resolve to it (see .entire/logs for the reason)"
-			info.IgnoredReasonIsReadSide = true
-		}
+	// With pushing disabled, reaching here means the fetch side already
+	// declined the store above (resolveDedicatedReadSource returned false).
+	if r, ok := ignoredCheckpointRemote(ctx, s, elected.Name, info.PushDisabled); ok {
+		info.IgnoredRemote = r.Repo
+		info.IgnoredReason = r.Reason
+		info.IgnoredDisproved = r.Verdict == checkpointremote.OwnershipDisproved
+		info.IgnoredReasonIsReadSide = r.ReadSide
+		info.IgnoredRemedy = r.Remedy
 	}
 	return info
 }

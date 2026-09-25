@@ -308,6 +308,15 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		return
 	}
 	if s.IsPushSessionsDisabled() {
+		// Reads still resolve through the elected remote, so a store they do
+		// not use is reported here as `entire status` reports it. A failed or
+		// empty election has no read candidate to judge against; status stays
+		// silent about the store there too.
+		if elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx); electErr == nil && elected.Name != "" &&
+			reportIgnoredCheckpointRemote(ctx, w, s, elected.Name, !c.suppressClaim) {
+			c.changed = true
+			touched = true
+		}
 		if touched {
 			c.reportUnchangedDestination(w)
 			fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
@@ -456,6 +465,60 @@ func ignoredCheckpointRemoteFix(repo, claim string) string {
 	return "If " + repo + " is yours, run `" + claim + "` to use it from this clone."
 }
 
+// ignoredCheckpointRemoteReport describes a configured checkpoint_remote that
+// is not in use. It is the one verdict both `entire status` and `entire enable`
+// render, so the two cannot report the same clone differently.
+type ignoredCheckpointRemoteReport struct {
+	Repo   string
+	Reason string
+	// Remedy is the claim command, empty when the entry is too malformed to
+	// name one or when the refusal was not an ownership verdict.
+	Remedy string
+	// Verdict is the ownership verdict behind the refusal, OwnershipOurs when
+	// ReadSide is set.
+	Verdict remote.OwnershipVerdict
+	// ReadSide marks a refusal that came from the fetch side's verdict rather
+	// than ownership.
+	ReadSide bool
+}
+
+// ignoredCheckpointRemote decides whether the configured checkpoint_remote is
+// being ignored when checkpoints resolve to electedRemote. readsDeclined says
+// the fetch side has already declined the store; callers pass it only with
+// pushing disabled, where the fetch side is what decides the store's use.
+func ignoredCheckpointRemote(ctx context.Context, s *settings.EntireSettings, electedRemote string, readsDeclined bool) (ignoredCheckpointRemoteReport, bool) {
+	cr := s.GetCheckpointRemote()
+	if cr == nil {
+		return ignoredCheckpointRemoteReport{}, false
+	}
+	if verdict, reason := remote.InheritedCheckpointRemoteVerdict(ctx, s, electedRemote); verdict.Refused() {
+		return ignoredCheckpointRemoteReport{
+			Repo:    cr.Repo,
+			Reason:  reason,
+			Remedy:  remote.ClaimCheckpointRemoteCommand(cr),
+			Verdict: verdict,
+		}, true
+	}
+	if !readsDeclined {
+		return ignoredCheckpointRemoteReport{}, false
+	}
+	// The verdict above is ownership only, so it accepts a store the fetch
+	// side declined for another reason (an unparseable origin URL, an
+	// unmappable protocol). Without this the configured store is reported by
+	// nothing at all, which is the silent-ignore the report exists to prevent.
+	// Ownership itself cannot split the two: both vote over origin plus the
+	// candidate's push urls.
+	//
+	// No reason is given: the fetch side returns a verdict and not a cause, so
+	// naming one would be a guess. The causes are logged where they are
+	// decided.
+	return ignoredCheckpointRemoteReport{
+		Repo:     cr.Repo,
+		Reason:   "checkpoint reads do not resolve to it (see .entire/logs for the reason)",
+		ReadSide: true,
+	}, true
+}
+
 // reportIgnoredCheckpointRemote explains a refused checkpoint_remote and offers
 // a local claim only when it can safely confirm ownership. Reports whether it
 // saved a claim, so the caller can describe the resulting destination.
@@ -471,17 +534,25 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 	if cr == nil {
 		return false
 	}
-	verdict, reason := remote.InheritedCheckpointRemoteVerdict(ctx, s, electedRemote)
-	if !verdict.Refused() {
+	// With pushing disabled the store is in use only if reads resolve to it,
+	// exactly as `entire status` decides. A failed probe knows nothing, so it
+	// reports nothing rather than guessing.
+	readsDeclined := false
+	if s.IsPushSessionsDisabled() {
+		reads, err := remote.ReadsDedicatedStore(ctx, electedRemote)
+		readsDeclined = err == nil && !reads
+	}
+	r, ok := ignoredCheckpointRemote(ctx, s, electedRemote, readsDeclined)
+	if !ok {
 		return false
 	}
 	// The repo comes from the committed settings file, so it is stripped of
 	// escape sequences before it reaches the terminal.
-	repo := tuiutil.SanitizeDisplayText(cr.Repo)
+	repo := tuiutil.SanitizeDisplayText(r.Repo)
 	// Votes with the elected remote only, exactly as `entire status` does, so
 	// the two report the same clone the same way. Another remote that would
 	// reach the store does not silence it: checkpoints go to the elected one.
-	fmt.Fprintln(w, ignoredCheckpointRemoteSentence(repo, reason, tuiutil.SanitizeDisplayText(electedRemote)))
+	fmt.Fprintln(w, ignoredCheckpointRemoteSentence(repo, r.Reason, tuiutil.SanitizeDisplayText(electedRemote)))
 
 	// Ownership merely UNPROVABLE is the one case a human can settle that local
 	// git config cannot: a single-segment or non-forge origin
@@ -499,13 +570,13 @@ func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings
 	// --checkpoint-remote <provider>:<owner>/<repo>` already performs exactly
 	// this write in one command; the prompt makes the existing remedy
 	// discoverable to someone who does not know it exists.
-	if allowPrompt && verdict == remote.OwnershipUnprovable &&
+	if allowPrompt && r.Verdict == remote.OwnershipUnprovable &&
 		settings.CheckpointRemoteLocalClaimRejection(ctx) == "" &&
 		offerToClaimCheckpointRemote(ctx, w, remote.ClaimCheckpointRemoteFlagValue(cr), repo) {
 		return true
 	}
 
-	fmt.Fprintln(w, ignoredCheckpointRemoteFix(repo, remote.ClaimCheckpointRemoteCommand(cr)))
+	fmt.Fprintln(w, ignoredCheckpointRemoteFix(repo, r.Remedy))
 	return false
 }
 
