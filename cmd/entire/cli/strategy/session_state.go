@@ -666,7 +666,8 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 	// Copied out before the defer clears gate.afterSave, into a fresh slice so
 	// the queue never shares a backing array with the gate. Guarded because the
 	// overwhelmingly common case is a plain MutateSessionState with nothing
-	// queued, and that runs on the PostToolUse hot path — no effects, no alloc.
+	// queued, and that runs on the PostToolUse hot path — no effects, no alloc
+	// (snapshotPendingContent keeps that promise too).
 	if len(gate.afterSave) > 0 || onSaved != nil {
 		effects = make([]func(), 0, len(gate.afterSave)+1)
 		effects = append(effects, gate.afterSave...)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/go-git/go-git/v6"
@@ -14,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 // findSessionsForCommitLinking resolves which sessions a commit belongs to:
@@ -91,9 +93,23 @@ func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktre
 	if stampedTrailer != id.EmptyCheckpointID {
 		linking.sessions = linking.sessionsIncludingReservedFor(stampedTrailer)
 	} else if len(declined) > 0 && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
-		announceUnlinkedCommit(declined)
+		s.announceIfCommitHoldsTheirWork(ctx, declined)
 	}
 	return linking, nil
+}
+
+// announceIfCommitHoldsTheirWork announces the declined candidates only when at
+// least one has new content in this commit: a human commit touching none of
+// their work is unrelated to them, and a notice there would be a nag.
+func (s *ManualCommitStrategy) announceIfCommitHoldsTheirWork(ctx context.Context, declined []*SessionState) {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
+	if withWork := s.filterSessionsWithNewContent(ctx, repo, declined); len(withWork) > 0 {
+		announceUnlinkedCommit(withWork)
+	}
 }
 
 // announceUnlinkedCommit names the candidate sessions so the user can
@@ -232,26 +248,45 @@ func hasPendingFilesOrTasks(state *SessionState) bool {
 }
 
 // pendingContentSnapshot is what a mutation started from, so the outermost
-// MutateSessionState frame can tell whether it added pending content.
+// MutateSessionState frame can tell whether it added pending content. It keeps
+// the FilesTouched slice header and a digest of the task records rather than
+// copies: it runs on every mutation, PostToolUse included, and must not
+// allocate there.
 type pendingContentSnapshot struct {
-	had   bool
-	files map[string]struct{}
-	tasks map[string]int // tool use ID -> file count
+	had       bool
+	files     []string
+	taskCount int
+	taskFiles int
+	taskIDs   uint64 // XOR of the records' ToolUseID hashes
 }
 
 func snapshotPendingContent(state *SessionState) pendingContentSnapshot {
-	snap := pendingContentSnapshot{
-		had:   hasPendingFilesOrTasks(state),
-		files: make(map[string]struct{}, len(state.FilesTouched)),
-		tasks: make(map[string]int, len(state.TaskRecords)),
+	count, files, ids := taskDigest(state.TaskRecords)
+	return pendingContentSnapshot{
+		had:       hasPendingFilesOrTasks(state),
+		files:     state.FilesTouched,
+		taskCount: count,
+		taskFiles: files,
+		taskIDs:   ids,
 	}
-	for _, f := range state.FilesTouched {
-		snap.files[f] = struct{}{}
+}
+
+func taskDigest(records []session.TaskRecord) (count, files int, ids uint64) {
+	for _, rec := range records {
+		files += len(rec.Files)
+		ids ^= fnv64a(rec.ToolUseID)
 	}
-	for _, rec := range state.TaskRecords {
-		snap.tasks[rec.ToolUseID] = len(rec.Files)
+	return len(records), files, ids
+}
+
+// fnv64a is FNV-1a over s, inline so the digest does not allocate.
+func fnv64a(s string) uint64 {
+	h := uint64(14695981039346656037)
+	for i := range len(s) {
+		h ^= uint64(s[i])
+		h *= 1099511628211
 	}
-	return snap
+	return h
 }
 
 // notePendingContentGrowth attributes content a mutation added to the worktree
@@ -269,13 +304,32 @@ func notePendingContentGrowth(ctx context.Context, before pendingContentSnapshot
 }
 
 func pendingContentGrew(before pendingContentSnapshot, state *SessionState) bool {
-	for _, f := range state.FilesTouched {
-		if _, ok := before.files[f]; !ok {
-			return true
-		}
+	count, files, ids := taskDigest(state.TaskRecords)
+	if count > before.taskCount || files > before.taskFiles || (count == before.taskCount && ids != before.taskIDs) {
+		return true
 	}
-	for _, rec := range state.TaskRecords {
-		if n, ok := before.tasks[rec.ToolUseID]; !ok || len(rec.Files) > n {
+	return filesGrew(before.files, state.FilesTouched)
+}
+
+// filesGrew reports whether after holds a path before did not. Writers replace
+// FilesTouched rather than edit it in place, so an unchanged prefix of equal
+// length is the common case and needs no allocation.
+func filesGrew(before, after []string) bool {
+	if len(after) == 0 {
+		return false
+	}
+	if len(after) > len(before) {
+		return true
+	}
+	if slices.Equal(before[:len(after)], after) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(before))
+	for _, f := range before {
+		seen[f] = struct{}{}
+	}
+	for _, f := range after {
+		if _, ok := seen[f]; !ok {
 			return true
 		}
 	}

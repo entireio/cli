@@ -313,8 +313,14 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		dir := identityTestRepo(t)
 		wtA := addSiblingWorktree(t, dir, "live-a")
 		wtB := addSiblingWorktree(t, dir, "live-b")
-		saveIdentitySession(t, "sess-live-a", func(st *SessionState) { st.WorktreePath = wtA })
-		saveIdentitySession(t, "sess-live-b", func(st *SessionState) { st.WorktreePath = wtB })
+		// Both sessions hold pending work this commit stages.
+		withWork := func(st *SessionState) {
+			st.TaskRecords = []session.TaskRecord{{ToolUseID: "toolu_" + st.SessionID, Files: []string{"shared.txt"}, CompletedAt: time.Now()}}
+		}
+		saveIdentitySession(t, "sess-live-a", func(st *SessionState) { st.WorktreePath = wtA; withWork(st) })
+		saveIdentitySession(t, "sess-live-b", func(st *SessionState) { st.WorktreePath = wtB; withWork(st) })
+		testutil.WriteFile(t, dir, "shared.txt", "work\n")
+		testutil.GitAdd(t, dir, "shared.txt")
 		buf := captureStderrWriter(t)
 
 		s := NewManualCommitStrategy()
@@ -337,6 +343,22 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		}
 		assert.Contains(t, notice, "entire session attach", "the remedy is to attach this commit to the right session afterwards")
 		assert.NotContains(t, notice, "session adopt", "adopt moves a live session out of its worktree; it is not the remedy for a commit made elsewhere")
+	})
+
+	t.Run("a commit holding none of the candidates' work is not announced", func(t *testing.T) {
+		dir := identityTestRepo(t)
+		wtA := addSiblingWorktree(t, dir, "idle-a")
+		wtB := addSiblingWorktree(t, dir, "idle-b")
+		saveIdentitySession(t, "sess-idle-a", func(st *SessionState) { st.WorktreePath = wtA })
+		saveIdentitySession(t, "sess-idle-b", func(st *SessionState) { st.WorktreePath = wtB })
+		testutil.WriteFile(t, dir, "human.txt", "human work\n")
+		testutil.GitAdd(t, dir, "human.txt")
+		buf := captureStderrWriter(t)
+
+		got, err := NewManualCommitStrategy().findSessionsForCommitLinking(ctx, dir)
+		require.NoError(t, err)
+		assert.Empty(t, got)
+		assert.Empty(t, buf.String(), "a human commit unrelated to the sessions in other worktrees must not nag")
 	})
 
 	t.Run("identity rescue suppresses the decline hint", func(t *testing.T) {
@@ -584,4 +606,46 @@ func TestNotePendingContentGrowth_LocatesOnlyAddedContent(t *testing.T) {
 	require.Equal(t, "/repo-wt", fresh.PendingContentWorktree)
 	fresh.NotePendingContentAt("/repo", true)
 	require.Equal(t, session.PendingContentInSeveralWorktrees, fresh.PendingContentWorktree)
+}
+
+// The pending-content snapshot runs on every mutation, PostToolUse included.
+func TestSnapshotPendingContent_DoesNotAllocate(t *testing.T) {
+	state := &SessionState{
+		FilesTouched: []string{"a.txt", "b.txt"},
+		TaskRecords:  []session.TaskRecord{{ToolUseID: "toolu_1", Files: []string{"a.txt"}}},
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		before := snapshotPendingContent(state)
+		_ = pendingContentGrew(before, state)
+	})
+	require.Zero(t, allocs)
+}
+
+func TestPendingContentGrew(t *testing.T) {
+	t.Parallel()
+	base := func() *SessionState {
+		return &SessionState{FilesTouched: []string{"a.txt"}, TaskRecords: []session.TaskRecord{{ToolUseID: "t1"}}}
+	}
+	cases := map[string]struct {
+		mutate func(*SessionState)
+		grew   bool
+	}{
+		"unchanged":                     {mutate: func(*SessionState) {}, grew: false},
+		"a file added":                  {mutate: func(s *SessionState) { s.FilesTouched = []string{"a.txt", "b.txt"} }, grew: true},
+		"a file swapped for another":    {mutate: func(s *SessionState) { s.FilesTouched = []string{"b.txt"} }, grew: true},
+		"files condensed away":          {mutate: func(s *SessionState) { s.FilesTouched = nil }, grew: false},
+		"a task added":                  {mutate: func(s *SessionState) { s.TaskRecords = append(s.TaskRecords, session.TaskRecord{ToolUseID: "t2"}) }, grew: true},
+		"a task replaced by another":    {mutate: func(s *SessionState) { s.TaskRecords = []session.TaskRecord{{ToolUseID: "t2"}} }, grew: true},
+		"files attached to a task":      {mutate: func(s *SessionState) { s.TaskRecords[0].Files = []string{"x"} }, grew: true},
+		"a task materialized (removed)": {mutate: func(s *SessionState) { s.TaskRecords = nil }, grew: false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			state := base()
+			before := snapshotPendingContent(state)
+			tc.mutate(state)
+			require.Equal(t, tc.grew, pendingContentGrew(before, state))
+		})
+	}
 }
