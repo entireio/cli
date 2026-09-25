@@ -485,7 +485,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	// NOTE: TTY confirmation (askConfirmTTY) is intentionally NOT wrapped in a span
 	// because it blocks on user input and would skew timing.
 	switch source {
-	case "message":
+	case commitSourceMessage:
 		// Using -m or -F: behavior depends on TTY availability and commit_linking setting
 		switch {
 		case !interactive.CanPromptInteractively():
@@ -552,7 +552,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 // Returns the inherited IDs; nil when there are none or the message is
 // unusable. Ordinary matching runs afterwards either way.
 func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) []id.CheckpointID {
-	if source != "message" && source != "squash" {
+	if source != commitSourceMessage && source != "squash" {
 		return nil
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
@@ -2601,13 +2601,16 @@ func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
 	return trailers.AppendCheckpointTrailer(message, checkpointID.String())
 }
 
+// commitSourceMessage is prepare-commit-msg's source for `-m`/`-F` messages.
+const commitSourceMessage = "message"
+
 // addInheritedCheckpointTrailer adds an inherited trailer above git's comment
 // block rather than after it: with `commit -v` git discards everything below
 // the scissors line, and the trailer with it. Only an editor message has that
 // block; a `-m`/`-F` message (source "message") keeps `#` lines as content, so
 // its trailer is appended as usual.
 func addInheritedCheckpointTrailer(message string, checkpointID id.CheckpointID, source string) string {
-	if source == "message" {
+	if source == commitSourceMessage {
 		return addCheckpointTrailer(message, checkpointID)
 	}
 	lines := strings.Split(message, "\n")
