@@ -174,6 +174,12 @@ cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
 
 See `CheckoutBranch()` in `git_operations.go` for an example.
 
+#### Branch-name validation
+
+`cli.ValidateBranchName` uses go-git's `plumbing.ValidateBranchName` for literal names without a subprocess. Do not substitute `ReferenceName.Validate`: branch creation also rejects the shorthand `HEAD` and a leading `-`.
+
+Names containing `@{` retain native `git check-ref-format --branch` interpretation, including repository-dependent checkout history such as `@{-1}`. Validation does not expand the string returned to callers, check that a branch exists, or make checkout safe from pathspec fallback; `CheckoutBranch` must still pass the trailing `--`. Cancellation and deadline expiry are returned as wrapped context errors, not invalid-name errors. Check context state both before validation and after native interpretation, since a killed subprocess can otherwise hide the context cause behind its exit error.
+
 #### Repo Root vs Current Working Directory
 
 **Always use repo root (not `os.Getwd()`) when working with git-relative paths.**
