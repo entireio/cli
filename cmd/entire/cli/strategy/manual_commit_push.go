@@ -106,13 +106,6 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		}
 	}
 
-	// Below the gate on purpose: a push the gate turned away carries no
-	// checkpoints anywhere, and hintGatedCheckpointSync already speaks for that
-	// case. Everything past here is a push that DOES carry checkpoints, which is
-	// what makes "they are going somewhere other than where you said" worth a
-	// line in the user's push output.
-	warnIgnoredCheckpointRemote(ctx, ps)
-
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
 	// instead of the single v1 branch. Those refs live under refs/entire/, not
 	// refs/heads/, so a forge can never pick them as a repository's default
@@ -221,6 +214,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// making. The next push that carries a checkpoint captures instead.
 	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
 		commitCapturedSyncRemote(ctx, pendingCapture)
+	}
+	// Only a push that carried checkpoints can say "they are going somewhere
+	// other than where you said"; the gate and every early return above carry
+	// none, and hintGatedCheckpointSync speaks for the gated case.
+	if deliveredCount > 0 {
+		warnIgnoredCheckpointRemote(ctx, ps)
 	}
 
 	cleanupPushedShadowBranches(ctx)
@@ -429,6 +428,11 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		// nothing, so it must not move the election or announce that it had.
 		if pendingCapture != "" && flushed > 0 {
 			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+		// An empty queue carried no checkpoints, so there is nothing to warn
+		// was misdirected — see warnIgnoredCheckpointRemote.
+		if flushed > 0 {
+			warnIgnoredCheckpointRemote(ctx, ps)
 		}
 	} else {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's

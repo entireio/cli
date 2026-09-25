@@ -15,17 +15,24 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+// Origins for hintRepo, one per ownership verdict against acme/checkpoints.
+const (
+	ownedOrigin      = "git@github.com:acme/main-repo.git"
+	forkOrigin       = "git@github.com:alice/main-repo.git"
+	unprovableOrigin = "git@git.internal:main-repo.git" // single segment: no owner
+)
+
 // hintRepo builds a repo whose committed settings name a checkpoint_remote,
-// with origin's owner supplied by the caller: matching it is a store this
-// developer owns, differing is one inherited by cloning.
-func hintRepo(t *testing.T, originOwner string) string {
+// with origin supplied by the caller: a matching owner is a store this
+// developer owns, a differing one is a fork, and no owner at all is unprovable.
+func hintRepo(t *testing.T, originURL string) string {
 	t.Helper()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "init")
 	testutil.GitAdd(t, dir, "f.txt")
 	testutil.GitCommit(t, dir, "init")
-	testutil.RunGit(t, dir, "remote", "add", "origin", "git@github.com:"+originOwner+"/main-repo.git")
+	testutil.RunGit(t, dir, "remote", "add", "origin", originURL)
 
 	entireDir := filepath.Join(dir, ".entire")
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
@@ -53,11 +60,12 @@ func captureHintStderr(t *testing.T) *bytes.Buffer {
 // TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote is the point of
 // the warning: before it, the ownership rejection reached the user only as a
 // Warn in .entire/logs, and the visible symptom — checkpoints landing in the
-// code repository — looks like a working setup.
+// code repository — looks like a working setup. Unprovable ownership is the
+// case only a human can settle, so it is the one pre-push speaks for.
 //
 // Not parallel: t.Chdir.
 func TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote(t *testing.T) {
-	dir := hintRepo(t, "alice")
+	dir := hintRepo(t, unprovableOrigin)
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
 	out := captureHintStderr(t)
@@ -79,7 +87,7 @@ func TestPrePushNamesTheCommandThatClaimsAnIgnoredCheckpointRemote(t *testing.T)
 //
 // Not parallel: t.Chdir.
 func TestPrePushStripsTerminalEscapesFromTheCheckpointRemote(t *testing.T) {
-	dir := hintRepo(t, "alice")
+	dir := hintRepo(t, unprovableOrigin)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, ".entire", "settings.json"),
 		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "acme/store\u001b[2J\u001b]0;pwned\u0007"}}}`),
@@ -104,7 +112,7 @@ func TestPrePushStripsTerminalEscapesFromTheCheckpointRemote(t *testing.T) {
 //
 // Not parallel: t.Chdir.
 func TestPrePushSaysNothingWhenTheCheckpointRemoteIsInUse(t *testing.T) {
-	dir := hintRepo(t, "acme")
+	dir := hintRepo(t, ownedOrigin)
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
 	out := captureHintStderr(t)
@@ -115,6 +123,27 @@ func TestPrePushSaysNothingWhenTheCheckpointRemoteIsInUse(t *testing.T) {
 	warnIgnoredCheckpointRemote(ctx, ps)
 
 	assert.Empty(t, out.String(), "a store that is in use has nothing to report")
+}
+
+// TestPrePushSaysNothingToAForkContributor: a committed checkpoint_remote owned
+// by someone else is disproved, not unprovable, and for a fork contributor
+// checkpoints landing in their fork is the correct outcome. Warning on every one
+// of their pushes is noise they could silence only by claiming a store that is
+// not theirs; `entire status` still reports it.
+//
+// Not parallel: t.Chdir.
+func TestPrePushSaysNothingToAForkContributor(t *testing.T) {
+	dir := hintRepo(t, forkOrigin)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	out := captureHintStderr(t)
+
+	ctx := context.Background()
+	ps := resolvePushSettings(ctx, "origin")
+	require.False(t, ps.hasCheckpointURL(), "fixture must be the rejected case")
+	warnIgnoredCheckpointRemote(ctx, ps)
+
+	assert.Empty(t, out.String(), "a disproved store is left to entire status")
 }
 
 // TestPrePushSaysNothingWithoutACheckpointRemote pins the other half of the
@@ -141,13 +170,12 @@ func TestPrePushSaysNothingWithoutACheckpointRemote(t *testing.T) {
 	assert.Empty(t, out.String(), "no checkpoint_remote, nothing ignored")
 }
 
-// TestPrePushSurfacesTheIgnoredCheckpointRemoteToTheUser proves the warning is
-// wired into the push the user actually runs, not merely callable. Origin is a
-// local bare repo here, which is itself one of the rejection reasons — a path
-// URL has no owner to compare — and keeps the push off the network.
-//
-// Not parallel: t.Chdir.
-func TestPrePushSurfacesTheIgnoredCheckpointRemoteToTheUser(t *testing.T) {
+// bareOriginHintRepo builds a repo whose origin is a local bare repo — itself
+// an unprovable-ownership reason, since a path URL has no owner to compare —
+// which keeps a real PrePush off the network. seedCheckpoints creates the local
+// v1 branch, so the push has checkpoints to carry.
+func bareOriginHintRepo(t *testing.T, seedCheckpoints bool) string {
+	t.Helper()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "init")
@@ -166,9 +194,18 @@ func TestPrePushSurfacesTheIgnoredCheckpointRemoteToTheUser(t *testing.T) {
 		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "acme/checkpoints"}}}`),
 		0o644,
 	))
-	testutil.RunGit(t, dir, "branch", paths.MetadataBranchName)
+	if seedCheckpoints {
+		testutil.RunGit(t, dir, "branch", paths.MetadataBranchName)
+	}
+	return dir
+}
 
-	t.Chdir(dir)
+// TestPrePushSurfacesTheIgnoredCheckpointRemoteToTheUser proves the warning is
+// wired into the push the user actually runs, not merely callable.
+//
+// Not parallel: t.Chdir.
+func TestPrePushSurfacesTheIgnoredCheckpointRemoteToTheUser(t *testing.T) {
+	t.Chdir(bareOriginHintRepo(t, true))
 	paths.ClearWorktreeRootCache()
 	out := captureHintStderr(t)
 
@@ -176,4 +213,20 @@ func TestPrePushSurfacesTheIgnoredCheckpointRemoteToTheUser(t *testing.T) {
 
 	assert.Contains(t, out.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints",
 		"a user pushing must see the fix in their own push output")
+}
+
+// TestPrePushSaysNothingWhenThePushCarriesNoCheckpoints: the warning claims
+// checkpoints are going somewhere, so a push that carried none — a contributor
+// who never ran an agent here — must not print it.
+//
+// Not parallel: t.Chdir.
+func TestPrePushSaysNothingWhenThePushCarriesNoCheckpoints(t *testing.T) {
+	t.Chdir(bareOriginHintRepo(t, false))
+	paths.ClearWorktreeRootCache()
+	out := captureHintStderr(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "origin"))
+
+	assert.NotContains(t, out.String(), "checkpoint_remote",
+		"nothing was pushed, so nothing was misdirected")
 }

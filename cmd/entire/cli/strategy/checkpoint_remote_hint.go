@@ -22,8 +22,17 @@ import (
 // misconfiguration into lost work, and claiming the store re-delivers what
 // already went to the wrong one.
 //
-// Fires on every push while the condition holds. A one-shot notice is seen by
-// whoever set the repo up, not by whoever hits the problem.
+// Fires on every push that delivered checkpoints while the condition holds. A
+// one-shot notice is seen by whoever set the repo up, not by whoever hits the
+// problem. Callers invoke it only after delivery, so a push carrying no
+// checkpoints says nothing: nothing went anywhere to warn about.
+//
+// Only an UNPROVABLE verdict warns here. A disproved one is a remote owned by
+// someone else — the ordinary fork contributor, for whom checkpoints landing in
+// their fork is the correct outcome — and printing on every one of their
+// pushes would be noise they can only silence by claiming a store that is not
+// theirs. `entire status` and `entire enable` still report that case with the
+// same remedy, for the rare owner whose remote genuinely disagrees.
 func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
 	// hasCheckpointURL is the authoritative half: PushURL decided where this
 	// push sends checkpoints, while InheritedCheckpointRemote re-runs the vote
@@ -38,15 +47,20 @@ func warnIgnoredCheckpointRemote(ctx context.Context, ps pushSettings) {
 	if err != nil {
 		return
 	}
-	repo, reason, inherited := remote.InheritedCheckpointRemote(ctx, s, ps.remote)
-	if !inherited {
-		// Configured, not adopted, and ownership is not why. PushURL fell back
-		// for some other reason (an unparseable remote URL, an unreachable
-		// derivation) and logged its own cause; naming ownership here would
-		// send the user after the wrong problem, and the claim command would
-		// not fix it.
+	cr := s.GetCheckpointRemote()
+	if cr == nil {
 		return
 	}
+	verdict, reason := remote.InheritedCheckpointRemoteVerdict(ctx, s, ps.remote)
+	if verdict != remote.OwnershipUnprovable {
+		// Ours: configured, not adopted, and ownership is not why. PushURL fell
+		// back for some other reason (an unparseable remote URL, an unreachable
+		// derivation) and logged its own cause; naming ownership here would
+		// send the user after the wrong problem, and the claim command would
+		// not fix it. Disproved: see the doc comment.
+		return
+	}
+	repo := cr.Repo
 
 	// repo comes from the committed settings file; strip escape sequences
 	// before it reaches the terminal.
