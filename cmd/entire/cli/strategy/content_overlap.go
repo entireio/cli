@@ -373,7 +373,8 @@ func hasOverlappingFiles(stagedFiles, filesTouched []string) bool {
 // uncommitted agent changes. This is used for carry-forward after partial commits.
 //
 // A file has remaining agent changes if:
-//   - It wasn't committed at all (not in committedFiles), OR
+//   - It wasn't committed at all (not in committedFiles), unless HEAD already
+//     holds the shadow's content and the working tree matches it, OR
 //   - It was committed but the committed content doesn't match the shadow branch
 //     AND the working tree still has changes (e.g., user did git add -p)
 //
@@ -474,8 +475,24 @@ func filesWithRemainingAgentChanges(
 			continue
 		}
 
-		// File wasn't committed at all — it has remaining changes
+		// File wasn't committed at all — it has remaining changes, unless HEAD
+		// already holds the shadow's content. That happens when an earlier
+		// commit Entire never saw (every hook skipped) took it: no later commit
+		// will contain it, so keeping it would carry it forward forever. HEAD
+		// matching the shadow says nothing about edits made since the shadow
+		// snapshot, so it goes through the same working-tree check as a
+		// partial commit: dropped only while the working tree matches HEAD.
 		if _, wasCommitted := committedFiles[filePath]; !wasCommitted {
+			if headFile, headErr := commitTree.File(filePath); headErr == nil && headFile.Hash.Equal(shadowFile.Hash) {
+				candidates = append(candidates, worktreeCandidate{
+					index:      i,
+					path:       filePath,
+					commitHash: headFile.Hash,
+					commitMode: headFile.Mode,
+					shadowHash: shadowFile.Hash,
+				})
+				continue
+			}
 			keep[i] = true
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
 				slog.String("file", filePath),
@@ -543,7 +560,7 @@ func filesWithRemainingAgentChanges(
 			workingTreeClean = workingTreeMatchesBlob(worktreeRoot, candidate.path, candidate.commitMode, candidate.commitHash)
 		}
 		if workingTreeClean {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content differs from shadow but working tree is clean, skipping",
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: working tree matches the commit, skipping",
 				slog.String("file", candidate.path),
 				slog.String("commit_hash", candidate.commitHash.String()[:7]),
 				slog.String("shadow_hash", candidate.shadowHash.String()[:7]),
@@ -552,7 +569,7 @@ func filesWithRemainingAgentChanges(
 		}
 
 		keep[candidate.index] = true
-		logging.Debug(logCtx, "filesWithRemainingAgentChanges: content mismatch with dirty working tree, keeping for carry-forward",
+		logging.Debug(logCtx, "filesWithRemainingAgentChanges: working tree differs from the commit, keeping for carry-forward",
 			slog.String("file", candidate.path),
 			slog.String("commit_hash", candidate.commitHash.String()[:7]),
 			slog.String("shadow_hash", candidate.shadowHash.String()[:7]),
