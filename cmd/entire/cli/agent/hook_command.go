@@ -167,6 +167,24 @@ func WrapWindowsProductionSilentHookCommand(command string) string {
 	)
 }
 
+// WrapWindowsProductionSilentHookCommandDirect is the silent wrapper for a host
+// that already runs every hook command through cmd.exe /C on Windows (agy does;
+// see HookHostIsWindows): the bare `where … & if errorlevel 1 (ver>nul) else
+// (<command>)` line, with no cmd.exe prefix and no quoted block. Handing such a
+// host WrapWindowsProductionSilentHookCommand's nested form fails outright —
+// cmd.exe /C takes the quoted block as one program name ('"where.exe entire
+// >nul 2>nul & …"' is not recognized as an internal or external command) — and
+// the sh wrapper fails too, because cmd.exe reads its `>/dev/null` as a redirect
+// to a nonexistent path. Both were observed on Windows 11 with agy 1.2.7; only
+// this shape produced a tracked session. Same distinction
+// WrapWindowsProductionJSONWarningHookCommand draws for Codex.
+func WrapWindowsProductionSilentHookCommandDirect(command string) string {
+	return fmt.Sprintf(
+		`where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)`,
+		command,
+	)
+}
+
 // WrapWindowsProductionJSONWarningHookCommand emits a JSON hook response with a
 // systemMessage field on stdout when the Entire CLI is missing from PATH. It
 // avoids sh so Codex hooks still work from native Windows shells. Codex already
@@ -375,6 +393,33 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 	return cmd.Run() == nil
 }
 
+// HookHostIsWindows reports whether hook commands will run on a Windows host,
+// without asking whether a POSIX sh is reachable there.
+//
+// It is the predicate for an agent that hands every hook command to cmd.exe on
+// Windows whatever else is installed. Factory Droid is one: its Windows build
+// runs each hook command as an argument of cmd.exe, while its macOS/Linux
+// build runs the same string under sh. For such an agent
+// UseWindowsProductionHooks answers the wrong question — its probe only
+// establishes that `sh -c 'exit 0'` runs, and that command carries no cmd.exe
+// metacharacters, so a host with Git Bash reports success while the real sh
+// wrapper, which is full of `>` and `&`, is still cut apart by cmd.exe before
+// any sh sees it.
+//
+// Codex and Cursor keep UseWindowsProductionHooks, but do NOT read that as
+// "their runners are different". WrapWindowsProductionSilentHookCommand's own
+// doc, runWindowsWrapper in hook_command_exec_windows_test.go, and cursor's
+// InstallHooks all describe those runners as going through cmd.exe too. What
+// separates them is only evidence: Codex demonstrably passes the Windows
+// nightly with the sh wrapper installed, so whatever its composition does, the
+// wrapper survives it. Cursor has no such evidence — it is excluded from the
+// Windows matrix (no tmux) — so it may well have this same defect. Establish
+// that the way it was established here, by reading the runner, before changing
+// its gate.
+func HookHostIsWindows() bool {
+	return hookCommandOS == hookWrapperOSWindows
+}
+
 // WrapProductionSilentHookCommandForOS picks the sh-based or native Windows
 // silent wrapper based on useWindows (typically from UseWindowsProductionHooks).
 func WrapProductionSilentHookCommandForOS(command string, useWindows bool) string {
@@ -393,8 +438,18 @@ func WrapProductionJSONWarningHookCommandForOS(command string, format WarningFor
 	return WrapProductionJSONWarningHookCommand(command, format)
 }
 
+// WrapProductionPlainTextWarningHookCommandForOS picks the sh-based or native
+// Windows plain-text-warning wrapper based on useWindows.
+func WrapProductionPlainTextWarningHookCommandForOS(command string, format WarningFormat, useWindows bool) string {
+	if useWindows {
+		return WrapWindowsProductionPlainTextWarningHookCommand(command, format)
+	}
+	return WrapProductionPlainTextWarningHookCommand(command, format)
+}
+
 // SetWindowsHookProbeForTesting overrides the OS and sh-wrapper probe used by
-// UseWindowsProductionHooks and returns a restore function. Test-only.
+// UseWindowsProductionHooks and HookHostIsWindows, and returns a restore
+// function. Test-only.
 func SetWindowsHookProbeForTesting(goos string, works func(ctx context.Context, command string) bool) func() {
 	oldOS, oldProbe := hookCommandOS, shHookWrapperWorks
 	hookCommandOS = goos

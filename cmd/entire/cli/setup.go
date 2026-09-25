@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -58,7 +59,14 @@ const (
 	flagAgentHelpSkill       = "agent-help-skill"
 	flagImportHistory        = "import-history"
 	checkpointProviderGitHub = "github"
+	checkpointProviderGitLab = "gitlab"
 )
+
+// checkpointRemoteFlagUsage is the shared --checkpoint-remote help text. Both
+// `enable` and `configure` register the flag, so it lives here rather than being
+// spelled twice, for the same reason as checkpointBackendFlagUsage.
+const checkpointRemoteFlagUsage = "Checkpoint remote in provider:owner/repo format; providers: " +
+	checkpointProviderGitHub + ", " + checkpointProviderGitLab + " (e.g., github:org/checkpoints-repo)"
 
 // externalAgentsAutoEnabledNotice is printed when picking an external summary
 // provider implicitly turns the external_agents setting on. It tells the user
@@ -391,21 +399,23 @@ func saveSettingsToTarget(ctx context.Context, s *EntireSettings, targetFile str
 }
 
 // parseCheckpointRemoteFlag parses a "provider:owner/repo" string into its components.
-// Supported providers: "github".
+// Supported providers: "github", "gitlab". The provider is normalized the same way
+// the resolver (remote.providerHost) reads it, so the flag cannot reject a spelling
+// the settings file would accept.
 func parseCheckpointRemoteFlag(value string) (provider, repo string, err error) {
 	parts := strings.SplitN(value, ":", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("expected format provider:owner/repo (e.g., github:org/checkpoints-repo), got %q", value)
 	}
 
-	provider = parts[0]
+	provider = strings.ToLower(strings.TrimSpace(parts[0]))
 	repo = parts[1]
 
 	switch provider {
-	case checkpointProviderGitHub:
+	case checkpointProviderGitHub, checkpointProviderGitLab:
 		// valid
 	default:
-		return "", "", fmt.Errorf("unsupported provider %q (supported: %s)", provider, checkpointProviderGitHub)
+		return "", "", fmt.Errorf("unsupported provider %q (supported: %s, %s)", provider, checkpointProviderGitHub, checkpointProviderGitLab)
 	}
 
 	repoParts := strings.SplitN(repo, "/", 2)
@@ -416,9 +426,14 @@ func parseCheckpointRemoteFlag(value string) (provider, repo string, err error) 
 	return provider, repo, nil
 }
 
-// runSetupFlow runs the first-time setup flow (agent selection + hooks + settings).
-// Shared by root command (no args), `entire configure`, and `entire enable` on fresh repos.
-func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
+// selectAgentsForSetup is the agent-selection half of first-time setup, split
+// out so the bare-enable path can run the identity preflight between selection
+// and runEnableInteractive — which is the whole point of the split, since the
+// preflight has to sit after the user has chosen agents but before anything
+// writes hooks or settings. Kept as one implementation because the alternative
+// is two copies that drift, and it is small enough to sit under dupl's
+// threshold where lint would not notice.
+func selectAgentsForSetup(ctx context.Context, w io.Writer, opts EnableOptions) ([]agent.Agent, error) {
 	// Discover external agent plugins so they appear in agent selection.
 	// Use DiscoverAndRegisterAlways to bypass the external_agents setting —
 	// during setup the setting doesn't exist yet.
@@ -431,10 +446,68 @@ func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
 
 	agents, err := detectOrSelectAgent(ctx, w, selectFn)
 	if err != nil {
-		return fmt.Errorf("agent selection failed: %w", err)
+		return nil, fmt.Errorf("agent selection failed: %w", err)
+	}
+	return agents, nil
+}
+
+// runSetupFlow runs the first-time setup flow (agent selection + identity +
+// hooks + settings). Shared by the root command (no args), `entire configure`,
+// and `entire agent`.
+//
+// The identity preflight belongs here, not only in `entire enable`: these
+// callers reach the same end state — hooks installed, settings written, commits
+// flowing — for the same "existing repo, not set up yet" case, so a repo
+// onboarded by bare `entire` would otherwise keep attributing commits to an
+// unknown author, which is the bug the preflight exists to fix.
+func runSetupFlow(ctx context.Context, w io.Writer, opts EnableOptions) error {
+	return runSetupFlowWithPreflight(ctx, w, opts, defaultIdentityPreflight(ctx, w))
+}
+
+// runSetupFlowWithPreflight is runSetupFlow with the identity step injected, so
+// tests can drive the ordering without reaching the network. The ordering is
+// the point: select agents, resolve identity, then write. The preflight sits
+// between the two because it may fail or start a login, and neither should
+// happen after hooks and settings are already on disk.
+//
+// `entire enable` deliberately does not route through here. It has to install
+// its logger between the preflight and the writes — late enough that a rejected
+// enable leaves no .entire/logs behind, and its context has to be re-read after
+// that — so it spells the same three steps out itself, sharing
+// selectAgentsForSetup rather than this wrapper.
+func runSetupFlowWithPreflight(ctx context.Context, w io.Writer, opts EnableOptions, preflight func() error) error {
+	agents, err := selectAgentsForSetup(ctx, w, opts)
+	if err != nil {
+		return err
+	}
+	if preflight != nil {
+		if err := preflight(); err != nil {
+			return err
+		}
 	}
 
 	return runEnableInteractive(ctx, w, agents, opts)
+}
+
+// defaultIdentityPreflight builds the identity step for callers that have no
+// command flags to thread through. It resolves the worktree root itself and is
+// a no-op when that fails: these entry points only run inside a git repo, so a
+// failure here means something is wrong that setup will report in its own
+// terms rather than as an identity error.
+func defaultIdentityPreflight(ctx context.Context, w io.Writer) func() error {
+	return func() error {
+		repoRoot, rootErr := paths.WorktreeRoot(ctx)
+		if rootErr != nil {
+			// Callers reach here only from inside a git repo (root.go checks
+			// first), so this is unreachable in practice. If it ever is not,
+			// setup's own prerequisite handling gives the accurate message —
+			// failing here instead would report a missing identity for what is
+			// really a missing repo.
+			return nil //nolint:nilerr // deliberate skip; see above
+		}
+		return ensureGitIdentity(ctx, w, execRunner{}, repoRoot,
+			newEntireGitIdentityResolver(w, os.Stderr, false))
+	}
 }
 
 // selectAllAgents is a selectFn that selects all available agents.
@@ -475,6 +548,24 @@ func hookAgentOptions(selected map[types.AgentName]struct{}) []huh.Option[string
 // runManageAgents shows which agents are currently enabled and lets the user
 // add or remove agents. Deselecting an installed agent removes its hooks.
 func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selectFn func(available []string) ([]string, error)) error {
+	return runManageAgentsWithPreflight(ctx, w, opts, selectFn, nil)
+}
+
+func runManageAgentsWithPreflight(
+	ctx context.Context,
+	w io.Writer,
+	opts EnableOptions,
+	selectFn func(available []string) ([]string, error),
+	preflight func() error,
+) error {
+	runPreflight := func() error {
+		if preflight == nil {
+			return nil
+		}
+		fn := preflight
+		preflight = nil
+		return fn()
+	}
 	installedNames := GetAgentsWithHooksInstalled(ctx)
 
 	// Show currently installed agents
@@ -503,6 +594,9 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 				for _, name := range installedNames {
 					discoverNamedExternalAgent(ctx, name)
 					selectedAgentNames = append(selectedAgentNames, string(name))
+				}
+				if err := runPreflight(); err != nil {
+					return err
 				}
 				return applyAgentChanges(ctx, w, selectedAgentNames, installedNames, opts)
 			}
@@ -556,6 +650,9 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 		if err := form.Run(); err != nil {
 			return fmt.Errorf("agent selection cancelled: %w", err)
 		}
+	}
+	if err := runPreflight(); err != nil {
+		return err
 	}
 
 	// Nothing selected and nothing installed — no-op.
@@ -734,7 +831,7 @@ Examples:
   entire configure --telemetry=false              # Opt out of telemetry
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
-  entire configure --checkpoint-remote github:org/checkpoints
+  entire configure --checkpoint-remote github:org/checkpoints   # or gitlab:org/checkpoints
   entire configure --checkpoint-backend refs      # Move a legacy repo to per-checkpoint git refs
   entire configure --summarize-provider claude-code
   entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
@@ -794,9 +891,9 @@ Examples:
 	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
-	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", checkpointRemoteFlagUsage)
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
-	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
+	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, antigravity, pi, opencode, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
@@ -806,10 +903,14 @@ Examples:
 }
 
 func newEnableCmd() *cobra.Command {
+	return newEnableCmdWithIdentityResolverFactory(newEntireGitIdentityResolver)
+}
+
+func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFactory) *cobra.Command {
 	var opts EnableOptions
 	var ignoreUntracked bool
 	var agentName string
-	var bootstrapOpts GitHubBootstrapOptions
+	var bootstrapOpts BootstrapOptions
 	var insecureHTTPAuth bool
 
 	cmd := &cobra.Command{
@@ -821,7 +922,8 @@ If Entire is not yet configured, this runs the full configuration flow.
 If Entire is already configured but disabled, this re-enables it.
 
 If the current directory is not a git repository, Entire can initialize one
-for you and (optionally) create a matching GitHub repository via the gh CLI.`,
+for you and create an initial commit. It never creates or pushes to a remote —
+publish the repository yourself when you're ready.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
 			// The destination report needs the choice pointer, not the answer,
@@ -831,8 +933,8 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
 			// Best-effort: after a successful enable, tell the backend which repo
 			// was enabled so the web onboarding reflects it (and we can warn when
-			// the GitHub App can't reach it). Runs after any bootstrap finalize that creates the
-			// GitHub repo and pushes, by which point an origin remote exists.
+			// the GitHub App can't reach it). A freshly bootstrapped repo has no
+			// origin yet, so this reports nothing until the user adds one.
 			defer func() {
 				if runErr != nil {
 					return
@@ -862,18 +964,20 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			ctx = cmd.Context()
 
 			// Check if we're in a git repository first. If not, offer to
-			// bootstrap one (git init + optional GitHub repo). If the user
-			// declines, fall back to the legacy prerequisite error.
+			// bootstrap one (git init, local only). If the user declines,
+			// fall back to the legacy prerequisite error.
 			//
-			// The bootstrap runs in two phases: phase 1 (git init + identity
-			// + gather GitHub choices) before agent setup, phase 2
-			// (initial commit + gh repo create + push) after agent setup so
-			// the initial commit captures the .entire/, .claude/, hooks, and
+			// The bootstrap runs in two phases: phase 1 (git init + the
+			// initial-commit decision) before agent setup and identity
+			// recovery, phase 2 (the initial commit itself) after agent setup
+			// so that commit captures the .entire/, .claude/, hooks, and
 			// settings files that setup writes.
 			var bootstrap *bootstrapState
-			if _, err := paths.WorktreeRoot(ctx); err != nil {
+			repoRoot, repoErr := paths.WorktreeRoot(ctx)
+			repoExisted := repoErr == nil
+			if repoErr != nil {
 				bootstrapOpts.Yes = opts.Yes
-				state, bootstrapErr := runGitHubBootstrapInit(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), bootstrapOpts)
+				state, bootstrapErr := runBootstrapInit(ctx, cmd.OutOrStdout(), bootstrapOpts)
 				if errors.Is(bootstrapErr, errBootstrapDeclined) {
 					fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository, or pass --init-repo to initialize one here.")
 					return NewSilentError(errors.New("not a git repository"))
@@ -890,20 +994,22 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				// "done" summary from the bootstrap finalize step.
 				opts.SuppressDoneMessage = true
 				// Re-check after bootstrap.
-				if _, err := paths.WorktreeRoot(ctx); err != nil {
-					return fmt.Errorf("bootstrap finished but no git repository detected: %w", err)
+				var rootErr error
+				repoRoot, rootErr = paths.WorktreeRoot(ctx)
+				if rootErr != nil {
+					return fmt.Errorf("bootstrap finished but no git repository detected: %w", rootErr)
 				}
 				// Visual separator between bootstrap init and agent setup.
 				printBootstrapSection(cmd.OutOrStdout(), "Enabling Entire")
 				// On the way out (if setup succeeded), create the initial
-				// commit and push to the GitHub repo. If setup returned an
-				// error, skip the finalize — the user can fix the issue and
-				// re-run; any partial state is just untracked files.
+				// commit. If setup returned an error, skip the finalize —
+				// the user can fix the issue and re-run; any partial state
+				// is just untracked files.
 				defer func() {
 					if runErr != nil || bootstrap == nil {
 						return
 					}
-					if err := runGitHubBootstrapFinalize(ctx, cmd.OutOrStdout(), bootstrap); err != nil {
+					if err := runBootstrapFinalize(ctx, cmd.OutOrStdout(), bootstrap); err != nil {
 						runErr = err
 					}
 				}()
@@ -939,28 +1045,9 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				selectedAgent = ag
 			}
 
-			// enable runs before the repo is set up, which is exactly when the
-			// root pre-run's IsSetUpAny gate declines to build a logger. Placed
-			// after every check that can still reject this invocation, so a
-			// rejected enable leaves an untouched repo untouched.
-			ensureLogger(cmd)
-			ctx = cmd.Context()
-
-			if selectedAgent != nil {
-				// --agent is a targeted operation: set up this specific agent without
-				// affecting other agents. Unlike the interactive path, it does not
-				// uninstall hooks for other previously-enabled agents.
-				return setupAgentHooksNonInteractive(ctx, cmd.OutOrStdout(), selectedAgent, opts)
-			}
-
-			// Any setup-mutating flags should behave like `configure` on repos that
-			// are already set up. Bare `enable` remains the lightweight re-enable path.
-			if settings.IsSetUpAny(ctx) {
-				return runEnableOnConfiguredRepo(ctx, cmd, opts)
-			}
-
-			// Fresh repo — run full setup flow
-			return runSetupFlow(ctx, cmd.OutOrStdout(), opts)
+			needsIdentity := repoExisted || (bootstrap != nil && bootstrap.commit)
+			return continueEnableAfterAgentValidation(ctx, cmd, opts, selectedAgent, repoRoot, needsIdentity,
+				identityFactory(cmd.OutOrStdout(), cmd.ErrOrStderr(), insecureHTTPAuth))
 		},
 	}
 
@@ -972,30 +1059,23 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
-	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", checkpointRemoteFlagUsage)
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
 	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
 	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
 	cmd.Flags().BoolVar(&bootstrapOpts.NoInitRepo, "no-init-repo", false, "If not a git repo, exit instead of prompting to initialize one")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoName, "repo-name", "", "GitHub repository name for the new repo (used when bootstrapping)")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
-	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
-	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote (implies creating the remote; without it the repo is created but not pushed)")
 	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
 	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
 	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
 	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
-	cmd.MarkFlagsMutuallyExclusive("push", "no-github")
-	cmd.MarkFlagsMutuallyExclusive("push", "skip-initial-commit")
 
 	// Provide a helpful error when --agent is used without a value
 	defaultFlagErr := cmd.FlagErrorFunc()
@@ -1009,6 +1089,51 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	})
 
 	return cmd
+}
+
+func continueEnableAfterAgentValidation(
+	ctx context.Context,
+	cmd *cobra.Command,
+	opts EnableOptions,
+	selectedAgent agent.Agent,
+	repoRoot string,
+	needsIdentity bool,
+	resolveIdentity gitIdentityResolver,
+) error {
+	if selectedAgent != nil {
+		if err := runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity); err != nil {
+			return err
+		}
+		ensureLogger(cmd)
+		return setupAgentHooksNonInteractive(cmd.Context(), cmd.OutOrStdout(), selectedAgent, opts)
+	}
+
+	if settings.IsSetUpAny(ctx) {
+		preflight := func() error {
+			return runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity)
+		}
+		return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, preflight)
+	}
+
+	// First-time bare enable owns agent selection here so authentication can be
+	// placed after selection but before runEnableInteractive mutates hooks or
+	// settings.
+	agents, err := selectAgentsForSetup(ctx, cmd.OutOrStdout(), opts)
+	if err != nil {
+		return err
+	}
+	if err := runEnableIdentityPreflight(ctx, cmd, repoRoot, needsIdentity, resolveIdentity); err != nil {
+		return err
+	}
+	ensureLogger(cmd)
+	return runEnableInteractive(cmd.Context(), cmd.OutOrStdout(), agents, opts)
+}
+
+func runEnableIdentityPreflight(ctx context.Context, cmd *cobra.Command, repoRoot string, needed bool, resolve gitIdentityResolver) error {
+	if !needed {
+		return nil
+	}
+	return ensureGitIdentity(ctx, cmd.OutOrStdout(), execRunner{}, repoRoot, resolve)
 }
 
 // reportRepoEnabled records the `entire enable` against the backend so the web
@@ -1183,7 +1308,19 @@ was not fully uninstalled.`,
 // management) behave like `configure`; a bare re-enable just flips the enabled
 // flag or reports current status.
 func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts EnableOptions) error {
+	return runEnableOnConfiguredRepoWithPreflight(ctx, cmd, opts, nil)
+}
+
+func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Command, opts EnableOptions, preflight func() error) error {
 	w := cmd.OutOrStdout()
+	runPreflight := func() error {
+		if preflight == nil {
+			return nil
+		}
+		fn := preflight
+		preflight = nil
+		return fn()
+	}
 	// This path is by definition not a first run, so it never reaches the
 	// import offer. Say so rather than dropping the flag silently.
 	if opts.ImportHistory {
@@ -1191,6 +1328,29 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 	}
 	usedSetupFlow := enableUsesSetupFlow(cmd, "")
 	if usedSetupFlow {
+		// Agent management runs before the strategy and checkpoint-backend
+		// writes below, which reverses the order on main. That is load-bearing,
+		// not incidental: the identity preflight is invoked from inside
+		// runManageAgentsWithPreflight, so moving the settings writes back ahead
+		// of it would persist them before authentication is known to succeed —
+		// exactly what TestEnableCmd_IdentityFailurePreservesConfiguredSettings
+		// asserts must not happen. Do not "restore" the original order.
+		if enableNeedsAgentManagement(cmd) {
+			var selectFn func(available []string) ([]string, error)
+			if opts.Yes {
+				selectFn = selectAllAgents
+			}
+			if err := runManageAgentsWithPreflight(ctx, w, opts, selectFn, runPreflight); err != nil {
+				return err
+			}
+		}
+		// Some noninteractive agent-management paths return without a picker or
+		// applying agent changes. Ensure the preflight still runs before the
+		// settings/strategy work below; this is a no-op when the picker path
+		// already invoked it.
+		if err := runPreflight(); err != nil {
+			return err
+		}
 		if hasStrategyFlags(cmd) {
 			if err := updateStrategyOptions(ctx, w, opts); err != nil {
 				return err
@@ -1201,15 +1361,8 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 				return err
 			}
 		}
-		if enableNeedsAgentManagement(cmd) {
-			var selectFn func(available []string) ([]string, error)
-			if opts.Yes {
-				selectFn = selectAllAgents
-			}
-			if err := runManageAgents(ctx, w, opts, selectFn); err != nil {
-				return err
-			}
-		}
+	} else if err := runPreflight(); err != nil {
+		return err
 	}
 
 	// `entire enable` is an explicit, user-initiated recovery point. A repo
@@ -1636,6 +1789,10 @@ func localExists(ctx context.Context) bool {
 
 // runRemoveAgent removes hooks for a specific agent.
 func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
+	if types.AgentName(name) == retiredGeminiAgentName && !retiredGeminiNameClaimed() {
+		return runRemoveRetiredGeminiHooks(ctx, w)
+	}
+
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
 		printWrongAgentError(w, name)
@@ -1666,7 +1823,51 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	}
 	warnCodexHooksAfterRemoval(ctx, w, ag)
 
+	// Antigravity's title tee lives in agy's GLOBAL settings.json, not in
+	// this repo. `entire agent remove` is itself a per-repo command (it edits
+	// only this repo's .agents/hooks.json), and there is no machine-wide
+	// "remove Antigravity everywhere" command, so this is the one place the
+	// global slot is released: `entire disable` deliberately leaves it alone.
+	// The cost is real and stated to the user below — removing the tee here
+	// disables token capture for every OTHER repo still using Antigravity
+	// until `entire agent add antigravity` (or doctor) repairs it there.
+	// Counting the repos that still depend on the slot before releasing it
+	// is a deferred product decision, tracked on trail 444.
+	teeRemoved := false
+	if ag.Name() == agent.AgentNameAntigravity && antigravity.TitleTeeInstalled() {
+		if err := antigravity.UninstallTitleTee(); err != nil {
+			logging.Warn(ctx, "failed to uninstall antigravity title tee",
+				"error", err.Error())
+		} else {
+			teeRemoved = true
+		}
+	}
+
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	if teeRemoved {
+		fmt.Fprintln(w, "Note: the Antigravity title-tee was removed from agy's global settings —")
+		fmt.Fprintln(w, "this disables token capture in any other repositories still using Antigravity.")
+		fmt.Fprintln(w, "Run `entire agent add antigravity` (or `entire doctor`) there to restore it.")
+	}
+	return nil
+}
+
+// runRemoveRetiredGeminiHooks answers `entire agent remove gemini`, the command
+// a user reaches for to clear the hooks removed Gemini CLI support left behind.
+func runRemoveRetiredGeminiHooks(ctx context.Context, w io.Writer) error {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to remove Gemini CLI hooks: %w", err)
+	}
+	changed, err := removeRetiredGeminiHooks(worktreeRoot)
+	if err != nil {
+		return fmt.Errorf("failed to remove Gemini CLI hooks: %w", err)
+	}
+	if !changed {
+		fmt.Fprintln(w, "Gemini CLI hooks are not installed.")
+		return nil
+	}
+	fmt.Fprintln(w, "Removed Gemini CLI hooks. Gemini CLI is no longer supported.")
 	return nil
 }
 
@@ -1972,6 +2173,10 @@ func printMissingAgentError(w io.Writer) {
 
 // printWrongAgentError writes a helpful error when an unknown agent name is provided.
 func printWrongAgentError(w io.Writer, name string) {
+	if types.AgentName(name) == retiredGeminiAgentName && !retiredGeminiNameClaimed() {
+		printAgentError(w, "Gemini CLI is no longer supported.")
+		return
+	}
 	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name))
 }
 
@@ -2098,17 +2303,9 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
 
 	if installedHooks == 0 {
-		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
-		if ag.IsPreview() {
-			msg += " (Preview)"
-		}
-		fmt.Fprintf(w, "  %s\n", msg)
+		fmt.Fprintf(w, "  Hooks for %s already installed\n", ag.Description())
 	} else {
-		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
-		if ag.IsPreview() {
-			msg += " (Preview)"
-		}
-		fmt.Fprintf(w, "  %s\n", msg)
+		fmt.Fprintf(w, "  Installed %d hooks for %s\n", installedHooks, ag.Description())
 	}
 	fmt.Fprintln(w, "  ✓ Configured project")
 	fmt.Fprintf(w, "    %s\n", configDisplay)
@@ -2598,6 +2795,10 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// One sweep, threaded onwards: each external plugin costs a subprocess to ask,
 	// and the removal below must act on exactly what the summary showed.
 	agHookState := getAgentHookState(ctx)
+	// Separate from the sweep above: Gemini CLI is no longer a registered
+	// agent, but the hooks its support installed can outlive everything else
+	// (a partial uninstall that already removed .entire/, say).
+	geminiHooks, geminiHooksErr := retiredGeminiHooksInstalled(repoRoot)
 	entireDirExists := checkEntireDirExists(ctx)
 
 	p := newUninstallPrinter(w, errW)
@@ -2606,10 +2807,11 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// "not installed" claim: its hooks may or may not be on disk, which is not
 	// the same as cleanly reporting none — fall through so the removal below
 	// reports it with its remedy, and the run exits non-zero rather than
-	// asserting an absence it could not verify.
+	// asserting an absence it could not verify. The retired Gemini hooks get
+	// the same treatment when their config could not be read.
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
 		shadowBranchCount == 0 && len(agHookState.installed) == 0 &&
-		len(agHookState.unchecked) == 0 {
+		len(agHookState.unchecked) == 0 && !geminiHooks && geminiHooksErr == nil {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -2622,6 +2824,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 			sessionStateCount: sessionStateCount,
 			shadowBranchCount: shadowBranchCount,
 			hookState:         agHookState,
+			geminiHooks:       geminiHooks,
+			geminiHooksErr:    geminiHooksErr,
 		})
 		if err != nil {
 			return err
@@ -2639,6 +2843,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// errors, and returns only whether it succeeded. ok is the single fact
 	// tracked across the run; the steps are otherwise isolated from each other.
 	ok := uninstallAgentHooks(ctx, p, repoRoot, agHookState)
+	ok = uninstallRetiredGeminiHooks(p, repoRoot) && ok
 	ok = uninstallGitHooks(ctx, p) && ok
 	ok = uninstallSessionStates(ctx, p) && ok
 	ok = uninstallEntireDir(ctx, p, entireDirExists) && ok
@@ -2731,6 +2936,11 @@ type uninstallSummary struct {
 	sessionStateCount int
 	shadowBranchCount int
 	hookState         agentHookState
+	// geminiHooks reports Entire hooks left in .gemini/settings.json by removed
+	// Gemini CLI support; geminiHooksErr is set when that file could not be
+	// checked.
+	geminiHooks    bool
+	geminiHooksErr error
 }
 
 // confirmUninstall prints the removal summary and asks the user to confirm.
@@ -2740,7 +2950,7 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	p.blank()
 	p.plain("This will completely remove Entire from this repository:")
 	p.blank()
-	rows := make([]explainRow, 0, 6)
+	rows := make([]explainRow, 0, 7)
 	if len(summary.hookState.installed) > 0 {
 		rows = append(rows, explainRow{Label: "agent hooks", Value: strings.Join(agentDisplayNames(summary.hookState.installed), ", ")})
 	}
@@ -2748,6 +2958,12 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	// installed, which for these plugins is exactly what we could not find out.
 	if len(summary.hookState.unchecked) > 0 {
 		rows = append(rows, explainRow{Label: "unchecked", Value: strings.Join(agentDisplayNames(summary.hookState.uncheckedNames()), ", ") + " (could not be checked)"})
+	}
+	switch {
+	case summary.geminiHooksErr != nil:
+		rows = append(rows, explainRow{Label: "retired hooks", Value: "Gemini CLI (could not be checked)"})
+	case summary.geminiHooks:
+		rows = append(rows, explainRow{Label: "retired hooks", Value: "Gemini CLI"})
 	}
 	if summary.gitHooksInstalled {
 		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, pre-push"})
@@ -2967,6 +3183,24 @@ func uninstallAgentHooks(ctx context.Context, p *uninstallPrinter, repoRoot stri
 	}
 
 	return !builtinProblem && !externalProblem
+}
+
+// uninstallRetiredGeminiHooks removes the Entire hook entries that removed
+// Gemini CLI support left in .gemini/settings.json. uninstallAgentHooks cannot:
+// it walks registered agents, and Gemini CLI is no longer one. Silent when there
+// is nothing to remove, so repositories that never used Gemini see no new line.
+func uninstallRetiredGeminiHooks(p *uninstallPrinter, repoRoot string) bool {
+	changed, err := removeRetiredGeminiHooks(repoRoot)
+	if err != nil {
+		p.stepFailed("Failed to remove retired Gemini CLI hooks")
+		p.warnUnder("%v", err)
+		p.warnUnderDetail("Delete the entries running 'entire hooks gemini ...' from %s by hand.", retiredGeminiHookConfigRelPath)
+		return false
+	}
+	if changed {
+		p.step("Removed retired Gemini CLI hooks")
+	}
+	return true
 }
 
 // uninstallAgentHooksInterrupted reports a user cancellation mid-removal and

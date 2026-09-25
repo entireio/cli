@@ -284,9 +284,6 @@ func TransitionAndLog(goCtx context.Context, state *SessionState, event session.
 // hooks that fire as separate CLI processes before TurnStart:
 //
 //   - Claude Code sends "model" on SessionStart (before any TurnStart)
-//   - Gemini CLI sends "llm_request.model" on BeforeModel (after TurnStart,
-//     so handleLifecycleModelUpdate writes to SessionState directly when it
-//     exists and only falls back to this hint file otherwise)
 //
 // The hint is read by handleLifecycleTurnStart/TurnEnd when event.Model is
 // empty, passed to InitializeSession, and persisted in state.ModelName. After
@@ -1032,4 +1029,23 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 	// sentinels and session IDs aren't reused, so leaving them in place is
 	// harmless. Bulk cleanup happens via RemoveAll on uninstall.
 	return nil
+}
+
+// AccumulateSessionTokenUsage adds a token-usage delta to both the
+// session-cumulative total and the checkpoint-scoped accumulator, mirroring
+// SaveStep's accounting (manual_commit_git.go). It exists for turns that end
+// with no uncommitted changes — e.g. Antigravity committing all its work
+// mid-turn, its normal flow — where the TurnEnd handler skips SaveStep
+// entirely but the turn's out-of-band token delta must still be recorded so
+// the next condensation (or `entire status`) attributes it. A nil or empty
+// delta is a no-op.
+func AccumulateSessionTokenUsage(ctx context.Context, sessionID string, delta *agent.TokenUsage) error {
+	if delta == nil {
+		return nil
+	}
+	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		state.TokenUsage = accumulateTokenUsage(state.TokenUsage, delta)
+		state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, delta)
+		return nil
+	})
 }

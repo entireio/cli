@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -240,8 +241,8 @@ func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
 
 // TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions tests that
 // listAllSessionStates cleans up stale sessions whose shadow branch no longer exists.
-// Stale sessions include: pre-state-machine sessions (empty phase), IDLE/ENDED sessions
-// that were never condensed. Active sessions and sessions with LastCheckpointID are kept.
+// Deleted: ENDED never-condensed sessions. Kept: ACTIVE, condensed,
+// record-bearing, and IDLE sessions (see isOrphanedSessionState).
 func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -253,23 +254,32 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 
 	// None of these sessions have shadow branches → cleanup logic applies.
 
-	// Session 1: Pre-state-machine session (empty phase, no checkpoint ID)
-	// Should be cleaned up.
-	staleEmpty := &SessionState{
-		SessionID:  "stale-empty-phase",
+	// Session 1: pre-state-machine (empty phase); normalizes to IDLE, no owner: KEPT.
+	legacyEmpty := &SessionState{
+		SessionID:  "legacy-empty-phase",
 		BaseCommit: "aaa1111",
 		StartedAt:  now.Add(-24 * time.Hour),
 		StepCount:  0,
 	}
 
-	// Session 2: IDLE session with no checkpoint ID
-	// Should be cleaned up.
-	staleIdle := &SessionState{
-		SessionID:  "stale-idle",
+	// Session 2a: IDLE, no checkpoint ID, no recorded owner: KEPT until stale.
+	idleUnknownOwner := &SessionState{
+		SessionID:  "idle-unknown-owner",
 		BaseCommit: "bbb2222",
 		StartedAt:  now.Add(-12 * time.Hour),
 		StepCount:  3,
 		Phase:      "idle",
+	}
+
+	// Session 2b: IDLE, no checkpoint ID, owner exited (wrong start fingerprint):
+	// KEPT so finalizeExitedSessions can retain and finalize its ownership.
+	idleDeadOwner := &SessionState{
+		SessionID:  "idle-dead-owner",
+		BaseCommit: "bbb2223",
+		StartedAt:  now.Add(-12 * time.Hour),
+		StepCount:  3,
+		Phase:      "idle",
+		Owner:      &proclive.Identity{PID: os.Getpid(), Start: "not-this-process"},
 	}
 
 	// Session 3: ENDED session with no checkpoint ID
@@ -280,6 +290,18 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		StartedAt:  now.Add(-6 * time.Hour),
 		StepCount:  1,
 		Phase:      "ended",
+	}
+
+	// Session 3b: IDLE phase but EndedAt stamped (partial finalizing write):
+	// ended per State.IsEnded, never condensed → cleaned up.
+	endedAt := now.Add(-5 * time.Hour)
+	idleWithEndedAt := &SessionState{
+		SessionID:  "idle-with-ended-at",
+		BaseCommit: "ccc3334",
+		StartedAt:  now.Add(-6 * time.Hour),
+		StepCount:  1,
+		Phase:      "idle",
+		EndedAt:    &endedAt,
 	}
 
 	// Session 4: ACTIVE session with no shadow branch (branch not yet created)
@@ -311,7 +333,9 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_keep", StartedAt: now, CompletedAt: now}},
 	}
 
-	for _, state := range []*SessionState{staleEmpty, staleIdle, staleEnded, activeNoShadow, condensedIdle, recordEnded} {
+	fixtures := []*SessionState{legacyEmpty, idleUnknownOwner, idleDeadOwner, staleEnded, idleWithEndedAt, activeNoShadow, condensedIdle, recordEnded}
+	wantKept := []string{"active-no-shadow", "condensed-idle", "record-ended", "idle-dead-owner", "idle-unknown-owner", "legacy-empty-phase"}
+	for _, state := range fixtures {
 		if err := s.saveSessionState(context.Background(), state); err != nil {
 			t.Fatalf("saveSessionState(%s) error = %v", state.SessionID, err)
 		}
@@ -322,13 +346,12 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 		t.Fatalf("listAllSessionStates() error = %v", err)
 	}
 
-	// Only active-no-shadow, condensed-idle, and record-ended should survive
-	if len(states) != 3 {
+	if len(states) != len(wantKept) {
 		var ids []string
 		for _, st := range states {
 			ids = append(ids, st.SessionID)
 		}
-		t.Fatalf("listAllSessionStates() returned %d states %v, want 3 [active-no-shadow, condensed-idle, record-ended]", len(states), ids)
+		t.Fatalf("listAllSessionStates() returned %d states %v, want %d %v", len(states), ids, len(wantKept), wantKept)
 	}
 
 	kept := make(map[string]bool)
@@ -344,9 +367,18 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 	if !kept["record-ended"] {
 		t.Error("ended record-bearing session must not be cleared as orphaned")
 	}
+	if !kept["idle-unknown-owner"] {
+		t.Error("idle session with no recorded owner must be kept until it goes stale")
+	}
+	if !kept["legacy-empty-phase"] {
+		t.Error("legacy empty-phase session normalizes to IDLE and must be kept until it goes stale")
+	}
+	if !kept["idle-dead-owner"] {
+		t.Error("idle session whose owner exited must be kept for exited-owner finalization")
+	}
 
 	// Verify stale sessions were actually cleared from disk
-	for _, staleID := range []string{"stale-empty-phase", "stale-idle", "stale-ended"} {
+	for _, staleID := range []string{"stale-ended", "idle-with-ended-at"} {
 		loaded, err := LoadSessionState(context.Background(), staleID)
 		if err != nil {
 			t.Errorf("LoadSessionState(%s) error = %v", staleID, err)
@@ -2123,23 +2155,6 @@ func TestCountTranscriptItems(t *testing.T) {
 		expected  int
 	}{
 		{
-			name:      "Gemini JSON with messages",
-			agentType: agent.AgentTypeGemini,
-			content: `{
-				"messages": [
-					{"type": "user", "content": "Hello"},
-					{"type": "gemini", "content": "Hi there!"}
-				]
-			}`,
-			expected: 2,
-		},
-		{
-			name:      "Gemini empty messages array",
-			agentType: agent.AgentTypeGemini,
-			content:   `{"messages": []}`,
-			expected:  0,
-		},
-		{
 			name:      "Claude Code JSONL",
 			agentType: agent.AgentTypeClaudeCode,
 			content: `{"type":"human","message":{"content":"Hello"}}
@@ -2161,17 +2176,24 @@ func TestCountTranscriptItems(t *testing.T) {
 			expected:  0,
 		},
 		{
-			name:      "Gemini JSON with array content (real format)",
+			// A Gemini session still in the store when its support was removed
+			// is condensed on the next commit; its offsets are message indices,
+			// so counting the pretty-printed document's lines would be wrong.
+			name:      "Gemini CLI session JSON counts messages",
 			agentType: agent.AgentTypeGemini,
 			content: `{
 				"messages": [
 					{"type": "user", "content": [{"text": "Hello"}]},
-					{"type": "gemini", "content": "Hi there!"},
-					{"type": "user", "content": [{"text": "Do something"}]},
-					{"type": "gemini", "content": "Done!"}
+					{"type": "gemini", "content": "Hi"}
 				]
 			}`,
-			expected: 4,
+			expected: 2,
+		},
+		{
+			name:      "Gemini CLI malformed JSON",
+			agentType: agent.AgentTypeGemini,
+			content:   `{"messages": [`,
+			expected:  0,
 		},
 		{
 			name:      "OpenCode export JSON with messages",
@@ -3171,409 +3193,6 @@ func TestCondenseSession_TranscriptRelocatedMidSession(t *testing.T) {
 	}
 }
 
-// TestCondenseSession_GeminiTranscript verifies that CondenseSession works correctly
-// with Gemini JSON format transcripts, including prompt extraction and format detection.
-func TestCondenseSession_GeminiTranscript(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create initial commit
-	testFile := filepath.Join(dir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial content"), 0o644); err != nil {
-		t.Fatalf("failed to write file: %v", err)
-	}
-	if _, err := worktree.Add("test.txt"); err != nil {
-		t.Fatalf("failed to stage file: %v", err)
-	}
-	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "2026-02-09-gemini-test"
-
-	// Create metadata directory with Gemini JSON transcript
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-
-	// Gemini JSON format with IDE tags to test stripping
-	geminiTranscript := `{
-		"sessionId": "test-session",
-		"messages": [
-			{
-				"type": "user",
-				"content": "<ide_opened_file>test.txt</ide_opened_file>Create a new file"
-			},
-			{
-				"type": "gemini",
-				"content": "I'll create the file for you",
-				"tokens": {
-					"input": 50,
-					"output": 20,
-					"cached": 10
-				}
-			}
-		]
-	}`
-
-	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(geminiTranscript), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	// Write prompt.txt (simulating what lifecycle does at turn start / turn end)
-	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.PromptFileName), []byte("Create a new file"), 0o644); err != nil {
-		t.Fatalf("failed to write prompt file: %v", err)
-	}
-
-	// Create modified file
-	if err := os.WriteFile(testFile, []byte("modified by gemini"), 0o644); err != nil {
-		t.Fatalf("failed to modify file: %v", err)
-	}
-
-	// Save checkpoint (creates shadow branch)
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:     sessionID,
-		ModifiedFiles: []string{"test.txt"},
-		NewFiles:      []string{},
-		DeletedFiles:  []string{},
-		MetadataDir:   metadataDir,
-		CommitMessage: "Checkpoint 1",
-		AuthorName:    "Gemini CLI",
-		AuthorEmail:   "gemini@test.com",
-		AgentType:     agent.AgentTypeGemini,
-	})
-	if err != nil {
-		t.Fatalf("SaveStep() error = %v", err)
-	}
-
-	// Load session state
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("loadSessionState() error = %v", err)
-	}
-	if state.AgentType != agent.AgentTypeGemini {
-		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeGemini)
-	}
-
-	// Condense the session
-	checkpointID := id.MustCheckpointID("aabbcc112233")
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
-	if err != nil {
-		t.Fatalf("CondenseSession() error = %v", err)
-	}
-
-	// Verify result
-	if result.CheckpointID != checkpointID {
-		t.Errorf("CheckpointID = %v, want %v", result.CheckpointID, checkpointID)
-	}
-	if result.SessionID != sessionID {
-		t.Errorf("SessionID = %q, want %q", result.SessionID, sessionID)
-	}
-	if len(result.FilesTouched) != 1 || result.FilesTouched[0] != "test.txt" {
-		t.Errorf("FilesTouched = %v, want [test.txt]", result.FilesTouched)
-	}
-
-	// Verify condensed data on entire/checkpoints/v1 branch
-	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
-	if err != nil {
-		t.Fatalf("ReadLatestSessionContent() error = %v", err)
-	}
-
-	// Verify transcript was stored
-	if len(content.Transcript) == 0 {
-		t.Error("Transcript should not be empty")
-	}
-
-	// Verify prompts were extracted and IDE tags were stripped
-	if !strings.Contains(content.Prompts, "Create a new file") {
-		t.Errorf("Prompts = %q, should contain %q (IDE tags should be stripped)", content.Prompts, "Create a new file")
-	}
-	if strings.Contains(content.Prompts, "<ide_opened_file>") {
-		t.Error("Prompts should not contain IDE tags")
-	}
-
-	// Verify token usage was calculated
-	if content.Metadata.TokenUsage == nil {
-		t.Fatal("TokenUsage should not be nil for Gemini transcript")
-	}
-	if content.Metadata.TokenUsage.InputTokens != 50 {
-		t.Errorf("InputTokens = %d, want 50", content.Metadata.TokenUsage.InputTokens)
-	}
-	if content.Metadata.TokenUsage.OutputTokens != 20 {
-		t.Errorf("OutputTokens = %d, want 20", content.Metadata.TokenUsage.OutputTokens)
-	}
-	if content.Metadata.TokenUsage.CacheReadTokens != 10 {
-		t.Errorf("CacheReadTokens = %d, want 10", content.Metadata.TokenUsage.CacheReadTokens)
-	}
-}
-
-// TestCondenseSession_GeminiMultiCheckpoint verifies that multi-checkpoint Gemini sessions
-// correctly scope token usage to only the checkpoint portion (not the entire transcript).
-// This is the core bug fix - ensuring CheckpointTranscriptStart is properly used.
-//
-//nolint:maintidx // Integration test with comprehensive verification steps
-func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create initial commit
-	testFile := filepath.Join(dir, "code.go")
-	if err := os.WriteFile(testFile, []byte("package main"), 0o644); err != nil {
-		t.Fatalf("failed to write file: %v", err)
-	}
-	if _, err := worktree.Add("code.go"); err != nil {
-		t.Fatalf("failed to stage file: %v", err)
-	}
-	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "2026-02-09-multi-checkpoint"
-
-	// Create metadata directory
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-
-	transcriptPath := filepath.Join(metadataDirAbs, paths.TranscriptFileName)
-
-	// CHECKPOINT 1: Initial work with 2 messages (1 gemini message with tokens)
-	checkpoint1Transcript := `{
-		"sessionId": "multi-test",
-		"messages": [
-			{
-				"type": "user",
-				"content": "Add a main function"
-			},
-			{
-				"type": "gemini",
-				"content": "I'll add a main function",
-				"tokens": {
-					"input": 100,
-					"output": 50,
-					"cached": 20
-				}
-			}
-		]
-	}`
-
-	if err := os.WriteFile(transcriptPath, []byte(checkpoint1Transcript), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	// Write prompt.txt for checkpoint 1 (simulating what lifecycle does)
-	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.PromptFileName), []byte("Add a main function"), 0o644); err != nil {
-		t.Fatalf("failed to write prompt file: %v", err)
-	}
-
-	// Modify file for checkpoint 1
-	if err := os.WriteFile(testFile, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
-		t.Fatalf("failed to modify file: %v", err)
-	}
-
-	// Save checkpoint 1
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:     sessionID,
-		ModifiedFiles: []string{"code.go"},
-		NewFiles:      []string{},
-		DeletedFiles:  []string{},
-		MetadataDir:   metadataDir,
-		CommitMessage: "Checkpoint 1",
-		AuthorName:    "Gemini CLI",
-		AuthorEmail:   "gemini@test.com",
-		AgentType:     agent.AgentTypeGemini,
-	})
-	if err != nil {
-		t.Fatalf("SaveStep() checkpoint 1 error = %v", err)
-	}
-
-	// Load and verify state after checkpoint 1
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("loadSessionState() error = %v", err)
-	}
-	if state.CheckpointTranscriptStart != 0 {
-		t.Errorf("CheckpointTranscriptStart after checkpoint 1 = %d, want 0", state.CheckpointTranscriptStart)
-	}
-
-	// CHECKPOINT 2: Add more messages to transcript (simulating continued session)
-	// This adds 2 more messages (indices 2 and 3), with new token counts
-	checkpoint2Transcript := `{
-		"sessionId": "multi-test",
-		"messages": [
-			{
-				"type": "user",
-				"content": "Add a main function"
-			},
-			{
-				"type": "gemini",
-				"content": "I'll add a main function",
-				"tokens": {
-					"input": 100,
-					"output": 50,
-					"cached": 20
-				}
-			},
-			{
-				"type": "user",
-				"content": "Now add error handling"
-			},
-			{
-				"type": "gemini",
-				"content": "I'll add error handling",
-				"tokens": {
-					"input": 200,
-					"output": 75,
-					"cached": 30
-				}
-			}
-		]
-	}`
-
-	if err := os.WriteFile(transcriptPath, []byte(checkpoint2Transcript), 0o644); err != nil {
-		t.Fatalf("failed to update transcript: %v", err)
-	}
-
-	// Simulate condensation clearing prompt.txt (condenseAndUpdateState does this),
-	// then lifecycle appending the new prompt at turn start.
-	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.PromptFileName), []byte("Now add error handling"), 0o644); err != nil {
-		t.Fatalf("failed to write prompt file: %v", err)
-	}
-
-	// Modify file for checkpoint 2
-	if err := os.WriteFile(testFile, []byte("package main\n\nfunc main() {\n\tif err := run(); err != nil {\n\t\tpanic(err)\n\t}\n}\n"), 0o644); err != nil {
-		t.Fatalf("failed to modify file: %v", err)
-	}
-
-	// Before checkpoint 2, manually update CheckpointTranscriptStart to simulate
-	// what would happen after condensing checkpoint 1
-	state.CheckpointTranscriptStart = 2 // Start from message index 2 (the second user prompt)
-	state.StepCount = 1                 // Set to 1 (will be incremented to 2 by SaveStep)
-	// CheckpointsCount is now the prompt window (SessionTurnCount - PromptWindowBase),
-	// not StepCount. Simulate two counted turns so the assertion below still expects 2.
-	state.SessionTurnCount = 2
-	if err := s.saveSessionState(context.Background(), state); err != nil {
-		t.Fatalf("failed to update session state: %v", err)
-	}
-
-	// Save checkpoint 2
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:     sessionID,
-		ModifiedFiles: []string{"code.go"},
-		NewFiles:      []string{},
-		DeletedFiles:  []string{},
-		MetadataDir:   metadataDir,
-		CommitMessage: "Checkpoint 2",
-		AuthorName:    "Gemini CLI",
-		AuthorEmail:   "gemini@test.com",
-		AgentType:     agent.AgentTypeGemini,
-	})
-	if err != nil {
-		t.Fatalf("SaveStep() checkpoint 2 error = %v", err)
-	}
-
-	// Reload state to get updated values
-	state, err = s.loadSessionState(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("loadSessionState() error = %v", err)
-	}
-
-	// Condense the session - this should calculate token usage ONLY from message index 2 onwards
-	checkpointID := id.MustCheckpointID("ddeeff998877")
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
-	if err != nil {
-		t.Fatalf("CondenseSession() error = %v", err)
-	}
-
-	// Verify result
-	if result.CheckpointsCount != 2 {
-		t.Errorf("CheckpointsCount = %d, want 2", result.CheckpointsCount)
-	}
-	if result.TotalTranscriptLines != 4 {
-		t.Errorf("TotalTranscriptLines = %d, want 4 (4 messages in Gemini format)", result.TotalTranscriptLines)
-	}
-
-	// Read condensed metadata
-	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-	content, err := store.ReadLatestSessionContent(t.Context(), checkpointID)
-	if err != nil {
-		t.Fatalf("ReadLatestSessionContent() error = %v", err)
-	}
-
-	// CRITICAL VERIFICATION: Token usage should ONLY count from message index 2 onwards
-	// This means ONLY the second gemini message (indices 2-3), NOT the first one (indices 0-1)
-	if content.Metadata.TokenUsage == nil {
-		t.Fatal("TokenUsage should not be nil")
-	}
-
-	// Expected: Only the second gemini message tokens (input=200, output=75, cached=30)
-	// NOT the first gemini message tokens (input=100, output=50, cached=20)
-	if content.Metadata.TokenUsage.InputTokens != 200 {
-		t.Errorf("InputTokens = %d, want 200 (should only count from checkpoint start, not entire transcript)",
-			content.Metadata.TokenUsage.InputTokens)
-	}
-	if content.Metadata.TokenUsage.OutputTokens != 75 {
-		t.Errorf("OutputTokens = %d, want 75 (should only count from checkpoint start, not entire transcript)",
-			content.Metadata.TokenUsage.OutputTokens)
-	}
-	if content.Metadata.TokenUsage.CacheReadTokens != 30 {
-		t.Errorf("CacheReadTokens = %d, want 30 (should only count from checkpoint start, not entire transcript)",
-			content.Metadata.TokenUsage.CacheReadTokens)
-	}
-	if content.Metadata.TokenUsage.APICallCount != 1 {
-		t.Errorf("APICallCount = %d, want 1 (only one gemini message after checkpoint start)",
-			content.Metadata.TokenUsage.APICallCount)
-	}
-
-	// Verify the full transcript is stored (all 4 messages)
-	if len(content.Transcript) == 0 {
-		t.Error("Full transcript should be stored")
-	}
-
-	// Verify only checkpoint-scoped prompts are present (from CheckpointTranscriptStart onwards)
-	if strings.Contains(content.Prompts, "Add a main function") {
-		t.Error("Prompts should NOT contain first prompt (before checkpoint start)")
-	}
-	if !strings.Contains(content.Prompts, "Now add error handling") {
-		t.Error("Prompts should contain second prompt (checkpoint-scoped)")
-	}
-}
-
 func TestCondenseSession_CopilotScopedCheckpointMetadataAndSessionBackfill(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -3935,25 +3554,22 @@ func TestExtractFilesFromLiveTranscript_RespectsOffset(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	// Create a Gemini-format transcript with 3 file writes at different message indices:
-	//   msg 0: user prompt
-	//   msg 1: gemini writes red.md      (already condensed)
-	//   msg 2: user prompt
-	//   msg 3: gemini writes blue.md     (already condensed)
-	//   msg 4: user prompt
-	//   msg 5: gemini writes green.md    (new, should be extracted)
-	transcript := `{
-  "messages": [
-    {"type": "user", "content": [{"text": "create red.md"}]},
-    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "docs/red.md"}}]},
-    {"type": "user", "content": [{"text": "create blue.md"}]},
-    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "docs/blue.md"}}]},
-    {"type": "user", "content": [{"text": "create green.md"}]},
-    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "docs/green.md"}}]}
-  ]
-}`
+	// Create a Claude Code JSONL transcript with 3 file writes at different line offsets:
+	//   line 0: user prompt
+	//   line 1: assistant writes red.md      (already condensed)
+	//   line 2: user prompt
+	//   line 3: assistant writes blue.md     (already condensed)
+	//   line 4: user prompt
+	//   line 5: assistant writes green.md    (new, should be extracted)
+	transcript := `{"type":"user","message":{"content":"create red.md"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"docs/red.md","content":"red"}}]}}
+{"type":"user","message":{"content":"create blue.md"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"docs/blue.md","content":"blue"}}]}}
+{"type":"user","message":{"content":"create green.md"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"docs/green.md","content":"green"}}]}}
+`
 
-	transcriptPath := filepath.Join(dir, "transcript.json")
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
 	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
@@ -3962,9 +3578,9 @@ func TestExtractFilesFromLiveTranscript_RespectsOffset(t *testing.T) {
 	state := &SessionState{
 		SessionID:                 "test-offset-session",
 		TranscriptPath:            transcriptPath,
-		AgentType:                 agent.AgentTypeGemini,
+		AgentType:                 agent.AgentTypeClaudeCode,
 		WorktreePath:              dir,
-		CheckpointTranscriptStart: 4, // Past red.md (msg 1) and blue.md (msg 3)
+		CheckpointTranscriptStart: 4, // Past red.md (line 1) and blue.md (line 3)
 	}
 
 	// With correct offset (4): should only find green.md
@@ -3990,14 +3606,11 @@ func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 
-	// Gemini transcript containing a file write
-	transcript := `{
-  "messages": [
-    {"type": "user", "content": [{"text": "create file"}]},
-    {"type": "gemini", "content": "", "toolCalls": [{"name": "write_file", "args": {"file_path": "from-transcript.txt"}}]}
-  ]
-}`
-	transcriptPath := filepath.Join(dir, "transcript.json")
+	// Claude Code transcript containing a file write
+	transcript := `{"type":"user","message":{"content":"create file"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"from-transcript.txt","content":"x"}}]}}
+`
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
 	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
@@ -4006,7 +3619,7 @@ func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
 		state := &SessionState{
 			SessionID:      "test-prefers-state",
 			TranscriptPath: transcriptPath,
-			AgentType:      agent.AgentTypeGemini,
+			AgentType:      agent.AgentTypeClaudeCode,
 			WorktreePath:   dir,
 			FilesTouched:   []string{"from-hook.txt"},
 		}
@@ -4033,7 +3646,7 @@ func TestResolveFilesTouched_PrefersStateFallsBackToTranscript(t *testing.T) {
 		state := &SessionState{
 			SessionID:      "test-fallback",
 			TranscriptPath: transcriptPath,
-			AgentType:      agent.AgentTypeGemini,
+			AgentType:      agent.AgentTypeClaudeCode,
 			WorktreePath:   dir,
 			FilesTouched:   nil,
 		}

@@ -54,8 +54,6 @@ func (c *CursorAgent) Description() string {
 	return "Cursor - AI-powered code editor"
 }
 
-func (c *CursorAgent) IsPreview() bool { return true }
-
 // DetectPresence checks if Cursor is configured in the repository.
 func (c *CursorAgent) DetectPresence(ctx context.Context) (bool, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)

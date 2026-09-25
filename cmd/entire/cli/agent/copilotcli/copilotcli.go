@@ -45,9 +45,6 @@ func (c *CopilotCLIAgent) Description() string {
 	return "Copilot CLI - GitHub's AI-powered coding agent"
 }
 
-// IsPreview returns true because this is a new integration.
-func (c *CopilotCLIAgent) IsPreview() bool { return true }
-
 // DetectPresence checks if Entire hooks are installed in the Copilot CLI config.
 // Delegates to AreHooksInstalled which checks .github/hooks/entire.json for Entire hook entries.
 func (c *CopilotCLIAgent) DetectPresence(ctx context.Context) (bool, error) {

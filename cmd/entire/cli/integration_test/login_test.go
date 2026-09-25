@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -271,6 +272,75 @@ func TestLogin_BrowserFlow_SavesToken(t *testing.T) {
 	}
 }
 
+// TestLogin_NoDisplay_UsesDeviceFlow pins the no-display rule end to end: a
+// prompt-capable Linux/BSD session (ENTIRE_TEST_TTY=1, no SSH variables) with
+// no X11 or Wayland display, no $BROWSER and no WSL interop takes the
+// device-code flow and says why. startLoginProcess gives every login a
+// nominal DISPLAY so the browser-flow tests run on headless CI; this test
+// blanks it again through extraEnv, which the harness appends last so it
+// wins, the same way the harness itself blanks the SSH variables. Linux only:
+// noLocalDisplay is false by construction on macOS and Windows, so there the
+// same environment takes the browser flow and this assertion has no subject.
+func TestLogin_NoDisplay_UsesDeviceFlow(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("noLocalDisplay applies to Linux and the BSDs only")
+	}
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
+			writeJSON(t, w, http.StatusOK, map[string]any{
+				"device_code":      "device-no-display",
+				"user_code":        "NODI-SPLY",
+				"verification_uri": serverURLWithPath(r, "/approve"),
+				"expires_in":       10,
+				"interval":         1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
+			// Deny straight away: the assertion is about which flow was
+			// chosen, and a denial ends the poll without an approval dance.
+			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "access_denied"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	proc := startLoginProcess(t, server.URL, []string{
+		"ENTIRE_TEST_TTY=1",
+		"DISPLAY=", "WAYLAND_DISPLAY=", "BROWSER=", "WSL_DISTRO_NAME=", "WSL_INTEROP=",
+	}, "login", "--insecure-http-auth")
+
+	// Fail fast if the browser flow was taken instead. waitForLoginPrompt
+	// checks its deadline only between blocking reads, and the browser flow
+	// prints nothing after its URL until browserLoginTimeout (five minutes, no
+	// override) expires, so a regression here would block for that long. The
+	// device flow's first stdout bytes are "Device code:" — runLogin writes
+	// that before anything else, and runLoginAuto's explanation goes to
+	// stderr — while the browser flow's are "Logging in to ". Peek does not
+	// consume, so the prompt parser below still sees the whole line.
+	if head, err := proc.stdout.Peek(len("Device code:")); err != nil || string(head) != "Device code:" {
+		t.Fatalf("login did not take the device flow: first stdout bytes %q (%v)", head, err)
+	}
+
+	_, deviceCode := waitForLoginPrompt(t, proc.stdout)
+	if deviceCode != "NODI-SPLY" {
+		t.Fatalf("device code = %q, want %q", deviceCode, "NODI-SPLY")
+	}
+
+	output, err := proc.wait()
+	if err == nil {
+		t.Fatalf("expected login to fail once the device flow was denied\nOutput:\n%s", output)
+	}
+	if !strings.Contains(output, "No graphical display detected") {
+		t.Fatalf("output missing the no-display reason for taking the device flow:\n%s", output)
+	}
+	if !strings.Contains(output, "device authorization denied") {
+		t.Fatalf("expected the device flow to run to its denial, got:\n%s", output)
+	}
+}
+
 type loginProcess struct {
 	stdout *bufio.Reader
 	// configDir is the sandboxed ENTIRE_CONFIG_DIR the spawned binary writes
@@ -301,7 +371,6 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 	cmd.Dir = env.RepoDir
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 		"ENTIRE_API_BASE_URL="+apiBaseURL,
 		// The login records its credential in contexts.json and the token
@@ -316,6 +385,14 @@ func startLoginProcess(t *testing.T, apiBaseURL string, extraEnv []string, args 
 		// device flow. extraEnv is appended after, so a test can still
 		// set them deliberately.
 		"SSH_CONNECTION=", "SSH_CLIENT=", "SSH_TTY=",
+		// And give it a display: noLocalDisplay() routes a Linux/BSD process
+		// with no DISPLAY or WAYLAND_DISPLAY to the device flow, which is
+		// exactly what a headless CI runner looks like. The browser flow
+		// under test never opens a browser (terminal actions are off under
+		// test), so a nominal DISPLAY is enough to model the desktop these
+		// tests simulate. Harmless for the device-flow tests, which are
+		// routed by the absence of a TTY before the display is consulted.
+		"DISPLAY=:0",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 

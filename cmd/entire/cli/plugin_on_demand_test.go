@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestMaybeRunPlugin_MissingGraphNonInteractive(t *testing.T) { //nolint:paralleltest // isolates PATH and terminal detection
@@ -272,7 +275,9 @@ func TestMaybeRunPlugin_AnnouncementNeverEchoesArguments(t *testing.T) { //nolin
 // whose target moved — is neither run nor offered for installation: exec'ing
 // it fails with a fork/exec ENOENT naming a path the user never chose, and
 // prompting dead-ends on the already-installed guard. Both are replaced by a
-// message that says what is broken and how to repair it.
+// message that says what is broken and how to repair it — and with no
+// manifest the entry is local development, so the repair is rebuild-or-remove,
+// not the index release a bare-name reinstall would fetch over the symlink.
 func TestMaybeRunPlugin_BrokenManagedEntryReportsARemedy(t *testing.T) { //nolint:paralleltest // isolates PATH and managed plugins
 	withIsolatedPluginEnv(t)
 	interceptVersionCheck(t)
@@ -314,7 +319,7 @@ func TestMaybeRunPlugin_BrokenManagedEntryReportsARemedy(t *testing.T) { //nolin
 		entry,
 		"cannot be run",
 		"points at a file that no longer exists",
-		"entire plugin install graph --force",
+		"rebuild the target or run: entire plugin remove graph",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("missing %q in the diagnosis: %q", want, stderr.String())
@@ -322,6 +327,54 @@ func TestMaybeRunPlugin_BrokenManagedEntryReportsARemedy(t *testing.T) { //nolin
 	}
 	if strings.Contains(stderr.String(), "use --force to replace") {
 		t.Errorf("fell through to the already-installed dead end: %q", stderr.String())
+	}
+}
+
+// A 0-byte managed entry is found by exec.LookPath, so it reaches dispatch
+// rather than the on-demand path; exec would then fail with an opaque "exec
+// format error". Dispatch must diagnose it with the remedy doctor gives: this
+// is the entry a release install left behind, so it has a manifest and the
+// repair is the recorded source with its options, not a bare name.
+func TestMaybeRunPlugin_EmptyManagedEntryOnPathReportsARemedy(t *testing.T) { //nolint:paralleltest // isolates PATH and managed plugins
+	withIsolatedPluginEnv(t)
+	interceptVersionCheck(t)
+	binDir, err := EnsurePluginBinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(binDir, pluginBinaryName("graph"))
+	if err := os.WriteFile(entry, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePluginManifest(&PluginManifest{
+		Name: "graph", RepoURL: "https://x.example/entire-graph", Tag: "v1.2.3", Pinned: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := exec.LookPath(pluginBinaryPrefix + "graph"); err != nil {
+		t.Fatalf("precondition: LookPath must resolve the empty entry: %v", err)
+	}
+
+	root := newTestRoot()
+	var stderr bytes.Buffer
+	root.SetErr(&stderr)
+	handled, code, _ := MaybeRunPlugin(t.Context(), root, []string{"graph", "search"})
+	if !handled || code != 1 {
+		t.Fatalf("handled=%v code=%d, want true, 1; stderr=%s", handled, code, &stderr)
+	}
+	for _, want := range []string{
+		entry,
+		"cannot be run",
+		"it is an empty file",
+		"reinstall: entire plugin install https://x.example/entire-graph --force --pin v1.2.3",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("missing %q in the diagnosis: %q", want, stderr.String())
+		}
+	}
+	if strings.Contains(stderr.String(), "exec format error") || strings.Contains(stderr.String(), "Failed to run plugin") {
+		t.Errorf("fell through to exec: %q", stderr.String())
 	}
 }
 
@@ -345,33 +398,75 @@ func TestCheckManagedPluginRunnable(t *testing.T) {
 	if err := os.Mkdir(asDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name             string
-		path             string
-		wantErr          string
-		wantReinstallFix bool
-	}{
+	empty := filepath.Join(dir, "entire-empty")
+	if err := os.WriteFile(empty, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []runnableCase{
 		{name: "regular file", path: runnable},
 		{name: "dangling symlink", path: dangling, wantErr: "points at a file that no longer exists", wantReinstallFix: true},
 		{name: "directory", path: asDir, wantErr: "it is a directory", wantReinstallFix: true},
+		{name: "empty file", path: empty, wantErr: "it is an empty file", wantReinstallFix: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			reinstallFixes, err := checkManagedPluginRunnable(tc.path)
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("err=%v, want nil", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("err=%v, want %q", err, tc.wantErr)
-			}
-			if reinstallFixes != tc.wantReinstallFix {
-				t.Errorf("reinstallFixes=%v, want %v", reinstallFixes, tc.wantReinstallFix)
-			}
+			tc.check(t)
 		})
 	}
+}
+
+type runnableCase struct {
+	name             string
+	path             string
+	wantErr          string
+	wantReinstallFix bool
+}
+
+func (tc runnableCase) check(t *testing.T) {
+	t.Helper()
+	reinstallFixes, err := checkManagedPluginRunnable(tc.path)
+	if tc.wantErr == "" {
+		if err != nil {
+			t.Fatalf("err=%v, want nil", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+		t.Fatalf("err=%v, want %q", err, tc.wantErr)
+	}
+	if reinstallFixes != tc.wantReinstallFix {
+		t.Errorf("reinstallFixes=%v, want %v", reinstallFixes, tc.wantReinstallFix)
+	}
+}
+
+// The unfollowable absolute os.Root.Symlink earlier Windows builds left behind
+// (see plugin_store_windows.go). Its target exists, so it is not the dangling
+// case. Named for CI's Windows job, which runs only -run '(Windows|MSYS)'.
+func TestCheckManagedPluginRunnable_WindowsUnfollowableSymlink(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != windowsGOOS {
+		t.Skip("os.Root.Symlink absolute targets are only unfollowable on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "entire-ok.exe")
+	if err := os.WriteFile(target, []byte("MZ"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	if err := root.Symlink(target, "entire-unfollowable"); err != nil {
+		// CI's Windows runners hold SeCreateSymbolicLinkPrivilege, so there a
+		// failure to create the link is a broken test, not a reason to skip;
+		// a developer's non-elevated shell legitimately cannot.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("CI runner could not create the symlink this test exists for: %v", err)
+		}
+		t.Skipf("symlink creation needs SeCreateSymbolicLinkPrivilege or Developer Mode: %v", err)
+	}
+	runnableCase{path: filepath.Join(dir, "entire-unfollowable"), wantErr: "cannot be followed", wantReinstallFix: true}.check(t)
 }
 
 // A name the index does not carry cannot be installed, so it must not be
@@ -400,5 +495,124 @@ func TestMaybeRunPlugin_UnlistedNameIsNotOffered(t *testing.T) { //nolint:parall
 	}
 	if !strings.Contains(stderr.String(), "not listed in the plugin index") {
 		t.Errorf("missing diagnosis: %q", stderr.String())
+	}
+}
+
+// TestMaybeRunPlugin_MissingInvestigateNonInteractive pins that `investigate`
+// gets the same on-demand treatment as `graph`.
+//
+// It was a built-in until it moved to the entire-investigate plugin, so a user
+// typing it has every reason to expect the command to exist; falling through
+// to Cobra would answer an established command with "unknown command for
+// entire" and no way forward.
+func TestMaybeRunPlugin_MissingInvestigateNonInteractive(t *testing.T) { //nolint:paralleltest // isolates PATH and terminal detection
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("ENTIRE_TEST_TTY", "0")
+	withPluginDir(t)
+	root := newTestRoot()
+	var stderr bytes.Buffer
+	root.SetErr(&stderr)
+
+	handled, code, _ := MaybeRunPlugin(t.Context(), root, []string{"investigate", "--findings"})
+	if !handled || code != 1 {
+		t.Fatalf("handled=%v code=%d, want true, 1", handled, code)
+	}
+	if !strings.Contains(stderr.String(), "entire plugin install investigate") {
+		t.Fatalf("missing installation hint: %q", stderr.String())
+	}
+}
+
+// TestOffersOnDemandInstall_IsNarrow pins that the offer is not extended to
+// arbitrary names. The prompt defaults to Yes and ends in a downloaded binary
+// linked onto $PATH, so it belongs only to names this CLI previously answered
+// itself.
+func TestOffersOnDemandInstall_IsNarrow(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"graph", "investigate"} {
+		if !offersOnDemandInstall(name) {
+			t.Errorf("offersOnDemandInstall(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"run", "upgrade", "brain", "ci", "definitely-not-a-plugin", ""} {
+		if offersOnDemandInstall(name) {
+			t.Errorf("offersOnDemandInstall(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestInstallMissingPlugin_RefreshesStaleIndexOnMiss reproduces the window
+// right after a plugin is added to the index: the local clone still holds the
+// catalog from before the entry landed.
+//
+// The clone refreshes on a 24-hour TTL, so without the forced retry the user
+// is told the plugin "is not listed in the plugin index" for up to a day after
+// it demonstrably is — the error blames the index when the local copy is
+// merely old.
+func TestInstallMissingPlugin_RefreshesStaleIndexOnMiss(t *testing.T) { //nolint:paralleltest // mutates env via cache and PATH isolation
+	dir := t.TempDir()
+	withIsolatedPath(t)
+	withPathDir(t, dir)
+	t.Setenv("ENTIRE_PLUGIN_DIR", filepath.Join(dir, "managed"))
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	t.Setenv("ACCESSIBLE", "1")
+	t.Setenv("ENTIRE_TELEMETRY_OPTOUT", "1")
+	withIndexCache(t)
+
+	// The catalog as it was before investigate was published.
+	indexURL, indexDir := newIndexRepo(t, `{"version":1,"plugins":[{"name":"graph","repo_url":"https://github.com/entireio/entire-graph"}]}`)
+	t.Setenv(pluginIndexEnvVar, indexURL)
+
+	// Prime the cache with that stale copy, exactly as an earlier command would.
+	if _, err := SyncPluginIndex(t.Context(), indexURL, false); err != nil {
+		t.Fatalf("prime index cache: %v", err)
+	}
+
+	// The entry lands upstream. The cached clone is now stale and, without a
+	// forced refresh, stays stale until the TTL expires.
+	testutil.WriteFile(t, indexDir, pluginIndexFileName,
+		`{"version":1,"plugins":[{"name":"graph","repo_url":"https://github.com/entireio/entire-graph"},`+
+			`{"name":"investigate","repo_url":"https://github.com/entireio/entire-investigate"}]}`)
+	testutil.GitAdd(t, indexDir, pluginIndexFileName)
+	testutil.GitCommit(t, indexDir, "add investigate")
+
+	// A real binary to place, so the install completes and the caller's own
+	// "was it actually installed?" check passes.
+	sourceDir := t.TempDir()
+	source := writePluginBinary(t, sourceDir, "entire-investigate", filepath.Join(dir, "args.txt"), 0)
+
+	var installed bool
+	restore := onDemandPluginInstall
+	onDemandPluginInstall = func(_ context.Context, _ *cobra.Command, src installSource, _ remoteInstallFlags) error {
+		installed = true
+		// The entry only exists in the refreshed catalog, so resolving to it
+		// is the proof that the retry re-read the index rather than the
+		// stale clone.
+		if src.Resolved == nil || src.Resolved.RepoURL != "https://github.com/entireio/entire-investigate" {
+			t.Errorf("resolved source = %+v, want the freshly indexed repo", src.Resolved)
+		}
+		_, err := InstallPluginFromPath(InstallPluginOptions{SourcePath: source})
+		return err
+	}
+	t.Cleanup(func() { onDemandPluginInstall = restore })
+
+	root := newTestRoot()
+	var stderr bytes.Buffer
+	root.SetErr(&stderr)
+	root.SetOut(&bytes.Buffer{})
+
+	// The confirmation reads the controlling terminal rather than stdin, so
+	// the answer has to arrive through that seam.
+	originalInput := openPluginPromptTerminal
+	openPluginPromptTerminal = func() (pluginPromptTerminal, error) {
+		return pluginPromptTerminal{in: io.NopCloser(strings.NewReader("\n"))}, nil
+	}
+	t.Cleanup(func() { openPluginPromptTerminal = originalInput })
+
+	_, err := installMissingPlugin(t.Context(), root, "investigate")
+	if err != nil {
+		t.Fatalf("installMissingPlugin: %v\nstderr: %s", err, stderr.String())
+	}
+	if !installed {
+		t.Fatalf("install was never reached; stderr: %s", stderr.String())
 	}
 }

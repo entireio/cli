@@ -12,7 +12,7 @@ import (
 )
 
 // HookConfigFile is an agent's hook-configuration file inside the worktree —
-// .claude/settings.json, .cursor/hooks.json, .gemini/settings.json,
+// .claude/settings.json, .cursor/hooks.json,
 // .github/hooks/entire.json, .factory/settings.json, .codex/hooks.json,
 // .opencode/plugins/entire.ts, .pi/extensions/entire/index.ts.
 //
@@ -229,7 +229,8 @@ func (f *HookConfigFile) RemoveDir() error {
 	if dir == "." {
 		// The owned directory IS the anchor, so it cannot be removed through
 		// its own root (see "A directory cannot be created, statted, or removed
-		// through its own root" in CLAUDE.md). Unreachable today, because
+		// through its own root" in docs/development/filesystem-safety.md).
+		// Unreachable today, because
 		// neverVouchable refuses a vouch for the Entire-owned directory itself
 		// for exactly this reason. Kept as the honest answer rather than as the
 		// misleading one above, since any future way of anchoring here needs a

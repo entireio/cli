@@ -129,6 +129,25 @@ func IsolateProcess(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "0")
 }
 
+// IsolateRepository isolates config and removes inherited repository/object-store
+// selectors for a test that drives Git against temporary repositories. Unlike
+// IsolateProcess, it must not be used by tests intentionally inheriting a hook's
+// temporary index or another repository selector. It changes process-global
+// state, so the test cannot run in parallel.
+func IsolateRepository(t *testing.T) {
+	t.Helper()
+	IsolateProcess(t)
+	for _, key := range []string{
+		"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	} {
+		t.Setenv(key, "") // register restoration before unsetting
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+}
+
 // IsolateMain is IsolateProcess for a TestMain, which has no *testing.T to
 // restore through: the isolation is set process-wide for the whole run via
 // os.Setenv and inherited by every spawned binary and git hook. Inherited
@@ -169,6 +188,27 @@ func EmptyConfigOverrides() []string {
 	return []string{
 		"GIT_CONFIG_GLOBAL=" + emptyConfigPath(),
 		"GIT_CONFIG_SYSTEM=" + emptyConfigPath(),
+	}
+}
+
+// UnsetGlobalConfig removes GIT_CONFIG_GLOBAL for the duration of t so that git
+// and go-git resolve global config from the caller's $HOME (then XDG) again.
+//
+// Use it in a helper that points HOME at a fixture and then expects
+// ~/.gitconfig to be read. GIT_CONFIG_GLOBAL, when set, replaces every standard
+// path with the one file it names, so any inherited value — including the
+// isolation file IsolateProcess and IsolateMain install — makes the fixture
+// unreachable and the helper a no-op.
+//
+// The variable must end up ABSENT, not empty: git and go-git both read an empty
+// GIT_CONFIG_GLOBAL as "no global config at all". t.Setenv registers the
+// restore for the end of the test; os.Unsetenv then clears it for the test's
+// own duration.
+func UnsetGlobalConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+		t.Fatalf("failed to unset GIT_CONFIG_GLOBAL: %v", err)
 	}
 }
 

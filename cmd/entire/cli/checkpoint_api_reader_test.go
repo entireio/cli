@@ -76,6 +76,11 @@ const checkpointEnvelopeJSON = `{
 // endpoint a read actually hit.
 func newTestAPIReader(t *testing.T, handler http.HandlerFunc) (*apiCheckpointReader, *[]string) {
 	t.Helper()
+	return newTestAPIReaderForForge(t, handler, mirrorCloneForge)
+}
+
+func newTestAPIReaderForForge(t *testing.T, handler http.HandlerFunc, forge string) (*apiCheckpointReader, *[]string) {
+	t.Helper()
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.RequestURI())
@@ -83,7 +88,7 @@ func newTestAPIReader(t *testing.T, handler http.HandlerFunc) (*apiCheckpointRea
 	}))
 	t.Cleanup(srv.Close)
 	client := api.NewClientWithBaseURL("test-token", srv.URL)
-	return newAPICheckpointReader(client, testAPIRepoID, testAPIOwnerRep), &paths
+	return newAPICheckpointReader(client, testAPIRepoID, forge, "acme", "widgets"), &paths
 }
 
 // defaultAPIHandler serves the envelope and a raw transcript per session index.
@@ -103,7 +108,7 @@ func defaultAPIHandler(w http.ResponseWriter, r *http.Request) {
 func TestAPICheckpointReader_ReadMapsEnvelope(t *testing.T) {
 	t.Parallel()
 
-	reader, _ := newTestAPIReader(t, defaultAPIHandler)
+	reader, paths := newTestAPIReader(t, defaultAPIHandler)
 	summary, err := reader.Read(context.Background(), testAPICheckpointID)
 	require.NoError(t, err)
 
@@ -118,6 +123,24 @@ func TestAPICheckpointReader_ReadMapsEnvelope(t *testing.T) {
 	assert.Equal(t, 70839522, summary.TokenUsage.CacheReadTokens)
 	assert.Equal(t, 197680, summary.TokenUsage.OutputTokens)
 	assert.Equal(t, 252, summary.TokenUsage.APICallCount)
+	require.Len(t, *paths, 1)
+	assert.Equal(t, "/api/v1/repos/"+testAPIRepoID+"/checkpoints/"+testAPICheckpointID.String(), (*paths)[0],
+		"cell checkpoint reads must be addressed by the resolved Entire repo ID")
+}
+
+// The server's repo_full_name is the bare pair for both forges, so a reader
+// constructed for either forge must accept the same envelope.
+func TestAPICheckpointReader_IdentityComparandIsBareForBothForges(t *testing.T) {
+	t.Parallel()
+
+	for _, forge := range []string{mirrorCloneForge, nativeCloneForge} {
+		t.Run(forge, func(t *testing.T) {
+			t.Parallel()
+			reader, _ := newTestAPIReaderForForge(t, defaultAPIHandler, forge)
+			_, err := reader.Read(context.Background(), testAPICheckpointID)
+			require.NoError(t, err, "the forge in the display ref must not leak into the repo_full_name comparison")
+		})
+	}
 }
 
 // The cell reports branches CONTAINING the commit, which is a different fact
@@ -264,7 +287,7 @@ func TestAPICheckpointReader_ForbiddenNamesAccess(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 	})
 	_, err := reader.Read(context.Background(), testAPICheckpointID)
-	require.ErrorContains(t, err, "cannot read checkpoints in acme/widgets")
+	require.ErrorContains(t, err, "cannot read checkpoints in gh/acme/widgets")
 }
 
 func TestAPICheckpointReader_EmptyEnvelopeIsNotFound(t *testing.T) {
@@ -478,7 +501,7 @@ func TestAPICheckpointReader_ListUnsupported(t *testing.T) {
 func TestAPICheckpointReader_IsNotAWriter(t *testing.T) {
 	t.Parallel()
 
-	var anyReader any = newAPICheckpointReader(nil, testAPIRepoID, testAPIOwnerRep)
+	var anyReader any = newAPICheckpointReader(nil, testAPIRepoID, mirrorCloneForge, "acme", "widgets")
 	_, isWriter := anyReader.(checkpoint.Writer)
 	assert.False(t, isWriter, "apiCheckpointReader must not implement checkpoint.Writer")
 	_, isStore := anyReader.(checkpoint.PersistentStore)

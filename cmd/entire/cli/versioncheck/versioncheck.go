@@ -424,13 +424,6 @@ func UpdateCommandForCurrentBinary(currentVersion string) string {
 	return fallbackInstallCommand(execPath, currentVersion)
 }
 
-// UpdateCommandShell names the shell UpdateCommandForCurrentBinary's command
-// has to run in, or "" when any shell will do. Callers that print the command
-// instead of running it need it: the Windows commands are PowerShell
-// one-liners, and pasting one into cmd.exe or bash either fails or, in bash's
-// case, expands part of the command before PowerShell sees it.
-func UpdateCommandShell() string { return updateCommandShell }
-
 // printNotification prints the version update notification to the user.
 func printNotification(w io.Writer, current, latest string) {
 	fmt.Fprintf(w, "\nUpdate available! %s -> %s\nRelease notes: %s\n",

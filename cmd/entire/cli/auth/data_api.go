@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
@@ -31,9 +32,9 @@ var resolveContextForAPI resolveContextFunc = clusterdiscovery.ResolveContextFor
 
 // SetResolveContextForAPIForTest overrides the /.well-known/entire-api.json
 // discovery seam and returns a cleanup func. Tests in other packages that
-// exercise a data-API command (activity/search/dispatch/recap) MUST install
-// this — otherwise ResolveDataAPIToken makes a real network call to the
-// configured data host. Test-only.
+// exercise a data-API command under ENTIRE_API_BASE_URL MUST install this —
+// otherwise ResolveDataAPIToken makes a real network call to the configured
+// data host. Test-only.
 func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFunc) func() {
 	t.Helper()
 	prev := resolveContextForAPI
@@ -41,40 +42,141 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 	return func() { resolveContextForAPI = prev }
 }
 
-// ResolveDataAPIToken returns the bearer for the data plane at dataBaseURL:
-// the active context's refreshed login JWT — the account access token (scope
-// entire:session) that the entire.io gateway and the entire-api cells accept
-// directly, and that the gateway uses to mint per-jurisdiction cell tokens
-// itself (COR-1095).
+// DataAPI is the web/data API origin to dial and the bearer for it.
+type DataAPI struct {
+	BaseURL string
+	Token   string
+}
+
+// ResolveDataAPI picks the data API and bearer for this command.
 //
-// It used to return an RFC 8693 exchange of that JWT for the data host's
-// audience (a narrower entire:api-access token). Cell-backed gateway routes
-// can no longer serve that shape: the gateway had to re-exchange it at
-// entire-core to reach a cell, and core refuses a non-session subject — which
-// is how every released CLI's `entire dispatch` 502'd from 2026-08-20.
+// The acting login decides both, with the control plane's precedence:
+// ENTIRE_TOKEN when set (the token verbatim, its aud's site as the host), else
+// the selected login (--context / $ENTIRE_CONTEXT / current_context), whose
+// refreshed login JWT is the bearer and whose login server's site is the host
+// (DataBaseURL). The identity is never inferred from a target host, so a
+// staging login talks to staging and a prod login to prod.
 //
-// Discovery is unchanged and remains the only path: the host's
-// /.well-known/entire-api.json names the login servers it trusts, and the
-// ACTIVE auth context must be issued by one of them. Pointing the CLI at
-// another environment therefore still takes two steps, because the acting
-// identity is never inferred from the target host:
-//
-//	entire auth use staging
-//	ENTIRE_API_BASE_URL=https://partial.to entire activity
-//
-// A host that doesn't advertise discovery (unreachable / 404 / 503 /
-// malformed) is an error — without it we can't know which login servers the
-// host trusts, and guessing risks presenting a token to a host that doesn't
-// accept that core (see clusterdiscovery.selectLoginContext).
+// ENTIRE_API_BASE_URL names the host instead. An env token is still sent to it
+// verbatim, as the cell path does; a saved login must be one that host's
+// /.well-known/entire-api.json trusts (ResolveDataAPIToken).
 //
 // Callers that honour --insecure-http-auth must call EnableInsecureHTTP before
 // invoking this (as they already do); the per-context refresh reads that
 // global opt-in.
+func ResolveDataAPI(ctx context.Context) (DataAPI, error) {
+	dataURL, overridden := api.BaseURLOverride()
+	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+		return envTokenDataAPI(raw, dataURL, overridden)
+	}
+	if overridden {
+		c, err := dataAPIContext(ctx, dataURL)
+		if err != nil {
+			return DataAPI{}, err
+		}
+		announceLogin(c)
+		token, err := RefreshedLoginToken(ctx, c)
+		if err != nil {
+			return DataAPI{}, err
+		}
+		return DataAPI{BaseURL: dataURL, Token: token}, nil
+	}
+	c, ok, err := ActingContext()
+	if err != nil {
+		return DataAPI{}, err
+	}
+	if !ok {
+		return DataAPI{}, errNoLogin()
+	}
+	baseURL, err := dataBaseURLForCore(c.CoreURL)
+	if err != nil {
+		return DataAPI{}, err
+	}
+	token, err := RefreshedLoginToken(ctx, c)
+	if err != nil {
+		return DataAPI{}, err
+	}
+	return DataAPI{BaseURL: baseURL, Token: token}, nil
+}
+
+// envTokenDataAPI is the ENTIRE_TOKEN path: the token verbatim, sent to the
+// explicit host or to its aud's site. Fail-closed like coreapi.New — a blank
+// or malformed value errors rather than falling back to a saved login.
+func envTokenDataAPI(raw, dataURL string, overridden bool) (DataAPI, error) {
+	core, token, err := ParseEnvToken(raw)
+	if err != nil {
+		return DataAPI{}, err
+	}
+	if overridden {
+		return DataAPI{BaseURL: dataURL, Token: token}, nil
+	}
+	baseURL, err := dataBaseURLForCore(core)
+	if err != nil {
+		return DataAPI{}, err
+	}
+	return DataAPI{BaseURL: baseURL, Token: token}, nil
+}
+
+// DataBaseURL is the web/data API origin for the acting login, without a
+// bearer: ENTIRE_API_BASE_URL when set, else the site of ENTIRE_TOKEN's core,
+// else the selected login server's site.
+func DataBaseURL() (string, error) {
+	if dataURL, ok := api.BaseURLOverride(); ok {
+		return dataURL, nil
+	}
+	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+		core, _, err := ParseEnvToken(raw)
+		if err != nil {
+			return "", err
+		}
+		return dataBaseURLForCore(core)
+	}
+	c, ok, err := ActiveContext()
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errNoLogin()
+	}
+	return dataBaseURLForCore(c.CoreURL)
+}
+
+// dataBaseURLForCore maps a login server to the site it serves: the apex for
+// entire.io and partial.to. A loopback core has no site — local dev runs the
+// web app on its own port, and a core is not a cell either (see
+// resolveTargetCellBaseURL) — so it needs ENTIRE_API_BASE_URL, like any other
+// login server outside those two.
+func dataBaseURLForCore(coreURL string) (string, error) {
+	origin := api.OriginOnly(coreURL)
+	if site := EntireSite(origin); site != "" {
+		return "https://" + site, nil
+	}
+	return "", fmt.Errorf("login server %s has no known web host; set %s", origin, api.BaseURLEnvVar)
+}
+
+// ResolveDataAPIToken returns the bearer for the data plane at dataBaseURL:
+// the login JWT of the saved context that host trusts.
+//
+// The host's /.well-known/entire-api.json names the login servers it trusts,
+// and the selected context must be issued by one of them; the host never
+// picks another saved login. A host that doesn't advertise discovery
+// (unreachable / 404 / 503 / malformed) is an error — without it we can't know
+// which login servers the host trusts, and guessing risks presenting a token
+// to a host that doesn't accept that core.
 func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error) {
+	selected, err := dataAPIContext(ctx, dataBaseURL)
+	if err != nil {
+		return "", err
+	}
+	return RefreshedLoginToken(ctx, selected)
+}
+
+// dataAPIContext picks the saved login the host at dataBaseURL trusts.
+func dataAPIContext(ctx context.Context, dataBaseURL string) (*contexts.Context, error) {
 	dataOrigin := api.OriginOnly(dataBaseURL)
 	host, ok := hostOf(dataOrigin)
 	if !ok {
-		return "", fmt.Errorf("data API URL %q has no host to discover against", dataBaseURL)
+		return nil, fmt.Errorf("data API URL %q has no host to discover against", dataBaseURL)
 	}
 
 	dctx, cancel := context.WithTimeout(ctx, dataAPIDiscoveryTimeout)
@@ -83,13 +185,12 @@ func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error
 
 	selected, err := resolveContextForAPI(dctx, userdirs.Config(), userdirs.Cache(), host, httpClient, nil)
 	if errors.Is(err, clusterdiscovery.ErrDiscoveryUnavailable) {
-		return "", fmt.Errorf("%s does not advertise its trusted login servers (/.well-known/entire-api.json missing or unreachable); cannot authenticate: %w", host, err)
+		return nil, fmt.Errorf("%s does not advertise its trusted login servers (/.well-known/entire-api.json missing or unreachable); cannot authenticate: %w", host, err)
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	return RefreshedLoginToken(ctx, selected)
+	return selected, nil
 }
 
 type dataAPIHTTPDiscoveryTransport struct {

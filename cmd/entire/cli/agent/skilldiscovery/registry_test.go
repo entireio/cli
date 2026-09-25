@@ -18,10 +18,6 @@ func TestCuratedBuiltinsFor_KnownAgents(t *testing.T) {
 	if len(codex) != 0 {
 		t.Errorf("codex built-ins: got %+v, want 0 (discovery-driven)", codex)
 	}
-	gemini := skilldiscovery.CuratedBuiltinsFor("gemini")
-	if len(gemini) != 0 {
-		t.Errorf("gemini built-ins: got %d, want 0", len(gemini))
-	}
 }
 
 func TestCuratedBuiltinsFor_UnknownAgentReturnsEmpty(t *testing.T) {
@@ -52,18 +48,26 @@ func TestActiveInstallHintsFor_ShowsAllWhenNothingDiscovered(t *testing.T) {
 	}
 }
 
-func TestActiveInstallHintsFor_GeminiAlwaysShownRegardlessOfDiscovery(t *testing.T) {
+func TestActiveInstallHintsFor_AntigravityAlwaysShownRegardlessOfDiscovery(t *testing.T) {
 	t.Parallel()
-	hints := skilldiscovery.ActiveInstallHintsFor("gemini", map[string]struct{}{"/anything": {}})
+	hints := skilldiscovery.ActiveInstallHintsFor("antigravity", map[string]struct{}{"/code-review": {}})
 	if len(hints) == 0 {
-		t.Error("gemini hint with nil ProvidesAny should always show")
+		t.Error("antigravity hint with nil ProvidesAny should always show")
+	}
+}
+
+func TestIsEligible_IncludesAntigravity(t *testing.T) {
+	t.Parallel()
+	if !skilldiscovery.IsEligible("antigravity") {
+		t.Error("antigravity should be eligible via install hint")
 	}
 }
 
 func TestIsEligible_IncludesAgentWithOnlyInstallHint(t *testing.T) {
 	t.Parallel()
-	if !skilldiscovery.IsEligible("gemini") {
-		t.Error("gemini should be eligible via install hint alone")
+	// Codex has no curated built-ins, only an install hint.
+	if !skilldiscovery.IsEligible("codex") {
+		t.Error("codex should be eligible via install hint alone")
 	}
 	if !skilldiscovery.IsEligible("claude-code") {
 		t.Error("claude-code should be eligible via built-ins")

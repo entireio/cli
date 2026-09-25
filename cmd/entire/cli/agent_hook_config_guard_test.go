@@ -62,8 +62,8 @@ func TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent(t *testing.T) {
 	// A count, deliberately, directly under the argument against counts above —
 	// and defeatable the same way, by dropping one agent from the registry while
 	// adding another locator. A set comparison would need to map a package
-	// directory to the rel path it declares, and nothing does: `geminicli`
-	// declares `.gemini/settings.json` and `copilotcli` declares
+	// directory to the rel path it declares, and nothing does: `factoryaidroid`
+	// declares `.factory/settings.json` and `copilotcli` declares
 	// `.github/hooks/entire.json`, so neither the package name nor the path's
 	// first component derives the other. The set comparison above is the guard
 	// that matters; this one only catches a locator the registry never sees.

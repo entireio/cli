@@ -14,7 +14,7 @@ import (
 //
 // The old design registered --json persistently on each group root, so it was
 // inherited by every subcommand — including side-effect verbs (delete, clone,
-// mirror create/remove, grant remove) that ignored it, silently accepting a
+// mirror add/remove, grant remove) that ignored it, silently accepting a
 // no-op flag. Now the flag exists exactly on the commands that honor it, so the
 // non-honoring commands reject --json with "unknown flag" and their help never
 // advertises it.
@@ -36,38 +36,37 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		// repo
 		"repo create":        true,
 		"repo list":          true,
-		"repo get":           true,
+		"repo view":          true,
+		"repo edit":          true,
 		"repo delete":        false,
 		"repo clone":         false,
-		"repo mirror create": false,
+		"repo mirror add":    false,
 		"repo mirror list":   true,
 		"repo mirror get":    true,
 		"repo mirror remove": false,
-		// `use` writes local git config and reports what it changed; there is no
-		// object to render, so it stays off the --json surface like the other
-		// side-effect verbs.
-		"repo mirror use":                false,
-		"repo mirror collaborators list": true,
-		"repo visibility get":            true,
-		"repo visibility set":            true,
+		// `remote add` writes local git config and reports what it changed;
+		// there is no object to render, so it stays off the --json surface like
+		// the other side-effect verbs.
+		"repo remote add":     false,
+		"repo visibility get": true,
 		// add/remove print the resulting rule list, so they render JSON too.
 		"repo protection list":   true,
 		"repo protection add":    true,
 		"repo protection remove": true,
-		// grant
-		"grant org add":        true,
-		"grant org list":       true,
-		"grant org remove":     false,
-		"grant project add":    true,
-		"grant project list":   true,
-		"grant project remove": false,
-		"grant repo add":       true,
-		"grant repo list":      true,
-		"grant repo remove":    false,
+		// grant subtrees: add/list render a payload, remove only reports
+		"org grant add":        true,
+		"org grant list":       true,
+		"org grant remove":     false,
+		"project grant add":    true,
+		"project grant list":   true,
+		"project grant remove": false,
+		"repo grant add":       true,
+		"repo grant list":      true,
+		"repo grant remove":    false,
 	}
 
 	got := map[string]bool{}
-	for _, root := range []*cobra.Command{newOrgCmd(), newProjectCmd(), newRepoCmd(), newGrantCmd()} {
+	for _, root := range []*cobra.Command{newOrgCmd(), newProjectCmd(), newRepoCmd()} {
 		collectJSONFlag(t, root, root.Name(), got)
 	}
 

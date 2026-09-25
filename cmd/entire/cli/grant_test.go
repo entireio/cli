@@ -1,24 +1,61 @@
 package cli
 
 import (
-	"slices"
+	"strconv"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-func TestValidateGrantRole(t *testing.T) {
+// TestValidateRole covers the one role check every `<noun> grant add` runs:
+// the value matches one of the target's roles exactly (the server enums are
+// lowercase) and the message lists what would have been accepted.
+func TestValidateRole(t *testing.T) {
 	t.Parallel()
-	for _, ok := range []string{"reader", "writer", "admin"} {
-		if err := validateGrantRole(ok); err != nil {
-			t.Errorf("validateGrantRole(%q) = %v, want nil", ok, err)
-		}
+	roles := []string{"reader", "writer", "admin"}
+	for _, ok := range roles {
+		require.NoError(t, validateRole(ok, roles))
 	}
 	for _, bad := range []string{"", "owner", "Reader", "member"} {
-		if err := validateGrantRole(bad); err == nil {
-			t.Errorf("validateGrantRole(%q) expected error", bad)
-		}
+		require.ErrorContains(t, validateRole(bad, roles), "invalid --role "+strconv.Quote(bad)+": must be one of reader, writer, admin")
 	}
+}
+
+// TestGrantTargetRoles pins each target's role set and default: org
+// membership has owner/admin/member with member as the server default, while
+// project and repo access has reader/writer/admin and no default, so --role is
+// required there.
+//
+// Each list is also checked against the generated client's enum for that
+// target's grant body. The lists are bare strings cast into those enum types,
+// so nothing else notices when a regenerated client renames, drops or adds a
+// role: the help would advertise a role the server refuses, or refuse one it
+// accepts. The deleted per-target switch used to catch that at compile time;
+// this is the same guard as a test.
+func TestGrantTargetRoles(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, []string{"owner", "admin", "member"}, orgGrantTarget.roles)
+	require.Equal(t, "member", orgGrantTarget.defaultRole)
+	require.Equal(t, []string{"reader", "writer", "admin"}, projectGrantTarget.roles)
+	require.Empty(t, projectGrantTarget.defaultRole)
+	require.Equal(t, []string{"reader", "writer", "admin"}, repoGrantTarget.roles)
+	require.Empty(t, repoGrantTarget.defaultRole)
+
+	require.Equal(t, enumStrings(coreapi.AddOrgMemberInputBodyRole("").AllValues()), orgGrantTarget.roles)
+	require.Equal(t, enumStrings(coreapi.GrantAccessBodyRole("").AllValues()), projectGrantTarget.roles)
+	require.Equal(t, enumStrings(coreapi.GrantAccessBodyRole("").AllValues()), repoGrantTarget.roles)
+}
+
+// enumStrings converts a generated enum's AllValues() into the plain strings a
+// grantTarget lists.
+func enumStrings[E ~string](values []E) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = string(v)
+	}
+	return out
 }
 
 func TestGranteeName(t *testing.T) {
@@ -49,10 +86,9 @@ func TestGrantRows(t *testing.T) {
 	const ulid = "01HZX0000000000000000000AB"
 
 	// grantColumns and the row builders must stay in lockstep — same width,
-	// same column order — or the table header and cells misalign.
-	if got, want := len(grantColumns), 5; got != want {
-		t.Fatalf("grantColumns has %d columns, want %d", got, want)
-	}
+	// same column order — or the table header and cells misalign. No column
+	// carries an internal id: the grantee ULID stays in --json only.
+	require.Equal(t, []string{"GRANTEE", "ROLE", "SOURCE", "TYPE"}, grantColumns)
 
 	t.Run("project resolved name", func(t *testing.T) {
 		t.Parallel()
@@ -63,10 +99,22 @@ func TestGrantRows(t *testing.T) {
 			Role:        "writer",
 			Source:      "direct",
 		})
-		want := []string{"github:alice", "writer", "direct", "account", ulid}
-		if !slices.Equal(row, want) {
-			t.Errorf("projectGrantRow = %v, want %v", row, want)
-		}
+		require.Equal(t, []string{"github:alice", "writer", "direct", "account"}, row)
+	})
+
+	// Org membership is the same table shape at the front: the grantee's
+	// handle first, the account ULID only when the server sent no handle.
+	t.Run("org member shows the handle", func(t *testing.T) {
+		t.Parallel()
+		require.Equal(t, []string{"GRANTEE", "ROLE", "STATUS"}, orgMemberColumns)
+		row := orgMemberRow(coreapi.Membership{AccountId: ulid, Handle: coreapi.NewOptString("github:alice"), Role: "owner", Status: "active"})
+		require.Equal(t, []string{"github:alice", "owner", "active"}, row)
+	})
+
+	t.Run("org member without a handle falls back to the ULID", func(t *testing.T) {
+		t.Parallel()
+		row := orgMemberRow(coreapi.Membership{AccountId: ulid, Role: "member", Status: "pending"})
+		require.Equal(t, []string{ulid, "member", "pending"}, row)
 	})
 
 	t.Run("repo unresolved name falls back to ULID", func(t *testing.T) {
@@ -78,43 +126,6 @@ func TestGrantRows(t *testing.T) {
 			Role:        "reader",
 			Source:      "inherited",
 		})
-		want := []string{ulid, "reader", "inherited", "team", ulid}
-		if !slices.Equal(row, want) {
-			t.Errorf("repoGrantRow = %v, want %v", row, want)
-		}
+		require.Equal(t, []string{ulid, "reader", "inherited", "team"}, row)
 	})
-}
-
-func TestParseOrgRole(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		in      string
-		want    coreapi.AddOrgMemberInputBodyRole
-		wantErr bool
-	}{
-		{in: "owner", want: coreapi.AddOrgMemberInputBodyRoleOwner},
-		{in: "admin", want: coreapi.AddOrgMemberInputBodyRoleAdmin},
-		{in: "member", want: coreapi.AddOrgMemberInputBodyRoleMember},
-		{in: "", wantErr: true},
-		{in: "viewer", wantErr: true},
-		{in: "Owner", wantErr: true}, // case-sensitive: server enum is lowercase
-	}
-	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
-			t.Parallel()
-			got, err := parseOrgRole(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parseOrgRole(%q) expected error, got %q", tt.in, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseOrgRole(%q): %v", tt.in, err)
-			}
-			if got != tt.want {
-				t.Errorf("parseOrgRole(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
 }

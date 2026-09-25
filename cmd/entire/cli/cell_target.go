@@ -43,7 +43,7 @@ type cellCoreClient interface {
 }
 
 type nativeRepoCellCoreClient interface {
-	nativeRepoResolverClient
+	repoRefClient
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
@@ -298,21 +298,25 @@ type repoCellPlacement struct {
 	Target *auth.CellTarget
 }
 
-// resolveTrailRepoCellPlacement keeps the forge namespace in repository
+// resolveForgeRepoCellPlacement keeps the forge namespace in repository
 // identity resolution. A native /et/<project>/<repo> and a legacy
 // /gh/<owner>/<repo> can have the same two trailing path segments but are
 // different repositories with different repo IDs and, potentially, cells.
-func resolveTrailRepoCellPlacement(ctx context.Context, forge, owner, repo string) (repoCellPlacement, error) {
-	if forge == nativeCloneForge {
+func resolveForgeRepoCellPlacement(ctx context.Context, forge, owner, repo string) (repoCellPlacement, error) {
+	switch forge {
+	case nativeCloneForge:
 		return resolveNativeRepoCellPlacement(ctx, owner, repo)
+	case mirrorCloneForge:
+		return resolveRepoCellPlacement(ctx, owner, repo)
+	default:
+		return repoCellPlacement{}, fmt.Errorf("resolve repo %s/%s: unsupported forge %q (supported: %s, %s)", owner, repo, forge, mirrorCloneForge, nativeCloneForge)
 	}
-	return resolveRepoCellPlacement(ctx, owner, repo)
 }
 
 // resolveNativeRepoCellPlacement resolves /et/<project>/<repo> through the
-// native project-scoped repo lookup, then maps the repo's home cluster to its
-// entire-api cell. It deliberately never consults the forge-blind repos index:
-// that index can select a same-named /gh/ mirror instead.
+// native path lookup, then maps the repo's home cluster to its entire-api
+// cell. It deliberately never consults the forge-blind repos index: that index
+// can select a same-named /gh/ mirror instead.
 func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName string) (repoCellPlacement, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
 	defer cancel()

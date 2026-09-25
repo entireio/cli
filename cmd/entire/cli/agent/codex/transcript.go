@@ -286,7 +286,7 @@ func (c *CodexAgent) GetTranscriptPosition(path string) (int, error) {
 }
 
 // ExtractModifiedFilesFromOffset extracts files modified since a given line offset.
-func (c *CodexAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *CodexAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}

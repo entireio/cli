@@ -1177,7 +1177,7 @@ func ReadSessionPromptFromTree(tree *object.Tree, checkpointPath string) string 
 
 // ReadAgentTypeFromTree reads the agent type from a checkpoint's metadata.json file in a git tree.
 // If metadata.json doesn't exist (shadow branches), it falls back to detecting the agent
-// from the presence of agent-specific config files (.gemini/settings.json or .claude/).
+// from the presence of agent-specific config markers (.claude/, .codex/, .cursor/, etc.).
 // Returns agent.AgentTypeUnknown if the agent type cannot be determined.
 func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.AgentType {
 	// First, try to read from metadata.json (present in condensed/committed checkpoints)
@@ -1199,10 +1199,6 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 	var detected types.AgentType
 	detectedCount := 0
 
-	if _, err := tree.File(".gemini/settings.json"); err == nil {
-		detected = agent.AgentTypeGemini
-		detectedCount++
-	}
 	if _, err := tree.Tree(".claude"); err == nil {
 		detected = agent.AgentTypeClaudeCode
 		detectedCount++
@@ -1229,6 +1225,16 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) types.Agent
 
 	if detectedCount == 1 {
 		return detected
+	}
+	// Gemini CLI support was removed, but a session still in flight when it
+	// was leaves a shadow branch until its next commit, and its JSON-document
+	// transcript cannot be read as anything else. Only a last resort: counted
+	// with the others, a leftover .gemini would make every later session in a
+	// repo that also has another agent's marker ambiguous.
+	if detectedCount == 0 {
+		if _, err := tree.File(".gemini/settings.json"); err == nil {
+			return agent.AgentTypeGemini
+		}
 	}
 	return agent.AgentTypeUnknown
 }

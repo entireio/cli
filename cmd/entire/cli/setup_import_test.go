@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,9 +14,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/agentimport"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // fakeAgent satisfies agent.Agent via an embedded nil interface; only Type() is
@@ -65,7 +65,7 @@ func TestImporterForAgent_UnknownTypeReturnsNil(t *testing.T) {
 
 // withImportSeams overrides the package seams and restores them after the test.
 // Tests using it must not call t.Parallel (shared package state).
-func withImportSeams(t *testing.T, discover func(context.Context, []agent.Agent, string) []eligibleImport, prompt func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error), run func(context.Context, io.Writer, string, []eligibleImport)) {
+func withImportSeams(t *testing.T, discover func(context.Context, []agent.Agent, string) []eligibleImport, prompt func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error), run func(context.Context, io.Writer, string, string, []eligibleImport)) {
 	t.Helper()
 	oldDiscover, oldPrompt, oldRun := sessionImportDiscover, sessionImportPrompt, sessionImportRun
 	t.Cleanup(func() {
@@ -98,17 +98,31 @@ func TestMaybeOfferSessionImport_FirstRunGate(t *testing.T) {
 	}
 }
 
-func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *testing.T) {
-	// Not parallel: overrides seams and chdirs into a temp repo.
+// importTestRepo creates an isolated repo with one commit and chdirs into it.
+// The commit is load-bearing, not incidental: maybeOfferSessionImport resolves
+// the import anchor before it prompts, so a commitless fixture short-circuits
+// with a skip notice before reaching the seams under test.
+func importTestRepo(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
 	t.Chdir(dir)
+	return dir
+}
+
+func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *testing.T) {
+	// Not parallel: overrides seams and chdirs into a temp repo.
+	dir := importTestRepo(t)
 
 	eligible := []eligibleImport{
 		{displayName: testAgentClaude, sessionCount: 3},
 		{displayName: "Codex", sessionCount: 1},
 	}
 	var ran []eligibleImport
+	var anchor string
 	promptCalled := false
 	withImportSeams(t,
 		func(context.Context, []agent.Agent, string) []eligibleImport { return eligible },
@@ -116,7 +130,9 @@ func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *test
 			promptCalled = true
 			return nil, nil
 		},
-		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
+		func(_ context.Context, _ io.Writer, _, gotAnchor string, sel []eligibleImport) {
+			ran, anchor = sel, gotAnchor
+		},
 	)
 
 	// --import-history is the explicit, non-interactive opt-in: it imports
@@ -128,6 +144,12 @@ func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *test
 	if len(ran) != len(eligible) {
 		t.Fatalf("imported %d agents, want all %d", len(ran), len(eligible))
 	}
+	// The resolved anchor has to REACH the importer. Every other seam stub
+	// discards it, so without this a hand-off broken to "" passes the whole
+	// unit suite and is caught only by the integration tests.
+	if want := testutil.GetHeadHash(t, dir); anchor != want {
+		t.Errorf("importer received anchor %q, want the resolved head %q", anchor, want)
+	}
 }
 
 // TestMaybeOfferSessionImport_YesDoesNotImport pins the decision that --yes
@@ -138,9 +160,7 @@ func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *test
 // decision rather than a setup default.
 func TestMaybeOfferSessionImport_YesDoesNotImport(t *testing.T) {
 	// Not parallel: overrides seams, chdirs into a temp repo, and sets env.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
+	importTestRepo(t)
 	// A real TTY is available: --yes must still not import, and must not fall
 	// through to the prompt either.
 	t.Setenv("ENTIRE_TEST_TTY", "1")
@@ -155,7 +175,7 @@ func TestMaybeOfferSessionImport_YesDoesNotImport(t *testing.T) {
 			promptCalled = true
 			return nil, nil
 		},
-		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
+		func(_ context.Context, _ io.Writer, _, _ string, sel []eligibleImport) { ran = sel },
 	)
 
 	var buf bytes.Buffer
@@ -195,9 +215,7 @@ func TestMaybeOfferSessionImport_ImportHistoryOnNonFirstRunIsReported(t *testing
 
 func TestMaybeOfferSessionImport_NonInteractiveWithoutOptInSkips(t *testing.T) {
 	// Not parallel: overrides seams and chdirs into a temp repo.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
+	importTestRepo(t)
 	// No ENTIRE_TEST_TTY => CanPromptInteractively() is false (non-interactive),
 	// e.g. a scripted or agent-driven enable.
 
@@ -211,7 +229,7 @@ func TestMaybeOfferSessionImport_NonInteractiveWithoutOptInSkips(t *testing.T) {
 			promptCalled = true
 			return nil, nil
 		},
-		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
+		func(_ context.Context, _ io.Writer, _, _ string, sel []eligibleImport) { ran = sel },
 	)
 
 	// No opt-in flag and no TTY: neither prompt nor auto-import; just hint at
@@ -238,7 +256,7 @@ func TestMaybeOfferSessionImport_NoEligibleIsNoOp(t *testing.T) {
 	withImportSeams(t,
 		func(context.Context, []agent.Agent, string) []eligibleImport { return nil },
 		nil,
-		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
+		func(context.Context, io.Writer, string, string, []eligibleImport) { runCalled = true },
 	)
 
 	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{Yes: true}, true)
@@ -248,9 +266,7 @@ func TestMaybeOfferSessionImport_NoEligibleIsNoOp(t *testing.T) {
 }
 
 func TestMaybeOfferSessionImport_InteractiveUsesSelection(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
+	importTestRepo(t)
 	// Force interactive so the prompt branch is taken.
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
@@ -264,7 +280,7 @@ func TestMaybeOfferSessionImport_InteractiveUsesSelection(t *testing.T) {
 		func(_ context.Context, _ io.Writer, e []eligibleImport) ([]eligibleImport, error) {
 			return e[:1], nil // user picks only the first
 		},
-		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
+		func(_ context.Context, _ io.Writer, _, _ string, sel []eligibleImport) { ran = sel },
 	)
 
 	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, true)
@@ -274,9 +290,7 @@ func TestMaybeOfferSessionImport_InteractiveUsesSelection(t *testing.T) {
 }
 
 func TestMaybeOfferSessionImport_EmptySelectionSkips(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
+	importTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
 	runCalled := false
@@ -285,7 +299,7 @@ func TestMaybeOfferSessionImport_EmptySelectionSkips(t *testing.T) {
 			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
 		},
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) { return nil, nil },
-		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
+		func(context.Context, io.Writer, string, string, []eligibleImport) { runCalled = true },
 	)
 
 	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, true)
@@ -294,40 +308,8 @@ func TestMaybeOfferSessionImport_EmptySelectionSkips(t *testing.T) {
 	}
 }
 
-func TestRunSelectedImports_UnsatisfiablePolicySkips(t *testing.T) {
-	// Not parallel: chdirs into a temp repo and reads CWD-based git state.
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-	ctx := context.Background()
-
-	// Install a checkpoint policy this CLI cannot satisfy (a future format).
-	// The gate must skip the import, matching the standalone `entire import`
-	// command's ensureCheckpointPolicyAllowsCheckpointData check.
-	repo, err := openRepository(ctx)
-	if err != nil {
-		t.Fatalf("open repository: %v", err)
-	}
-	future := checkpointpolicy.Policy{CheckpointVersion: "branch-v99", CheckpointMinVersion: "branch-v99"}
-	if _, err := checkpointpolicy.WriteLocal(ctx, repo, plumbing.ZeroHash, future); err != nil {
-		t.Fatalf("write local policy: %v", err)
-	}
-	repo.Close()
-
-	// A nil importer would panic if the import loop ran, so the gate returning
-	// before the loop is exactly what keeps this from blowing up.
-	var buf bytes.Buffer
-	runSelectedImports(ctx, &buf, dir, []eligibleImport{{displayName: testAgentClaude}})
-
-	if got := buf.String(); !strings.Contains(got, "skipping agent history import") {
-		t.Errorf("expected a skip note for an unsatisfiable checkpoint policy, got %q", got)
-	}
-}
-
 func TestMaybeOfferSessionImport_PromptErrorIsBestEffort(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
+	importTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
 	runCalled := false
@@ -338,7 +320,7 @@ func TestMaybeOfferSessionImport_PromptErrorIsBestEffort(t *testing.T) {
 		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
 			return nil, errors.New("terminal exploded")
 		},
-		func(context.Context, io.Writer, string, []eligibleImport) { runCalled = true },
+		func(context.Context, io.Writer, string, string, []eligibleImport) { runCalled = true },
 	)
 
 	// A prompt failure must never fail enable: the offer is best-effort, so this
@@ -422,7 +404,7 @@ func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
 	agentName := string(claudeImp.AgentType())
 
 	var buf bytes.Buffer
-	runSelectedImports(ctx, &buf, dir, []eligibleImport{{imp: imp, displayName: agentName}})
+	runSelectedImports(ctx, &buf, dir, testutil.GetHeadHash(t, dir), []eligibleImport{{imp: imp, displayName: agentName}})
 	out := buf.String()
 
 	if strings.ContainsRune(out, '\x1b') {
@@ -444,6 +426,38 @@ func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
 
 	if want := "Imported 4 turn(s) from 2 session(s) (0 already imported).\n"; !strings.Contains(out, want) {
 		t.Errorf("final summary line missing or changed; want %q in:\n%s", want, out)
+	}
+
+	// Import success must mean both metadata representations carry a real
+	// anchor, while local imported state remains deliberately commit-less.
+	wantAnchor := testutil.GetHeadHash(t, dir)
+	stateStore, err := session.NewStateStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sessionID := range []string{"sess1", "sess2"} {
+		for _, turnID := range []string{"u1", "u2"} {
+			cid := agentimport.DeriveCheckpointID(sessionID, turnID)
+			for _, suffix := range []string{"/metadata.json", "/0/metadata.json"} {
+				raw := testutil.RunGit(t, dir, "show", "entire/checkpoints/v1:"+cid.Path()+suffix)
+				var metadata struct {
+					CommitSHA string `json:"commit_sha"`
+				}
+				if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+					t.Fatal(err)
+				}
+				if metadata.CommitSHA != wantAnchor {
+					t.Errorf("%s%s anchor = %q, want %s", cid, suffix, metadata.CommitSHA, wantAnchor)
+				}
+			}
+		}
+		state, err := stateStore.Load(ctx, sessionID)
+		if err != nil || state == nil {
+			t.Fatalf("load imported session %s: %v", sessionID, err)
+		}
+		if state.BaseCommit != "" {
+			t.Errorf("imported local session %s acquired BaseCommit %q", sessionID, state.BaseCommit)
+		}
 	}
 }
 
@@ -492,13 +506,13 @@ func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 	}}
 
 	// First pass actually imports; discard its output.
-	runSelectedImports(ctx, io.Discard, dir, selected)
+	runSelectedImports(ctx, io.Discard, dir, testutil.GetHeadHash(t, dir), selected)
 
 	// Second pass: every turn is already imported, so agentimport.Run's loop
 	// only ever calls TurnSkipped for it — this is the scenario that used to
 	// leave a TTY reporter frozen at "turn 0/M".
 	var buf bytes.Buffer
-	runSelectedImports(ctx, &buf, dir, selected)
+	runSelectedImports(ctx, &buf, dir, testutil.GetHeadHash(t, dir), selected)
 	out := buf.String()
 
 	if strings.ContainsRune(out, '\x1b') {
@@ -554,7 +568,7 @@ func TestRunSelectedImports_InterruptedStopsBeforeNextAgent(t *testing.T) {
 
 	var secondReached bool
 	var buf bytes.Buffer
-	runSelectedImports(ctx, &buf, dir, []eligibleImport{
+	runSelectedImports(ctx, &buf, dir, testutil.GetHeadHash(t, dir), []eligibleImport{
 		// The first agent's import is interrupted as it starts; the second must
 		// never be reached.
 		{imp: fixedDiscoverImporter{Importer: claudeImp, sessions: sessions, onDiscover: cancel}, displayName: testAgentClaude},

@@ -53,7 +53,6 @@ Returns agent metadata and declared capabilities.
   "name": "cursor",
   "type": "Cursor",
   "description": "Cursor - AI-powered code editor",
-  "is_preview": true,
   "protected_dirs": [".cursor"],
   "hook_names": ["session-start", "session-end", "stop"],
   "capabilities": {
@@ -515,12 +514,22 @@ Used as input to `write-session` and output from `read-session`.
 | `session_id` | string | Agent session identifier |
 | `agent_name` | string | Agent registry name |
 | `repo_path` | string | Absolute path to the repository |
-| `session_ref` | string | Path/reference to session in agent's storage |
+| `session_ref` | string | Path/reference to session in agent's storage. Constrained — see [session_ref constraints](#session_ref-constraints) |
 | `start_time` | string | RFC 3339 timestamp of session start |
 | `native_data` | bytes/null | Session content in agent's native format (opaque to CLI) |
 | `modified_files` | string[] | Files modified during the session |
 | `new_files` | string[] | Files created during the session |
 | `deleted_files` | string[] | Files deleted during the session |
+
+### session_ref constraints
+
+`session_ref` stays agent-defined: a plugin backed by a database may return an opaque key rather than a path, and the CLI forwards such a value to `write-session` unchanged. Which checks apply depends on the shape of the value, and one of them also depends on whether `repo_path` was supplied.
+
+**A reference that is absolute, or that carries a volume name** (`/home/u/.agentx/sessions/abc.jsonl`, `C:\Users\u\...`) is treated as a filesystem path. It must contain no `.` or `..` component — always, whether or not `repo_path` is set. When `repo_path` IS set, it must additionally resolve inside the directory the plugin itself reported from `get-session-dir`; without `repo_path` there is no session directory to resolve against, so that containment check does not run and the reference is forwarded.
+
+**Any other reference** is treated as an agent-defined key. It must not be rooted, and once cleaned it must not escape its own base, so `../outside.jsonl` and `nested/../../outside.jsonl` are refused. A key that merely *contains* a dot segment without escaping, such as `tenant/../session-key`, is forwarded as given. Note that the rooted check is reachable only on Windows: on Unix a leading separator makes the reference absolute, so it takes the filesystem branch above.
+
+This is a preflight, not a sandbox. The plugin runs as its own process and can write wherever its own permissions allow; the check exists so the CLI does not *hand* it a reference that leaves the store the plugin named.
 
 ### Event Object
 

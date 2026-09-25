@@ -531,7 +531,7 @@ func TestFileBackendPath_RejectsRelativeConfigDirWithoutTouchingDisk(t *testing.
 
 // An explicit ENTIRE_TOKEN_STORE_PATH is deliberately not held to the rule: it
 // names a file the user chose, the same reasoning that exempts it from the
-// root-base rule in CLAUDE.md.
+// root-base rule in docs/development/filesystem-safety.md.
 func TestFileBackendPath_ExplicitPathIsNotHeldToTheAbsoluteRule(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
 	t.Setenv(PathEnvVar, "relative-tokens.json")
@@ -569,7 +569,7 @@ func resetBackendForTesting(t *testing.T) {
 // the directory, then a .lock, then the token file.
 //
 // The token store does open an os.Root — but on filepath.Dir of its own
-// absolutized path, one of the two bases CLAUDE.md permits to be derived, since
+// absolutized path, a derived base permitted by docs/development/filesystem-safety.md, since
 // ENTIRE_TOKEN_STORE_PATH names a file the caller chose. That filepath.Abs is
 // exactly what stops the root from ever refusing a relative config dir: it
 // launders ./relative-config into a plausible absolute path first. Hence the

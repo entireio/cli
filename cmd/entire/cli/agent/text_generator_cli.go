@@ -34,17 +34,20 @@ type TextCommandRunner func(ctx context.Context, name string, args ...string) *e
 // directory with all GIT_* environment variables removed. This avoids recursive
 // hook triggers and repo side effects while preserving provider-specific flags.
 //
+// Optional envOverrides take precedence over inherited values; GIT_* entries
+// are removed even from overrides.
+//
 // Returns (result, capturedStderr, stdoutByteCount, err). capturedStderr and
 // stdoutByteCount are populated even on error so callers can wrap them into a
 // *agent.TextGenerationError for timeout diagnostics.
-func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string) (string, string, int, error) {
+func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string, envOverrides ...string) (string, string, int, error) {
 	if runner == nil {
 		runner = exec.CommandContext
 	}
 
 	cmd := runner(ctx, binary, args...)
 	cmd.Dir = os.TempDir()
-	cmd.Env = StripGitEnv(os.Environ())
+	cmd.Env = StripGitEnv(append(os.Environ(), envOverrides...))
 	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
 	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.
 	execx.TerminateOnCancel(cmd)
@@ -99,13 +102,19 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 // Callers outside this package that need the binary name (e.g., the explain
 // diagnostic's "run `claude` directly" suggestion) should use
 // SummaryCLIBinaryName rather than duplicating the mapping.
+// openCodeBinary is the OpenCode CLI executable. It happens to spell the same
+// as AgentNameOpenCode, but it names a program on $PATH rather than a registry
+// key, so it is its own constant instead of a cast of the agent name.
+const openCodeBinary = "opencode"
+
 var summaryProviderBinaries = map[types.AgentName]string{
-	AgentNameClaudeCode: "claude",
-	AgentNameCodex:      "codex",
-	AgentNameCopilotCLI: "copilot",
-	AgentNameCursor:     "agent",
-	AgentNameGemini:     "gemini",
-	AgentNamePi:         "pi",
+	AgentNameAntigravity: "agy",
+	AgentNameClaudeCode:  "claude",
+	AgentNameCodex:       "codex",
+	AgentNameCopilotCLI:  "copilot",
+	AgentNameCursor:      "agent",
+	AgentNamePi:          "pi",
+	AgentNameOpenCode:    openCodeBinary,
 }
 
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable
@@ -119,7 +128,7 @@ func SummaryCLIBinaryName(name types.AgentName) string {
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
 // agent is on PATH. This is distinct from DetectPresence, which checks
 // repo-level agent configuration — a repo configured with Claude Code for
-// development can still use Codex or Gemini for summary generation as long
+// development can still use Codex or Pi for summary generation as long
 // as the binary is installed.
 func IsSummaryCLIAvailable(name types.AgentName) bool {
 	binary := SummaryCLIBinaryName(name)
