@@ -33,6 +33,23 @@ func TestOpenCodeSeedRepoPlantsDeps(t *testing.T) {
 		t.Fatalf("SeedRepo: %v", err)
 	}
 
+	version, err := openCodeVersion()
+	if err != nil {
+		t.Fatalf("openCodeVersion: %v", err)
+	}
+	if openCodeMajor(version) >= 2 {
+		// OpenCode 2 provides the V2 plugin API from the binary; there is no
+		// @opencode-ai/plugin tree to seed, so SeedRepo writes only the config
+		// the repo needs. See errOpenCodeDepsNotApplicable.
+		if _, err := os.Stat(filepath.Join(dir, "opencode.json")); err != nil {
+			t.Errorf("seeded opencode.json missing: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, ".opencode", "node_modules")); !os.IsNotExist(err) {
+			t.Errorf("expected no seeded node_modules on opencode 2, got err=%v", err)
+		}
+		return
+	}
+
 	// node_modules is the one that matters: opencode reinstalls without it.
 	//
 	// Windows asserts the documented degradation instead. linkFile copies there

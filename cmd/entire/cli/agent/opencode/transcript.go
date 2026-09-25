@@ -20,17 +20,19 @@ var (
 )
 
 // ParseExportSession parses export JSON content into an ExportSession structure.
+// It accepts both the OpenCode 1 and OpenCode 2 export shapes, returning the
+// v1-normalized form the rest of the package consumes.
 func ParseExportSession(data []byte) (*ExportSession, error) {
 	if len(data) == 0 {
 		return nil, nil //nolint:nilnil // nil for empty data is expected
 	}
 
-	var session ExportSession
-	if err := json.Unmarshal(data, &session); err != nil {
+	session, err := NormalizeExportSession(data)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse export session: %w", err)
 	}
 
-	return &session, nil
+	return session, nil
 }
 
 // parseExportSessionFromFile reads a file and parses its contents as an ExportSession.
@@ -119,7 +121,7 @@ func modifiedFilesFromMessages(msgs []ExportMessage, startOffset int) []string {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type != "tool" || part.State == nil {
+			if part.Type != partTypeTool || part.State == nil {
 				continue
 			}
 			if !slices.Contains(FileModificationTools, part.Tool) {
@@ -187,7 +189,7 @@ func extractFilePaths(state *ToolState) []string {
 func ExtractTextFromParts(parts []Part) string {
 	var texts []string
 	for _, part := range parts {
-		if part.Type == "text" && part.Text != "" {
+		if part.Type == partTypeText && part.Text != "" {
 			texts = append(texts, part.Text)
 		}
 	}
