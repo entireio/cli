@@ -126,14 +126,21 @@ func newAuthCmd() *cobra.Command {
 
 // --- token ------------------------------------------------------------------
 
-// newAuthTokenCmd prints an Entire bearer to stdout for scripting. By default
-// that's the active control-plane bearer (resolved the same way the API client's
-// is: ENTIRE_TOKEN verbatim when set, otherwise the active context's login JWT,
-// refreshed if near expiry); with --jurisdiction it mints a data-plane cell
-// identity token for that jurisdiction instead. The user-facing Long and Example
-// carry the detail and the "treat the output as a secret" caveat; only the token
-// is printed — errors and the not-logged-in hint go to stderr so command
-// substitution stays clean.
+// errJurisdictionFlagDeprecated is returned when `auth token --jurisdiction`
+// is used: the default token is accepted at every entire-api cell, so the
+// flag has nothing to add.
+var errJurisdictionFlagDeprecated = errors.New("--jurisdiction is deprecated; use 'entire auth token' without it")
+
+// newAuthTokenCmd prints an Entire bearer to stdout for scripting: the active
+// control-plane bearer (resolved the same way the API client's is: ENTIRE_TOKEN
+// verbatim when set, otherwise the active context's login JWT, refreshed if
+// near expiry). The same token works at every entire-api cell. The user-facing
+// Long and Example carry the detail and the "treat the output as a secret"
+// caveat; only the token is printed — errors and the not-logged-in hint go to
+// stderr so command substitution stays clean.
+//
+// --jurisdiction is deprecated and hidden: it stays registered so existing
+// scripts fail with a migration hint instead of an unknown-flag error.
 func newAuthTokenCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	var jurisdiction string
@@ -142,44 +149,26 @@ func newAuthTokenCmd() *cobra.Command {
 		Short: "Print an Entire bearer token — a live credential, treat as a secret",
 		Long: "Print an Entire bearer token to stdout so scripts and ad-hoc curl can\n" +
 			"authenticate without plumbing auth themselves.\n\n" +
-			"By default it prints the control-plane bearer: the same one the API client\n" +
-			"uses (ENTIRE_TOKEN verbatim when set, otherwise the active context's login\n" +
-			"JWT, refreshed if near expiry), for the control-plane API (orgs, repos,\n" +
-			"clusters, /me).\n\n" +
-			"With --jurisdiction <slug> it instead mints a jurisdictional identity token\n" +
-			"for that jurisdiction's entire-api cells (e.g.\n" +
-			"https://aws-us-east-2.api.entire.io/api/v1), which reject the control-plane\n" +
-			"bearer. The slug is a jurisdiction like 'us' or 'eu' (find yours with\n" +
-			"'entire auth status'); the token works against any cell in that\n" +
-			"jurisdiction. It is minted by exchanging your login (or ENTIRE_TOKEN, when\n" +
-			"set) for the jurisdiction's audience.\n\n" +
+			"It prints the same bearer the API client uses (ENTIRE_TOKEN verbatim when\n" +
+			"set, otherwise the active context's login JWT, refreshed if near expiry).\n" +
+			"The token works against the control-plane API (orgs, repos, clusters, /me)\n" +
+			"and against every entire-api cell (e.g.\n" +
+			"https://aws-us-east-2.api.entire.io/api/v1).\n\n" +
 			"The output is a live credential — treat it as a secret. Only the token is\n" +
 			"printed to stdout; errors and the not-logged-in hint go to stderr so command\n" +
 			"substitution stays clean.",
 		Example: "  curl -H \"Authorization: Bearer $(entire auth token)\" \"https://us.console.entire.io/api/v1/clusters\"\n" +
-			"  curl -H \"Authorization: Bearer $(entire auth token --jurisdiction us)\" \"https://aws-us-east-2.api.entire.io/api/v1/me/activity\"",
+			"  curl -H \"Authorization: Bearer $(entire auth token)\" \"https://aws-us-east-2.api.entire.io/api/v1/me/activity\"",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Refresh may exchange/refresh over the network; honor the
-			// plain-HTTP opt-in before resolving so local dev cores work.
-			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
-
-			// --jurisdiction mints a data-plane cell identity token instead of the
-			// control-plane bearer. JurisdictionToken performs its own TLS/exchange
-			// guards and returns context-rich errors.
-			if strings.TrimSpace(jurisdiction) != "" {
-				token, err := auth.JurisdictionToken(cmd.Context(), insecure, jurisdiction)
-				if err != nil {
-					cmd.SilenceUsage = true
-					if errors.Is(err, auth.ErrNotLoggedIn) {
-						fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
-						return NewSilentError(err)
-					}
-					return err //nolint:wrapcheck // JurisdictionToken already returns contextual auth errors
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), token)
-				return nil
+			if cmd.Flags().Changed("jurisdiction") {
+				cmd.SilenceUsage = true
+				return errJurisdictionFlagDeprecated
 			}
+
+			// Refresh may go over the network; honor the plain-HTTP opt-in
+			// before resolving so local dev cores work.
+			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
 
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
 			if err != nil {
@@ -206,7 +195,10 @@ func newAuthTokenCmd() *cobra.Command {
 		},
 	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-	cmd.Flags().StringVarP(&jurisdiction, "jurisdiction", "j", "", "mint a jurisdictional identity token for this jurisdiction slug (e.g. us, eu) for use against that jurisdiction's entire-api cells")
+	cmd.Flags().StringVarP(&jurisdiction, "jurisdiction", "j", "", "deprecated; the default token works at every cell")
+	if err := cmd.Flags().MarkHidden("jurisdiction"); err != nil {
+		panic(fmt.Sprintf("hide jurisdiction flag: %v", err))
+	}
 	return cmd
 }
 
@@ -520,8 +512,8 @@ func writeProfileLines(w io.Writer, p *authProfile) {
 		}
 		writeAuthStatusLine(w, "Identity:", identity)
 	}
-	// The home jurisdiction slug is what 'entire auth token --jurisdiction'
-	// takes; surface it so it's discoverable non-interactively.
+	// The home jurisdiction slug is what 'entire api --jurisdiction' takes;
+	// surface it so it's discoverable non-interactively.
 	if p.Jurisdiction != "" {
 		writeAuthStatusLine(w, "Jurisdiction:", p.Jurisdiction)
 	}
