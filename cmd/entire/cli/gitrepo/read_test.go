@@ -79,3 +79,36 @@ func TestReadsNeedNativeGit_Selectors(t *testing.T) {
 	t.Setenv("GIT_INDEX_FILE", "index-is-not-read")
 	require.False(t, gitrepo.ReadsNeedNativeGit(t.Context()))
 }
+
+func TestReadsNeedNativeGit_DiscoveredGitDir(t *testing.T) {
+	main := t.TempDir()
+	testutil.InitRepo(t, main)
+	testutil.RunGit(t, main, "commit", "--allow-empty", "--no-gpg-sign", "-m", "initial")
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, main, "worktree", "add", "--detach", linked)
+	linkedGitDir := strings.TrimSpace(testutil.RunGit(t, linked, "rev-parse", "--absolute-git-dir"))
+	for _, tc := range []struct {
+		name, cwd, gitDir, workTree string
+		native                      bool
+	}{
+		{name: "linked hook", cwd: linked, gitDir: linkedGitDir},
+		{name: "relative main", cwd: main, gitDir: ".git"},
+		{name: "linked selects common dir", cwd: linked, gitDir: filepath.Join(main, ".git"), native: true},
+		{name: "main selects linked", cwd: main, gitDir: linkedGitDir, native: true},
+		{name: "missing", cwd: main, gitDir: filepath.Join(main, "absent"), native: true},
+		{name: "matching with work tree", cwd: linked, gitDir: linkedGitDir, workTree: linked, native: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitenv.IsolateRepository(t)
+			t.Chdir(tc.cwd)
+			paths.ClearWorktreeRootCache()
+			t.Cleanup(paths.ClearWorktreeRootCache)
+			// Set the selectors before discovery, as Git does for hooks.
+			t.Setenv("GIT_DIR", tc.gitDir)
+			if tc.workTree != "" {
+				t.Setenv("GIT_WORK_TREE", tc.workTree)
+			}
+			require.Equal(t, tc.native, gitrepo.ReadsNeedNativeGit(t.Context()))
+		})
+	}
+}

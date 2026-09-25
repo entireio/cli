@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -74,4 +75,28 @@ func TestLocalRefReads_StoreOverrideAndBare(t *testing.T) {
 	t.Setenv("GIT_WORK_TREE", root)
 	require.NoError(t, branchExists(t.Context(), repo, "shadow"))
 	require.True(t, remoteHasTrackingRefs(t.Context(), "origin"))
+}
+
+// Git exports GIT_DIR to hooks in linked worktrees. When it names the
+// discovered Git directory, the reads stay on go-git and spawn no Git.
+func TestLocalRefReads_LinkedWorktreeHookEnvironment(t *testing.T) {
+	gitenv.IsolateRepository(t)
+	root, _, head := initCountTestRepo(t)
+	testutil.RunGit(t, root, "update-ref", "refs/heads/shadow", head)
+	testutil.RunGit(t, root, "update-ref", "refs/remotes/origin/topic", head)
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, root, "worktree", "add", "--detach", linked)
+	gitDir := strings.TrimSpace(testutil.RunGit(t, linked, "rev-parse", "--absolute-git-dir"))
+	t.Chdir(linked)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Setenv("GIT_DIR", gitDir)
+	repo, err := OpenRepository(t.Context())
+	require.NoError(t, err)
+	defer repo.Close()
+	t.Setenv("PATH", t.TempDir())
+	require.NoError(t, branchExists(t.Context(), repo, "shadow"))
+	require.ErrorIs(t, branchExists(t.Context(), repo, "absent"), plumbing.ErrReferenceNotFound)
+	require.True(t, remoteHasTrackingRefs(t.Context(), "origin"))
+	require.False(t, remoteHasTrackingRefs(t.Context(), "other"))
 }

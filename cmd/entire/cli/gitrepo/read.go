@@ -17,10 +17,12 @@ import (
 // stores on the native read path. Detect reftable before opening a repository:
 // even opening its adapter performs a native reference lookup.
 // Failed discovery also stays native, never guessing a CWD repository.
+// A GIT_DIR naming the discovered Git directory selects the store go-git would
+// open anyway; Git exports exactly that to hooks in linked worktrees.
 // GIT_INDEX_FILE is intentionally absent: these reads never consult the index.
 func ReadsNeedNativeGit(ctx context.Context) bool {
 	for _, key := range []string{
-		"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY",
+		"GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY",
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
 	} {
 		if os.Getenv(key) != "" {
@@ -35,8 +37,25 @@ func ReadsNeedNativeGit(ctx context.Context) bool {
 	if err != nil {
 		return true
 	}
+	if gitDir := os.Getenv("GIT_DIR"); gitDir != "" && !sameDirectory(gitDir, metadata.GitDir) {
+		return true
+	}
 	reftable, err := inspectRepoUsesReftable(metadata.GitDir, metadata.CommonDir)
 	return err != nil || reftable
+}
+
+// sameDirectory compares by file identity, so relative, symlinked, and
+// case-folded spellings of one directory match. Unreadable paths never match.
+func sameDirectory(a, b string) bool {
+	aInfo, err := os.Stat(a) //nolint:gosec // identity comparison only; nothing is read or written through the Git-selected path.
+	if err != nil {
+		return false
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return aInfo.IsDir() && os.SameFile(aInfo, bInfo)
 }
 
 // CommitAtReference reads an exact reference and peels annotated tags to a
