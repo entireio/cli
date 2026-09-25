@@ -147,7 +147,11 @@ func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 // commit replaces HEAD and so has HEAD's parent as its own.
 func recordInheritedTrailersOnAmend(ctx context.Context, inherited []id.CheckpointID) {
 	root, err := perWorktreeGitRoot(ctx)
-	if err != nil || len(inherited) == 0 {
+	if err != nil {
+		return
+	}
+	if len(inherited) == 0 {
+		_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent is the usual case
 		return
 	}
 	writeInheritedTrailers(ctx, root, inheritedTrailers{IDs: inherited, Parent: headParentHash(ctx)})
