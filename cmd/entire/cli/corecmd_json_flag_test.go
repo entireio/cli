@@ -57,13 +57,11 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"org grant add":    true,
 		"org grant list":   true,
 		"org grant remove": false,
-		// invite renders the invitation it created or resent, invites the
-		// listing; uninvite only reports, like remove.
-		"org grant invite":   true,
-		"org grant invites":  true,
-		"org grant uninvite": false,
-		// join renders the membership it created.
-		"org join":             true,
+		// invite renders the invitation it created or resent, invite list the
+		// listing; invite revoke only reports, like remove.
+		"org invite":           true,
+		"org invite list":      true,
+		"org invite revoke":    false,
 		"project grant add":    true,
 		"project grant list":   true,
 		"project grant remove": false,
@@ -88,9 +86,15 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 
 // collectJSONFlag walks the command tree rooted at cmd, recording for each leaf
 // command whether --json is visible on it (local flags merged with inherited).
+// A group that is also a verb in its own right (`org invite <org> <email>`)
+// is recorded too when it registers --json locally, so removing the flag from
+// it drifts the map like it would for a leaf.
 func collectJSONFlag(t *testing.T, cmd *cobra.Command, path string, out map[string]bool) {
 	t.Helper()
 	children := cmd.Commands()
+	if len(children) > 0 && cmd.LocalFlags().Lookup("json") != nil {
+		out[path] = true
+	}
 	if len(children) == 0 {
 		// Merge parent persistent flags so an accidentally-inherited --json is
 		// still caught here, not just a locally-registered one.

@@ -466,7 +466,15 @@ func resolveRepoInProject(ctx context.Context, c repoRefClient, name, projID str
 }
 
 func noOrgNamedErr(name string) error {
-	return fmt.Errorf("no org named %q (run `entire org list` to see names, or pass a ULID)", name)
+	return &orgNotFoundError{name: name}
+}
+
+// orgNotFoundError is a by-name org lookup miss. It is typed so a command that
+// addresses orgs by name only can word the hint without the ULID alternative.
+type orgNotFoundError struct{ name string }
+
+func (e *orgNotFoundError) Error() string {
+	return fmt.Sprintf("no org named %q (run `entire org list` to see names, or pass a ULID)", e.name)
 }
 
 var errNamedRefNotFound = errors.New("named reference not found")

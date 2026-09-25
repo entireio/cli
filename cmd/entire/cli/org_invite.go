@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,12 +11,11 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// The invitation verbs. `entire org grant invite|invites|uninvite` sit beside
-// add/list/remove because an invitation is how an org grants membership to
-// someone the control plane cannot name yet: `grant add` needs an existing
-// provider account, an invitation needs only an email address. `entire org
-// join` is the invitee's half and hangs off `entire org` instead, because it
-// acts on the caller's own account rather than on an org they manage.
+// The invitation verbs. `entire org invite <org> <email>` creates an
+// invitation, with `invite list` and `invite revoke` managing the ones already
+// sent. An invitation is how an org grants membership to someone the control
+// plane cannot name yet: `grant add` needs an existing provider account, an
+// invitation needs only an email address.
 //
 // Who may invite with which role is the server's decision: it answers 403 for
 // a role the caller cannot delegate. The CLI checks only that --role spells one
@@ -27,7 +27,7 @@ import (
 var invitationStatuses = []string{"open", "accepted", "revoked", "expired", "all"}
 
 // invitationColumns omits the invitation ULID, which only --json carries;
-// `uninvite` takes the email address instead.
+// `invite revoke` takes the email address instead.
 var invitationColumns = []string{"EMAIL", colHeaderRole, colHeaderStatus, "EXPIRES"}
 
 func invitationRow(i coreapi.Invitation) []string {
@@ -39,8 +39,8 @@ func newOrgInviteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "invite <org> <email>",
 		Short:   "Invite an email address to an organization",
-		Long:    "Invite an email address to an organization. The org is addressed by name or ULID. The invited address receives a link; the invitee runs `entire org join` to accept. Inviting an address that already has an open invitation sends the mail again and keeps the role the invitation was created with.",
-		Example: "  entire org grant invite acme dev@example.com --role admin",
+		Long:    "Invite an email address to an organization. The org is addressed by name. The invited address receives a link to accept. Inviting an address that already has an open invitation sends the mail again and keeps the role the invitation was created with.",
+		Example: "  entire org invite acme dev@example.com --role admin\n  entire org invite list acme\n  entire org invite revoke acme dev@example.com",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("role") {
@@ -50,7 +50,7 @@ func newOrgInviteCmd() *cobra.Command {
 				}
 			}
 			return runCoreMutation(cmd, func(ctx context.Context, c *coreapi.Client) (string, any, error) {
-				orgID, err := resolveOrgRef(ctx, c, args[0])
+				orgID, err := resolveInviteOrg(ctx, c, args[0])
 				if err != nil {
 					return "", nil, err
 				}
@@ -64,8 +64,8 @@ func newOrgInviteCmd() *cobra.Command {
 				}
 				switch out := res.(type) {
 				case *coreapi.CreateOrgInvitationCreated:
-					// An invitation is the one object with an accept token (see
-					// org_join.go). Its modeled fields carry none today, but ogen
+					// An invitation is the one object with an accept token. Its
+					// modeled fields carry none today, but ogen
 					// round-trips any response property this schema doesn't
 					// declare, verbatim, into --json output, so blank the bag
 					// rather than trust the endpoint's contract never grows one.
@@ -89,16 +89,19 @@ func newOrgInviteCmd() *cobra.Command {
 	// same default the API documents.
 	cmd.Flags().StringVar(&role, "role", orgRoleMember, "Role the invitation grants: one of "+strings.Join(orgRoles, ", "))
 	addJSONFlag(cmd)
+	// The subcommands take precedence over the <org> positional, so an org
+	// literally named "list" or "revoke" must be addressed by its ULID here.
+	cmd.AddCommand(newOrgInviteListCmd(), newOrgInviteRevokeCmd())
 	return cmd
 }
 
-func newOrgInvitesCmd() *cobra.Command {
+func newOrgInviteListCmd() *cobra.Command {
 	var status string
 	cmd := &cobra.Command{
-		Use:     "invites <org>",
+		Use:     "list <org>",
 		Short:   "List an organization's invitations",
-		Long:    "List an organization's invitations, open ones by default. The org is addressed by name or ULID.",
-		Example: "  entire org grant invites acme --status all",
+		Long:    "List an organization's invitations, open ones by default. The org is addressed by name.",
+		Example: "  entire org invite list acme --status all",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateChoice("status", status, invitationStatuses); err != nil {
@@ -106,7 +109,7 @@ func newOrgInvitesCmd() *cobra.Command {
 				return err
 			}
 			return runCoreList(cmd, "No invitations found.", invitationColumns, invitationRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Invitation, error) {
-				orgID, err := resolveOrgRef(ctx, c, args[0])
+				orgID, err := resolveInviteOrg(ctx, c, args[0])
 				if err != nil {
 					return nil, err
 				}
@@ -145,16 +148,16 @@ func listOrgInvitations(ctx context.Context, c *coreapi.Client, orgID, status st
 	return invitations, nil
 }
 
-func newOrgUninviteCmd() *cobra.Command {
+func newOrgInviteRevokeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "uninvite <org> <email|id>",
+		Use:     "revoke <org> <email|id>",
 		Short:   "Revoke an organization invitation",
-		Long:    "Revoke an open invitation so its link stops working. The org is addressed by name or ULID; the invitation by the invited email address or its own ULID.",
-		Example: "  entire org grant uninvite acme dev@example.com",
+		Long:    "Revoke an open invitation so its link stops working. The org is addressed by name; the invitation by the invited email address or its own ULID.",
+		Example: "  entire org invite revoke acme dev@example.com",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-				orgID, err := resolveOrgRef(ctx, c, args[0])
+				orgID, err := resolveInviteOrg(ctx, c, args[0])
 				if err != nil {
 					return err
 				}
@@ -178,6 +181,17 @@ func newOrgUninviteCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+// resolveInviteOrg resolves the <org> the invite commands take. Their help
+// documents the org by name only, so a miss names only that way out rather
+// than the shared "or pass a ULID" hint.
+func resolveInviteOrg(ctx context.Context, c *coreapi.Client, name string) (string, error) {
+	id, err := resolveOrgRef(ctx, c, name)
+	if notFound := (*orgNotFoundError)(nil); errors.As(err, &notFound) {
+		return "", fmt.Errorf("no org named %q (run `entire org list` to see org names)", name)
+	}
+	return id, err
 }
 
 // openInvitationIDForEmail finds the open invitation for an address, or ""

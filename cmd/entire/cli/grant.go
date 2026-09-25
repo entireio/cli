@@ -53,9 +53,6 @@ type grantTarget[Row any] struct {
 	// it — a typed ULID is refused — so it is nil on org, whose rows are
 	// addressed by handle because org membership has no such route.
 	revokeByID func(ctx context.Context, c *coreapi.Client, id, granteeID string) error
-	// extraCmds are verbs only this target has, added beside the shared three.
-	// nil for targets with none.
-	extraCmds func() []*cobra.Command
 	// candidates lists who could be granted this target for the interactive
 	// picker: members of the owning org with no direct grant on it, plus the
 	// counts an empty pool needs to say why. nil where no pool is enumerable
@@ -110,9 +107,6 @@ func newGrantSubtreeCmd[Row any](t grantTarget[Row]) *cobra.Command {
 		Short: "Manage " + t.noun + " access",
 	}
 	cmd.AddCommand(newGrantAddCmd(t), newGrantListCmd(t), newGrantRemoveCmd(t))
-	if t.extraCmds != nil {
-		cmd.AddCommand(t.extraCmds()...)
-	}
 	return requireSubcommand(cmd)
 }
 
@@ -711,11 +705,6 @@ var orgGrantTarget = grantTarget[coreapi.Membership]{
 		return c.RemoveOrgMember(ctx, coreapi.RemoveOrgMemberParams{OrgId: id, Provider: provider, ProviderUserId: providerUserID})
 	},
 	holders: orgMemberHolders,
-	// Invitations grant membership, which only an org has; the API offers no
-	// project or repo equivalent.
-	extraCmds: func() []*cobra.Command {
-		return []*cobra.Command{newOrgInviteCmd(), newOrgInvitesCmd(), newOrgUninviteCmd()}
-	},
 }
 
 // projectGrantTarget is project access: roles reader/writer/admin, required,

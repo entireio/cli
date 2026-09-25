@@ -12,7 +12,7 @@ import (
 // TestValidateChoice covers the check every `<noun> grant add` runs on --role:
 // the value matches one of the target's roles exactly (the server enums are
 // lowercase) and the message lists what would have been accepted. The same
-// function checks `grant invites --status`, so it names the flag it rejected.
+// function checks `org invite list --status`, so it names the flag it rejected.
 func TestValidateChoice(t *testing.T) {
 	t.Parallel()
 	roles := []string{"reader", "writer", "admin"}

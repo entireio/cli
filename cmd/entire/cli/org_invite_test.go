@@ -64,7 +64,7 @@ func TestOrgInvite_CreatesAndReportsTheRole(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invite", testOrgULID, "dev@example.com", "--role", "admin")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "admin")
 	require.NoError(t, err)
 	assert.Equal(t, "/api/v1/orgs/"+testOrgULID+"/invitations", gotPath)
 	assert.Equal(t, "dev@example.com", gotBody.Email)
@@ -86,7 +86,7 @@ func TestOrgInvite_SendsTheDefaultRoleWhenFlagOmitted(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invite", testOrgULID, "dev@example.com")
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com")
 	require.NoError(t, err)
 	assert.EqualValues(t, "member", gotBody.Role)
 }
@@ -103,7 +103,7 @@ func TestOrgInvite_ResendReportsTheStoredRole(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invite", testOrgULID, "dev@example.com", "--role", "admin")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "admin")
 	require.NoError(t, err)
 	assert.Contains(t, out, "✓ Resent the open invitation for dev@example.com to org "+testOrgULID+", which invites as member")
 	assert.NotContains(t, out, "as admin", "the request's role must not be reported as the effective one")
@@ -124,7 +124,7 @@ func TestOrgInvite_ForbiddenRoleSurfacesTheServerMessage(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invite", testOrgULID, "dev@example.com", "--role", "owner")
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "owner")
 	require.ErrorContains(t, err, "only an owner may invite an owner")
 	assert.True(t, reached, "the CLI must ask the server rather than refuse an owner invite itself")
 }
@@ -136,15 +136,14 @@ func TestOrgInvite_RejectsAnUnknownRoleWithoutCallingTheServer(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invite", testOrgULID, "dev@example.com", "--role", "auditor")
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "auditor")
 	require.ErrorContains(t, err, `invalid --role "auditor": must be one of owner, admin, member`)
 }
 
 // The generated response types round-trip any property the schema doesn't
 // declare, so a server that ever sent one under an unmodeled key would
 // otherwise reach --json output verbatim. An invitation is the one object with
-// an accept token (see org_join.go's identical defense), so this pins the same
-// guarantee here.
+// an accept token, so this pins that none can leak.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestOrgInvite_JSONDropsUnmodeledResponseProperties(t *testing.T) {
@@ -167,7 +166,7 @@ func TestOrgInvite_JSONDropsUnmodeledResponseProperties(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invite", testOrgULID, "dev@example.com", "--role", "admin", "--json")
+			out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", testOrgULID, "dev@example.com", "--role", "admin", "--json")
 			require.NoError(t, err)
 			assert.NotContains(t, out, leakedValue, "an unmodeled response property reached --json output")
 			assert.NotContains(t, out, "unexpectedField")
@@ -179,7 +178,7 @@ func TestOrgInvite_JSONDropsUnmodeledResponseProperties(t *testing.T) {
 // comes back, defaulting to the open invitations.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvites_ListsAndFiltersByStatus(t *testing.T) {
+func TestOrgInviteList_ListsAndFiltersByStatus(t *testing.T) {
 	var gotStatus string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotStatus = r.URL.Query().Get("status")
@@ -193,7 +192,7 @@ func TestOrgInvites_ListsAndFiltersByStatus(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invites", testOrgULID)
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "list", testOrgULID)
 	require.NoError(t, err)
 	assert.Equal(t, "open", gotStatus, "the default listing is the open invitations")
 	assert.Contains(t, out, "EMAIL")
@@ -203,25 +202,25 @@ func TestOrgInvites_ListsAndFiltersByStatus(t *testing.T) {
 	assert.Contains(t, out, "2026-01-08", "the expiry is what a manager acts on")
 	assert.NotContains(t, out, "revoked")
 
-	out, _, err = runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invites", testOrgULID, "--status", "all")
+	out, _, err = runCoreCmd(t, newOrgCmd, srv.URL, "invite", "list", testOrgULID, "--status", "all")
 	require.NoError(t, err)
 	assert.Equal(t, "all", gotStatus)
 	assert.Contains(t, out, "revoked", "a state the server returns is rendered, not filtered again")
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvites_RejectsAnUnknownStatus(t *testing.T) {
+func TestOrgInviteList_RejectsAnUnknownStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("an invalid --status must be refused before any request")
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invites", testOrgULID, "--status", "pending")
+	_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "list", testOrgULID, "--status", "pending")
 	require.ErrorContains(t, err, `invalid --status "pending": must be one of open, accepted, revoked, expired, all`)
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvites_ReportsAnEmptyListing(t *testing.T) {
+func TestOrgInviteList_ReportsAnEmptyListing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -229,7 +228,7 @@ func TestOrgInvites_ReportsAnEmptyListing(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invites", testOrgULID)
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "list", testOrgULID)
 	require.NoError(t, err)
 	assert.Contains(t, out, "No invitations found.")
 }
@@ -239,7 +238,7 @@ func TestOrgInvites_ReportsAnEmptyListing(t *testing.T) {
 // for each item, not just the first — this is the case that matters more.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgInvites_JSONDropsUnmodeledResponsePropertiesOnEveryItem(t *testing.T) {
+func TestOrgInviteList_JSONDropsUnmodeledResponsePropertiesOnEveryItem(t *testing.T) {
 	const leaked1 = "SHOULD-NEVER-REACH-JSON-OUTPUT-1"
 	const leaked2 = "SHOULD-NEVER-REACH-JSON-OUTPUT-2"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -254,7 +253,7 @@ func TestOrgInvites_JSONDropsUnmodeledResponsePropertiesOnEveryItem(t *testing.T
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "invites", testOrgULID, "--json")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "list", testOrgULID, "--json")
 	require.NoError(t, err)
 	assert.NotContains(t, out, leaked1, "the first invitation's unmodeled property reached --json output")
 	assert.NotContains(t, out, leaked2, "the second invitation's unmodeled property reached --json output")
@@ -262,7 +261,7 @@ func TestOrgInvites_JSONDropsUnmodeledResponsePropertiesOnEveryItem(t *testing.T
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgUninvite_RevokesByULIDWithoutALookup(t *testing.T) {
+func TestOrgInviteRevoke_RevokesByULIDWithoutALookup(t *testing.T) {
 	var gotMethod, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
@@ -270,7 +269,7 @@ func TestOrgUninvite_RevokesByULIDWithoutALookup(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "uninvite", testOrgULID, testInvitationULID)
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, testInvitationULID)
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodDelete, gotMethod)
 	assert.Equal(t, "/api/v1/orgs/"+testOrgULID+"/invitations/"+testInvitationULID, gotPath)
@@ -278,7 +277,7 @@ func TestOrgUninvite_RevokesByULIDWithoutALookup(t *testing.T) {
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgUninvite_ResolvesAnEmailThroughTheOpenListing(t *testing.T) {
+func TestOrgInviteRevoke_ResolvesAnEmailThroughTheOpenListing(t *testing.T) {
 	var deletedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -296,14 +295,14 @@ func TestOrgUninvite_ResolvesAnEmailThroughTheOpenListing(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	// Mixed case: the server stores the address lowercased.
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "uninvite", testOrgULID, "Dev@Example.com")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "Dev@Example.com")
 	require.NoError(t, err)
 	assert.Equal(t, "/api/v1/orgs/"+testOrgULID+"/invitations/"+testInvitationULID, deletedPath)
 	assert.Contains(t, out, "✓ Revoked the invitation for Dev@Example.com")
 }
 
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgUninvite_IsANoOpWithoutAnOpenInvitation(t *testing.T) {
+func TestOrgInviteRevoke_IsANoOpWithoutAnOpenInvitation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			t.Error("nothing is open for that address, so nothing may be revoked")
@@ -314,7 +313,7 @@ func TestOrgUninvite_IsANoOpWithoutAnOpenInvitation(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "uninvite", testOrgULID, "gone@example.com")
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, "gone@example.com")
 	require.NoError(t, err)
 	assert.Contains(t, out, "no open invitation; nothing to revoke")
 }
@@ -323,13 +322,36 @@ func TestOrgUninvite_IsANoOpWithoutAnOpenInvitation(t *testing.T) {
 // for, matching the other revoke verbs.
 //
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
-func TestOrgUninvite_IsIdempotentOnAMissingInvitation(t *testing.T) {
+func TestOrgInviteRevoke_IsIdempotentOnAMissingInvitation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeNotFoundProblem(t, w)
 	}))
 	t.Cleanup(srv.Close)
 
-	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "grant", "uninvite", testOrgULID, testInvitationULID)
+	out, _, err := runCoreCmd(t, newOrgCmd, srv.URL, "invite", "revoke", testOrgULID, testInvitationULID)
 	require.NoError(t, err)
 	assert.Contains(t, out, "no such grant; nothing to revoke")
+}
+
+// The invite commands document the org by name only, so an unknown name must
+// not suggest a ULID the way the shared org lookup does.
+//
+// Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
+func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, err := fmt.Fprint(w, `{"status":404,"detail":"org not found"}`)
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, args := range [][]string{
+		{"invite", "ior", "dev@example.com"},
+		{"invite", "list", "ior"},
+		{"invite", "revoke", "ior", "dev@example.com"},
+	} {
+		_, _, err := runCoreCmd(t, newOrgCmd, srv.URL, args...)
+		require.EqualError(t, err, "no org named \"ior\" (run `entire org list` to see org names)", "%v", args)
+	}
 }

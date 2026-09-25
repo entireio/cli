@@ -44,7 +44,7 @@ the *client sends* (request bodies like `SetRepoVisibilityInputBody`) should
 stay strict.
 
 `Membership.role`/`status` and `Invitation.role`/`status` are the same shape:
-`entire org grant list` displays memberships. `entire org grant invites`
+`entire org grant list` displays memberships. `entire org invite list`
 displays invitations, and the generated `ListOrgInvitations` client decodes
 them. A new role or lifecycle state must display rather than fail either
 listing.
