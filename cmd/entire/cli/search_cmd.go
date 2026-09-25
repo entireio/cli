@@ -215,7 +215,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// Semantic search goes to the v4 query-serve path (entire-api
 			// cell gateway) via newSemanticSearcher, which fans out across
-			// cells and mints per-cell identity tokens itself (ENT-1055).
+			// cells with the login JWT as bearer (ENT-1055).
 			// Instrumented at the seam so the TUI's re-searches and
 			// pagination emit outcome telemetry too, not just this one-shot.
 			searcher := instrumentSemanticSearcher(cmd.CommandPath(), newSemanticSearcher(insecureHTTPAuth))
@@ -457,7 +457,7 @@ func buildCodeSearchOpts(ctx context.Context, commandPath, owner, repoName strin
 	}
 }
 
-// codeSearchCellTimeout bounds each per-cell search call (token exchange + API).
+// codeSearchCellTimeout bounds each per-cell search call (login refresh + API).
 const codeSearchCellTimeout = 30 * time.Second
 
 // runCodeSearch handles the --code flag path: search code content via peregrine.

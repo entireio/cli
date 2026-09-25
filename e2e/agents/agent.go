@@ -78,7 +78,7 @@ func promptTimeout(agentDefault time.Duration, cfg *runConfig) (time.Duration, e
 // undoing.
 //
 // Runners that need the duration itself — cursor computes an absolute deadline
-// from it, and codex, copilot-cli and gemini derive a separate promptCtx — call
+// from it, and codex and copilot-cli derive a separate promptCtx — call
 // promptTimeout directly.
 func boundPrompt(ctx context.Context, agentDefault time.Duration, cfg *runConfig) (context.Context, context.CancelFunc, error) {
 	timeout, err := promptTimeout(agentDefault, cfg)
@@ -94,12 +94,12 @@ func boundPrompt(ctx context.Context, agentDefault time.Duration, cfg *runConfig
 
 type Agent interface {
 	Name() string
-	// Binary returns the CLI binary name (e.g. "claude", "gemini").
+	// Binary returns the CLI binary name (e.g. "claude", "codex").
 	Binary() string
 	EntireAgent() string
 	PromptPattern() string
 	// TimeoutMultiplier returns a factor applied to per-test timeouts.
-	// Slower agents (e.g. Gemini) return values > 1.
+	// Slower agents (e.g. Factory AI Droid) return values > 1.
 	TimeoutMultiplier() float64
 	RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error)
 	StartSession(ctx context.Context, dir string) (Session, error)
@@ -110,6 +110,29 @@ type Agent interface {
 	// a transient API failure (e.g. 500, rate limit, network error) that
 	// is worth retrying.
 	IsTransientError(out Output, err error) bool
+}
+
+// RepoPreparer is implemented by agents that need repo-local setup after
+// `entire enable` (e.g. extra hook entries for diagnostics). Optional.
+type RepoPreparer interface {
+	PrepareRepo(repoDir string) error
+}
+
+// RepoCleaner is implemented by agents whose PrepareRepo (or prompt runs) leave
+// state beside the test repo — Antigravity's isolated HOME is a sibling
+// directory of it — so that state goes with the repo when the test cleans up.
+// Called from the repo's t.Cleanup, after artifacts are captured. Optional.
+type RepoCleaner interface {
+	CleanupRepo(repoDir string) error
+}
+
+// ArtifactCollector is implemented by agents that keep state outside the test
+// repo (an isolated HOME, the agent's own logs) worth capturing when artifacts
+// are collected. Keys are artifact names (written under the test's artifact
+// dir), values are source files or directories; missing sources are skipped.
+// Optional.
+type ArtifactCollector interface {
+	ExtraArtifacts(repoDir string) map[string]string
 }
 
 type Session interface {

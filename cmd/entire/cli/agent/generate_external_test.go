@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 )
 
 // catRunner returns a TextCommandRunner that invokes `cat`, which echoes
@@ -58,18 +57,9 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 			agent:         &cursor.CursorAgent{},
 			requiredFlags: []string{"--print", "--force", "--trust", "--workspace"},
 		},
-		{
-			name:          "gemini",
-			agent:         &geminicli.GeminiCLIAgent{},
-			requiredFlags: []string{"-p"},
-			extraCheck: func(t *testing.T, args []string) {
-				t.Helper()
-				pIdx := slices.Index(args, "-p")
-				if pIdx < 0 || pIdx+1 >= len(args) || args[pIdx+1] != " " {
-					t.Fatalf("expected -p followed by space placeholder, got %v", args)
-				}
-			},
-		},
+		// antigravity is deliberately absent: agy 1.2.x ignores stdin in print
+		// mode, so its prompt travels in argv. That contract is pinned in the
+		// antigravity package (TestGenerateText_PassesPromptInArgv).
 	}
 
 	for _, tt := range tests {
@@ -102,7 +92,7 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 	}
 }
 
-// setRunner injects a test CommandRunner into any of the 4 supported agent
+// setRunner injects a test CommandRunner into any of the 3 supported agent
 // types. This is the external-test equivalent of the package-level var
 // mutation the old per-package tests used.
 func setRunner(tg agent.TextGenerator, runner agent.TextCommandRunner) {
@@ -112,8 +102,6 @@ func setRunner(tg agent.TextGenerator, runner agent.TextCommandRunner) {
 	case *copilotcli.CopilotCLIAgent:
 		a.CommandRunner = runner
 	case *cursor.CursorAgent:
-		a.CommandRunner = runner
-	case *geminicli.GeminiCLIAgent:
 		a.CommandRunner = runner
 	}
 }

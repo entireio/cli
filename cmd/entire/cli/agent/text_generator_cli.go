@@ -108,13 +108,13 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 const openCodeBinary = "opencode"
 
 var summaryProviderBinaries = map[types.AgentName]string{
-	AgentNameClaudeCode: "claude",
-	AgentNameCodex:      "codex",
-	AgentNameCopilotCLI: "copilot",
-	AgentNameCursor:     "agent",
-	AgentNameGemini:     "gemini",
-	AgentNamePi:         "pi",
-	AgentNameOpenCode:   openCodeBinary,
+	AgentNameAntigravity: "agy",
+	AgentNameClaudeCode:  "claude",
+	AgentNameCodex:       "codex",
+	AgentNameCopilotCLI:  "copilot",
+	AgentNameCursor:      "agent",
+	AgentNamePi:          "pi",
+	AgentNameOpenCode:    openCodeBinary,
 }
 
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable
@@ -128,7 +128,7 @@ func SummaryCLIBinaryName(name types.AgentName) string {
 // IsSummaryCLIAvailable reports whether the CLI binary for a summary-capable
 // agent is on PATH. This is distinct from DetectPresence, which checks
 // repo-level agent configuration — a repo configured with Claude Code for
-// development can still use Codex or Gemini for summary generation as long
+// development can still use Codex or Pi for summary generation as long
 // as the binary is installed.
 func IsSummaryCLIAvailable(name types.AgentName) bool {
 	binary := SummaryCLIBinaryName(name)

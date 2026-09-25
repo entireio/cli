@@ -349,7 +349,7 @@ var perfLargeFileSets = func() [][]string {
 		"cmd/entire/cli/session",
 		"cmd/entire/cli/checkpoint",
 		"cmd/entire/cli/agent/claudecode",
-		"cmd/entire/cli/agent/geminicli",
+		"cmd/entire/cli/agent/cursor",
 		"cmd/entire/cli/paths",
 		"cmd/entire/cli/logging",
 		"cmd/entire/cli/settings",
@@ -423,7 +423,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 		agent.AgentTypeClaudeCode,
 		agent.AgentTypeClaudeCode,
 		agent.AgentTypeClaudeCode,
-		agent.AgentTypeGemini,
+		agent.AgentTypeCursor,
 		agent.AgentTypeOpenCode,
 	}
 

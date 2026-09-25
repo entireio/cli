@@ -168,7 +168,7 @@ func TestNativeRepoDetailRow(t *testing.T) {
 }
 
 // TestNativeUsePlacementsPrimaryIsReachableByCatalogHost pins the invariant
-// `repo remote use` rests on when there is no terminal: the host it offers as
+// `repo remote add` rests on when there is no terminal: the host it offers as
 // the default has to be the one the placement list spells, and the list spells
 // every host through the cluster catalog. Repo.ClusterHost names the same
 // cluster by a second derivation, so a default taken from there is only ever
@@ -192,7 +192,7 @@ func TestNativeUsePlacementsPrimaryIsReachableByCatalogHost(t *testing.T) {
 	require.Error(t, err, "the repo field is a separate derivation and need not match a catalog host")
 }
 
-// TestNativeUsePlacements pins which clusters `repo remote use` will point a
+// TestNativeUsePlacements pins which clusters `repo remote add` will point a
 // remote at: the primary always, and only mirrors that can actually serve a
 // fetch.
 func TestNativeUsePlacements(t *testing.T) {

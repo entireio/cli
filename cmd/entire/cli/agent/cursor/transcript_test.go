@@ -1,6 +1,7 @@
 package cursor
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -174,7 +175,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset(t *testing.T) {
 	// The sample is a text-only conversation, so there is nothing to attribute --
 	// but the position must still advance to the sample's line count. Returning a
 	// constant 0 here is what the removed stub did.
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v, want nil", err)
 	}
@@ -193,7 +194,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_NonexistentFile(t *testing.T
 	t.Parallel()
 	ag := &CursorAgent{}
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset("/nonexistent/path.jsonl", 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), "/nonexistent/path.jsonl", 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v, want nil", err)
 	}
@@ -209,7 +210,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_EmptyPath(t *testing.T) {
 	t.Parallel()
 	ag := &CursorAgent{}
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset("", 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), "", 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v", err)
 	}
@@ -349,7 +350,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_RealSession(t *testing.T) {
 	t.Parallel()
 	ag := &CursorAgent{}
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(realSessionFixture, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), realSessionFixture, 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset() error = %v", err)
 	}
@@ -381,7 +382,7 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_RealSessionOffsets(t *testin
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			files, pos, err := ag.ExtractModifiedFilesFromOffset(realSessionFixture, tt.offset)
+			files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), realSessionFixture, tt.offset)
 			if err != nil {
 				t.Fatalf("ExtractModifiedFilesFromOffset() error = %v", err)
 			}

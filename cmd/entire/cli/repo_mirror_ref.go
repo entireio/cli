@@ -72,7 +72,10 @@ func parseMirrorRepoRef(ref string, forges ...string) (mirrorRepoRef, error) {
 	if suggestions := bareRefSuggestions(ref, forges...); len(suggestions) > 0 {
 		return mirrorRepoRef{}, fmt.Errorf("invalid <repo>: repository reference must name its forge; did you mean %s?", strings.Join(suggestions, " or "))
 	}
-	return mirrorRepoRef{}, fmt.Errorf("invalid <repo>: expected a forge-qualified repository reference such as /gh/owner/repo or /et/project/repo, got %q", ref)
+	// Placeholders, as mirrorRepoRefHelp spells them: the shapes are what the
+	// reader has to fill in, and `/gh/owner/repo` reads like a repo called
+	// "repo" owned by "owner".
+	return mirrorRepoRef{}, fmt.Errorf("invalid <repo>: expected a forge-qualified repository reference such as /%s/<owner>/<repo> or /%s/<project>/<repo>, got %q", mirrorCloneForge, nativeCloneForge, ref)
 }
 
 // parseDeclaredMirrorRepoRef reads a ref that has already named a forge the
@@ -96,8 +99,13 @@ func parseDeclaredMirrorRepoRef(ref, forge string) (mirrorRepoRef, error) {
 // unsupportedForgeErr reports a ref whose forge this verb does not act on. It
 // names the kind of repository rather than the token, and says what the verb
 // does serve, so the reader learns the boundary rather than just being stopped
-// at it. Callers that know where the answer lives append their own pointer
-// (see `repo access list`, which names `entire repo grant list`).
+// at it. A caller that knows where the answer lives can append its own pointer.
+//
+// No production caller narrows forges today: the mirror verbs read both and
+// branch on what they get, and `repo grant` refuses a mirror ref itself, with
+// the upstream reason no parser has. So this reaches only the tests that pin
+// the refusal — kept because narrowing is the parser's contract, not because
+// something currently uses it.
 func unsupportedForgeErr(ref, forge string, served []string) error {
 	supported := make([]string, 0, len(served))
 	for _, f := range served {

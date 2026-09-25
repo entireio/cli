@@ -27,6 +27,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 
 	// Register agents so GetByAgentType works in tests.
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
@@ -258,6 +259,97 @@ func TestCountTranscriptItems_CursorEmpty(t *testing.T) {
 	}
 }
 
+func TestNonCopilotCondensationPreservesSessionTokenUsage(t *testing.T) {
+	t.Parallel()
+
+	sessionUsage := &agent.TokenUsage{
+		InputTokens:         10_000,
+		OutputTokens:        999,
+		CacheReadTokens:     2_000,
+		CacheCreationTokens: 500,
+		APICallCount:        42,
+	}
+	state := &SessionState{
+		SessionID:  "s1",
+		AgentType:  agent.AgentTypeClaudeCode,
+		TokenUsage: sessionUsage,
+	}
+	checkpointUsage := &agent.TokenUsage{
+		InputTokens:         100,
+		OutputTokens:        10,
+		CacheReadTokens:     20,
+		CacheCreationTokens: 5,
+		APICallCount:        1,
+	}
+
+	applyBackfilledSessionTokenUsage(t.Context(), nil, state, nil, checkpointUsage)
+
+	require.Equal(t, sessionUsage, state.TokenUsage)
+}
+
+func TestNonCopilotCondensationDoesNotPromoteCheckpointUsage(t *testing.T) {
+	t.Parallel()
+
+	state := &SessionState{
+		SessionID: "s1",
+		AgentType: agent.AgentTypeClaudeCode,
+	}
+	checkpointUsage := &agent.TokenUsage{
+		InputTokens:  100,
+		OutputTokens: 10,
+		APICallCount: 1,
+	}
+
+	applyBackfilledSessionTokenUsage(t.Context(), nil, state, nil, checkpointUsage)
+
+	require.Nil(t, state.TokenUsage)
+}
+
+func TestCondenseSessionByID_NonCopilotPreservesSessionTokenUsage(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "non-copilot-token-usage"
+	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
+
+	transcript := strings.Join([]string{
+		`{"type":"human","uuid":"u1","message":{"content":"hello"}}`,
+		`{"type":"assistant","uuid":"u2","message":{"id":"msg_001","usage":{"input_tokens":100,"output_tokens":10}}}`,
+	}, "\n") + "\n"
+	testutil.WriteFile(t, dir, filepath.Join(metadataDir, paths.TranscriptFileName), transcript)
+	testutil.WriteFile(t, dir, "test.txt", "agent content")
+
+	sessionUsage := &agent.TokenUsage{
+		InputTokens:         10_000,
+		OutputTokens:        999,
+		CacheReadTokens:     2_000,
+		CacheCreationTokens: 500,
+		APICallCount:        42,
+	}
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+		TokenUsage:    sessionUsage,
+	}))
+
+	state, err := s.loadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, sessionUsage, state.TokenUsage)
+
+	require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+
+	state, err = s.loadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, sessionUsage, state.TokenUsage)
+	require.Nil(t, state.CheckpointTokenUsage)
+}
+
 func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *testing.T) {
 	t.Parallel()
 
@@ -282,6 +374,52 @@ func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *
 	require.Equal(t, 20, backfillUsage.CacheReadTokens)
 	require.Equal(t, 10, backfillUsage.CacheCreationTokens)
 	require.Equal(t, 3, backfillUsage.APICallCount)
+}
+
+func TestSessionStateBackfillTokenUsage_CopilotFallsBackToCheckpointUsage(t *testing.T) {
+	t.Parallel()
+
+	checkpointUsage := &agent.TokenUsage{
+		OutputTokens: 25,
+		APICallCount: 1,
+	}
+
+	backfillUsage := sessionStateBackfillTokenUsage(
+		t.Context(), nil, agent.AgentTypeCopilotCLI, nil, checkpointUsage,
+	)
+
+	require.Same(t, checkpointUsage, backfillUsage)
+}
+
+func TestApplyBackfilledSessionTokenUsage_CopilotPreservesSubagentTotal(t *testing.T) {
+	t.Parallel()
+
+	checkpointUsage := &agent.TokenUsage{
+		OutputTokens: 25,
+		APICallCount: 1,
+	}
+	state := &SessionState{
+		AgentType: agent.AgentTypeCopilotCLI,
+		TokenUsage: &agent.TokenUsage{
+			InputTokens: 1_000,
+			SubagentTokens: &agent.TokenUsage{
+				InputTokens:  200,
+				OutputTokens: 50,
+				APICallCount: 2,
+			},
+		},
+	}
+
+	applyBackfilledSessionTokenUsage(t.Context(), nil, state, nil, checkpointUsage)
+
+	require.Equal(t, 25, state.TokenUsage.OutputTokens)
+	require.Equal(t, 1, state.TokenUsage.APICallCount)
+	require.Equal(t, &agent.TokenUsage{
+		InputTokens:  200,
+		OutputTokens: 50,
+		APICallCount: 2,
+	}, state.TokenUsage.SubagentTokens)
+	require.Nil(t, checkpointUsage.SubagentTokens)
 }
 
 func TestSessionStateBackfillModel_PiReadsModelFromTranscript(t *testing.T) {
@@ -549,6 +687,205 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.Equal(t, string(session.KindAgentInvestigate), meta.Kind, "per-session Kind")
 	require.Equal(t, "0123456789ab", meta.InvestigateRunID, "per-session InvestigateRunID")
 	require.Equal(t, "Why is checkout flaky?", meta.InvestigateTopic, "per-session InvestigateTopic")
+}
+
+// TestCondenseSession_OutOfBandTokenFallback verifies that for an agent without
+// transcript-embedded token data (Antigravity is not a TokenCalculator), a
+// populated SessionState.TokenUsage flows through to the per-session
+// CommittedMetadata.token_usage on the metadata branch. This is the out-of-band
+// fallback: agy accumulates per-turn deltas into SessionState.TokenUsage at
+// SaveStep time, and the transcript recompute yields nil, so without the
+// fallback the UI would show no token counts.
+//
+// Tests in this file use t.Chdir for CWD-based git resolution, so this
+// cannot be a parallel test.
+func TestCondenseSession_OutOfBandTokenFallback(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-06-03-antigravity-tokens"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	// Antigravity transcripts carry no token usage, so the condensation
+	// recompute yields nil — exactly the case the fallback handles.
+	transcript := `{"type":"human","message":{"content":"add tokens"}}
+{"type":"assistant","message":{"content":"Done."}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	trackedFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		AgentType:     agent.AgentTypeAntigravity,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Antigravity checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, agent.AgentTypeAntigravity, state.AgentType, "session must be tagged as Antigravity")
+
+	// Simulate the lifecycle accumulating an out-of-band token delta:
+	// SaveStep accumulates StepContext.TokenUsage into BOTH the
+	// checkpoint-scoped CheckpointTokenUsage (reset at every condensation)
+	// and the session-cumulative TokenUsage (never reset). The checkpoint
+	// metadata must take the checkpoint-scoped value. Make the cumulative
+	// total deliberately LARGER (as after an earlier condensed turn) so this
+	// test fails if condensation ever inherits the cumulative total again —
+	// that bug double-counted earlier turns on every checkpoint after the
+	// first.
+	state.CheckpointTokenUsage = &agent.TokenUsage{
+		InputTokens:         3500,
+		OutputTokens:        300,
+		CacheCreationTokens: 50,
+		CacheReadTokens:     3400,
+		APICallCount:        2,
+	}
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:         9999,
+		OutputTokens:        888,
+		CacheCreationTokens: 77,
+		CacheReadTokens:     6666,
+		APICallCount:        5,
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("ddee00112233")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must not skip when files are touched")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+
+	// Per-session metadata must round-trip the out-of-band token usage.
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.Metadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	require.NotNil(t, meta.TokenUsage, "per-session token_usage must be populated from the checkpoint-scoped accumulator")
+	require.Equal(t, 3500, meta.TokenUsage.InputTokens, "InputTokens must be the checkpoint-scoped delta, not the session-cumulative total")
+	require.Equal(t, 300, meta.TokenUsage.OutputTokens, "OutputTokens")
+	require.Equal(t, 50, meta.TokenUsage.CacheCreationTokens, "CacheCreationTokens")
+	require.Equal(t, 3400, meta.TokenUsage.CacheReadTokens, "CacheReadTokens")
+	require.Equal(t, 2, meta.TokenUsage.APICallCount, "APICallCount")
+}
+
+// TestCondenseSession_NonOOBAgentDoesNotInheritStateTokens is the negative
+// branch of the token resolution: NO agent may inherit the session-cumulative
+// SessionState.TokenUsage into per-checkpoint metadata (it is never reset at
+// condensation, so it double-counts earlier turns). Checkpoint metadata comes
+// only from the transcript recompute or the checkpoint-scoped
+// state.CheckpointTokenUsage. Cursor with a populated state total and a nil
+// recompute must therefore produce empty checkpoint token_usage.
+//
+// Tests in this file use t.Chdir for CWD-based git resolution, so this
+// cannot be a parallel test.
+func TestCondenseSession_NonOOBAgentDoesNotInheritStateTokens(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-06-03-cursor-tokens"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+
+	// Token-less transcript: the condensation recompute yields nil TokenUsage,
+	// mirroring the positive test so the only behavioral difference is the
+	// agent's OutOfBandTokenSource capability.
+	transcript := `{"type":"human","message":{"content":"add tokens"}}
+{"type":"assistant","message":{"content":"Done."}}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644))
+
+	trackedFile := filepath.Join(dir, "test.txt")
+	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		AgentType:     agent.AgentTypeCursor,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Cursor checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, agent.AgentTypeCursor, state.AgentType, "session must be tagged as Cursor")
+
+	// Populate SessionState.TokenUsage anyway. A non-OOB agent must NOT inherit
+	// this — the fallback gate excludes it.
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens:         3500,
+		OutputTokens:        300,
+		CacheCreationTokens: 50,
+		CacheReadTokens:     3400,
+		APICallCount:        2,
+	}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("ddee44556677")
+	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	require.False(t, result.Skipped, "condensation must not skip when files are touched")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+
+	checkpointTree, err := tree.Tree(checkpointID.Path())
+	require.NoError(t, err)
+
+	sessionMeta, err := checkpointTree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		subtree, subErr := checkpointTree.Tree("0")
+		require.NoError(t, subErr)
+		sessionMeta, err = subtree.File(paths.MetadataFileName)
+		require.NoError(t, err)
+	}
+	sessionBytes, err := sessionMeta.Contents()
+	require.NoError(t, err)
+	var meta checkpoint.Metadata
+	require.NoError(t, json.Unmarshal([]byte(sessionBytes), &meta))
+
+	require.Nil(t, meta.TokenUsage, "non-OOB agent must NOT inherit SessionState.TokenUsage; per-session token_usage must be nil")
 }
 
 func setupEndedSessionWithoutFiles(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir, sessionID string) *SessionState {

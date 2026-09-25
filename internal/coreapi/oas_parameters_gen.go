@@ -16,6 +16,11 @@ type ConnectOrgCIBuildkiteCredentialParams struct {
 	OrgId string
 }
 
+// ConnectOrgCIDepotOrganizationParams is parameters of connectOrgCIDepotOrganization operation.
+type ConnectOrgCIDepotOrganizationParams struct {
+	OrgId string
+}
+
 // CreateBindingParams is parameters of createBinding operation.
 type CreateBindingParams struct {
 	AccountId string
@@ -24,6 +29,11 @@ type CreateBindingParams struct {
 // CreateNativeMirrorParams is parameters of createNativeMirror operation.
 type CreateNativeMirrorParams struct {
 	RepoId string
+}
+
+// CreateOrgInvitationParams is parameters of createOrgInvitation operation.
+type CreateOrgInvitationParams struct {
+	OrgId string
 }
 
 // CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
@@ -92,6 +102,20 @@ type DeleteServiceAccountParams struct {
 	AccountId string
 }
 
+// DetachMyHandleParams is parameters of detachMyHandle operation.
+type DetachMyHandleParams struct {
+	// Sign-in provider of the handle to detach.
+	Provider DetachMyHandleProvider
+	// The provider's stable user identifier for the handle (handles[].providerUserId from GET /me).
+	ProviderUserId string
+}
+
+// DisconnectOrgCIDepotOrganizationParams is parameters of disconnectOrgCIDepotOrganization operation.
+type DisconnectOrgCIDepotOrganizationParams struct {
+	OrgId   string
+	Account string
+}
+
 // GetBranchProtectionParams is parameters of getBranchProtection operation.
 type GetBranchProtectionParams struct {
 	RepoId string
@@ -112,12 +136,10 @@ type GetOrgParams struct {
 	OrgId string
 }
 
-// GetPermissionsParams is parameters of getPermissions operation.
-type GetPermissionsParams struct {
-	ResourceType string
-	ResourceId   string
-	// If set, return the SpiceDB trace for this permission instead of the permission list.
-	Explain OptString `json:",omitempty,omitzero"`
+// GetOrgPersonAccessParams is parameters of getOrgPersonAccess operation.
+type GetOrgPersonAccessParams struct {
+	OrgId     string
+	AccountId string
 }
 
 // GetProjectParams is parameters of getProject operation.
@@ -132,6 +154,12 @@ type GetRepoParams struct {
 	// jurisdiction redirects with 421. This core reports 503 when it cannot route the read. Provisioning
 	// and failed states still return 200.
 	Authoritative OptBool `json:",omitempty,omitzero"`
+}
+
+// GetRepoCIDeliveryParams is parameters of getRepoCIDelivery operation.
+type GetRepoCIDeliveryParams struct {
+	RepoId string
+	ID     string
 }
 
 // GetRepoVisibilityParams is parameters of getRepoVisibility operation.
@@ -230,6 +258,22 @@ type ListOrgCIBuildkiteCredentialsParams struct {
 	OrgId string
 }
 
+// ListOrgCIDepotOrganizationsParams is parameters of listOrgCIDepotOrganizations operation.
+type ListOrgCIDepotOrganizationsParams struct {
+	OrgId string
+}
+
+// ListOrgInvitationsParams is parameters of listOrgInvitations operation.
+type ListOrgInvitationsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	OrgId     string
+	// Lifecycle state to return; all returns every state.
+	Status OptListOrgInvitationsStatus `json:",omitempty,omitzero"`
+}
+
 // ListOrgMembersParams is parameters of listOrgMembers operation.
 type ListOrgMembersParams struct {
 	// Maximum entries to return; server may cap further.
@@ -237,6 +281,26 @@ type ListOrgMembersParams struct {
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
 	OrgId     string
+}
+
+// ListOrgPeopleParams is parameters of listOrgPeople operation.
+type ListOrgPeopleParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	// Select people with a recorded grant at this resource level.
+	Scope OptListOrgPeopleScope `json:",omitempty,omitzero"`
+	OrgId string
+	// Case-insensitive substring of account ID, public handle, or resource name.
+	Search OptString `json:",omitempty,omitzero"`
+	// Member includes non-pending memberships; invited means pending; collaborator means no direct
+	// membership.
+	Membership OptListOrgPeopleMembership `json:",omitempty,omitzero"`
+	// Direct membership status; collaborators have no membership status.
+	Status OptListOrgPeopleStatus `json:",omitempty,omitzero"`
+	// Exact recorded grant role, including organization membership and weaker independent grants.
+	Role OptListOrgPeopleRole `json:",omitempty,omitzero"`
 }
 
 // ListOrgProjectsParams is parameters of listOrgProjects operation.
@@ -259,6 +323,9 @@ type ListOrgsParams struct {
 	// Optional: exact-match org name (case-insensitive).
 	Name        OptString `json:",omitempty,omitzero"`
 	IfNoneMatch OptString `json:",omitempty,omitzero"`
+	// Optional: opaque commit token from an org create or delete, to read at a snapshot that contains
+	// that write. Applies to both the name lookup and the page.
+	CommitToken OptString `json:",omitempty,omitzero"`
 }
 
 // ListProjectMembersParams is parameters of listProjectMembers operation.
@@ -267,6 +334,19 @@ type ListProjectMembersParams struct {
 	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+	ProjectId string
+}
+
+// ListProjectPeopleParams is parameters of listProjectPeople operation.
+type ListProjectPeopleParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	// Case-insensitive substring of account ID or public handle.
+	Search OptString `json:",omitempty,omitzero"`
+	// Exact effective role on the selected resource.
+	Role      OptListProjectPeopleRole `json:",omitempty,omitzero"`
 	ProjectId string
 }
 
@@ -279,6 +359,8 @@ type ListProjectReposParams struct {
 	ProjectId string
 	// Optional: exact-match repo name (case-insensitive).
 	Name OptString `json:",omitempty,omitzero"`
+	// Optional: opaque commit token from a create, to read a snapshot that contains that write.
+	CommitToken OptString `json:",omitempty,omitzero"`
 }
 
 // ListProjectsParams is parameters of listProjects operation.
@@ -289,6 +371,9 @@ type ListProjectsParams struct {
 	PageToken OptString `json:",omitempty,omitzero"`
 	// Optional: exact-match project name (case-insensitive).
 	Name OptString `json:",omitempty,omitzero"`
+	// Optional: opaque commit token from a project create or delete, to list at a snapshot that contains
+	// that write. Ignored when name is set.
+	CommitToken OptString `json:",omitempty,omitzero"`
 }
 
 // ListRepoCIBuildsParams is parameters of listRepoCIBuilds operation.
@@ -298,6 +383,13 @@ type ListRepoCIBuildsParams struct {
 	Pipeline    OptString `json:",omitempty,omitzero"`
 	BuildNumber OptInt64  `json:",omitempty,omitzero"`
 	Limit       OptInt64  `json:",omitempty,omitzero"`
+}
+
+// ListRepoCIDeliveriesParams is parameters of listRepoCIDeliveries operation.
+type ListRepoCIDeliveriesParams struct {
+	RepoId    string
+	Direction OptListRepoCIDeliveriesDirection `json:",omitempty,omitzero"`
+	Limit     OptInt64                         `json:",omitempty,omitzero"`
 }
 
 // ListRepoCIProvidersParams is parameters of listRepoCIProviders operation.
@@ -356,6 +448,19 @@ type ListRepoOrgFacetsParams struct {
 	Q OptString `json:",omitempty,omitzero"`
 }
 
+// ListRepoPeopleParams is parameters of listRepoPeople operation.
+type ListRepoPeopleParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	// Case-insensitive substring of account ID or public handle.
+	Search OptString `json:",omitempty,omitzero"`
+	// Exact effective role on the selected resource.
+	Role   OptListRepoPeopleRole `json:",omitempty,omitzero"`
+	RepoId string
+}
+
 // ListReposParams is parameters of listRepos operation.
 type ListReposParams struct {
 	// Maximum entries to return; server may cap further.
@@ -368,6 +473,9 @@ type ListReposParams struct {
 	// entries; pagination and scope are ignored, but the fact filters below still apply (a repo whose
 	// facts don't match returns empty).
 	Filter OptString `json:",omitempty,omitzero"`
+	// Optional: opaque commit token from a create, to read a snapshot that contains that write. Requires
+	// filter.
+	CommitToken OptString `json:",omitempty,omitzero"`
 	// Multi-key sort spec, e.g. org:asc,stars:desc. Keys: name,org,language,candidacy,stars,forks,
 	// pushed_at,last_activity_at,last_pushed_at,activity_hotness,checkpoint_count,open_pr_count. A
 	// single bare key uses the order param. Encoded into the cursor (authoritative on continuation).
@@ -388,6 +496,8 @@ type ListReposParams struct {
 	Org OptString `json:",omitempty,omitzero"`
 	// Literal case-insensitive substring match on the full name (owner/repo).
 	Q OptString `json:",omitempty,omitzero"`
+	// Exact-match owning project id (ULID). Also accepts projectId[eq]; projectId[ne] is rejected.
+	ProjectId OptString `json:",omitempty,omitzero"`
 	// Filter on placement/candidacy lifecycle. inactive requires scope=all. Also accepts
 	// status[eq]/status[ne].
 	Status OptListReposStatus `json:",omitempty,omitzero"`
@@ -460,6 +570,18 @@ type ResolveMirrorPlacementsParams struct {
 	Repo string
 }
 
+// ResolveProjectParams is parameters of resolveProject operation.
+type ResolveProjectParams struct {
+	Host    ResolveProjectHost
+	Project string
+}
+
+// RevokeOrgInvitationParams is parameters of revokeOrgInvitation operation.
+type RevokeOrgInvitationParams struct {
+	OrgId string
+	ID    string
+}
+
 // RevokeProjectAccessParams is parameters of revokeProjectAccess operation.
 type RevokeProjectAccessParams struct {
 	ProjectId   string
@@ -514,4 +636,10 @@ type SetRepoVisibilityParams struct {
 // UpdateBranchProtectionParams is parameters of updateBranchProtection operation.
 type UpdateBranchProtectionParams struct {
 	RepoId string
+}
+
+// UpdateOrgMemberRoleParams is parameters of updateOrgMemberRole operation.
+type UpdateOrgMemberRoleParams struct {
+	OrgId        string
+	MembershipId string
 }

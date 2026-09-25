@@ -43,12 +43,20 @@ plain strings (drop `enum`), or have ogen treat them as open enums. Enums
 the *client sends* (request bodies like `SetRepoVisibilityInputBody`) should
 stay strict.
 
+`Membership.role`/`status` and `Invitation.role`/`status` are the same shape:
+`entire org grant list` displays memberships; the generated
+`ListOrgInvitations` client decodes invitations. A new role or lifecycle state
+must not fail either listing.
+
 **Workaround:** `spec/normalize.go` (`loosenReadModelEnums`, allowlist
 `readModelEnumFields`) deletes the `enum` constraint from those response
 read-model fields, so ogen emits plain strings with no `Validate()` and
 unknown values pass through for display. Only response read models are
-loosened; request-body enums stay strict. Locked in by
-`TestListProjectRepos_UnknownEnumValuesPassThrough` in `client_test.go`.
+loosened; request-body enums stay strict — `CreateOrgInvitationInputBody.role`
+keeps its enum for outgoing requests. Locked in
+by `TestListProjectRepos_UnknownEnumValuesPassThrough`,
+`TestListOrgInvitations_UnknownEnumValuesPassThrough` and
+`TestListOrgMembers_UnknownEnumValuesPassThrough` in `client_test.go`.
 Retire the allowlist entries as upstream loosens the corresponding fields.
 
 ## 2b. New read-model fields ship as `required`
@@ -59,6 +67,9 @@ were added as `required`. ogen's
 decoder then fails the whole response when a field is absent, so a core that
 predates the field, or a mixed-version roll, breaks every list, get and
 repo-routing call in a client that does not depend on any of them.
+
+The create responses (`CreatedOrg`, `CreatedProject`, `CreatedRepo`) repeat the
+shape of their read models and so repeat the problem.
 
 **Fix upstream:** add read-model fields as optional until every deployment
 sends them, then tighten.

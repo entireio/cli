@@ -415,10 +415,8 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
 			if transcriptContent, readErr := agent.ReadTranscriptFile(opts.TranscriptPath); readErr == nil {
-				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
-
 				// Chunk if necessary
-				chunks, chunkErr := agent.ChunkTranscript(ctx, transcriptContent, agentType)
+				chunks, chunkErr := agent.ChunkTranscript(ctx, transcriptContent, opts.Agent)
 				if chunkErr != nil {
 					logging.Warn(ctx, "failed to chunk transcript, checkpoint will be saved without transcript",
 						slog.String("error", chunkErr.Error()),

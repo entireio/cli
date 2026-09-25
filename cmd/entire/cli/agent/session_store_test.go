@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -282,6 +283,55 @@ func TestSessionStore_ProbingManyDirectoriesRetainsNoDescriptors(t *testing.T) {
 		"probing %d candidate directories must not retain a descriptor per directory", candidates)
 }
 
+func TestSessionStore_LstatRefusesSymlinkedParentAndReportsLeaf(t *testing.T) {
+	t.Parallel()
+	store, dir := newStore(t, joinResolve)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real.jsonl"), []byte("x"), 0o600))
+	info, err := store.Lstat("real.jsonl")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), info.Size())
+
+	_, err = store.Lstat("missing.jsonl")
+	assert.True(t, os.IsNotExist(err), "a missing name must classify as not-exist, got %v", err)
+
+	if err := os.Symlink(filepath.Join(dir, "real.jsonl"), filepath.Join(dir, "link.jsonl")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	info, err = store.Lstat("link.jsonl")
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink, "the leaf is returned as-is so the caller can refuse it")
+
+	elsewhere := t.TempDir()
+	require.NoError(t, os.Symlink(elsewhere, filepath.Join(dir, "sub")))
+	_, err = store.Lstat("sub/anything.jsonl")
+	require.Error(t, err, "a symlinked parent component must be refused")
+}
+
+func TestSessionStore_CreateExclusiveCreatesOnceAndNeverReplaces(t *testing.T) {
+	t.Parallel()
+	store, dir := newStore(t, joinResolve)
+
+	require.NoError(t, store.CreateExclusive("conv/logs/transcript.jsonl", 0o600))
+	info, err := os.Stat(filepath.Join(dir, "conv", "logs", "transcript.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), info.Size())
+
+	// The agent wrote the real file in between: a second create must fail with
+	// fs.ErrExist and leave the content alone.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "conv", "logs", "transcript.jsonl"), []byte("real"), 0o600))
+	err = store.CreateExclusive("conv/logs/transcript.jsonl", 0o600)
+	require.ErrorIs(t, err, fs.ErrExist)
+	data, err := os.ReadFile(filepath.Join(dir, "conv", "logs", "transcript.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, "real", string(data))
+
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	require.Error(t, store.CreateExclusive("linked/transcript.jsonl", 0o600), "a symlinked parent must be refused")
+}
+
 // The store itself may not exist yet — an external plugin is allowed to create
 // it — so the walk has to resolve a symlinked ANCESTOR while the store and the
 // reference below it are both still missing.
@@ -309,18 +359,35 @@ func TestSessionStore_FollowsSymlinkedAncestorOfAMissingStore(t *testing.T) {
 }
 
 // Nested directories inherit the store root's 0700 rather than 0750: they hold
-// the same transcripts, and Copilot, Cursor and Codex all write into them.
+// the same transcripts, and Copilot, Cursor and Codex all write into them. Both
+// writers that create those directories are covered: CreateExclusive reaches
+// the same tree as WriteFile, through the late-transcript placeholder.
 func TestSessionStore_CreatesNestedDirectories0700(t *testing.T) {
 	t.Parallel()
 
-	storeDir := filepath.Join(t.TempDir(), "store")
-	store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
-	require.NoError(t, err)
-	require.NoError(t, store.WriteFile("nested/deeper/session.jsonl", []byte("hi\n"), 0o600))
+	writers := map[string]func(*agent.SessionStore) error{
+		"WriteFile": func(s *agent.SessionStore) error {
+			return s.WriteFile("nested/deeper/session.jsonl", []byte("hi\n"), 0o600)
+		},
+		"CreateExclusive": func(s *agent.SessionStore) error {
+			return s.CreateExclusive("nested/deeper/session.jsonl", 0o600)
+		},
+	}
 
-	for _, dir := range []string{storeDir, filepath.Join(storeDir, "nested"), filepath.Join(storeDir, "nested", "deeper")} {
-		info, err := os.Stat(dir)
-		require.NoError(t, err, dir)
-		assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), dir)
+	for name, write := range writers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			storeDir := filepath.Join(t.TempDir(), "store")
+			store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: storeDir, resolve: joinResolve}, storeDir)
+			require.NoError(t, err)
+			require.NoError(t, write(store))
+
+			for _, dir := range []string{storeDir, filepath.Join(storeDir, "nested"), filepath.Join(storeDir, "nested", "deeper")} {
+				info, err := os.Stat(dir)
+				require.NoError(t, err, dir)
+				assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), dir)
+			}
+		})
 	}
 }

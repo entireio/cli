@@ -40,16 +40,14 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo edit":          true,
 		"repo delete":        false,
 		"repo clone":         false,
-		"repo remote url":    false,
 		"repo mirror add":    false,
 		"repo mirror list":   true,
 		"repo mirror get":    true,
 		"repo mirror remove": false,
-		// `remote use` writes local git config and reports what it changed;
+		// `remote add` writes local git config and reports what it changed;
 		// there is no object to render, so it stays off the --json surface like
 		// the other side-effect verbs.
-		"repo remote use":     false,
-		"repo access list":    true,
+		"repo remote add":     false,
 		"repo visibility get": true,
 		// add/remove print the resulting rule list, so they render JSON too.
 		"repo protection list":   true,

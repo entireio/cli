@@ -20,12 +20,12 @@ identify the caller. Tiers, strongest first, each reported back as
 **Environment and ancestry are one tier, and a nearer owner outranks an
 environment claim.** They were two tiers, environment first, returning on any
 hit — which is wrong for nesting: an inner agent that publishes no ID of its
-own (Gemini CLI, opencode) forwards the OUTER agent's variable straight
+own (opencode, for one) forwards the OUTER agent's variable straight
 through, so the only claim named the outer session while the inner one sat one
 hop away in our ancestry. The resolver reported the outer session as
 `caller-env` and `IsCaller()` true — "safe to act on" — which is exactly the
 mistake the type exists to prevent. Depth is the only signal that separates
-"Codex ran me" from "Codex ran Gemini ran me", so the nearest owner wins
+"Codex ran me" from "Codex ran opencode ran me", so the nearest owner wins
 wherever ancestry can rank at all. The environment's remaining job is real and
 narrower: naming a session ancestry *cannot* rank — one whose owner was never
 recorded (no turn yet), or any session on a platform that cannot introspect
@@ -126,7 +126,7 @@ live registry.
 which looks backwards until you see the failure: its consumers are the test
 harnesses that isolate themselves from the developer's real agent session, and
 not every test binary links every agent implementation — the e2e harness links
-eight of the nine, omitting pi. A registry-derived list silently shortens to
+seven of the eight, omitting pi. A registry-derived list silently shortens to
 that binary's subset, and a missing name is not an error, it is one variable
 left set, so a real session leaks into the run and surfaces as an unrelated
 assertion failure on one machine. Registration cannot be the source of truth
@@ -135,13 +135,11 @@ silently — it degrades to a weaker tier rather than erroring — and the guard
 test catches a newly capable agent going unlisted, not a vendor renaming a
 variable we already track.
 
-Gemini CLI and opencode publish **nothing**, and that is a finding rather than
-a gap in our table: Gemini passes its session ID to its shell executor for
-background-process bookkeeping but never into the child environment, and
-opencode's shell tool performs no environment augmentation at all. Tier 2 is
-what covers them, which is why it is not optional.
-`TestCallerSessionEnvVar_UnpublishedAgentsStayUnpublished` fails if either
-gains the capability without its variable being pinned.
+opencode publishes **nothing**, and that is a finding rather than a gap in
+our table: its shell tool performs no environment augmentation at all. Tier 2
+is what covers it, which is why it is not optional.
+`TestCallerSessionEnvVar_UnpublishedAgentsStayUnpublished` fails if it gains
+the capability without its variable being pinned.
 
 Two states worth distinguishing, both on tier 1:
 `ResolvedSession.Tracked == false` means the agent named a session Entire holds

@@ -70,7 +70,6 @@ type TestEnv struct {
 	T                  *testing.T
 	RepoDir            string
 	ClaudeProjectDir   string
-	GeminiProjectDir   string
 	OpenCodeProjectDir string
 	SessionCounter     int
 	gitConfigSnapshot  string
@@ -108,10 +107,6 @@ func NewTestEnv(t *testing.T) *TestEnv {
 	if resolved, err := filepath.EvalSymlinks(claudeProjectDir); err == nil {
 		claudeProjectDir = resolved
 	}
-	geminiProjectDir := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(geminiProjectDir); err == nil {
-		geminiProjectDir = resolved
-	}
 	openCodeProjectDir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(openCodeProjectDir); err == nil {
 		openCodeProjectDir = resolved
@@ -121,7 +116,6 @@ func NewTestEnv(t *testing.T) *TestEnv {
 		T:                  t,
 		RepoDir:            repoDir,
 		ClaudeProjectDir:   claudeProjectDir,
-		GeminiProjectDir:   geminiProjectDir,
 		OpenCodeProjectDir: openCodeProjectDir,
 	}
 
@@ -147,12 +141,11 @@ func (env *TestEnv) Cleanup() {
 }
 
 // cliEnv returns the environment variables for CLI execution.
-// Includes Claude, Gemini, and OpenCode project dirs so tests work for any agent.
+// Includes Claude and OpenCode project dirs so tests work for any agent.
 // Delegates to testutil.GitIsolatedEnv() for git config isolation.
 func (env *TestEnv) cliEnv() []string {
 	base := append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+env.ClaudeProjectDir,
-		"ENTIRE_TEST_GEMINI_PROJECT_DIR="+env.GeminiProjectDir,
 		"ENTIRE_TEST_OPENCODE_PROJECT_DIR="+env.OpenCodeProjectDir,
 	)
 	base = append(base, env.checkpointStoreEnv()...)
@@ -1676,7 +1669,7 @@ func (env *TestEnv) validateSessionMetadata(v CheckpointValidation) {
 
 // validateTranscriptJSONL validates that full.jsonl exists and is valid JSON or JSONL.
 // It supports both:
-// - JSON format (single document, used by OpenCode and Gemini CLI)
+// - JSON format (single document, used by OpenCode)
 // - JSONL format (one JSON object per line, used by Claude Code)
 func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent []string) {
 	env.T.Helper()
@@ -1687,7 +1680,7 @@ func (env *TestEnv) validateTranscriptJSONL(checkpointID string, expectedContent
 		env.T.Fatalf("Transcript not found at %s", transcriptPath)
 	}
 
-	// First try to parse as a single JSON document (OpenCode/Gemini format)
+	// First try to parse as a single JSON document (OpenCode format)
 	var jsonDoc any
 	if err := json.Unmarshal([]byte(content), &jsonDoc); err != nil {
 		// Fall back to JSONL validation (Claude Code format)
@@ -1850,10 +1843,6 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 	if resolved, err := filepath.EvalSymlinks(claudeProjectDir); err == nil {
 		claudeProjectDir = resolved
 	}
-	geminiProjectDir := env.T.TempDir()
-	if resolved, err := filepath.EvalSymlinks(geminiProjectDir); err == nil {
-		geminiProjectDir = resolved
-	}
 	openCodeProjectDir := env.T.TempDir()
 	if resolved, err := filepath.EvalSymlinks(openCodeProjectDir); err == nil {
 		openCodeProjectDir = resolved
@@ -1863,7 +1852,6 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 		T:                  env.T,
 		RepoDir:            cloneDir,
 		ClaudeProjectDir:   claudeProjectDir,
-		GeminiProjectDir:   geminiProjectDir,
 		OpenCodeProjectDir: openCodeProjectDir,
 		CheckpointStore:    env.CheckpointStore,
 	}

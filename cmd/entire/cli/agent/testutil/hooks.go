@@ -9,7 +9,7 @@ import (
 )
 
 // ReadRawHooks reads the raw hooks map from a settings file.
-// settingsDir is the directory name (e.g., ".claude" or ".gemini").
+// settingsDir is the directory name (e.g., ".claude" or ".cursor").
 func ReadRawHooks(t *testing.T, tempDir, settingsDir string) map[string]json.RawMessage {
 	t.Helper()
 	settingsPath := filepath.Join(tempDir, settingsDir, "settings.json")
