@@ -25,7 +25,6 @@ func TestAgentHelpBannerSuffix(t *testing.T) {
 	for _, name := range []types.AgentName{
 		agent.AgentNameClaudeCode,
 		agent.AgentNameCodex,
-		agent.AgentNameGemini,
 		agent.AgentNameCursor,
 		agent.AgentNameCopilotCLI,
 		agent.AgentNameOpenCode,

@@ -265,7 +265,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 		ag := &CopilotCLIAgent{}
 		path := writeTestJSONL(t, testJSONLLines)
 
-		files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+		files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -287,7 +287,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 
 		// Offset 5 means skip first 5 lines (tool.execution_complete is line 5)
 		// so only lines 6 and 7 remain (assistant.message and assistant.turn_end)
-		files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 5)
+		files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 5)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -303,7 +303,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 		t.Parallel()
 		ag := &CopilotCLIAgent{}
 
-		files, pos, err := ag.ExtractModifiedFilesFromOffset("", 0)
+		files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), "", 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

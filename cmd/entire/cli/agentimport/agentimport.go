@@ -88,7 +88,6 @@ var importers = []Importer{
 	factoryImporter{},
 	codexImporter{},
 	copilotImporter{},
-	geminiImporter{},
 }
 
 // All returns every supported importer, sorted by name.

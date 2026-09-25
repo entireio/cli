@@ -12,7 +12,7 @@ import (
 )
 
 // HookConfigFile is an agent's hook-configuration file inside the worktree —
-// .claude/settings.json, .cursor/hooks.json, .gemini/settings.json,
+// .claude/settings.json, .cursor/hooks.json,
 // .github/hooks/entire.json, .factory/settings.json, .codex/hooks.json,
 // .opencode/plugins/entire.ts, .pi/extensions/entire/index.ts.
 //

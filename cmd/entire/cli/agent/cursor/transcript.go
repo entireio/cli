@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -154,7 +155,7 @@ func ExtractModifiedFiles(lines []transcript.Line) []string {
 // A missing transcript is not an error: Cursor reports transcript_path as null in
 // CLI mode, so ResolveSessionFile predicts a path that may not exist yet, and this
 // runs on capture paths that must fail open (matching GetTranscriptPosition).
-func (c *CursorAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (c *CursorAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	if path == "" {
 		return nil, 0, nil
 	}

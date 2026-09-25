@@ -129,6 +129,25 @@ func IsolateProcess(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "0")
 }
 
+// IsolateRepository isolates config and removes inherited repository/object-store
+// selectors for a test that drives Git against temporary repositories. Unlike
+// IsolateProcess, it must not be used by tests intentionally inheriting a hook's
+// temporary index or another repository selector. It changes process-global
+// state, so the test cannot run in parallel.
+func IsolateRepository(t *testing.T) {
+	t.Helper()
+	IsolateProcess(t)
+	for _, key := range []string{
+		"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	} {
+		t.Setenv(key, "") // register restoration before unsetting
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+}
+
 // IsolateMain is IsolateProcess for a TestMain, which has no *testing.T to
 // restore through: the isolation is set process-wide for the whole run via
 // os.Setenv and inherited by every spawned binary and git hook. Inherited

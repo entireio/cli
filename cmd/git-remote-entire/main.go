@@ -414,10 +414,9 @@ func coreTrusted(coreURL string, trusted []string) bool {
 }
 
 // gitActionFromRequest classifies a smart-HTTP request as "pull" or "push".
-// The jurisdiction token doesn't vary by action, but the classification
-// still gates which endpoints may carry credentials (and labels the timing
-// logs). Returns "" when the endpoint isn't a recognised git smart-HTTP
-// route.
+// The bearer doesn't vary by action, but the classification still gates
+// which endpoints may carry credentials (and labels the timing logs).
+// Returns "" when the endpoint isn't a recognised git smart-HTTP route.
 func gitActionFromRequest(req *http.Request) string {
 	path := req.URL.Path
 	switch req.Method {

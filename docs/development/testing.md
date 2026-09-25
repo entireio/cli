@@ -78,7 +78,7 @@ E2E tests:
 - See [`e2e/README.md`](../../e2e/README.md) for full documentation (structure, debugging, adding agents)
 - Test agent interactions (creating files, committing, etc.); Vogon and Roger Roger are deterministic canaries rather than real-agent API calls.
 - Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Select a runner via `E2E_AGENT`: `claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor-cli`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`, or `roger-roger`. These are the filter names used by registration in `e2e/agents/`, not necessarily the CLI's agent identifiers.
+- Select a runner via `E2E_AGENT`: `claude-code`, `opencode`, `codex`, `cursor-cli`, `factoryai-droid`, `copilot-cli`, `pi`, `vogon`, or `roger-roger`. These are the filter names used by registration in `e2e/agents/`, not necessarily the CLI's agent identifiers.
 
 **Environment variables:**
 
@@ -86,7 +86,7 @@ E2E tests:
 - `E2E_CLAUDE_MODEL` - Claude model to use (default: `haiku` for cost efficiency)
 - `E2E_TIMEOUT` - Per-prompt timeout, overriding each runner's own default (e.g. `E2E_TIMEOUT=4m`)
 
-The per-prompt default is the runner's, not a single number: codex, copilot-cli and gemini use 60s, cursor 90s, opencode 2m, and claude-code, droid, pi, vogon and roger-roger impose no per-prompt bound at all — for those the scenario timeout passed to `ForEachAgent` is the only deadline. `E2E_TIMEOUT` sets a bound for every runner including those, and a per-test `agents.WithPromptTimeout(...)` overrides it. All ten resolve through `promptTimeout` in `e2e/agents/agent.go`; a runner that resolves its own is a build failure (`TestEveryRunPromptResolvesThroughPromptTimeout`). A malformed value is an error rather than a silent fall back to the default.
+The per-prompt default is the runner's, not a single number: codex and copilot-cli use 60s, cursor 90s, opencode 2m, and claude-code, droid, pi, vogon and roger-roger impose no per-prompt bound at all — for those the scenario timeout passed to `ForEachAgent` is the only deadline. `E2E_TIMEOUT` sets a bound for every runner including those, and a per-test `agents.WithPromptTimeout(...)` overrides it. All nine resolve through `promptTimeout` in `e2e/agents/agent.go`; a runner that resolves its own is a build failure (`TestEveryRunPromptResolvesThroughPromptTimeout`). A malformed value is an error rather than a silent fall back to the default.
 
 ### Test Parallelization
 

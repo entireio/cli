@@ -140,6 +140,22 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	}, err
 }
 
+// codexTUIArgs builds the interactive command line: the binary, the sandbox
+// bypass every test relies on, the daemon opt-out, and any subcommand
+// (resume, ...) after those. Codex accepts both flags at the root and on
+// resume, so the root placement covers every session kind.
+//
+// Codex 0.157 puts a shared app-server daemon behind the TUI, reached over a
+// unix socket under CODEX_HOME. Our per-test home sits under the run's cache
+// dir, and on CI that socket path exceeds the 108-byte unix limit (SUN_LEN),
+// so the TUI dies before its first prompt. --no-daemon avoids the socket
+// entirely. It requires Codex 0.157+; older binaries reject the flag at
+// startup, which is the intended loud failure.
+func codexTUIArgs(extra ...string) []string {
+	args := []string{"codex", "--dangerously-bypass-approvals-and-sandbox", "--no-daemon"}
+	return append(args, extra...)
+}
+
 func (c *Codex) StartSession(ctx context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("codex-test-%d", time.Now().UnixNano())
 
@@ -157,7 +173,7 @@ func (c *Codex) StartSession(ctx context.Context, dir string) (Session, error) {
 		return nil, fmt.Errorf("seed codex home: %w", err)
 	}
 
-	s, err := c.startTmuxSession(name, dir, home, "codex", "--dangerously-bypass-approvals-and-sandbox")
+	s, err := c.startTmuxSession(name, dir, home, codexTUIArgs()...)
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -176,7 +192,7 @@ func (c *Codex) ResumeSession(ctx context.Context, dir, home, sessionID string) 
 	_ = ctx
 	name := fmt.Sprintf("codex-resume-%d", time.Now().UnixNano())
 
-	s, err := c.startTmuxSession(name, dir, home, "codex", "--dangerously-bypass-approvals-and-sandbox", "resume", sessionID)
+	s, err := c.startTmuxSession(name, dir, home, codexTUIArgs("resume", sessionID)...)
 	if err != nil {
 		return nil, err
 	}

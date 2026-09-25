@@ -1,6 +1,7 @@
 package vogon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,7 +24,7 @@ func TestExtractModifiedFilesFromOffset_OnlyToolUseEntries(t *testing.T) {
 		t.Fatalf("write transcript: %v", err)
 	}
 
-	files, pos, err := (&Agent{}).ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := (&Agent{}).ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset: %v", err)
 	}
@@ -50,7 +51,7 @@ func TestExtractModifiedFilesFromOffset_HonoursOffsetAndDedupes(t *testing.T) {
 		t.Fatalf("write transcript: %v", err)
 	}
 
-	files, _, err := (&Agent{}).ExtractModifiedFilesFromOffset(path, 1)
+	files, _, err := (&Agent{}).ExtractModifiedFilesFromOffset(context.Background(), path, 1)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset: %v", err)
 	}

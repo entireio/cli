@@ -51,7 +51,7 @@ func TestRegistry_HasClaude(t *testing.T) {
 func TestRegistry_AllSupportedAgents(t *testing.T) {
 	t.Parallel()
 	want := []string{
-		"claude-code", "cursor", "pi", "factoryai-droid", "codex", "copilot-cli", "gemini",
+		"claude-code", "cursor", "pi", "factoryai-droid", "codex", "copilot-cli",
 	}
 	registered := make(map[string]Importer)
 	for _, imp := range All() {

@@ -192,7 +192,7 @@ func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 	}
 	// Negative guards against regressions:
 	//   - Hardcoded "Claude" / "sonnet" / "Anthropic" would misdirect users of
-	//     alternate summary providers (codex, gemini).
+	//     alternate summary providers (codex, cursor).
 	combined := label + "\n" + err.Error()
 	var combinedSb194 strings.Builder
 	for _, r := range rows {

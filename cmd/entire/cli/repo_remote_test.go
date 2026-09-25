@@ -79,84 +79,71 @@ func TestRedactGitArgs(t *testing.T) {
 	})
 }
 
+// planTestMirrorURL is the URL every planning case writes; only the remote's
+// current state varies between them.
+const planTestMirrorURL = "entire://aws-us-east-2.entire.io/gh/octocat/hello-world"
+
+// mustPlan plans a write that is expected to be allowed, so each case below
+// asserts the plan rather than restating the nil-error check.
+func mustPlan(t *testing.T, remote, currentURL string, override bool, remotes map[string]bool) mirrorRemotePlan {
+	t.Helper()
+	plan, err := planMirrorRemote(remote, planTestMirrorURL, currentURL, nil, override, remotes)
+	require.NoError(t, err)
+	return plan
+}
+
+// An occupied remote name is refused the way `git remote add` refuses one, so
+// the mirror URL never lands on a remote the caller did not mean to repoint.
+// --override is the only way through, and it names itself in the refusal.
+func TestPlanMirrorRemote_OccupiedNameNeedsOverride(t *testing.T) {
+	t.Parallel()
+	const mirrorURL = planTestMirrorURL
+	const forgeURL = "git@github.com:octocat/hello-world.git"
+
+	_, err := planMirrorRemote("origin", mirrorURL, forgeURL, nil, false, map[string]bool{"origin": true})
+	require.ErrorContains(t, err, "origin")
+	require.ErrorContains(t, err, "already exists")
+	require.ErrorContains(t, err, "--override")
+
+	// A remote already pointing at this very URL is what the caller asked for,
+	// so it reports rather than refusing — re-running must stay safe.
+	plan, err := planMirrorRemote("origin", mirrorURL, mirrorURL, nil, false, map[string]bool{"origin": true})
+	require.NoError(t, err)
+	require.True(t, plan.noop)
+}
+
 func TestPlanMirrorRemote(t *testing.T) {
 	t.Parallel()
-	const mirrorURL = "entire://aws-us-east-2.entire.io/gh/octocat/hello-world"
+	const mirrorURL = planTestMirrorURL
 	const forgeURL = "git@github.com:octocat/hello-world.git"
 
 	t.Run("adds a remote that does not exist", func(t *testing.T) {
 		t.Parallel()
-		plan := planMirrorRemote("entire", mirrorURL, "", "upstream", map[string]bool{"origin": true})
+		plan := mustPlan(t, "entire", "", false, map[string]bool{"origin": true})
 		require.True(t, plan.add)
 		require.False(t, plan.noop)
 		require.Empty(t, plan.replacedURL)
-		require.Empty(t, plan.preserveAs, "nothing was replaced, so nothing is preserved")
 		require.Equal(t, mirrorURL, plan.mirrorURL)
 	})
 
-	t.Run("replaces and preserves the previous URL", func(t *testing.T) {
+	t.Run("--override replaces and records what it replaced", func(t *testing.T) {
 		t.Parallel()
-		plan := planMirrorRemote("origin", mirrorURL, forgeURL, "upstream", map[string]bool{"origin": true})
+		plan := mustPlan(t, "origin", forgeURL, true, map[string]bool{"origin": true})
 		require.False(t, plan.add)
 		require.False(t, plan.noop)
-		require.Equal(t, forgeURL, plan.replacedURL)
-		require.Equal(t, "upstream", plan.preserveAs)
-	})
-
-	// The fork layout (origin + upstream both configured) hits this by default,
-	// so the skip must be recorded for the report to warn about — not silently
-	// dropped, which would leave a clean ✓ over a lost URL.
-	t.Run("records the skip when the upstream name is taken", func(t *testing.T) {
-		t.Parallel()
-		plan := planMirrorRemote("origin", mirrorURL, forgeURL, "upstream",
-			map[string]bool{"origin": true, "upstream": true})
-		require.Equal(t, forgeURL, plan.replacedURL)
-		require.Empty(t, plan.preserveAs, "an existing upstream must not be clobbered")
-		require.Equal(t, "upstream", plan.preserveSkipped)
-	})
-
-	// `--upstream ''` is an explicit opt-out, so there is nothing to warn about.
-	t.Run("skips preserving silently when disabled", func(t *testing.T) {
-		t.Parallel()
-		plan := planMirrorRemote("origin", mirrorURL, forgeURL, "", map[string]bool{"origin": true})
-		require.Equal(t, forgeURL, plan.replacedURL)
-		require.Empty(t, plan.preserveAs)
-		require.Empty(t, plan.preserveSkipped, "an explicit opt-out is not a skipped preservation")
-	})
-
-	t.Run("records the skip when preserving onto itself", func(t *testing.T) {
-		t.Parallel()
-		plan := planMirrorRemote("origin", mirrorURL, forgeURL, "origin", map[string]bool{"origin": true})
-		require.Empty(t, plan.preserveAs)
-		require.Equal(t, "origin", plan.preserveSkipped)
-	})
-
-	t.Run("a successful preserve records no skip", func(t *testing.T) {
-		t.Parallel()
-		plan := planMirrorRemote("origin", mirrorURL, forgeURL, "upstream", map[string]bool{"origin": true})
-		require.Equal(t, "upstream", plan.preserveAs)
-		require.Empty(t, plan.preserveSkipped)
-	})
-
-	// add/noop never replace anything, so neither can strand a URL.
-	t.Run("add and noop never record a skip", func(t *testing.T) {
-		t.Parallel()
-		add := planMirrorRemote("entire", mirrorURL, "", "upstream", map[string]bool{"origin": true, "upstream": true})
-		require.Empty(t, add.preserveSkipped)
-		noop := planMirrorRemote("origin", mirrorURL, mirrorURL, "upstream", map[string]bool{"origin": true, "upstream": true})
-		require.Empty(t, noop.preserveSkipped)
+		require.Equal(t, forgeURL, plan.replacedURL, "the report is the only record of it")
 	})
 
 	t.Run("noop when already pointing at the mirror", func(t *testing.T) {
 		t.Parallel()
-		plan := planMirrorRemote("origin", mirrorURL, mirrorURL, "upstream", map[string]bool{"origin": true})
+		plan := mustPlan(t, "origin", mirrorURL, false, map[string]bool{"origin": true})
 		require.True(t, plan.noop)
-		require.Empty(t, plan.preserveAs)
+		require.Empty(t, plan.replacedURL)
 	})
 
 	t.Run("noop tolerates surrounding whitespace and case", func(t *testing.T) {
 		t.Parallel()
-		plan := planMirrorRemote("origin", mirrorURL, "  "+strings.ToUpper(mirrorURL)+"  ", "upstream",
+		plan := mustPlan(t, "origin", "  "+strings.ToUpper(mirrorURL)+"  ", false,
 			map[string]bool{"origin": true})
 		require.True(t, plan.noop)
 	})
@@ -176,6 +163,15 @@ func applyPlanRepo(t *testing.T, remotes map[string]string) string {
 	return dir
 }
 
+// mustListRemotes is the assertion that a plan wrote no remote beyond the one
+// it named — the property that replaced --upstream.
+func mustListRemotes(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	remotes, err := listGitRemotes(t.Context(), dir)
+	require.NoError(t, err)
+	return remotes
+}
+
 func remoteURL(t *testing.T, dir, name string) string {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", "remote", "get-url", name)
@@ -187,84 +183,58 @@ func remoteURL(t *testing.T, dir, name string) string {
 
 func TestApplyMirrorRemotePlan(t *testing.T) {
 	t.Parallel()
-	const mirrorURL = "entire://aws-us-east-2.entire.io/gh/octocat/hello-world"
+	const mirrorURL = planTestMirrorURL
 	const forgeURL = "git@github.com:octocat/hello-world.git"
 
-	t.Run("replace preserves the old URL under upstream", func(t *testing.T) {
+	// --override writes exactly one remote: the replaced URL is not copied
+	// anywhere, so nothing but the named remote changes.
+	t.Run("override repoints and writes nothing else", func(t *testing.T) {
 		t.Parallel()
 		dir := applyPlanRepo(t, map[string]string{"origin": forgeURL})
-		plan := planMirrorRemote("origin", mirrorURL, forgeURL, "upstream", map[string]bool{"origin": true})
+		plan := mustPlan(t, "origin", forgeURL, true, map[string]bool{"origin": true})
 		require.NoError(t, applyMirrorRemotePlan(t.Context(), dir, plan))
 		require.Equal(t, mirrorURL, remoteURL(t, dir, "origin"))
-		require.Equal(t, forgeURL, remoteURL(t, dir, "upstream"))
+		require.Equal(t, map[string]bool{"origin": true}, mustListRemotes(t, dir))
 	})
 
 	t.Run("add creates a side remote and leaves origin alone", func(t *testing.T) {
 		t.Parallel()
 		dir := applyPlanRepo(t, map[string]string{"origin": forgeURL})
-		plan := planMirrorRemote("entire", mirrorURL, "", "upstream", map[string]bool{"origin": true})
+		plan := mustPlan(t, "entire", "", false, map[string]bool{"origin": true})
 		require.NoError(t, applyMirrorRemotePlan(t.Context(), dir, plan))
 		require.Equal(t, mirrorURL, remoteURL(t, dir, "entire"))
 		require.Equal(t, forgeURL, remoteURL(t, dir, "origin"), "origin must be untouched")
 	})
 
-	t.Run("replace without preserving discards the old URL", func(t *testing.T) {
-		t.Parallel()
-		dir := applyPlanRepo(t, map[string]string{"origin": forgeURL})
-		plan := planMirrorRemote("origin", mirrorURL, forgeURL, "", map[string]bool{"origin": true})
-		require.NoError(t, applyMirrorRemotePlan(t.Context(), dir, plan))
-		require.Equal(t, mirrorURL, remoteURL(t, dir, "origin"))
-		cmd := exec.CommandContext(t.Context(), "git", "remote", "get-url", "upstream")
-		cmd.Dir = dir
-		require.Error(t, cmd.Run(), "no upstream remote should have been created")
-	})
-
 	t.Run("noop writes nothing", func(t *testing.T) {
 		t.Parallel()
 		dir := applyPlanRepo(t, map[string]string{"origin": mirrorURL})
-		plan := planMirrorRemote("origin", mirrorURL, mirrorURL, "upstream", map[string]bool{"origin": true})
+		plan := mustPlan(t, "origin", mirrorURL, false, map[string]bool{"origin": true})
 		require.NoError(t, applyMirrorRemotePlan(t.Context(), dir, plan))
 		require.Equal(t, mirrorURL, remoteURL(t, dir, "origin"))
-		cmd := exec.CommandContext(t.Context(), "git", "remote", "get-url", "upstream")
-		cmd.Dir = dir
-		require.Error(t, cmd.Run())
+		require.Equal(t, map[string]bool{"origin": true}, mustListRemotes(t, dir))
 	})
 
-	// A failing `git remote add` echoes its argv into the error, and that error is
-	// a plain (printed) error — so a credentialed replaced URL must not survive
-	// into it. Guards the same property reportMirrorRemotePlan already has.
+	// A failing git command echoes its argv into the error, and that error is a
+	// plain (printed) error — so a credentialed URL must not survive into it.
+	// Guards redactGitArgs, which is the only thing standing between the argv
+	// and stderr.
 	t.Run("a failed git command does not leak credentials from the argv", func(t *testing.T) {
 		t.Parallel()
-		dir := applyPlanRepo(t, map[string]string{"origin": "git@github.com:octocat/hello-world.git"})
+		dir := applyPlanRepo(t, map[string]string{"origin": forgeURL})
+		// set-url against a remote that does not exist fails, with the URL in
+		// the argv it reports.
 		plan := mirrorRemotePlan{
-			remote:      "origin",
-			mirrorURL:   mirrorURL,
-			replacedURL: "https://user:ghp_SUPERSECRET@github.com/octocat/hello-world",
-			// Collides with the existing origin, so `git remote add` fails.
-			preserveAs: "origin",
+			remote:    "no-such-remote",
+			mirrorURL: "https://user:ghp_SUPERSECRET@github.com/octocat/hello-world",
 		}
 		err := applyMirrorRemotePlan(t.Context(), dir, plan)
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "ghp_SUPERSECRET", "credentials must not reach the error message")
 		require.NotContains(t, err.Error(), "user:", "userinfo must not reach the error message")
 		// Still useful for diagnosis: the command and the host survive.
-		require.Contains(t, err.Error(), "git remote add")
+		require.Contains(t, err.Error(), "git remote set-url")
 		require.Contains(t, err.Error(), "github.com/octocat/hello-world")
-	})
-
-	t.Run("a failed preserve leaves the target URL intact", func(t *testing.T) {
-		t.Parallel()
-		dir := applyPlanRepo(t, map[string]string{"origin": forgeURL})
-		// preserveAs collides with the existing origin, so `git remote add`
-		// fails. The target must not have been rewritten.
-		plan := mirrorRemotePlan{
-			remote:      "origin",
-			mirrorURL:   mirrorURL,
-			replacedURL: forgeURL,
-			preserveAs:  "origin",
-		}
-		require.Error(t, applyMirrorRemotePlan(t.Context(), dir, plan))
-		require.Equal(t, forgeURL, remoteURL(t, dir, "origin"))
 	})
 }
 
@@ -287,13 +257,13 @@ func TestListGitRemotes_NoRemotes(t *testing.T) {
 	require.Empty(t, remotes)
 }
 
-func TestResolveMirrorUseUpstream(t *testing.T) {
+func TestResolveRemoteRepoRef(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
 		// remotes configures the repo's remotes before resolving.
 		remotes map[string]string
-		// remote is the write target passed to resolveMirrorUseUpstream;
+		// remote is the write target passed to resolveRemoteRepoRef;
 		// defaults to "origin" when empty.
 		remote    string
 		arg       string
@@ -389,7 +359,7 @@ func TestResolveMirrorUseUpstream(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			remote := cmp.Or(tt.remote, "origin")
-			got, err := resolveMirrorUseUpstream(t.Context(), applyPlanRepo(t, tt.remotes), remote, tt.arg)
+			got, err := resolveRemoteRepoRef(t.Context(), applyPlanRepo(t, tt.remotes), remote, tt.arg)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return
@@ -403,112 +373,73 @@ func TestResolveMirrorUseUpstream(t *testing.T) {
 
 func TestReportMirrorRemotePlan(t *testing.T) {
 	t.Parallel()
-	const mirrorURL = "entire://aws-us-east-2.entire.io/gh/octocat/hello-world"
+	const mirrorURL = planTestMirrorURL
 
-	// report returns the plan's stdout and stderr separately.
-	report := func(plan mirrorRemotePlan) (stdout, stderr string) {
-		var o, e strings.Builder
-		reportMirrorRemotePlan(&o, &e, plan)
-		return o.String(), e.String()
+	report := func(plan mirrorRemotePlan) string {
+		var o strings.Builder
+		reportMirrorRemotePlan(&o, plan)
+		return o.String()
 	}
 
-	t.Run("replace reports the old URL and the preserve remote", func(t *testing.T) {
+	// The replaced URL is printed because this output is the only record of it:
+	// --override copies it nowhere.
+	t.Run("override reports the URL it replaced", func(t *testing.T) {
 		t.Parallel()
-		out, errOut := report(mirrorRemotePlan{
+		out := report(mirrorRemotePlan{
 			remote:      "origin",
 			mirrorURL:   mirrorURL,
 			replacedURL: "git@github.com:octocat/hello-world.git",
-			preserveAs:  "upstream",
 		})
 		require.Contains(t, out, "Repointed remote \"origin\"")
 		require.Contains(t, out, mirrorURL)
 		require.Contains(t, out, "was: git@github.com:octocat/hello-world.git")
-		require.Contains(t, out, "as remote \"upstream\"")
 		require.Contains(t, out, "git fetch origin")
-		require.Empty(t, errOut, "a successful preserve warns about nothing")
 	})
 
-	// Even with no preserve remote, the replaced URL must be printed so the
-	// previous value stays recoverable from the transcript.
-	t.Run("replace without preserve still prints the old URL", func(t *testing.T) {
+	t.Run("credentials are redacted in the replaced URL", func(t *testing.T) {
 		t.Parallel()
-		out, errOut := report(mirrorRemotePlan{
+		out := report(mirrorRemotePlan{
 			remote:      "origin",
 			mirrorURL:   mirrorURL,
-			replacedURL: "https://github.com/octocat/hello-world",
-		})
-		require.Contains(t, out, "was: https://github.com/octocat/hello-world")
-		require.NotContains(t, out, "Kept the previous URL")
-		require.Empty(t, errOut, "an explicit --upstream '' opt-out is not warned about")
-	})
-
-	// The finding this guards: a skipped preservation must be stated outright, not
-	// signalled by the absence of the "Kept the previous URL" line.
-	t.Run("a skipped preserve warns loudly on stderr", func(t *testing.T) {
-		t.Parallel()
-		out, errOut := report(mirrorRemotePlan{
-			remote:          "origin",
-			mirrorURL:       mirrorURL,
-			replacedURL:     "git@github.com:octocat/hello-world.git",
-			preserveSkipped: "upstream",
-		})
-		require.Contains(t, out, "was: git@github.com:octocat/hello-world.git")
-		require.NotContains(t, out, "Kept the previous URL")
-		require.Contains(t, errOut, "WARNING")
-		require.Contains(t, errOut, "NOT saved to git config")
-		require.Contains(t, errOut, "remote \"upstream\" already exists")
-		require.Contains(t, errOut, "git remote add <name> git@github.com:octocat/hello-world.git",
-			"the warning must carry the URL needed to recover it")
-	})
-
-	t.Run("credentials are redacted in both the report and the warning", func(t *testing.T) {
-		t.Parallel()
-		out, errOut := report(mirrorRemotePlan{
-			remote:          "origin",
-			mirrorURL:       mirrorURL,
-			replacedURL:     "https://user:s3cret@github.com/octocat/hello-world",
-			preserveSkipped: "upstream",
+			replacedURL: "https://user:s3cret@github.com/octocat/hello-world",
 		})
 		require.NotContains(t, out, "s3cret")
 		require.Contains(t, out, "github.com/octocat/hello-world")
-		require.NotContains(t, errOut, "s3cret", "the recovery hint must not leak credentials either")
-		require.Contains(t, errOut, "redacted")
 	})
 
 	t.Run("add reports no replacement", func(t *testing.T) {
 		t.Parallel()
-		out, errOut := report(mirrorRemotePlan{remote: "entire", mirrorURL: mirrorURL, add: true})
+		out := report(mirrorRemotePlan{remote: "entire", mirrorURL: mirrorURL, add: true})
 		require.Contains(t, out, "Added remote \"entire\"")
 		require.NotContains(t, out, "was:")
 		require.Contains(t, out, "git fetch entire")
-		require.Empty(t, errOut)
 	})
 
 	t.Run("noop reports no change", func(t *testing.T) {
 		t.Parallel()
-		out, errOut := report(mirrorRemotePlan{remote: "origin", mirrorURL: mirrorURL, noop: true})
+		out := report(mirrorRemotePlan{remote: "origin", mirrorURL: mirrorURL, noop: true})
 		require.Contains(t, out, "already points at the mirror")
 		require.NotContains(t, out, "git fetch")
-		require.Empty(t, errOut)
 	})
 }
 
-func TestRepoRemoteUseCmd_FlagValidation(t *testing.T) {
+func TestRepoRemoteAddCmd_ArgValidation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{name: "bad remote", args: []string{"--remote", "-f"}, want: "invalid --remote"},
-		{name: "bad upstream", args: []string{"--upstream", "bad name"}, want: "invalid --upstream"},
-		{name: "bad cluster flag", args: []string{"--cluster", "not a host"}, want: "invalid --cluster"},
-		{name: "a second positional is not a cluster host", args: []string{"github.com/a/b", "aws-us-east-2.entire.io"}, want: "accepts at most 1 arg"},
+		{name: "no remote name", args: []string{}, want: "accepts between 1 and 2 arg"},
+		{name: "bad remote name", args: []string{"-f"}, want: "unknown shorthand flag"},
+		{name: "remote name git would refuse", args: []string{"bad name"}, want: "invalid remote name"},
+		{name: "bad cluster flag", args: []string{"entire", "--cluster", "not a host"}, want: "invalid --cluster"},
+		{name: "a third positional is not a cluster host", args: []string{"entire", "github.com/a/b", "aws-us-east-2.entire.io"}, want: "accepts between 1 and 2 arg"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cmd := newRepoRemoteUseCmd()
+			cmd := newRepoRemoteAddCmd()
 			cmd.SetArgs(tt.args)
 			cmd.SetOut(&strings.Builder{})
 			cmd.SetErr(&strings.Builder{})
@@ -518,50 +449,20 @@ func TestRepoRemoteUseCmd_FlagValidation(t *testing.T) {
 	}
 }
 
-// The command must be reachable at `entire repo remote use`, and must not have
-// been registered as hidden.
-func TestRepoRemoteUseCmd_Registered(t *testing.T) {
+// `add` is the whole `repo remote` surface: it must be reachable, visible, and
+// the only verb there — the URL-printing half was removed in favour of
+// `entire repo mirror get`, which lists a clone URL per cluster.
+func TestRepoRemoteCmd_AddIsTheOnlyVerb(t *testing.T) {
 	t.Parallel()
-	var found bool
+	names := make([]string, 0, 1)
 	for _, c := range newRepoRemoteCmd().Commands() {
-		if c.Name() == "use" {
-			require.False(t, c.Hidden, "`repo remote use` must be visible")
-			found = true
+		if c.Name() == "help" || c.Name() == "completion" {
+			continue
 		}
+		require.False(t, c.Hidden, "`repo remote %s` must be visible", c.Name())
+		names = append(names, c.Name())
 	}
-	require.True(t, found, "`use` must be registered under `repo remote`")
-}
-
-// huh answers an unreadable accessible prompt by writing the FIRST option's
-// value and returning a nil error, so an interrupted prompt takes whichever
-// branch is listed first. That must be the same outcome the non-interactive path
-// produces with the same flags (repoint the target remote, preserving the old
-// URL), or a Ctrl+D would silently diverge from the documented default. This
-// pins that invariant: the prompt's first branch and the no-prompt path must
-// plan identically.
-// Not parallel: t.Setenv forces accessible mode process-wide so the prompt takes
-// the deterministic text path instead of trying to open a TTY.
-func TestPromptMirrorRemoteChoice_FirstOptionMatchesNonInteractive(t *testing.T) {
-	t.Setenv("ACCESSIBLE", "1")
-	const mirrorURL = "entire://aws-us-east-2.entire.io/gh/octocat/hello-world"
-	const forgeURL = "git@github.com:octocat/hello-world.git"
-	remotes := map[string]bool{"origin": true}
-
-	cmd := newRepoRemoteUseCmd()
-	cmd.SetOut(&strings.Builder{})
-	cmd.SetErr(&strings.Builder{})
-	cmd.SetContext(t.Context())
-
-	// Runs with stdin at EOF under `go test`, so huh selects the first option.
-	choice, err := promptMirrorRemoteChoice(cmd, "origin", forgeURL, mirrorURL, "upstream", remotes)
-	require.NoError(t, err)
-
-	fromPrompt := planMirrorRemote(choice.remote, mirrorURL, forgeURL, choice.upstream, remotes)
-	fromFlags := planMirrorRemote("origin", mirrorURL, forgeURL, "upstream", remotes)
-	require.Equal(t, fromFlags, fromPrompt,
-		"the prompt's first option must plan the same writes as the non-interactive path")
-	require.False(t, fromPrompt.add, "the first option must repoint, not add")
-	require.Equal(t, "upstream", fromPrompt.preserveAs, "the replaced URL must still be preserved")
+	require.Equal(t, []string{"add"}, names)
 }
 
 // gitRunner is the single chokepoint for the command's git writes; a failure
@@ -572,4 +473,171 @@ func TestApplyMirrorRemotePlan_GitFailureSurfaces(t *testing.T) {
 	// A path that is not a git repository makes `git remote set-url` fail.
 	err := applyMirrorRemotePlan(context.Background(), t.TempDir(), plan)
 	require.ErrorContains(t, err, "point remote \"origin\" at the mirror")
+}
+
+// A remote URL is legitimately a local path, and the report is the only record
+// of a URL --override just overwrote. RedactURL mangles one ("/srv/repo.git"
+// becomes ":///srv/repo.git"); RedactURLOrPath is the one that must be used.
+func TestRemoteReportKeepsALocalPathIntact(t *testing.T) {
+	t.Parallel()
+	const localPath = "/srv/repo.git"
+
+	var out strings.Builder
+	reportMirrorRemotePlan(&out, mirrorRemotePlan{
+		remote:      "backup",
+		mirrorURL:   planTestMirrorURL,
+		replacedURL: localPath,
+	})
+	require.Contains(t, out.String(), "was: "+localPath)
+
+	_, err := planMirrorRemote("backup", planTestMirrorURL, localPath, nil, false, map[string]bool{"backup": true})
+	require.ErrorContains(t, err, localPath)
+	require.NotContains(t, err.Error(), ":///srv")
+}
+
+// explicitPushURLs must answer only for a pushurl that is really configured.
+// `git remote get-url --push` echoes the FETCH url when none is set, and
+// against that every ordinary repoint looks stranded — the fetch URL is by
+// definition about to change — so a plain --override would print a spurious
+// "still pushes elsewhere" and talk the user into creating the very pushurl it
+// was warning about.
+func TestExplicitPushURLsIgnoresGitsFetchURLEcho(t *testing.T) {
+	t.Parallel()
+	const forgeURL = "git@github.com:octocat/hello-world.git"
+
+	t.Run("no pushurl configured is no push URL", func(t *testing.T) {
+		t.Parallel()
+		dir := applyPlanRepo(t, map[string]string{"origin": forgeURL})
+		require.Empty(t, explicitPushURLs(t.Context(), dir, "origin"))
+
+		// The end-to-end consequence: nothing to warn about on a plain repoint.
+		plan, err := planMirrorRemote("origin", planTestMirrorURL, forgeURL,
+			explicitPushURLs(t.Context(), dir, "origin"), true, map[string]bool{"origin": true})
+		require.NoError(t, err)
+		require.Empty(t, plan.strandedPushURLs)
+
+		var out strings.Builder
+		reportMirrorRemotePlan(&out, plan)
+		require.NotContains(t, out.String(), "still pushes elsewhere")
+	})
+
+	t.Run("a configured pushurl is reported", func(t *testing.T) {
+		t.Parallel()
+		dir := applyPlanRepo(t, map[string]string{"origin": forgeURL})
+		set := exec.CommandContext(t.Context(), "git", "remote", "set-url", "--push", "origin", "https://github.com/o/fork.git")
+		set.Dir = dir
+		require.NoError(t, set.Run())
+		require.Equal(t, []string{"https://github.com/o/fork.git"}, explicitPushURLs(t.Context(), dir, "origin"))
+	})
+}
+
+// An explicit pushurl outranks the URL this command writes, so a remote that
+// still pushes to the forge must be named rather than reported as fully
+// repointed — the Long promises fetch AND push go through Entire.
+func TestStrandedPushURLsAreReported(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a differing push URL is stranded and named", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planMirrorRemote("origin", planTestMirrorURL, "git@github.com:o/r.git",
+			[]string{"https://github.com/o/fork.git"}, true, map[string]bool{"origin": true})
+		require.NoError(t, err)
+		require.Equal(t, []string{"https://github.com/o/fork.git"}, plan.strandedPushURLs)
+
+		var out strings.Builder
+		reportMirrorRemotePlan(&out, plan)
+		require.Contains(t, out.String(), "still pushes elsewhere")
+		require.Contains(t, out.String(), "https://github.com/o/fork.git")
+		require.Contains(t, out.String(), "git remote set-url --push origin")
+	})
+
+	// A fetch URL already naming the mirror says nothing about an explicit
+	// pushurl, so the no-op path must report one too — this is what an
+	// idempotent script hits on its second run.
+	t.Run("a no-op still names a stranded push URL", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planMirrorRemote("origin", planTestMirrorURL, planTestMirrorURL,
+			[]string{"https://github.com/o/fork.git"}, false, map[string]bool{"origin": true})
+		require.NoError(t, err)
+		require.True(t, plan.noop)
+
+		var out strings.Builder
+		reportMirrorRemotePlan(&out, plan)
+		require.Contains(t, out.String(), "already points at the mirror")
+		require.Contains(t, out.String(), "still pushes elsewhere",
+			"a no-op fetch URL does not make an explicit pushurl harmless")
+	})
+
+	// `git remote get-url --push` echoes the fetch URL when no pushurl is set,
+	// so the URL this run writes is not a stranded push target.
+	t.Run("the mirror URL itself is not stranded", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planMirrorRemote("origin", planTestMirrorURL, "git@github.com:o/r.git",
+			[]string{planTestMirrorURL}, true, map[string]bool{"origin": true})
+		require.NoError(t, err)
+		require.Empty(t, plan.strandedPushURLs)
+
+		var out strings.Builder
+		reportMirrorRemotePlan(&out, plan)
+		require.NotContains(t, out.String(), "still pushes elsewhere")
+	})
+}
+
+// A bare "exit status 128" says nothing the user can act on; git's own sentence
+// is the only thing that names the cause.
+func TestGitRunnerSurfacesGitsOwnDiagnosis(t *testing.T) {
+	t.Parallel()
+	dir := applyPlanRepo(t, map[string]string{"origin": "https://github.com/o/r.git"})
+	// Two url values make `git remote set-url` refuse with a message of its own.
+	add := exec.CommandContext(t.Context(), "git", "config", "--add", "remote.origin.url", "https://github.com/o/second.git")
+	add.Dir = dir
+	require.NoError(t, add.Run())
+
+	_, err := gitRunner(t.Context(), dir, "remote", "set-url", "origin", planTestMirrorURL)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "multiple values", "git's own diagnosis reaches the user")
+	// The line naming what git could not set is the one that matters, and it
+	// embeds a URL. Redacting per line would route the whole sentence through
+	// RedactURL — which rebuilds it from a parsed scheme — and leave "fatal://".
+	require.Contains(t, err.Error(), "could not set", "the sentence survives the URL redaction")
+	require.NotContains(t, err.Error(), "fatal://", "a prose line must not be rebuilt as a URL")
+}
+
+// Redaction inside a stderr line must strip credentials from the URL without
+// destroying the sentence carrying it.
+func TestGitStderrRedactsOnlyTheURL(t *testing.T) {
+	t.Parallel()
+	err := &exec.ExitError{ProcessState: nil}
+	err.Stderr = []byte("error: cannot fetch https://user:ghp_SECRET@github.com/o/r\nfatal: could not set 'remote.origin.url'\n")
+
+	got := gitStderr(err)
+	require.NotContains(t, got, "ghp_SECRET", "credentials are stripped")
+	require.Contains(t, got, "error: cannot fetch https://github.com/o/r", "the sentence and the host survive")
+	require.Contains(t, got, "fatal: could not set 'remote.origin.url'")
+}
+
+// A credential containing a quote must not split the match: ending it on a
+// quote would redact the head of the URL and leave the tail of the password
+// sitting in the output.
+func TestGitStderrRedactsACredentialContainingAQuote(t *testing.T) {
+	t.Parallel()
+	err := &exec.ExitError{}
+	err.Stderr = []byte("error: cannot fetch https://user:pa'ss@github.com/o/r now\n")
+
+	got := gitStderr(err)
+	require.NotContains(t, got, "ss@", "no part of the credential survives")
+	require.NotContains(t, got, "pa'", "no part of the credential survives")
+	require.Contains(t, got, "https://github.com/o/r", "and the URL is still readable")
+}
+
+// git quotes the URL in its own messages; the sentence must stay intact.
+func TestGitStderrKeepsAQuotedURLsSentence(t *testing.T) {
+	t.Parallel()
+	err := &exec.ExitError{}
+	err.Stderr = []byte("fatal: could not set 'remote.origin.url' to 'https://user:tok@third/z'\n")
+
+	got := gitStderr(err)
+	require.NotContains(t, got, "tok")
+	require.Contains(t, got, "fatal: could not set 'remote.origin.url' to ")
+	require.Contains(t, got, "https://third/z")
 }

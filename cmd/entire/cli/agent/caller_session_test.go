@@ -40,9 +40,8 @@ func TestCallerSessionEnvVar_MatchesTheVendorsName(t *testing.T) {
 }
 
 // The agents deliberately WITHOUT the capability are as load-bearing as the
-// ones with it: Gemini CLI passes its session ID only to its own background
-// bookkeeping, and opencode's shell tool augments no environment at all. If
-// either gains the capability without an entry above, this fails and asks for
+// ones with it: opencode's shell tool augments no environment at all. If it
+// gains the capability without an entry above, this fails and asks for
 // the mapping to be pinned rather than left implicit.
 func TestCallerSessionEnvVar_UnpublishedAgentsStayUnpublished(t *testing.T) {
 	for _, name := range List() {

@@ -66,7 +66,6 @@ func TestCreateAndAwaitMirror_AsyncSuccess(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
-		require.False(t, outcome.created.Created)
 		require.Equal(t, coreapi.MirrorStatusReady, outcome.status)
 		require.Equal(t, []mirrorAddPhase{mirrorAddPhaseQueued, mirrorAddPhasePlacing, mirrorAddPhaseCloning}, phases)
 		require.Equal(t, []string{
@@ -369,14 +368,17 @@ func TestCreateAndAwaitMirror_AsyncResubmission(t *testing.T) {
 	useFastMirrorPolling(t)
 
 	t.Run("resubmission after transport failure reuses the placement", func(t *testing.T) {
-		submissions := 0
-		placements := 0
+		// Atomic, not plain ints: httptest serves each request on its own
+		// goroutine, and the aborted first request's handler can still be
+		// unwinding when the resubmission's handler runs, so two handler
+		// goroutines touch these counters. The race detector flagged exactly
+		// that in CI.
+		var submissions, placements atomic.Int32
 		client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case mirrorRequestsAPIPath:
-				submissions++
-				if submissions == 1 {
-					placements++
+				if submissions.Add(1) == 1 {
+					placements.Add(1)
 					panic(http.ErrAbortHandler)
 				}
 				writeAcceptedMirrorRequest(t, w)
@@ -396,8 +398,8 @@ func TestCreateAndAwaitMirror_AsyncResubmission(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
-		require.Equal(t, 1, placements)
-		require.Equal(t, 2, submissions)
+		require.Equal(t, int32(1), placements.Load())
+		require.Equal(t, int32(2), submissions.Load())
 	})
 }
 

@@ -12,7 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // Register agent for ResolveAgentForResume tests
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"  // Register agent for ResolveAgentForResume tests
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -171,17 +170,6 @@ func TestResolveAgentForResume(t *testing.T) {
 		}
 		if ag.Name() != agent.AgentNameClaudeCode {
 			t.Errorf("Name() = %q, want %q", ag.Name(), agent.AgentNameClaudeCode)
-		}
-	})
-
-	t.Run("Gemini CLI type resolves correctly", func(t *testing.T) {
-		t.Parallel()
-		ag, err := ResolveAgentForResume("Gemini CLI")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if ag.Name() != agent.AgentNameGemini {
-			t.Errorf("Name() = %q, want %q", ag.Name(), agent.AgentNameGemini)
 		}
 	})
 

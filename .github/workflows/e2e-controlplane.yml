@@ -2,13 +2,17 @@ name: E2E Control Plane
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
 
 # One shared test account with a three-org quota: never two runs at once, and
 # never cancel one mid-flight — a cancelled run skips t.Cleanup and leaks the
-# resources it created.
+# resources it created. PR runs share this group, so they queue behind any run
+# in flight rather than racing it on the account.
 concurrency:
   group: e2e-controlplane
   cancel-in-progress: false
@@ -19,6 +23,10 @@ jobs:
   controlplane:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Fork PRs get no secrets, and Dependabot-triggered runs get only
+    # Dependabot secrets, so either could only fail at login. It runs for other
+    # same-repo PRs, pushes to main, and manual dispatches.
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
     permissions:
       contents: read
 
@@ -53,8 +61,8 @@ jobs:
           path: e2e/artifacts/
           retention-days: 7
 
-  # The suite never runs on PRs, so a push to main is the only place a
-  # regression shows up; without this it stayed red for two days unnoticed.
+  # Only a push to main notifies: a PR's own checks already report its
+  # failure to its author, and a red main is what nobody is watching.
   notify-slack:
     runs-on: ubuntu-latest
     permissions: {}
@@ -76,7 +84,7 @@ jobs:
                       "type": "section",
                       "text": {
                         "type": "mrkdwn",
-                        "text": ":red_circle: *Control-plane E2E failed* on `main` — these tests run against production and never on PRs, so this is the first place a regression shows up. A killed run skips cleanup: check the shared test account for leftover `e2e-cp-*` orgs.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                        "text": ":red_circle: *Control-plane E2E failed* on `main` — these tests run against production, so main is now broken. A killed run skips cleanup: check the shared test account for leftover `e2e-cp-*` orgs.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
                       }
                     },
                     {
