@@ -45,7 +45,7 @@ func ParseEnvToken(raw string) (coreURL, token string, err error) {
 // helper uses the result only after checking it against the target cluster's
 // advertised CoreURLs, then sends the env token directly to the data plane.
 // Control-plane clients use the result as their bearer target; cell routing
-// uses it as the environment signal when no data host is configured.
+// lists clusters at it when no data host is configured.
 //
 // Structural rules, all required:
 //   - the aud is a well-formed absolute URL,

@@ -53,9 +53,9 @@ the commands are always runnable in every build.
   `token` (prints the active control-plane bearer to stdout for scripting/curl;
   honors `ENTIRE_TOKEN`, else the refreshed active-context login JWT). That
   token is also accepted directly at every entire-api cell (e.g.
-  `https://aws-us-east-2.api.entire.io/api/v1`, `aud == iss`, ADR 20260729), so
-  `token --jurisdiction <slug>` is deprecated: the flag stays registered but
-  hidden and fails with a migration hint. `auth status` shows the caller's
+  `https://aws-us-east-2.api.entire.io/api/v1`), so `token --jurisdiction
+  <slug>` is deprecated: the flag stays registered but hidden and fails with
+  a migration hint. `auth status` shows the caller's
   home jurisdiction. `logout` sweeps every saved
   login: one `DELETE /api/auth/tokens` per login server ends every CLI session
   there (core tells them apart by `issuer_client_id`), then the login is
@@ -528,8 +528,8 @@ themselves. `--to core` (default) hits the control plane; `--to cell` hits an
 entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 (cell routing lives in `auth.NewEntireAPICellClient` via `auth.CellTarget`;
-the login JWT is the bearer, no per-cell token exchange). **The cell path acts as the same login `--to core`
-does** — `ENTIRE_TOKEN` when set, else the selected context: with no
+the login JWT is the bearer). **The cell path acts as the same login
+`--to core` does** — `ENTIRE_TOKEN` when set, else the selected context: with no
 `ENTIRE_API_BASE_URL`, the cell `apiUrl` is read from the cluster catalog of
 that login's core, so a staging login lands on a staging cell and a local-dev
 login on the cell its local core advertises (never on the core itself); only an

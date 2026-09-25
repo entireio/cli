@@ -127,8 +127,8 @@ func newAuthCmd() *cobra.Command {
 // --- token ------------------------------------------------------------------
 
 // errJurisdictionFlagDeprecated is returned when `auth token --jurisdiction`
-// is used. The account access token printed by default is accepted at every
-// entire-api cell (aud == iss, ADR 20260729), so there is nothing to mint.
+// is used: the default token is accepted at every entire-api cell, so the
+// flag has nothing to add.
 var errJurisdictionFlagDeprecated = errors.New("--jurisdiction is deprecated; use 'entire auth token' without it")
 
 // newAuthTokenCmd prints an Entire bearer to stdout for scripting: the active
@@ -166,8 +166,8 @@ func newAuthTokenCmd() *cobra.Command {
 				return errJurisdictionFlagDeprecated
 			}
 
-			// Refresh may exchange/refresh over the network; honor the
-			// plain-HTTP opt-in before resolving so local dev cores work.
+			// Refresh may go over the network; honor the plain-HTTP opt-in
+			// before resolving so local dev cores work.
 			insecure := applyInsecureHTTPAuth(insecureHTTPAuth)
 
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)

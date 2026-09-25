@@ -457,7 +457,7 @@ func buildCodeSearchOpts(ctx context.Context, commandPath, owner, repoName strin
 	}
 }
 
-// codeSearchCellTimeout bounds each per-cell search call (token exchange + API).
+// codeSearchCellTimeout bounds each per-cell search call (login refresh + API).
 const codeSearchCellTimeout = 30 * time.Second
 
 // runCodeSearch handles the --code flag path: search code content via peregrine.

@@ -159,23 +159,22 @@ func (f *CellClientFactory) cellBaseURLFor(ctx context.Context, target *CellTarg
 // cellSubject carries the credential and routing signals cell routing needs.
 type cellSubject struct {
 	loginJWT string
-	// discoveredCore is the core that issued loginJWT: the core to list
-	// clusters at, and the environment signal (prod / staging / loopback)
-	// when no data host says otherwise.
+	// discoveredCore is the core that issued loginJWT: the core whose cluster
+	// catalog picks the cell when no data host says otherwise.
 	discoveredCore string
 	// dataHost is the origin ENTIRE_API_BASE_URL names, or "" when the CLI is
 	// not pointed at an explicit data host. Only an explicit host is ever
-	// dialed verbatim as a cell or preferred as the environment signal; "" means
-	// the cell is always resolved from discoveredCore's catalog, so a login core
-	// is never mistaken for the cell it fronts.
+	// dialed verbatim as a cell; "" means the cell is always resolved from
+	// discoveredCore's catalog, so a login core is never mistaken for the cell
+	// it fronts.
 	dataHost   string
 	httpClient *http.Client
 }
 
 // resolveActiveContextCellSubject builds the subject from the selected stored
 // login context (--context / $ENTIRE_CONTEXT / current_context): it refreshes
-// that context's login JWT and uses the context's own core as the environment
-// signal and the core to list clusters from. Used by resolveCellClientSubject.
+// that context's login JWT and lists clusters at the context's own core. Used
+// by resolveCellClientSubject.
 func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
 	if insecureHTTP {
 		EnableInsecureHTTP()
@@ -312,10 +311,10 @@ func refreshCellLoginJWT(ctx context.Context, c *contexts.Context) (string, erro
 }
 
 // resolveEnvTokenCellSubject builds the subject from ENTIRE_TOKEN: the env token
-// is the login JWT and its aud core is the environment signal, so the
-// audience/core templates and the cell catalog follow prod/staging/loopback
-// without ENTIRE_API_BASE_URL. Discovery is skipped — the token is used
-// verbatim. Presence is fail-closed via ParseEnvToken.
+// is the login JWT and clusters are listed at its aud core, so the cell
+// catalog follows prod/staging/loopback without ENTIRE_API_BASE_URL. Discovery
+// is skipped — the token is used verbatim. Presence is fail-closed via
+// ParseEnvToken.
 func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, error) {
 	if insecureHTTP {
 		EnableInsecureHTTP()
@@ -331,10 +330,9 @@ func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, err
 	}, nil
 }
 
-// cellExchangeHTTPClient builds the HTTP client used for the home-jurisdiction
-// cluster listing. It honours the test
-// transport seam, then the plain-HTTP-discovery relaxation for a loopback
-// origin, else a plain timeout client.
+// cellExchangeHTTPClient builds the HTTP client used for the cluster listing.
+// It honours the test transport seam, then the plain-HTTP-discovery relaxation
+// for a loopback origin, else a plain timeout client.
 func cellExchangeHTTPClient(origin string) *http.Client {
 	switch {
 	case cellExchangeTransportForTest != nil:
@@ -348,7 +346,7 @@ func cellExchangeHTTPClient(origin string) *http.Client {
 	}
 }
 
-// targetJurisdiction picks the jurisdiction to mint for from a repo CellTarget:
+// targetJurisdiction picks the jurisdiction to route to from a repo CellTarget:
 // the target's explicit jurisdiction when present, otherwise the caller's home
 // jurisdiction from the login JWT.
 func targetJurisdiction(target *CellTarget, loginJWT string) (string, error) {
@@ -359,7 +357,7 @@ func targetJurisdiction(target *CellTarget, loginJWT string) (string, error) {
 	return resolveJurisdiction(override, loginJWT)
 }
 
-// resolveJurisdiction picks the jurisdiction to mint for: the explicit override
+// resolveJurisdiction picks the jurisdiction to route to: the explicit override
 // when non-empty, otherwise the subject token's home_jurisdiction claim. Either
 // source is normalised to a lowercase DNS label and validated before it is
 // templated into URLs — `--jurisdiction US`, `" us "` and `us` all resolve to
@@ -485,8 +483,9 @@ func EntireSite(coreURL string) string {
 	}
 }
 
-// requireSafeExchangeURL rejects a target the login JWT would be sent to unless it is https (or an explicitly-allowed loopback/insecure
-// http). It affirmatively requires the https scheme — not merely "not http" —
+// requireSafeExchangeURL rejects a target the login JWT would be sent to
+// unless it is https (or an explicitly-allowed loopback/insecure http). It
+// affirmatively requires the https scheme — not merely "not http" —
 // so ftp/ws/scheme-relative/empty targets from a buggy core catalog can't
 // smuggle the login JWT off https. Mirrors the tokenmanager guard the sibling
 // data_api.go relies on.

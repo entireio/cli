@@ -87,9 +87,7 @@ func requireSecureDataOverride() error {
 // region that actually holds the repo's data. This is NOT best-effort: a
 // resolution failure fails the command instead of falling back to the
 // caller's home cell, because for repo-scoped data a silent wrong-region
-// "success" is worse than an error — that fallback is exactly what used to
-// make `entire trail` read the wrong region for a multi-homed repo like
-// entirehq/entire.io.
+// "success" is worse than an error.
 func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
 	target, err := resolveRepoCellTarget(ctx, fullName, "")
 	if err != nil {

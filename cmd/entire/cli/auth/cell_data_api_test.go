@@ -21,10 +21,6 @@ import (
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
 
-// usEntireAudience is the prod "us" jurisdiction audience, reused across the
-// cell tests.
-const usEntireAudience = "https://us.entire.io"
-
 func TestHomeJurisdictionFromLoginJWT(t *testing.T) {
 	t.Parallel()
 	jwt := makeJWT(t, fmt.Sprintf(`{"home_jurisdiction":"us","exp":%d}`, time.Now().Add(time.Hour).Unix()))
@@ -89,7 +85,7 @@ func TestRequireSafeExchangeURL(t *testing.T) {
 		raw     string
 		wantErr bool
 	}{
-		{usEntireAudience, false},
+		{"https://us.entire.io", false},
 		{"https://aws-eu-west-1.api.entire.io", false},
 		{"http://127.0.0.1:9000", false}, // loopback allowed
 		{"http://localhost:8787", false}, // loopback allowed

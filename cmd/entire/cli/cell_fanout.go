@@ -377,7 +377,7 @@ func (g cellGroup) label() string {
 
 // cellClientBuilder is what fanOutCells needs from the auth layer;
 // *auth.CellClientFactory satisfies it. A seam so fan-out tests don't run the
-// real discovery/exchange stack.
+// real discovery/refresh stack.
 type cellClientBuilder interface {
 	ClientFor(ctx context.Context, target *auth.CellTarget) (*api.Client, error)
 }

@@ -110,8 +110,8 @@ func (s contextTokenStore) DeleteTokens(string) error {
 // NewRefreshingLoginProvider sits on. Keying Issuer on c.CoreURL is the whole
 // point: store reads and the refresh grant target that context's core, so a
 // multi-core user's credentials never travel to (or get keyed under) a host
-// the context doesn't belong to. No RFC 8693 exchange runs through it any
-// more — data-plane bearers are the login JWT itself (ResolveDataAPIToken).
+// the context doesn't belong to. It only refreshes: data-plane bearers are
+// the login JWT itself (ResolveDataAPIToken).
 //
 // transport carries the caller's TLS configuration; allowInsecureHTTP permits
 // an http:// core/resource for loopback/dev.

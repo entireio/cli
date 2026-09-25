@@ -1172,13 +1172,12 @@ func reportRepoEnabled(ctx context.Context, insecureHTTPAuth bool) {
 	}
 
 	// Sequential, but each under its OWN deadline rather than sharing one: the
-	// trails probe now costs ~4 sequential round trips (repos index, cluster
-	// catalog, login refresh, TrailsEnabled) since it moved onto the
-	// repo's cell, so a slow enable report sharing a single budget could starve
-	// it to nothing. Separate budgets give the probe a floor it cannot lose,
-	// and their sum is the same 5s ceiling this function used to impose.
+	// trails probe costs ~4 sequential round trips (repos index, cluster
+	// catalog, login refresh, TrailsEnabled), so a slow enable report sharing
+	// a single budget could starve it to nothing. Separate budgets give the
+	// probe a floor it cannot lose, and their sum is a 5s ceiling.
 	//
-	// The probe gets the larger share because it is the step that grew, and
+	// The probe gets the larger share because it is the longer step, and
 	// because its failure self-heals — SessionStart's detached refresh retries
 	// it — whereas the enable report has no retry.
 	reportEnableToBackend(ctx, insecureHTTPAuth, info)

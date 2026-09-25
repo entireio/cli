@@ -71,9 +71,8 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   when the skips left no cell to query), never substituted with a ready
   mirror.
 
-Token rule: the login JWT is the bearer at every cell (`aud == iss`, ADR
-20260729); there is no per-cell or per-jurisdiction token exchange. Multi-cell
-callers must still build one `auth.CellClientFactory`
-(`NewEntireAPICellClientFactory`) per operation — it resolves and refreshes
-the login subject once, however many cells it dials. `fanOutCells` does this
-automatically; do not call `NewEntireAPICellClient` in a loop.
+Token rule: the login JWT is the bearer at every cell. Multi-cell callers must
+build one `auth.CellClientFactory` (`NewEntireAPICellClientFactory`) per
+operation — it resolves and refreshes the login subject once, however many
+cells it dials. `fanOutCells` does this automatically; do not call
+`NewEntireAPICellClient` in a loop.

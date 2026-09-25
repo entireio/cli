@@ -16,7 +16,7 @@ import (
 	"github.com/entireio/cli/internal/coreapi"
 )
 
-// semanticSearchV4CellTimeout bounds each per-cell v4 query (token exchange +
+// semanticSearchV4CellTimeout bounds each per-cell v4 query (login refresh +
 // the query-serve call), mirroring codeSearchCellTimeout.
 const semanticSearchV4CellTimeout = 30 * time.Second
 
