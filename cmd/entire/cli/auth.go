@@ -196,6 +196,9 @@ func newAuthTokenCmd() *cobra.Command {
 			}
 			if target.token == "" {
 				cmd.SilenceUsage = true
+				if target.storeErr != nil {
+					return storeReadError(target)
+				}
 				fmt.Fprintln(cmd.ErrOrStderr(), "Not logged in. Run 'entire login' to authenticate.")
 				return NewSilentError(errors.New("not logged in"))
 			}
@@ -291,6 +294,14 @@ type statusTarget struct {
 	activeContext string
 	totalContexts int
 	envToken      bool
+	// storeErr is set when the active context exists but its credential could
+	// not be READ from the store — a keyring or file failure, as opposed to an
+	// empty slot. token is "" in that case. status, token, api, and the mirror
+	// wizard report it. logout does not go through this type: its sweep reads
+	// each saved login itself and, when the token cannot be read, warns and
+	// removes that login locally only, which is the recovery a user with a
+	// broken store actually wants.
+	storeErr error
 }
 
 // resolveAuthStatusTarget picks the target for `entire auth status`, honouring
@@ -353,12 +364,19 @@ func resolveStatusTarget(ctx context.Context, listContexts contextsProvider, res
 		if tok, terr := resolveLogin(ctx, c); terr == nil && tok != "" {
 			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
 		}
-		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
+		tok, terr := auth.LoginTokenForContext(c)
+		if terr == nil && tok != "" {
 			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total}, nil
 		}
 		// Active context with no readable token: report against its core so
-		// the not-logged-in message names the right login server.
-		return statusTarget{coreURL: c.CoreURL, activeContext: c.Name, totalContexts: total}, nil
+		// the not-logged-in message names the right login server. An error
+		// other than "nothing stored" is carried, not swallowed — see
+		// statusTarget.storeErr.
+		target := statusTarget{coreURL: c.CoreURL, activeContext: c.Name, totalContexts: total}
+		if terr != nil && !errors.Is(terr, tokenstore.ErrNotFound) {
+			target.storeErr = terr
+		}
+		return target, nil
 	}
 	return statusTarget{totalContexts: total}, nil
 }
@@ -408,12 +426,37 @@ func defaultListAuthSessions(ctx context.Context, coreURL, token string) ([]api.
 	return newAuthSessionsClient(coreURL, token).ListAuthSessions(ctx) //nolint:wrapcheck // ListAuthSessions already wraps with action context
 }
 
+// storeReadError renders a statusTarget whose credential could not be read.
+// It is an error, not a "Not logged in" line: the login exists and the user
+// needs to know which store failed and what to do about it. The remedy
+// depends on the store, by the same rule withHeadlessStoreHint follows: when
+// the Linux fallback tried both stores and both failed (ErrFileStoreFailed)
+// the way out is a writable location for the file store, named through the
+// path override and selected explicitly — the same advice, in the same words,
+// that withHeadlessStoreHint gives for a write; with the keyring selected the
+// way out is the file store; with the file store already selected, suggesting
+// it again is nonsense, so the error names the file to check.
+func storeReadError(t statusTarget) error {
+	base := fmt.Errorf("saved login for %s found, but its token could not be read from %s: %w",
+		t.coreURL, tokenstore.BackendDescription(), t.storeErr)
+	if errors.Is(t.storeErr, tokenstore.ErrFileStoreFailed) {
+		return fmt.Errorf("%w\n\nBoth the OS keyring and the file store at %s failed. Point %s at a writable location and set %s=file, then run entire login again; a choice made with the path override is not remembered, so both variables must stay set for later commands", base, tokenstore.FileBackendPath(), tokenstore.PathEnvVar, tokenstore.BackendEnvVar)
+	}
+	if tokenstore.FileBackendSelected() {
+		return fmt.Errorf("%w\n\nCheck that %s exists and contains valid JSON, or run `entire login` again", base, tokenstore.FileBackendPath())
+	}
+	return fmt.Errorf("%w\n\nIf this machine has no usable OS keyring, run:\n\n  %s=file entire login", base, tokenstore.BackendEnvVar)
+}
+
 // runAuthStatus reports auth state against the target core: GET /me validates
 // the token and supplies the profile header, the active login context is shown
 // locally, and the active sessions (refresh-token families) on that core are
 // listed so the effect of `logout` / `logout --everywhere` is visible.
 func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher, listSessions authSessionLister, t statusTarget) error {
 	if t.token == "" {
+		if t.storeErr != nil {
+			return storeReadError(t)
+		}
 		if t.coreURL == "" {
 			fmt.Fprintln(w, "Not logged in.")
 		} else {

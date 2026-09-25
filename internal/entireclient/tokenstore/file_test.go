@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 func newTestStore(t *testing.T) *fileStore {
@@ -205,6 +207,11 @@ func TestFileStore_LoadCorruptFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for corrupt file")
 	}
+	// The error is what `auth status` shows a user whose tokens.json is
+	// broken; without the path they have to guess which file to fix.
+	if !strings.Contains(err.Error(), s.path) {
+		t.Fatalf("parse error should name the file, got: %v", err)
+	}
 }
 
 func TestFileStore_CreatesDirectory(t *testing.T) {
@@ -367,9 +374,10 @@ func TestFileStore_Reads0600FileWithoutWarning(t *testing.T) {
 }
 
 // BackendDescription pins: user-facing provenance wording must track the env
-// the way resolveBackendLocked does. Not parallel: t.Setenv.
+// the way resolveBackend does. Not parallel: t.Setenv.
 func TestBackendDescription_Keyring(t *testing.T) {
 	t.Setenv(BackendEnvVar, "")
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 	got := BackendDescription()
 	if got != keyringProviderName() {
 		t.Fatalf("BackendDescription() = %q, want the per-OS keyring name %q", got, keyringProviderName())
@@ -388,12 +396,12 @@ func TestBackendDescription_FileWithExplicitPath(t *testing.T) {
 }
 
 // The default file location is tokens.json in the per-user config dir — this
-// is production routing (resolveBackendLocked uses the same helper), so a
+// is production routing (defaultFileStore uses the same helper), so a
 // typo'd default would relocate real users' token files.
 func TestFileBackendPath_DefaultsToConfigDirTokensJSON(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv(PathEnvVar, "")
-	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	t.Setenv(userdirs.EnvConfigDir, cfgDir)
 	want := filepath.Join(cfgDir, "tokens.json")
 	if got := FileBackendPath(); got != want {
 		t.Fatalf("FileBackendPath() = %q, want %q", got, want)
@@ -474,24 +482,33 @@ func TestFileStore_TightensOwnedDirectory(t *testing.T) {
 	}
 }
 
+// explicitFileStore unwraps the *fileStore behind an explicit
+// ENTIRE_TOKEN_STORE=file selection, which resolves to a recordingStore.
+func explicitFileStore(t *testing.T, label string) *fileStore {
+	t.Helper()
+	got := resolveBackendLocked()
+	rec, ok := got.(recordingStore)
+	if !ok {
+		t.Fatalf("%s: got %T, want recordingStore for an explicit env selection", label, got)
+	}
+	fs, ok := rec.inner.(*fileStore)
+	if !ok {
+		t.Fatalf("%s: inner = %T, want *fileStore", label, rec.inner)
+	}
+	return fs
+}
+
 func TestResolveBackend_OwnsDirOnlyForTheDefaultPath(t *testing.T) {
 	t.Setenv(BackendEnvVar, "file")
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
 
 	t.Setenv(PathEnvVar, "")
-	def, ok := resolveBackendLocked().(*fileStore)
-	if !ok {
-		t.Fatalf("default path: got %T, want *fileStore", resolveBackendLocked())
-	}
-	if !def.ownsDir {
+	if def := explicitFileStore(t, "default path"); !def.ownsDir {
 		t.Error("default path: ownsDir = false, want true")
 	}
 
 	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
-	custom, ok := resolveBackendLocked().(*fileStore)
-	if !ok {
-		t.Fatalf("custom path: got %T, want *fileStore", resolveBackendLocked())
-	}
-	if custom.ownsDir {
+	if custom := explicitFileStore(t, "custom path"); custom.ownsDir {
 		t.Error("custom path: ownsDir = true, want false")
 	}
 }
@@ -505,14 +522,14 @@ func TestResolveBackend_OwnsDirOnlyForTheDefaultPath(t *testing.T) {
 // repository.
 func TestFileBackendPath_RejectsRelativeConfigDirWithoutTouchingDisk(t *testing.T) {
 	t.Setenv(PathEnvVar, "")
-	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	t.Setenv(userdirs.EnvConfigDir, "relative-config")
 	t.Chdir(t.TempDir())
 
 	path, err := fileBackendPathChecked()
 	if err == nil {
 		t.Fatalf("fileBackendPathChecked() = %q, nil; want a rejected override", path)
 	}
-	if !strings.Contains(err.Error(), "ENTIRE_CONFIG_DIR") {
+	if !strings.Contains(err.Error(), userdirs.EnvConfigDir) {
 		t.Errorf("error = %q, want it to name the variable the user has to change", err)
 	}
 
@@ -533,7 +550,7 @@ func TestFileBackendPath_RejectsRelativeConfigDirWithoutTouchingDisk(t *testing.
 // names a file the user chose, the same reasoning that exempts it from the
 // root-base rule in docs/development/filesystem-safety.md.
 func TestFileBackendPath_ExplicitPathIsNotHeldToTheAbsoluteRule(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	t.Setenv(userdirs.EnvConfigDir, "relative-config")
 	t.Setenv(PathEnvVar, "relative-tokens.json")
 
 	path, err := fileBackendPathChecked()
@@ -559,6 +576,7 @@ func resetBackendForTesting(t *testing.T) {
 		defer backendMu.Unlock()
 		backend = nil
 		resolved = false
+		adoptedFile = false
 	}
 	reset()
 	t.Cleanup(reset)
@@ -575,9 +593,9 @@ func resetBackendForTesting(t *testing.T) {
 // launders ./relative-config into a plausible absolute path first. Hence the
 // explicit check rather than relying on the root.
 func TestFileStore_PublicOpsRejectRelativeConfigDirWithoutSideEffects(t *testing.T) {
-	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv(BackendEnvVar, "file")
 	t.Setenv(PathEnvVar, "")
-	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	t.Setenv(userdirs.EnvConfigDir, "relative-config")
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	resetBackendForTesting(t)
@@ -606,8 +624,8 @@ func TestFileStore_PublicOpsRejectRelativeConfigDirWithoutSideEffects(t *testing
 // rule. A relative ENTIRE_CONFIG_DIR alongside it is simply irrelevant.
 func TestFileStore_ExplicitPathKeepsWorkingWithARelativeConfigDir(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("ENTIRE_TOKEN_STORE", "file")
-	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	t.Setenv(BackendEnvVar, "file")
+	t.Setenv(userdirs.EnvConfigDir, "relative-config")
 	t.Setenv(PathEnvVar, filepath.Join(dir, "tokens.json"))
 	resetBackendForTesting(t)
 

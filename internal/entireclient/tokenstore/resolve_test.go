@@ -1,0 +1,360 @@
+package tokenstore
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// scriptedStore is a primary store whose behaviour tests dictate. Values are
+// keyed by service+"\x00"+user.
+type scriptedStore struct {
+	getErr, setErr, delErr error
+	values                 map[string]string
+	sets, gets, dels       int
+}
+
+func newScriptedStore() *scriptedStore { return &scriptedStore{values: map[string]string{}} }
+
+func (s *scriptedStore) key(service, user string) string { return service + "\x00" + user }
+
+func (s *scriptedStore) Get(service, user string) (string, error) {
+	s.gets++
+	if s.getErr != nil {
+		return "", s.getErr
+	}
+	v, ok := s.values[s.key(service, user)]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return v, nil
+}
+
+func (s *scriptedStore) Set(service, user, password string) error {
+	s.sets++
+	if s.setErr != nil {
+		return s.setErr
+	}
+	s.values[s.key(service, user)] = password
+	return nil
+}
+
+func (s *scriptedStore) Delete(service, user string) error {
+	s.dels++
+	if s.delErr != nil {
+		return s.delErr
+	}
+	if _, ok := s.values[s.key(service, user)]; !ok {
+		return ErrNotFound
+	}
+	delete(s.values, s.key(service, user))
+	return nil
+}
+
+// Tests that need the process backend re-resolved use the existing
+// resetBackendForTesting helper in file_test.go; do not add a second one.
+
+func TestResolveBackend_ExplicitFileEnvIsARecordingFileStore(t *testing.T) {
+	isolateConfigDir(t)
+	got := resolveBackend(backendInputs{envValue: backendFile, goos: "darwin"})
+	rec, ok := got.(recordingStore)
+	if !ok || rec.name != backendFile {
+		t.Fatalf("got %T (%+v), want recordingStore{name: file}", got, got)
+	}
+	if _, ok := rec.inner.(*fileStore); !ok {
+		t.Fatalf("inner = %T, want *fileStore", rec.inner)
+	}
+}
+
+func TestResolveBackend_ExplicitKeyringEnvIsARecordingKeyringStore(t *testing.T) {
+	isolateConfigDir(t)
+	for _, v := range []string{backendKeyring, "anything-else"} {
+		got := resolveBackend(backendInputs{envValue: v, remembered: backendFile, testDir: t.TempDir(), goos: "linux"})
+		rec, ok := got.(recordingStore)
+		if !ok || rec.name != backendKeyring {
+			t.Fatalf("env=%q: got %T (%+v), want recordingStore{name: keyring}", v, got, got)
+		}
+		if _, ok := rec.inner.(keyringStore); !ok {
+			t.Fatalf("env=%q: inner = %T, want keyringStore (explicit selection never falls back)", v, rec.inner)
+		}
+	}
+}
+
+func TestResolveBackend_RememberedFileBeatsTestDirAndPlatform(t *testing.T) {
+	isolateConfigDir(t)
+	got := resolveBackend(backendInputs{remembered: backendFile, testDir: t.TempDir(), goos: "linux"})
+	fs, ok := got.(*fileStore)
+	if !ok {
+		t.Fatalf("got %T, want *fileStore (remembered choice, not recording: nothing new to learn)", got)
+	}
+	if fs.path != FileBackendPath() {
+		t.Fatalf("path = %q, want the default %q", fs.path, FileBackendPath())
+	}
+}
+
+func TestResolveBackend_TestDirBeatsKeyring(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	got := resolveBackend(backendInputs{testDir: dir, goos: "linux"})
+	fs, ok := got.(*fileStore)
+	if !ok || fs.path != filepath.Join(dir, "tokens.json") {
+		t.Fatalf("got %T (%+v), want the testdirs file store", got, got)
+	}
+}
+
+// Not parallel, and config-dir isolated: the fallback store has a file half at
+// the default path, and a parallel test that reaches it would read the path
+// environment while sequential tests are setting it.
+func TestResolveBackend_DefaultIsFallbackOnSecretServicePlatformsOnly(t *testing.T) {
+	isolateConfigDir(t)
+	for goos, wantFallback := range map[string]bool{
+		"linux": true, "freebsd": true, "openbsd": true, "netbsd": true, "dragonfly": true,
+		"darwin": false, "windows": false,
+	} {
+		got := resolveBackend(backendInputs{goos: goos})
+		switch got.(type) {
+		case *fallbackStore:
+			if !wantFallback {
+				t.Fatalf("goos=%s: got the fallback store, want a bare keyringStore", goos)
+			}
+		case keyringStore:
+			if wantFallback {
+				t.Fatalf("goos=%s: got a bare keyringStore, want the fallback store", goos)
+			}
+		default:
+			t.Fatalf("goos=%s: got %T, want *fallbackStore or keyringStore", goos, got)
+		}
+	}
+}
+
+func TestRecordingStore_SetRemembersTheExplicitBackend(t *testing.T) {
+	isolateConfigDir(t)
+	notice := captureNotices(t)
+	inner := newScriptedStore()
+
+	if err := (recordingStore{inner: inner, name: backendFile}).Set("svc", "alice", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedBackend(); got != backendFile {
+		t.Fatalf("after explicit file write: persisted = %q, want file", got)
+	}
+
+	if err := (recordingStore{inner: inner, name: backendKeyring}).Set("svc", "alice", "tok2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("after explicit keyring write: persisted = %q, want empty", got)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("a healthy explicit write prints nothing:\n%s", notice.String())
+	}
+}
+
+// Switching back to the keyring must not leave the previous bearer in
+// tokens.json: that plaintext copy is exactly what the fallback would
+// re-adopt on the next transient keyring failure. Only the entry just
+// superseded goes; other entries and the file itself stay.
+func TestRecordingStore_KeyringWriteRemovesTheSupersededFileCopy(t *testing.T) {
+	isolateConfigDir(t)
+	file := defaultFileStore()
+	if err := file.Set("svc", "alice", "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Set("svc", "bob", "keep"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rememberBackend(backendFile); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("marker = %q, want cleared by the explicit keyring write", got)
+	}
+	if _, err := file.Get("svc", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the superseded file copy should be gone, got %v", err)
+	}
+	if got, err := file.Get("svc", "bob"); err != nil || got != "keep" {
+		t.Fatalf("other entries must survive, got (%q, %v)", got, err)
+	}
+}
+
+// An explicit keyring login on a machine that has never used the file store
+// has nothing to remove, and must not create the config directory on the way
+// to finding that out.
+func TestRecordingStore_KeyringWriteWithNoConfigDirCreatesNothing(t *testing.T) {
+	dir := isolateConfigDir(t)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("an explicit keyring write must not create the config dir, stat err = %v", err)
+	}
+}
+
+// With a config directory but no tokens.json, the removal is a no-op and must
+// leave no trace: the file store's Delete takes a flock on tokens.json.lock,
+// which is created and never removed, so reaching it for a file that is not
+// there leaves a stray lock behind.
+func TestRecordingStore_KeyringWriteWithNoTokenFileLeavesNoLockFile(t *testing.T) {
+	dir := isolateConfigDir(t)
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	for _, stray := range []string{tokenStoreFileName + ".lock", tokenStoreFileName} {
+		if _, err := os.Stat(filepath.Join(dir, stray)); !os.IsNotExist(err) {
+			t.Fatalf("%s should not exist after a keyring write with no file store, stat err = %v", stray, err)
+		}
+	}
+}
+
+// A device-flow login carries no refresh token, so RecordLoginContext clears
+// the refresh slot with Delete rather than Set. An explicit keyring login
+// must remove the file copy of that slot too, or the OLD refresh token stays
+// in plaintext in tokens.json after the user chose the keyring. The inner
+// keyring reporting ErrNotFound is the common case (nothing was ever in the
+// keyring) and must not stop the file cleanup; the caller still sees
+// ErrNotFound.
+func TestRecordingStore_KeyringDeleteRemovesTheSupersededFileCopy(t *testing.T) {
+	isolateConfigDir(t)
+	file := defaultFileStore()
+	if err := file.Set("svc:refresh", "alice", "stale"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Set("svc:refresh", "bob", "keep"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Delete("svc:refresh", "alice")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete = %v, want the inner ErrNotFound passed through", err)
+	}
+	if _, err := file.Get("svc:refresh", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the superseded file copy of the refresh slot should be gone, got %v", err)
+	}
+
+	// The file backend's own recordingStore has nothing to supersede: its
+	// Delete is a plain passthrough and touches no other store.
+	err = (recordingStore{inner: newScriptedStore(), name: backendFile}).Delete("svc:refresh", "bob")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("file-backend Delete = %v, want ErrNotFound passed through", err)
+	}
+	if got, err := file.Get("svc:refresh", "bob"); err != nil || got != "keep" {
+		t.Fatalf("a file-backend delete must not reach into the default-path store, got (%q, %v)", got, err)
+	}
+}
+
+// A store named through ENTIRE_TOKEN_STORE_PATH is the user's to manage: an
+// explicit keyring write must not reach into it.
+func TestRecordingStore_KeyringWriteLeavesAnExplicitPathStoreAlone(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
+	file := defaultFileStore()
+	if err := file.Set("svc", "alice", "mine"); err != nil {
+		t.Fatal(err)
+	}
+	if err := (recordingStore{inner: newScriptedStore(), name: backendKeyring}).Set("svc", "alice", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := file.Get("svc", "alice"); err != nil || got != "mine" {
+		t.Fatalf("a store named through %s must be left alone, got (%q, %v)", PathEnvVar, got, err)
+	}
+}
+
+func TestRecordingStore_ReadsAndDeletesRememberNothing(t *testing.T) {
+	isolateConfigDir(t)
+	inner := newScriptedStore()
+	rec := recordingStore{inner: inner, name: backendFile}
+	if _, err := rec.Get("svc", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get = %v, want ErrNotFound passed through", err)
+	}
+	if err := rec.Delete("svc", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete = %v, want ErrNotFound passed through", err)
+	}
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persisted = %q after a read and a delete, want empty: only writes remember", got)
+	}
+	if inner.gets != 1 || inner.dels != 1 {
+		t.Fatalf("gets=%d dels=%d, want 1 and 1", inner.gets, inner.dels)
+	}
+}
+
+func TestRecordingStore_FailedSetRemembersNothing(t *testing.T) {
+	isolateConfigDir(t)
+	inner := newScriptedStore()
+	inner.setErr = errors.New("boom")
+	err := (recordingStore{inner: inner, name: backendFile}).Set("svc", "alice", "tok")
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("err = %v, want the inner error unchanged", err)
+	}
+	if got := persistedBackend(); got != "" {
+		t.Fatalf("persisted = %q after a failed write, want empty", got)
+	}
+}
+
+func TestFileBackendSelected_HonorsEnvThenMarker(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv(BackendEnvVar, "")
+	if FileBackendSelected() {
+		t.Fatal("nothing selected: want false")
+	}
+	if err := rememberBackend(backendFile); err != nil {
+		t.Fatal(err)
+	}
+	if !FileBackendSelected() {
+		t.Fatal("marker says file: want true")
+	}
+	t.Setenv(BackendEnvVar, backendKeyring)
+	if FileBackendSelected() {
+		t.Fatal("explicit keyring env must beat the marker")
+	}
+	t.Setenv(BackendEnvVar, backendFile)
+	if !FileBackendSelected() {
+		t.Fatal("explicit file env: want true")
+	}
+}
+
+// A developer's shell may export ENTIRE_TOKEN_STORE=keyring; under `go test`
+// that must not route a test's writes to the real OS keyring. The pure
+// resolver honours the explicit value (pinned by
+// TestResolveBackend_ExplicitKeyringEnvIsARecordingKeyringStore); the
+// gathering step drops it when a test process is detected.
+func TestResolveBackendLocked_IgnoresExplicitKeyringUnderTest(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv(BackendEnvVar, backendKeyring)
+	resetBackendForTesting(t)
+	fs, ok := currentBackend().(*fileStore)
+	if !ok {
+		t.Fatalf("currentBackend() = %T under go test with an explicit keyring env, want the testdirs *fileStore", currentBackend())
+	}
+	if fs.path == FileBackendPath() {
+		t.Fatalf("path = %q is the default file store; want the testdirs store, since no marker was written", fs.path)
+	}
+}
+
+// Under go test the testdirs store is itself a *fileStore, so the type alone
+// proves nothing; the PATH is what tells a marker-resolved store (the default
+// path in the isolated config dir) from the testdirs one. isolateConfigDir
+// blanks PathEnvVar, which is what lets rememberBackend write the marker.
+func TestCurrentBackend_ReadsMarkerWhenEnvUnset(t *testing.T) {
+	isolateConfigDir(t)
+	t.Setenv(BackendEnvVar, "")
+	resetBackendForTesting(t)
+	if err := rememberBackend(backendFile); err != nil {
+		t.Fatal(err)
+	}
+	fs, ok := currentBackend().(*fileStore)
+	if !ok {
+		t.Fatalf("currentBackend() = %T, want *fileStore from the marker", currentBackend())
+	}
+	if fs.path != FileBackendPath() {
+		t.Fatalf("path = %q, want the default %q (the marker, not the testdirs store)", fs.path, FileBackendPath())
+	}
+}

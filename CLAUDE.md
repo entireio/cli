@@ -182,6 +182,9 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
   implementation contracts before modifying any transcript/storage pipeline.
 - Control-plane precedence belongs to `coreapi`; display `client.CoreOrigin()`
   rather than independently resolving a possibly different target.
+- Credential backend selection (`ENTIRE_TOKEN_STORE`, then the remembered marker,
+  then the platform default with the Linux keyring fallback) is specified in the
+  API routing reference; read it before touching `tokenstore`.
 - Repo-scoped data-plane requests resolve the repo's cell and fail on resolution
   failure. `/me` uses the home cell; repo-set queries use shared fanout helpers.
   Multi-cell operations share one `auth.CellClientFactory` per operation.

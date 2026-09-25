@@ -430,6 +430,11 @@ func ensureMirrorWizardAuth(ctx context.Context, errW io.Writer, insecure bool) 
 	if err != nil {
 		return "", err
 	}
+	if target.storeErr != nil {
+		// The login exists but its token could not be read; "Not logged in"
+		// would send the user round the `entire login` loop.
+		return "", storeReadError(target)
+	}
 	if target.token == "" {
 		fmt.Fprintln(errW, "Not logged in. Run 'entire login' to authenticate.")
 		return "", NewSilentError(errors.New("not logged in"))
