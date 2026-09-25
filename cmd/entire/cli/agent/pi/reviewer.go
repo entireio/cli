@@ -8,15 +8,21 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // NewReviewer returns the AgentReviewer for Pi.
 //
-// Argv shape: pi --mode json --print [--model <model>] <prompt>.
+// Argv shape: pi --mode json --print --no-extensions -e <Entire extension>
+// [--model <model>] <prompt> (see buildPiReviewCmd).
 // The prompt is passed as a positional message because Pi's CLI accepts prompts
 // as message arguments in non-interactive mode. Stdout is newline-delimited JSON
 // session events; the parser maps Pi's AgentSessionEvent stream into Entire's
@@ -24,14 +30,32 @@ import (
 func NewReviewer() *reviewtypes.ReviewerTemplate {
 	return &reviewtypes.ReviewerTemplate{
 		AgentName: string(agent.AgentNamePi),
+		Prepare:   writeReviewExtension,
 		BuildCmd:  buildPiReviewCmd,
 		Parser:    parsePiReviewOutput,
 	}
 }
 
+// reviewExtensionName is where the review copy of Entire's extension lives,
+// as a name inside the per-user cache directory.
+const reviewExtensionName = "pi-review/entire-extension.ts"
+
+// buildPiReviewCmd builds the exec.Cmd for a pi review run.
+//
+// The reviewer runs inside the checkout under review, and pi loads every
+// project extension under .pi/extensions as code at startup, so a branch
+// could run anything as the reviewing user just by being reviewed. Extension
+// discovery is therefore off (--no-extensions), and Entire's own extension,
+// which normally comes from that same project directory, is loaded from a copy
+// the binary writes (writeReviewExtension) so the review is still captured.
+// If that copy cannot be located, the review runs untracked rather than
+// falling back to discovery.
 func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
-	args := []string{"--mode", "json", "--print"}
+	args := []string{"--mode", "json", "--print", "--no-extensions"}
+	if extPath, err := reviewExtensionPath(); err == nil {
+		args = append(args, "--extension", extPath)
+	}
 	if cfg.Model != "" {
 		args = append(args, "--model", cfg.Model)
 	}
@@ -39,6 +63,33 @@ func buildPiReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd 
 	cmd := exec.CommandContext(ctx, "pi", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), string(agent.AgentNamePi), cfg, prompt)
 	return cmd
+}
+
+// writeReviewExtension writes the extension buildPiReviewCmd loads, rendered
+// from the binary. Rewritten on every run so it always matches this binary.
+func writeReviewExtension(context.Context) error {
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		return fmt.Errorf("resolve cache dir: %w", err)
+	}
+	if err := osroot.MkdirAllNoSymlink(root, path.Dir(reviewExtensionName), 0o700); err != nil {
+		return fmt.Errorf("create pi review extension dir: %w", err)
+	}
+	// 0644 because pi reads the extension itself.
+	if err := jsonutil.WriteFileAtomicIn(root, reviewExtensionName, []byte(renderExtension()), 0o644); err != nil {
+		return fmt.Errorf("write pi review extension: %w", err)
+	}
+	return nil
+}
+
+// reviewExtensionPath is the absolute path of the file writeReviewExtension
+// writes, for pi's argv.
+func reviewExtensionPath() (string, error) {
+	root, err := userdirs.CacheRoot()
+	if err != nil {
+		return "", fmt.Errorf("resolve cache dir: %w", err)
+	}
+	return filepath.Join(root.Name(), filepath.FromSlash(reviewExtensionName)), nil
 }
 
 func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {

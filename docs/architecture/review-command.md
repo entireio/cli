@@ -40,6 +40,27 @@ remains available through `entire review --findings` even after target cleanup.
 Positive integer targets always mean trail numbers rather than numeric branch
 names; this avoids a local branch silently shadowing a trail selector.
 
+## Reviewer isolation
+
+A reviewer runs inside the checkout it reviews, which for `--target` is a
+branch someone else may control. Reviewers therefore do not load
+execution-capable agent configuration from that checkout:
+
+- claude-code runs with `--setting-sources user`, so the checkout's
+  `.claude/settings.json`, `.claude/settings.local.json`, and `.mcp.json` are
+  not loaded; Entire's lifecycle hooks are passed from the binary via
+  `--settings`.
+- pi runs with `--no-extensions`, so `.pi/extensions/` and extensions or
+  packages named in `.pi/settings.json` are not loaded; Entire's extension is
+  loaded with `--extension` from a copy the binary writes to the per-user
+  cache directory.
+- codex runs a project hook only when the user's own `config.toml` trusts that
+  exact hook at that path, so hooks in a review checkout do not run; review
+  passes no trust-bypass flag.
+
+The user's own agent settings still apply. The checkout's instruction files
+(`CLAUDE.md`, `AGENTS.md`, skills) are still read by the agent.
+
 ## Profiles
 
 Profiles live in:

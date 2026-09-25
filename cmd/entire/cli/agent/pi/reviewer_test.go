@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -32,7 +33,11 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 	if cmd.Args[0] != "pi" {
 		t.Fatalf("Args[0] = %q, want pi; args=%v", cmd.Args[0], cmd.Args)
 	}
-	wantPrefix := []string{"pi", "--mode", "json", "--print", "--model", "anthropic/claude-sonnet-4-5:high"}
+	extPath, err := reviewExtensionPath()
+	if err != nil {
+		t.Fatalf("reviewExtensionPath: %v", err)
+	}
+	wantPrefix := []string{"pi", "--mode", "json", "--print", "--no-extensions", "--extension", extPath, "--model", "anthropic/claude-sonnet-4-5:high"}
 	if len(cmd.Args) != len(wantPrefix)+1 {
 		t.Fatalf("args len = %d, want %d: %v", len(cmd.Args), len(wantPrefix)+1, cmd.Args)
 	}
@@ -54,6 +59,33 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 	}
 	if env[review.EnvStartingSHA] != "abc123" {
 		t.Errorf("%s = %q, want abc123", review.EnvStartingSHA, env[review.EnvStartingSHA])
+	}
+}
+
+// Pi loads every extension under the checkout's .pi/extensions as code, so the
+// reviewer turns discovery off and loads Entire's extension from a copy the
+// binary writes outside the checkout.
+func TestPiReviewer_LoadsEntireExtensionFromBinary(t *testing.T) {
+	// No t.Parallel: t.Setenv isolates the cache directory the copy lands in.
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+
+	if err := NewReviewer().Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	extPath, err := reviewExtensionPath()
+	if err != nil {
+		t.Fatalf("reviewExtensionPath: %v", err)
+	}
+	if !strings.HasPrefix(extPath, cacheHome) {
+		t.Fatalf("extension path %q is not under the cache dir %q", extPath, cacheHome)
+	}
+	got, err := os.ReadFile(extPath)
+	if err != nil {
+		t.Fatalf("read written extension: %v", err)
+	}
+	if string(got) != renderExtension() {
+		t.Error("written extension does not match the one the binary renders")
 	}
 }
 
