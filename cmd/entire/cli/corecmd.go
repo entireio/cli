@@ -251,20 +251,9 @@ func mergeSynthesizedField(v any, field string, synth func() string) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("encode %T: %w", v, err)
 	}
-	obj, err := mergeSynthesizedFieldRaw(raw, field, synth)
-	if err != nil {
-		return nil, fmt.Errorf("decode %T: %w", v, err)
-	}
-	return obj, nil
-}
-
-// mergeSynthesizedFieldRaw is mergeSynthesizedField for a JSON object that is
-// already encoded, such as a response body passed through verbatim. It never
-// re-marshals raw, so the object's values stay byte-for-byte as given.
-func mergeSynthesizedFieldRaw(raw json.RawMessage, field string, synth func() string) (map[string]json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, fmt.Errorf("decode JSON object: %w", err)
+		return nil, fmt.Errorf("decode %T: %w", v, err)
 	}
 	if _, ok := obj[field]; ok {
 		return obj, nil

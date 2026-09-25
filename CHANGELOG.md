@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Breaking changes and migrations
 
 - Gemini CLI support is removed: `entire configure --agent gemini`, Gemini hook capture, the Gemini review runner and summary provider, session import and resume, and Gemini skill setup are gone. Entire hooks already installed in `.gemini/settings.json` now exit silently without recording anything; `entire doctor` and `entire disable --uninstall` remove them. Checkpoints recorded from earlier Gemini CLI sessions remain readable by `entire explain` and summaries
-- `entire trail show --json` now prints the Trail detail as the API serves it (minus the response's `$schema` pointer), plus the Trail's browser `url`. This adds the `mergeability` snapshot (`head_sha`, `mergeable`, `conflict_status`, `checks`, `gates`), `actions`, and every other detail field. `trail_id` is now `id`, the description is `body_document.text_snapshot` instead of `body`, and the always-empty `labels` is gone. If the detail cannot be loaded, `--json` now fails instead of printing the list entry. `entire trail list --json` is unchanged ([#2593](https://github.com/entireio/cli/pull/2593))
 
 ## [0.11.2] - 2026-09-23
 

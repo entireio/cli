@@ -1859,18 +1859,71 @@ func TestRunTrailListAndShowJSONPreserveBranchState(t *testing.T) {
 			var listed []branchState
 			require.NoError(t, json.Unmarshal(listOut.Bytes(), &listed))
 			require.Len(t, listed, 1)
-			require.Equal(t, tt.branch, listed[0].Branch, "list branch")
-			require.NotNil(t, listed[0].OriginalBranch, "list original_branch must be present")
-			require.Equal(t, tt.originalBranch, *listed[0].OriginalBranch, "list original_branch")
-
-			// show --json is the detail resource as served, so its branch
-			// state is whatever the server sent.
-			var shown api.TrailResource
+			var shown branchState
 			require.NoError(t, json.Unmarshal(showOut.Bytes(), &shown))
-			require.Equal(t, tt.branch, shown.Branch, "show branch")
-			require.Equal(t, tt.originalBranch, shown.OriginalBranch, "show original_branch")
+
+			for output, got := range map[string]branchState{"list": listed[0], "show": shown} {
+				require.Equal(t, tt.branch, got.Branch, "%s branch", output)
+				require.NotNil(t, got.OriginalBranch, "%s original_branch must be present", output)
+				require.Equal(t, tt.originalBranch, *got.OriginalBranch, "%s original_branch", output)
+			}
 		})
 	}
+}
+
+func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
+	t.Parallel()
+
+	alice := trailListTestAuthorAlice
+	created := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	resource := api.TrailResource{
+		ID:        "trl_1",
+		Number:    7,
+		URL:       "https://entire.io/gh/acme/repo/trails/7",
+		Branch:    "feature/x",
+		Base:      "main",
+		Title:     "Shown trail",
+		Status:    string(trail.StatusOpen),
+		Phase:     "building",
+		Author:    &trail.Author{ID: "u1", Login: &alice},
+		Assignees: []string{"bob"},
+		Labels:    []string{"cli"},
+		Type:      string(trail.TypeBug),
+		Priority:  string(trail.PriorityHigh),
+		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
+		CreatedAt: created,
+		UpdatedAt: created,
+	}
+	srv := trailShowTestServer(t, resource, "detail body", 0)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "output must be a single JSON object: %s", out.String())
+	require.Equal(t, 7, got.Number)
+	require.Equal(t, trail.ID("trl_1"), got.TrailID)
+	require.Equal(t, "https://entire.io/gh/acme/repo/trails/7", got.URL)
+	require.Equal(t, "feature/x", got.Branch)
+	require.Equal(t, "main", got.Base)
+	require.Equal(t, "Shown trail", got.Title)
+	require.Equal(t, trail.StatusOpen, got.Status)
+	require.Equal(t, "building", got.Phase)
+	require.Equal(t, alice, got.AuthorLogin())
+	require.Equal(t, []string{"bob"}, got.Assignees)
+	require.Equal(t, []string{"cli"}, got.Labels)
+	require.Equal(t, trail.TypeBug, got.Type)
+	require.Equal(t, trail.PriorityHigh, got.Priority)
+	require.Equal(t, []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}}, got.Reviewers)
+	// The description lives on the detail endpoint only; JSON must carry it, not
+	// the empty list body.
+	require.Equal(t, "detail body", got.Body)
+	// Human-only decoration must not leak into the data.
+	require.NotContains(t, out.String(), noTrailDescription)
+	require.NotContains(t, out.String(), "Trail: ")
 }
 
 func TestRunTrailShowWithClientAtPathUsesNativeRepoIDRoutes(t *testing.T) {
@@ -1942,13 +1995,12 @@ func TestRunTrailShowNumericSelectorFetchesDetailOnce(t *testing.T) {
 	require.Empty(t, errOut.String())
 	require.EqualValues(t, 1, atomic.LoadInt32(&detailHits), "the detail route must be requested exactly once")
 
-	var got api.TrailResource
+	var got trail.Metadata
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
-	require.NotNil(t, got.BodyDocument)
-	require.Equal(t, "detail body", got.BodyDocument.TextSnapshot, "the output must be the resolved detail resource")
+	require.Equal(t, "detail body", got.Body, "the description must come from the resolved resource")
 }
 
-func TestRunTrailShowJSONOmitsDescriptionPlaceholder(t *testing.T) {
+func TestRunTrailShowJSONLeavesBodyEmptyWithoutDescription(t *testing.T) {
 	t.Parallel()
 
 	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}, "", 0)
@@ -1958,8 +2010,29 @@ func TestRunTrailShowJSONOmitsDescriptionPlaceholder(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Empty(t, errOut.String())
-	require.NotContains(t, out.String(), noTrailDescription, "display placeholders must not leak into JSON")
-	require.NotContains(t, out.String(), "Trail: ")
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Empty(t, got.Body, "an empty description must stay empty in JSON, not become the display placeholder")
+	require.NotContains(t, out.String(), noTrailDescription)
+}
+
+// A failed description fetch is best-effort: the warning belongs on stderr so
+// stdout stays parseable.
+func TestRunTrailShowJSONKeepsStdoutParseableWhenDescriptionFetchFails(t *testing.T) {
+	t.Parallel()
+
+	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "T", Body: trailTestListBody, Status: string(trail.StatusOpen)}, "", http.StatusInternalServerError)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "feature/x", JSON: true})
+
+	require.NoError(t, err)
+	require.Contains(t, errOut.String(), "could not load trail detail")
+
+	var got trail.Metadata
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "stdout must stay valid JSON: %s", out.String())
+	require.Equal(t, trailTestListBody, got.Body, "the list body is the fallback when the detail fetch fails")
 }
 
 func TestRunTrailShowTextStillRendersTheHumanView(t *testing.T) {

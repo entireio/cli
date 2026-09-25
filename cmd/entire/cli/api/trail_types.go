@@ -46,10 +46,10 @@ type TrailResource struct {
 	BodyDocument       *TrailBodyDocument `json:"body_document,omitempty"`
 	// Mergeability is served on the detail resource only; list items omit it.
 	Mergeability *TrailMergeability `json:"mergeability,omitempty"`
-	// Raw is the detail resource exactly as served, which `trail show --json`
-	// emits. It is set only when the resource was decoded from the detail
-	// route; list items leave it nil.
-	Raw json.RawMessage `json:"-"`
+	// FromDetail reports that the resource was decoded from the detail route
+	// rather than a list page. It is the reliable marker: body_document can be
+	// absent from a valid detail response.
+	FromDetail bool `json:"-"`
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
