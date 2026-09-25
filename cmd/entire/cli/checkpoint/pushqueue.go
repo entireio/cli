@@ -177,6 +177,54 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	return q.rewriteLocked(root, kept)
 }
 
+// Rotate moves the given refs to the back of the queue, keeping the relative
+// order within both the moved and the untouched group. Refs not currently queued
+// are ignored, and entries appended after a Drain keep their place ahead of the
+// rotated ones.
+//
+// This is what keeps a bounded flush fair. The queue is drained in first-seen
+// order and a flush that stops early leaves the rest for the next push, so
+// without rotation a prefix of refs that always fails — five checkpoints blocked
+// by secret scanning, say — is retried in the same order on every push and the
+// healthy refs behind them are never reached at all. Rotating the failures to
+// the back guarantees every queued ref eventually gets an attempt.
+//
+// One lock for the whole reorder, rather than Remove followed by Enqueue: that
+// pair leaves a window where the refs are in neither the queue nor the remote,
+// and a crash inside it drops them.
+func (q *PushQueue) Rotate(refs []plumbing.ReferenceName) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	root, release, err := q.lock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	current, _, err := q.readLocked(root)
+	if err != nil {
+		return err
+	}
+	rotating := make(map[string]struct{}, len(refs))
+	for _, r := range refs {
+		rotating[r.String()] = struct{}{}
+	}
+	kept := make([]plumbing.ReferenceName, 0, len(current))
+	moved := make([]plumbing.ReferenceName, 0, len(refs))
+	for _, r := range current {
+		if _, rotate := rotating[r.String()]; rotate {
+			moved = append(moved, r)
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if len(moved) == 0 {
+		return nil
+	}
+	return q.rewriteLocked(root, append(kept, moved...))
+}
+
 // rewriteLocked replaces the queue file with exactly refs (de-duplicated, one
 // line each), or removes the file when refs is empty so a clean repo has no
 // stray queue. The caller must hold the lock. The write is atomic (temp file +

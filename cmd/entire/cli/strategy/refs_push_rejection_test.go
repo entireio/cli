@@ -20,21 +20,27 @@ const checkpointUnblockURL = "https://github.com/example/checkpoints/security/se
 
 // Like remote.TestPushWithOptions_ErrorCarriesRemoteRejectionReason, use a real
 // bare remote's pre-receive hook, not a fake git executable.
-func installCheckpointRejectHook(t *testing.T, bareDir string, longOutput bool) {
+// countFile, when set, records one line per receive-pack invocation so a caller
+// can count attempts rather than infer them from elapsed time.
+func installCheckpointRejectHook(t *testing.T, bareDir string, longOutput bool, countFile string) {
 	t.Helper()
 	message := "GITHUB PUSH PROTECTION: Amazon AWS Access Key ID; path: 0/full.jsonl:85; " + checkpointUnblockURL + "\n"
 	if longOutput {
 		message += strings.Repeat("additional repository policy detail\n", 200)
 	}
 	message += checkpointRejectReason
-	hook := "#!/bin/sh\ncat >&2 <<'REASON'\n" + message + "\nREASON\nexit 1\n"
+	hook := "#!/bin/sh\n"
+	if countFile != "" {
+		hook += "echo attempt >> '" + countFile + "'\n"
+	}
+	hook += "cat >&2 <<'REASON'\n" + message + "\nREASON\nexit 1\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
 }
 
 func TestPushCheckpointRefWithRecovery_PreservesRejection(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir) // CWD-based push/recovery; cannot run in parallel.
-	installCheckpointRejectHook(t, bareDir, false)
+	installCheckpointRejectHook(t, bareDir, false, "")
 
 	err := pushCheckpointRefWithRecovery(t.Context(), bareDir, refs[0])
 	require.ErrorContains(t, err, checkpointRejectReason)
@@ -78,7 +84,7 @@ func TestPrePushCheckpointRefs_RejectionDoesNotRewriteExistingRef(t *testing.T) 
 	tree := strings.TrimSpace(testutil.RunGit(t, workDir, "write-tree"))
 	localTip := strings.TrimSpace(testutil.RunGit(t, workDir, "commit-tree", tree, "-p", "HEAD", "-m", "checkpoint backfill"))
 	testutil.RunGit(t, workDir, "update-ref", refs[0].String(), localTip)
-	installCheckpointRejectHook(t, bareDir, false)
+	installCheckpointRejectHook(t, bareDir, false, "")
 	repo, err := gitrepo.OpenPath(workDir)
 	require.NoError(t, err)
 	defer repo.Close()
@@ -112,7 +118,7 @@ func TestPrePushCheckpointRefs_RejectionIsFailSoftAndVisibleOnce(t *testing.T) {
 			paths.ClearWorktreeRootCache()
 			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
 			testutil.RunGit(t, workDir, "remote", "add", "origin", bareDir)
-			installCheckpointRejectHook(t, bareDir, longOutput)
+			installCheckpointRejectHook(t, bareDir, longOutput, "")
 			repo, err := gitrepo.OpenPath(workDir)
 			require.NoError(t, err)
 			defer repo.Close()

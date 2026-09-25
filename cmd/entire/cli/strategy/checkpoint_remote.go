@@ -189,7 +189,7 @@ func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, lab
 	defer cancel()
 
 	refSpec := fmt.Sprintf("+%s:%s", srcRef, tmpRef)
-	output, fetchErr := remote.Fetch(fetchCtx, remote.FetchOptions{
+	_, fetchErr := remote.Fetch(fetchCtx, remote.FetchOptions{
 		Remote:   remoteURL,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
@@ -200,11 +200,9 @@ func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, lab
 		return nil
 	}
 
+	// remote.Fetch already folds git's output into fetchErr, redacted and
+	// capped; splicing it again printed the same text twice.
 	redactedURL := remote.RedactURL(remoteURL)
-	msg := strings.TrimSpace(strings.ReplaceAll(string(output), remoteURL, redactedURL))
-	if msg != "" {
-		return fmt.Errorf("fetch %s from %s failed: %s: %w", label, redactedURL, msg, fetchErr)
-	}
 	return fmt.Errorf("fetch %s from %s failed: %w", label, redactedURL, fetchErr)
 }
 

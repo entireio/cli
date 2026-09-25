@@ -291,7 +291,7 @@ func Fetch(ctx context.Context, opts FetchOptions) ([]byte, error) {
 	}
 
 	if err != nil {
-		return out, fmt.Errorf("git fetch: %w", err)
+		return out, errWithGitOutput(fmt.Errorf("git fetch: %w", err), out, opts.Remote)
 	}
 	return out, nil
 }
@@ -495,18 +495,46 @@ func formatGitPushError(ctx context.Context, err error, output []byte, remote st
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("deadline exceeded: %w", err)
 	}
-	detail := strings.TrimSpace(string(output))
+	detail := gitOutputDetail(output, remote)
 	if detail == "" {
 		return err
-	}
-	if remote != "" {
-		detail = strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
 	}
 	return &PushError{
 		cause:  err,
 		detail: elideMiddle(strings.Join(strings.Fields(detail), " "), maxPushErrorDetail),
 		output: elideMiddle(detail, maxPushErrorDetail),
 	}
+}
+
+// gitOutputDetail trims git's combined output and redacts a URL-shaped target
+// out of it, because git echoes the remote back into its messages and a URL may
+// carry credentials (same reasoning as formatGitCommandError and FetchBlobs).
+// Returns "" when git produced no output — which is what a process killed by a
+// cancelled context or an exhausted budget does.
+func gitOutputDetail(output []byte, remote string) string {
+	detail := strings.TrimSpace(string(output))
+	if detail == "" || remote == "" {
+		return detail
+	}
+	return strings.ReplaceAll(detail, remote, RedactURLOrPath(remote))
+}
+
+// errWithGitOutput annotates err with git's own output, or returns err unchanged
+// when git produced none.
+//
+// The output annotates the error, it never replaces it: substituting the output
+// yielded an empty message precisely when git was killed, leaving no cause and
+// nothing for errors.Is to match.
+//
+// Deliberately not a *PushError, though it shares the folding: that type is how
+// checkpointRefRejectionReason recognises a push the remote refused, so handing
+// one back for a failed fetch would let a fetch failure be read as a rejection.
+func errWithGitOutput(err error, output []byte, remote string) error {
+	detail := gitOutputDetail(output, remote)
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w (%s)", err, elideMiddle(strings.Join(strings.Fields(detail), " "), maxPushErrorDetail))
 }
 
 // elideMiddle shortens s to at most limit runes by dropping the middle, keeping
@@ -541,7 +569,7 @@ func elideMiddle(s string, limit int) string {
 	return string(r[:head]) + marker + string(r[len(r)-tail:])
 }
 
-// maxPushErrorDetail bounds the git output folded into a push error, in runes.
+// maxPushErrorDetail bounds the git output folded into a push or fetch error, in runes.
 // Push output carries per-secret push-protection banners and progress lines and
 // can run to several KB; this keeps the error usable as a log attribute while
 // leaving room for both ends of a long rejection.

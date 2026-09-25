@@ -119,6 +119,12 @@ without additional secret redaction of the remote's diagnostic output. Plain non
 SSH authentication failures retain their dedicated hint. Failures remain queued
 and **never fail the user's git push**.
 
+The fallback is bounded. It runs under a `checkpointFlushBudget` context deadline — so an expired budget cuts a ref that is already hung rather than waiting out its own `checkpointPushBudget` first — and additionally stops after `maxConsecutiveRefPushFailures` refs fail in a row. Either way it never aborts before at least one ref has been attempted. A remote that is refusing or unreachable fails every ref the same way, and each ref in the fallback costs at least one network round-trip, so walking a large queue to the end turns one failed push into an apparently hung one for minutes or hours. Skipped refs stay queued and go out on the next push, and a success resets the consecutive count so one blocked checkpoint does not strand the refs queued behind it. The abort prints one line naming what stopped the retry and how many refs remain.
+
+An early abort also rotates that flush's failures to the back of the queue (`PushQueue.Rotate`). The queue drains in first-seen order, so without it a prefix that always fails — five checkpoints blocked by a ruleset, say — is retried in the same order on every push and the healthy refs behind it are never attempted at all. Rotation is skipped after an interruption, where the failures say nothing about the refs.
+
+Two diagnostics make a wholesale failure readable. The batch error is logged before the fallback runs: the per-ref retries re-derive a *rejection* reason, but a transport failure — an unreachable remote, a stalled connection — matches none of them, so without that line the cause reached neither the terminal nor `.entire/logs`. And `remote.Fetch` now annotates its error with git's own output — redacted and capped by the same `errWithGitOutput` helper the push path uses — instead of the strategy layer substituting that output for the error, which reported a contentless `fetch failed:` per ref whenever git was killed before writing anything.
+
 ### Non-force, fast-forward-only
 
 All checkpoint-ref pushes are **fast-forward-only — never a force push.** There is no server-side ref protection, so a force push risks silently clobbering a checkpoint written elsewhere. Per-checkpoint refs normally advance by fast-forward (append-only per-checkpoint history), so this is the common case.

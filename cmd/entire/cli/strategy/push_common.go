@@ -201,6 +201,51 @@ func displayPushTarget(target string) string {
 // can shrink it.
 var checkpointPushBudget = 2 * time.Minute
 
+// checkpointFlushBudget bounds the individual-retry fallback in
+// flushCheckpointRefsQueue as a whole, which checkpointPushBudget cannot: that
+// one caps a single ref, and the fallback walks the queue serially, so a backlog
+// multiplies it. A healthy push costs roughly one SSH round-trip per ref, so a
+// few hundred queued refs is already tens of minutes of a `git push` that looks
+// hung; when the destination is unreachable every ref instead pays the full
+// per-ref budget and the same queue runs for hours. Refs that do not fit stay
+// queued and go out on the next push, so this bounds progress, never data.
+//
+// Applied as a context deadline, not a wall-clock check between refs, so it can
+// cut a ref that is already hung rather than waiting out its own budget first.
+// context.WithTimeout keeps the earlier of parent and child deadlines, so the
+// per-ref checkpointPushBudget automatically shrinks to whatever is left.
+//
+// Declared as a var so tests can shrink it.
+var checkpointFlushBudget = 2 * time.Minute
+
+// maxConsecutiveRefPushFailures stops the individual-retry fallback once this
+// many refs in a row have failed. The fallback exists to isolate the odd
+// diverged or blocked ref from an otherwise pushable queue; once several fail in
+// a row the cause is the destination rather than the refs, and walking the rest
+// of the queue only repeats it. A success resets the count, so one poisoned ref
+// — say a single checkpoint tripping push protection — does not strand the refs
+// queued behind it.
+const maxConsecutiveRefPushFailures = 5
+
+// flushAbortReason reports why the individual-retry fallback should stop before
+// the end of the queue, or "" to continue.
+//
+// The reason is a bare phrase: it is printed inside the user's `git push` and
+// names what stopped the retry, never a diagnosis of the underlying failure —
+// the same discipline flushCheckpointRefsQueue's retry line follows, and for the
+// same reason. A stalled remote and a rejecting one abort identically here.
+func flushAbortReason(ctx context.Context, consecutiveFailures int) string {
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Sprintf("budget (%s) exhausted", checkpointFlushBudget)
+	case ctx.Err() != nil:
+		return "interrupted"
+	case consecutiveFailures >= maxConsecutiveRefPushFailures:
+		return fmt.Sprintf("%d consecutive failures", consecutiveFailures)
+	}
+	return ""
+}
+
 // doPushRef pushes the given ref to the target with fetch+rebase recovery.
 // The target can be a remote name or a URL.
 //
@@ -545,7 +590,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	// Span the fetch separately so a slow sync can be attributed to the network
 	// fetch versus the local reconcile/rebase that follows it.
 	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
@@ -553,7 +598,7 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 	fetchSpan.RecordError(fetchErr)
 	fetchSpan.End()
 	if fetchErr != nil {
-		return fmt.Errorf("fetch failed: %s", fetchOutput)
+		return fmt.Errorf("fetch failed: %w", fetchErr)
 	}
 
 	repo, err := OpenRepository(ctx)
