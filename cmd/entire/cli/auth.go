@@ -933,11 +933,13 @@ func authProfileRows(p *authProfile) []explainRow {
 	if user := authIdentityLabel(p); user != "" {
 		rows = append(rows, explainRow{Label: "user", Value: user})
 	}
-	// A display name only earns a line where the handle is not already one.
-	// Providers split cleanly here: GitHub gives a human handle and no display
-	// name, while Google mints a synthetic `google-<subject id>` handle and
-	// does give one — so each provider is named by whichever half it has, and
-	// neither grows a row repeating the other.
+	// A display name only earns a line where the handle is not already that
+	// name. The test is the value, not the provider: Google mints a synthetic
+	// `google-<subject id>` handle and supplies a display name, so it is named
+	// by both halves, while a GitHub account is named by its handle alone
+	// whenever it carries no display name, or one that merely restates it.
+	// A GitHub account that does carry a distinct display name gets the row
+	// like any other — which is what okProfile in the tests exercises.
 	if name := strings.TrimSpace(p.DisplayName); name != "" && !strings.EqualFold(name, p.Handle) {
 		rows = append(rows, explainRow{Label: "name", Value: name})
 	}

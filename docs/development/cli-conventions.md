@@ -152,13 +152,16 @@ the commands are always runnable in every build.
   `user` and deliberately not a split `handle`/`provider`: one field beats two a
   caller has to rejoin. **Identity is split across providers**, so the view takes
   whichever half each one has. GitHub supplies a human handle
-  (`github:gtrrz-victor`) and no display name; Google supplies a display name
-  and a handle synthesised as `google-<subject id>`, which qualifies to
-  `google:google-100…` — the provider twice. That prefix is dropped when what
+  (`github:gtrrz-victor`); Google supplies a display name and a handle
+  synthesised as `google-<subject id>`, which qualifies to `google:google-100…`
+  — the provider twice. That prefix is dropped when what
   follows it IS the `providerUserId`, so the handle is provably the minted form
   and a GitHub user genuinely named `github-foo` keeps their name. A `name` row
-  (and JSON field) carries the display name, and appears only where the handle
-  is not already a human one, so GitHub grows no second line.
+  carries the display name, and earns its line only where the handle is not
+  already that name — the test is the value, not the provider, so a GitHub
+  account that does carry a display name grows the row like any other. The
+  `name` JSON field is uncollapsed, as `--json` never applies a text-view
+  collapse.
   **The trade-off is deliberate and worth knowing:** the de-duplicated spelling
   does not resolve as a grantee — `GET /identity/handles/google/<subject id>`
   answers 404 while the doubled form resolves — so for synthetic handles `user`
