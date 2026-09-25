@@ -608,6 +608,17 @@ const push = (event) => {
   if (notify) notify()
 }
 
+// The event stream is process-wide: this instance must ignore another
+// location's session events before it runs any Entire hook.
+push({ type: "session.created", location: { directory: "/some/other/repo" }, data: { sessionID: "sess-other" } })
+await new Promise((resolve) => setTimeout(resolve, 100))
+{
+  const { readFileSync } = await import("node:fs")
+  let seen = ""
+  try { seen = readFileSync(process.argv[3], "utf8") } catch {}
+  if (seen.includes("session-start")) throw new Error("foreign-location event was not ignored")
+}
+
 push({ type: "session.created", data: { sessionID: "sess-v2" } })
 await new Promise((resolve) => setTimeout(resolve, 50))
 hooks.prompt({ sessionID: "sess-v2", messageID: "msg-1", prompt: { text: "hello entire" } })
@@ -619,7 +630,7 @@ await new Promise((resolve) => setTimeout(resolve, 200))
 		t.Fatal(err)
 	}
 
-	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pluginPath)
+	cmd := exec.CommandContext(t.Context(), "node", "--experimental-strip-types", driverPath, pluginPath, markerPath)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()

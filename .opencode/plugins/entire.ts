@@ -298,10 +298,29 @@ function createHooks(directory: string) {
 
   // ---- OpenCode 2 setup ----------------------------------------------------
 
+  // trimTrailingSeparators drops trailing path separators so two spellings of
+  // the same directory compare equal.
+  function trimTrailingSeparators(value: string): string {
+    return value.length > 1 ? value.replace(/[\\/]+$/, "") : value
+  }
+
+  // isForThisLocation reports whether an OpenCode 2 event belongs to this
+  // plugin instance's directory. The server's event stream is process-wide, so
+  // an instance for one location can observe another location's sessions; those
+  // events must not drive this location's Entire hooks. Events without a
+  // location are accepted because they are not location-scoped.
+  function isForThisLocation(event: AnyRecord): boolean {
+    const loc = event?.location?.directory
+    if (typeof loc !== "string" || loc === "") return true
+    return trimTrailingSeparators(loc) === trimTrailingSeparators(directory)
+  }
+
   // handleV2Event maps OpenCode 2 public events to the same lifecycle hooks the
   // V1 event handler fires. Event payloads carry a `data` object.
   function handleV2Event(event: AnyRecord) {
     try {
+      // Ignore events from other locations before dispatching the switch.
+      if (!isForThisLocation(event)) return
       switch (event?.type) {
         case "session.created": {
           const sessionID = event?.data?.sessionID
