@@ -1362,6 +1362,37 @@ func TestAuthProfileRows_NameRow(t *testing.T) {
 	}
 }
 
+// The display name is display_name in JSON, never name: sessions[].name in the
+// same envelope is a session's name, and one document must not spell two
+// subjects alike. It is also uncollapsed — emitted even where the text row is
+// dropped for restating the handle — since --json applies no text-view collapse.
+func TestBuildAuthStatusJSON_DisplayNameSpellingAndCollapse(t *testing.T) {
+	t.Parallel()
+
+	profile := &authProfile{Handle: "alice", Provider: "github", ProviderUserID: "1", DisplayName: "alice"}
+	fetch := func(context.Context, string, string) (*authProfile, error) { return profile, nil }
+	target := statusTarget{coreURL: testCoreURL, token: "tok", activeContext: "a", totalContexts: 1}
+
+	var out bytes.Buffer
+	if err := runAuthStatus(context.Background(), &out, fetch, noSessions, target, authStatusOptions{JSON: true}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("decode %q: %v", out.String(), err)
+	}
+	if _, ok := raw["name"]; ok {
+		t.Errorf("output = %q, want no top-level \"name\" — that key is a session's", out.String())
+	}
+	if got := raw["display_name"]; got != "alice" {
+		t.Errorf("display_name = %v, want it emitted even where the text row is dropped", got)
+	}
+	// The text row IS dropped here, which is the asymmetry being pinned.
+	if hasLabel(authProfileRows(profile), "name") {
+		t.Error("text rows carry a name row repeating the handle")
+	}
+}
+
 // Where the bearer came from is settled before /me is consulted, so a script
 // can see that ENTIRE_TOKEN supplied the token even when /me rejected it —
 // which is also why "run entire login" cannot help in that state.

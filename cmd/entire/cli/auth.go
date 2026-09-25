@@ -756,11 +756,17 @@ type authStatusJSON struct {
 	// It is the spelling `entire grant` takes wherever the provider issues real
 	// usernames. Where one is synthesised from a subject id (Google), the
 	// duplicated provider is dropped for legibility and the result no longer
-	// resolves as a grantee — see authIdentityLabel. Name is the display name
-	// such an account carries instead, absent where the handle is already
-	// human.
-	User          string `json:"user,omitempty"`
-	Name          string `json:"name,omitempty"`
+	// resolves as a grantee — see authIdentityLabel.
+	User string `json:"user,omitempty"`
+	// DisplayName is the account's human name where the server has one. Spelled
+	// display_name, not name: `sessions[].name` in this same envelope is a
+	// session's name, and one document must not use `name` for two subjects.
+	// It also matches the only other CLI envelope carrying this concept
+	// (`entire experts`), and /me's own `displayName`.
+	//
+	// Uncollapsed, unlike the text row it feeds: --json never applies a
+	// text-view collapse, so it is emitted even when it restates the handle.
+	DisplayName   string `json:"display_name,omitempty"`
 	Jurisdiction  string `json:"jurisdiction,omitempty"`
 	ForeignRegion bool   `json:"foreign_region,omitempty"`
 	// TokenSource is the same description the text view prints; EnvToken is the
@@ -843,7 +849,7 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 	out.ForeignRegion = d.profile.ForeignRegion
 	out.Jurisdiction = d.profile.Jurisdiction
 	out.User = authIdentityLabel(d.profile)
-	out.Name = strings.TrimSpace(d.profile.DisplayName)
+	out.DisplayName = strings.TrimSpace(d.profile.DisplayName)
 
 	if t.envToken {
 		return out

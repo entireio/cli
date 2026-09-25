@@ -159,9 +159,11 @@ the commands are always runnable in every build.
   and a GitHub user genuinely named `github-foo` keeps their name. A `name` row
   carries the display name, and earns its line only where the handle is not
   already that name — the test is the value, not the provider, so a GitHub
-  account that does carry a display name grows the row like any other. The
-  `name` JSON field is uncollapsed, as `--json` never applies a text-view
-  collapse.
+  account that does carry a display name grows the row like any other. In JSON
+  the field is `display_name`, not `name`: `sessions[].name` in the same
+  envelope is a session's name, and one document must not spell two subjects
+  the same way — it also matches `entire experts` and /me's own `displayName`.
+  It is uncollapsed, as `--json` never applies a text-view collapse.
   **The trade-off is deliberate and worth knowing:** the de-duplicated spelling
   does not resolve as a grantee — `GET /identity/handles/google/<subject id>`
   answers 404 while the doubled form resolves — so for synthetic handles `user`
