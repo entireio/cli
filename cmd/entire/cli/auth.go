@@ -425,10 +425,22 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 		return fmt.Errorf("validate token: %w", err)
 	}
 
+	// Last resort for the home jurisdiction: the login token carries it as a
+	// home_jurisdiction claim, and that claim is what jurisdictional calls
+	// route on (see auth.HomeJurisdictionFromLoginJWT). /me's
+	// global.homeJurisdiction is authoritative and normally wins; this covers a
+	// core too old to send it.
+	if profile.Jurisdiction == "" {
+		if juris, jerr := auth.HomeJurisdictionFromLoginJWT(t.token); jerr == nil && juris != "" {
+			profile.Jurisdiction = juris
+		}
+	}
+
 	fmt.Fprintf(w, "Logged in to %s\n", t.coreURL)
 	writeProfileLines(w, profile)
-	// Without this the display name and email are silently missing under a
-	// "Logged in to" line naming a non-home core. Name the split rather than
+	// Without this the block reads as a contradiction: "Logged in to
+	// eu.auth.entire.io" sitting directly above "Jurisdiction: au", with the
+	// display name and email silently missing. Name the split rather than
 	// leaving the user to infer it.
 	if profile.ForeignRegion {
 		writeAuthStatusLine(w, "Note:", fmt.Sprintf(
@@ -472,7 +484,7 @@ func runAuthStatus(ctx context.Context, w io.Writer, fetchProfile profileFetcher
 // writeAuthStatusLine writes one aligned "  Label   value" row of the
 // `entire auth status` block. writeProfileLines and runAuthStatus both render
 // into this same column, so the label width lives here in one place (it must be
-// ≥ the longest label).
+// ≥ the longest label, currently "Jurisdiction:").
 func writeAuthStatusLine(w io.Writer, label, value string) {
 	fmt.Fprintf(w, "  %-13s %s\n", label, value)
 }
@@ -499,6 +511,11 @@ func writeProfileLines(w io.Writer, p *authProfile) {
 			identity += "/" + p.ProviderUserID
 		}
 		writeAuthStatusLine(w, "Identity:", identity)
+	}
+	// The home jurisdiction slug is what 'entire auth token --jurisdiction'
+	// takes; surface it so it's discoverable non-interactively.
+	if p.Jurisdiction != "" {
+		writeAuthStatusLine(w, "Jurisdiction:", p.Jurisdiction)
 	}
 }
 
