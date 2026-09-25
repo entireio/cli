@@ -35,7 +35,7 @@ const maxReplacedCommits = 200
 // is recommitted, not rewritten, and one coincidentally identical file among
 // rewritten ones is not a redo. Returns the inherited IDs, nil when nothing
 // applies.
-func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Context, repo *git.Repository, commitMsgFile string) []id.CheckpointID {
+func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Context, repo *git.Repository, commitMsgFile, source string) []id.CheckpointID {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	logging.Debug(logCtx, "prepare-commit-msg: checking for redone commits")
 	tip, replaced, why := replacedCommits(ctx, repo)
@@ -83,7 +83,7 @@ func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Contex
 	added := 0
 	for _, cpID := range inherited {
 		if !present[cpID] {
-			message = addInheritedCheckpointTrailer(message, cpID)
+			message = addInheritedCheckpointTrailer(message, cpID, source)
 			added++
 		}
 	}
@@ -101,8 +101,8 @@ func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Contex
 
 // withRedoneTrailers adds the trailers of the commits this one redoes to the
 // message and to inherited, and records the combined set for post-commit.
-func (s *ManualCommitStrategy) withRedoneTrailers(ctx context.Context, repo *git.Repository, commitMsgFile string, inherited []id.CheckpointID) []id.CheckpointID {
-	redone := s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile)
+func (s *ManualCommitStrategy) withRedoneTrailers(ctx context.Context, repo *git.Repository, commitMsgFile, source string, inherited []id.CheckpointID) []id.CheckpointID {
+	redone := s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile, source)
 	if len(redone) == 0 {
 		return inherited
 	}
@@ -124,7 +124,7 @@ func (s *ManualCommitStrategy) prepareAmendCommitMsg(ctx context.Context, commit
 		return nil // the amend itself is prepared; folding is best-effort
 	}
 	defer repo.Close()
-	recordInheritedTrailersOnAmend(ctx, s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile))
+	recordInheritedTrailersOnAmend(ctx, s.inheritReplacedCommitsTrailers(ctx, repo, commitMsgFile, "commit"))
 	return nil
 }
 

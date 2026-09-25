@@ -36,7 +36,7 @@ func advPrepare(t *testing.T, text, source string) string {
 // one-file branch, fix a typo in that file before committing, then `git commit`
 // (editor; git seeds the message from SQUASH_MSG, which lists the trailer).
 // User wants: the squash commit keeps the squashed commit's trailer.
-// PR does: squashStagedContentMatches finds no staged file equal to a squashed
+// PR did: the stale-SQUASH_MSG guard found no staged file equal to a squashed
 // commit's version, treats SQUASH_MSG as stale, and strips the trailer that git
 // itself seeded. On main prepare skipped "squash" and the trailer survived.
 func TestAdversarial_SquashWithTweakKeepsSeededTrailer(t *testing.T) {

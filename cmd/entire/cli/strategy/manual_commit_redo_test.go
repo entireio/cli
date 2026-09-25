@@ -265,3 +265,13 @@ func TestPrepareCommitMsg_RedoInVerboseEditorKeepsTrailersAboveScissors(t *testi
 	kept, _, _ := strings.Cut(got, scissors)
 	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(kept), "%q", got)
 }
+
+// A redo committed with -m "#42 ..." keeps that line as its subject: a -m
+// message has no git comment block for the trailers to go above.
+func TestPrepareCommitMsg_RedoWithHashSubjectKeepsItsSubject(t *testing.T) {
+	dir := redoFixture(t)
+	testutil.RunGit(t, dir, "reset", "-q", "--soft", "HEAD~2")
+	got := prepareMessage(t, "#42 the feature (logical)\n")
+	require.True(t, strings.HasPrefix(got, "#42 the feature (logical)\n"), "%q", got)
+	require.Equal(t, []string{redoCheckpointOne, redoCheckpointTwo}, checkpointIDs(got), "%q", got)
+}
