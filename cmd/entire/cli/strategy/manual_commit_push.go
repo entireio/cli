@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -381,15 +382,46 @@ func isConfiguredRemote(ctx context.Context, name string) bool {
 // before and so already has at least one branch. Local-only and best-effort:
 // any error is treated as "no tracking refs" so the caller fails safe (defers).
 func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
-	if remote == "" {
+	if remote == "" || ctx.Err() != nil {
 		return false
 	}
-	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--count=1", "refs/remotes/"+remote+"/")
-	out, err := cmd.Output()
+	if gitrepo.ReadsNeedNativeGit() {
+		return remoteHasTrackingRefsNative(ctx, remote)
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return remoteHasTrackingRefsNative(ctx, remote)
+	}
+	defer repo.Close()
+	refs, err := repo.References()
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) != ""
+	defer refs.Close()
+	prefix := "refs/remotes/" + remote + "/"
+	for {
+		ref, err := refs.Next()
+		if err != nil || ctx.Err() != nil {
+			return false
+		}
+		if !strings.HasPrefix(ref.Name().String(), prefix) {
+			continue
+		}
+		resolved, err := repo.Reference(ref.Name(), true)
+		if errors.Is(err, plumbing.ErrReferenceNotFound) {
+			continue // for-each-ref omits dangling symbolic references
+		}
+		if err != nil {
+			return false
+		}
+		return repo.Storer.HasEncodedObject(resolved.Hash()) == nil && ctx.Err() == nil
+	}
+}
+
+func remoteHasTrackingRefsNative(ctx context.Context, remote string) bool {
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--count=1", "refs/remotes/"+remote+"/")
+	out, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 // prePushCheckpointRefs drains the per-checkpoint push queue and batch-pushes the

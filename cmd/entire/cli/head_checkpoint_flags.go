@@ -18,6 +18,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // headCheckpointFlags returns the (HasReview, HasInvestigation, info) triple
@@ -36,23 +38,22 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		logging.Debug(ctx, "head checkpoint flags: locate worktree root", slog.String("error", err.Error()))
 		return false, false, ""
 	}
-	execCmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-1", "--format=%B")
-	output, err := execCmd.Output()
-	if err != nil {
-		logging.Debug(ctx, "head checkpoint flags: read HEAD commit message", slog.String("error", err.Error()))
-		return false, false, ""
-	}
-	cpID, ok := trailers.ParseCheckpoint(string(output))
-	if !ok {
-		logging.Debug(ctx, "head checkpoint flags: no Entire-Checkpoint trailer on HEAD")
-		return false, false, ""
-	}
 	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		logging.Debug(ctx, "head checkpoint flags: open repository", slog.String("error", err.Error()))
 		return false, false, ""
 	}
 	defer repo.Close()
+	message, err := headCommitMessage(ctx, repo, repoRoot)
+	if err != nil {
+		logging.Debug(ctx, "head checkpoint flags: read HEAD commit message", slog.String("error", err.Error()))
+		return false, false, ""
+	}
+	cpID, ok := trailers.ParseCheckpoint(message)
+	if !ok {
+		logging.Debug(ctx, "head checkpoint flags: no Entire-Checkpoint trailer on HEAD")
+		return false, false, ""
+	}
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		logging.Debug(ctx, "head checkpoint flags: open store", slog.String("error", err.Error()))
@@ -66,6 +67,26 @@ func headCheckpointFlags(ctx context.Context) (hasReview, hasInvestigation bool,
 		return false, false, ""
 	}
 	return summary.HasReview, summary.HasInvestigation, fmt.Sprintf("checkpoint %s", cpID)
+}
+
+// headCommitMessage uses the already-open repository for normal local reads.
+// Native Git remains the compatibility path for explicit store overrides,
+// replace refs, and missing promisor objects that Git can fetch on demand.
+func headCommitMessage(ctx context.Context, repo *git.Repository, repoRoot string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("read HEAD message: %w", err)
+	}
+	if !gitrepo.ReadsNeedNativeGit() {
+		commit, err := gitrepo.CommitAtReference(ctx, repo, plumbing.HEAD)
+		if err == nil {
+			return commit.Message, nil
+		}
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-1", "--format=%B").Output()
+	if err != nil {
+		return "", fmt.Errorf("read HEAD message with Git: %w", err)
+	}
+	return string(out), nil
 }
 
 // headHasReviewCheckpoint checks whether HEAD's checkpoint metadata includes

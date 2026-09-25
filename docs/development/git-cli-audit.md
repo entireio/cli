@@ -1,9 +1,6 @@
 # Git CLI → go-git audit
 
-Static audit of this checkout against `~/Work/entire/go-git` main, treating that
-source as available (no release-availability gating). No production code changed.
-API availability is not a claim of behavioral equivalence; candidates below need
-regression tests before migration. Line numbers identify the audited checkout.
+Static audit against `~/Work/entire/go-git` main, treating that source as available (no release-availability gating). The original audit changed no production code; subsequent migrations are recorded below. API availability is not a claim of behavioral equivalence; candidates need regression tests before migration. Inventory line numbers identify the original audited checkout, not current locations.
 
 Scope: production Go subprocesses, their variadic wrappers/callers, test and
 benchmark helpers, and shell/build tooling. Test invocations are grouped rather
@@ -24,6 +21,14 @@ help text, and commands merely suggested to an agent are not executable call sit
 A go-git call through Entire's reftable adapter can still spawn Git. Replacing a
 caller with go-git does not eliminate subprocesses in reftable repositories.
 Always open via `gitrepo.OpenCurrent` / `OpenPath`, not a new direct `PlainOpen`.
+
+## Implemented migrations
+
+- Literal branch-name validation uses `plumbing.ValidateBranchName`; repository-dependent `@{...}` expressions retain native Git.
+- HEAD checkpoint messages and metadata tracking tips use `gitrepo.CommitAtReference`, including symbolic-ref resolution and nested tag peeling. Replace refs, explicit store selectors, and missing objects retain native compatibility paths.
+- Fresh shadow-branch existence checks reopen the storer after native deletion; tracking-ref detection iterates refs with an exact remote prefix. Explicit store selectors and bare repositories retain native Git. Branch deletion and its pre-check are unchanged.
+
+These are normal-path migrations, not wholesale subprocess removal. Discovery and reftable reference access remain native. The retained compatibility boundaries are documented in [Git safety](git-safety.md#local-ref-and-commit-reads). Arbitrary revision expressions, history counts, doctor ref reports, and object-tree diffs remain follow-ups.
 
 ## 1. Strong replacement candidates
 

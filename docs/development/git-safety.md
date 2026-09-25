@@ -45,6 +45,14 @@ instead — that is what "we could not find out which repository this is" means.
 Key files: `gitrepo/repository.go` (open entry points) and
 `gitrepo/reftable.go` (`reftableStorer`).
 
+#### Local ref and commit reads
+
+HEAD checkpoint messages, metadata tracking-tip checks, fresh shadow-branch existence checks, and tracking-ref enumeration use go-git on the normal local-worktree path. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git; a migrated read is not a promise of zero subprocesses, especially for the CLI-backed reftable storer.
+
+`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence. Shadow-branch existence verification opens a fresh storer after native deletion so packed-ref caches cannot report a deleted ref as present. Branch deletion and its native pre-check remain unchanged.
+
+Keep the native compatibility paths: explicit repository/object-store selectors (`gitrepo.ReadsNeedNativeGit`), repositories the worktree opener cannot handle (including bare repositories), and HEAD/commit reads requiring replace-ref interpretation or promisor-object backfill. Do not replace these with a guessed CWD repository. The literal tracking-ref prefix includes its trailing slash, so `origin` cannot match `origin-other`. No migrated read uses status, refreshes the index, or mutates worktree files.
+
 #### Reading Worktree Status - Always Use `gitrepo.Status`
 
 **Never call go-git's `worktree.Status()` directly.** Use

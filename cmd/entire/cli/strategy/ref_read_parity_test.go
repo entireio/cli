@@ -52,7 +52,7 @@ func TestGitCommitRefExists_PeelingAndAbsence(t *testing.T) {
 	require.False(t, gitCommitRefExists(ctx, "HEAD"))
 }
 
-func TestBranchExistsCLI_RepositoryStates(t *testing.T) {
+func TestBranchExistsFresh_RepositoryStates(t *testing.T) {
 	for _, state := range []string{"loose", "packed", "linked", "missing", "corrupt", "unborn", "canceled"} {
 		t.Run(state, func(t *testing.T) {
 			gitenv.IsolateRepository(t)
@@ -81,7 +81,7 @@ func TestBranchExistsCLI_RepositoryStates(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			err := branchExistsCLI(ctx, branch)
+			err := branchExistsFresh(ctx, branch)
 			if state == "loose" || state == "packed" || state == "linked" {
 				require.NoError(t, err)
 			} else {

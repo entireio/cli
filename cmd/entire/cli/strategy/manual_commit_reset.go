@@ -120,9 +120,8 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
 		fmt.Fprintf(errW, "Warning: failed to clean up shadow branch %s: %v\n", shadowBranchName, err)
 	} else {
-		// Check if it was actually deleted via git CLI (go-git's cache
-		// may be stale after CLI-based deletion with packed refs)
-		if err := branchExistsCLI(ctx, shadowBranchName); err != nil {
+		// Reopen the reference store to observe native deletion of packed refs.
+		if err := branchExistsFresh(ctx, shadowBranchName); err != nil {
 			fmt.Fprintf(w, "✓ Deleted shadow branch %s\n", shadowBranchName)
 		}
 	}

@@ -7,7 +7,7 @@ import (
 
 func TestIsolateRepository_RestoresSelectors(t *testing.T) {
 	// Both levels mutate the environment and must remain serial.
-	keys := []string{"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"}
+	keys := []string{"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE"}
 	for _, key := range keys {
 		t.Setenv(key, "inherited-selector")
 	}
