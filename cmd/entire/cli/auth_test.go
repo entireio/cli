@@ -92,25 +92,6 @@ func TestRunAuthStatus_LoggedIn(t *testing.T) {
 	}
 }
 
-// TestWriteProfileLines_Jurisdiction verifies the home jurisdiction slug is
-// rendered (so `auth token --jurisdiction` is discoverable) and omitted when the
-// server didn't populate it.
-func TestWriteProfileLines_Jurisdiction(t *testing.T) {
-	t.Parallel()
-
-	var withJ bytes.Buffer
-	writeProfileLines(&withJ, &authProfile{Handle: "alice", Provider: "github", Jurisdiction: "us"})
-	if !strings.Contains(withJ.String(), "Jurisdiction: us") {
-		t.Fatalf("output = %q, want a 'Jurisdiction: us' line", withJ.String())
-	}
-
-	var withoutJ bytes.Buffer
-	writeProfileLines(&withoutJ, &authProfile{Handle: "alice", Provider: "github"})
-	if strings.Contains(withoutJ.String(), "Jurisdiction") {
-		t.Fatalf("output = %q, want no Jurisdiction line when the slug is empty", withoutJ.String())
-	}
-}
-
 // defaultFetchProfile must read the account's own home region from
 // global.homeJurisdiction, not the top-level jurisdiction field, which is the
 // serving node's. A geo-routed device login makes the two differ: an AU-homed
@@ -152,8 +133,8 @@ func TestDefaultFetchProfile_HomeJurisdictionFromGlobal(t *testing.T) {
 	}
 }
 
-// The foreign-region note explains why the "Logged in to" host and the
-// jurisdiction disagree, and why the display name and email are absent.
+// The foreign-region note explains why the display name and email are absent
+// under a "Logged in to" line naming a non-home core.
 func TestRunAuthStatus_ForeignRegionNote(t *testing.T) {
 	t.Parallel()
 
@@ -168,8 +149,8 @@ func TestRunAuthStatus_ForeignRegionNote(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, "Jurisdiction: au") {
-		t.Fatalf("output = %q, want the account's home region", got)
+	if strings.Contains(got, "Jurisdiction") {
+		t.Fatalf("output = %q, must not print a Jurisdiction line", got)
 	}
 	if !strings.Contains(got, "outside your home region") {
 		t.Fatalf("output = %q, want a note explaining the foreign region", got)
@@ -192,44 +173,6 @@ func TestRunAuthStatus_NoNoteForHomeRegion(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "outside your home region") {
 		t.Fatalf("output = %q, want no foreign-region note", out.String())
-	}
-}
-
-// With no home region from /me, the login token's home_jurisdiction claim
-// stands in rather than the line disappearing.
-func TestRunAuthStatus_JurisdictionFallsBackToTokenClaim(t *testing.T) {
-	t.Parallel()
-
-	noJuris := func(context.Context, string, string) (*authProfile, error) {
-		return &authProfile{Handle: "alice", Provider: "github"}, nil
-	}
-
-	var out bytes.Buffer
-	token := makeTestJWT(t, `{"iss":"https://eu.auth.entire.io","home_jurisdiction":"au"}`)
-	target := statusTarget{coreURL: testCoreURL, token: token, totalContexts: 1}
-	if err := runAuthStatus(context.Background(), &out, noJuris, noSessions, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out.String(), "Jurisdiction: au") {
-		t.Fatalf("output = %q, want 'Jurisdiction: au' from the token claim", out.String())
-	}
-}
-
-// An opaque (non-JWT) token with no /me home region simply omits the line.
-func TestRunAuthStatus_NoJurisdictionAnywhere(t *testing.T) {
-	t.Parallel()
-
-	noJuris := func(context.Context, string, string) (*authProfile, error) {
-		return &authProfile{Handle: "alice", Provider: "github"}, nil
-	}
-
-	var out bytes.Buffer
-	target := statusTarget{coreURL: testCoreURL, token: "tok", totalContexts: 1}
-	if err := runAuthStatus(context.Background(), &out, noJuris, noSessions, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if strings.Contains(out.String(), "Jurisdiction") {
-		t.Fatalf("output = %q, want no Jurisdiction line when nothing supplies it", out.String())
 	}
 }
 

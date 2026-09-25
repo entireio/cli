@@ -55,8 +55,7 @@ the commands are always runnable in every build.
   token is also accepted directly at every entire-api cell (e.g.
   `https://aws-us-east-2.api.entire.io/api/v1`, `aud == iss`, ADR 20260729), so
   `token --jurisdiction <slug>` is deprecated: the flag stays registered but
-  hidden and fails with a migration hint. `auth status` shows the caller's
-  home jurisdiction. `logout` sweeps every saved
+  hidden and fails with a migration hint. `logout` sweeps every saved
   login: one `DELETE /api/auth/tokens` per login server ends every CLI session
   there (core tells them apart by `issuer_client_id`), then the login is
   removed locally. Nothing narrows it: an explicit `--context` is refused

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Breaking changes and migrations
 
-- `entire auth token --jurisdiction` is deprecated and now fails with a migration hint. The plain `entire auth token` output is accepted directly at every entire-api cell, so drop the flag; the jurisdiction token exchange is removed from the CLI
+- `entire auth token --jurisdiction` is deprecated and now fails with a migration hint. The plain `entire auth token` output is accepted directly at every entire-api cell, so drop the flag; the jurisdiction token exchange is removed from the CLI. `entire auth status` no longer prints a `Jurisdiction:` line
 - Gemini CLI support is removed: `entire configure --agent gemini`, Gemini hook capture, the Gemini review runner and summary provider, session import and resume, and Gemini skill setup are gone. Entire hooks already installed in `.gemini/settings.json` now exit silently without recording anything; `entire doctor` and `entire disable --uninstall` remove them. Checkpoints recorded from earlier Gemini CLI sessions remain readable by `entire explain` and summaries
 
 ## [0.11.2] - 2026-09-23
