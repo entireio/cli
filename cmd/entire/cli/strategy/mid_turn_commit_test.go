@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"os"
+        "os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -274,4 +275,21 @@ func TestPostCommit_NoTrailer_UpdatesBaseCommit(t *testing.T) {
 	// Phase should stay ACTIVE (no state machine transition, just BaseCommit update)
 	assert.Equal(t, session.PhaseActive, state.Phase,
 		"Phase should remain ACTIVE when commit has no trailer")
+}
+
+
+// TestGetStagedFiles_NonASCIIFilename verifies that staged filenames containing
+// non-ASCII characters are returned literally instead of Git's C-escaped form.
+func TestGetStagedFiles_NonASCIIFilename(t *testing.T) {
+        dir := setupGitRepo(t)
+        t.Chdir(dir)
+        filename := "caf\u00e9.go"
+        filePath := filepath.Join(dir, filename)
+        require.NoError(t, os.WriteFile(filePath, []byte("package main\n"), 0o644))
+        cmd := exec.Command("git", "add", "--", filename)
+        cmd.Dir = dir
+        require.NoError(t, cmd.Run())
+        stagedFiles, err := getStagedFiles(context.Background())
+        require.NoError(t, err)
+        assert.Contains(t, stagedFiles, filepath.ToSlash(filename))
 }
