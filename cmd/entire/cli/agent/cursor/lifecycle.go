@@ -70,13 +70,21 @@ func (c *CursorAgent) resolveTranscriptRef(ctx context.Context, conversationID, 
 		return ""
 	}
 
-	sessionDir, err := c.GetSessionDir(repoRoot)
+	// Through the store, not c.ResolveSessionFile directly: conversationID is the
+	// raw hook payload's and SessionFile is where it is validated and the result
+	// confirmed to be inside the store. See agent.Agent.ResolveSessionFile.
+	store, err := agent.OpenSessionStore(c, repoRoot)
 	if err != nil {
 		logging.Warn(ctx, "cursor: failed to get session dir for transcript resolution", "err", err)
 		return ""
 	}
 
-	return c.ResolveSessionFile(sessionDir, conversationID)
+	_, absPath, err := store.SessionFile(conversationID)
+	if err != nil {
+		logging.Warn(ctx, "cursor: refusing unsafe transcript path", "conversationID", conversationID, "err", err)
+		return ""
+	}
+	return absPath
 }
 
 func (c *CursorAgent) parseSessionStart(stdin io.Reader) (*agent.Event, error) {

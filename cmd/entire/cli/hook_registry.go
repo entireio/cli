@@ -4,25 +4,17 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/telemetry"
-	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
 
 	"github.com/spf13/cobra"
@@ -52,22 +44,15 @@ func GetCurrentHookAgent() (agent.Agent, error) {
 // newAgentHooksCmd creates a hooks subcommand for an agent that implements HookSupport.
 // It dynamically creates subcommands for each hook the agent supports.
 func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cobra.Command {
+	// No PersistentPreRun here: it would also run for every command attached
+	// to this one that is not a lifecycle verb. title-tee is such a command,
+	// and agy fires it on every state change during a turn, so the session
+	// scan and redactor construction ran roughly once a second per turn to
+	// append one JSON line. The hook session is set up per verb instead.
 	cmd := &cobra.Command{
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
-		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
-			// withHookSession scans session state and loads redactors, so it must
-			// not run in a repo that never enabled Entire. Same fail-closed gate
-			// the git-hook tree applies before its own call.
-			if !settings.IsSetUpAndEnabled(cmd.Context()) {
-				return
-			}
-			// Cobra invokes this PersistentPreRun with the leaf command, so
-			// SetContext hands the session-stamped context straight to the
-			// hook verb's RunE via cmd.Context().
-			cmd.SetContext(withHookSession(cmd.Context()))
-		},
 	}
 
 	for _, hookName := range handler.HookNames() {
@@ -80,21 +65,17 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 // Hook categories reported by getHookType.
 const (
 	hookTypeAgent    = "agent"
-	hookTypeTool     = "tool"
 	hookTypeSubagent = "subagent"
 )
 
 // getHookType returns the hook type based on the hook name.
 // Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
-// subagent-stop), "tool" for tool-related hooks (before-tool, after-tool),
-// "agent" for all other agent hooks.
+// subagent-stop) and "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
 		claudecode.HookNameSubagentStop:
 		return hookTypeSubagent
-	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
-		return hookTypeTool
 	default:
 		return hookTypeAgent
 	}
@@ -105,13 +86,13 @@ func getHookType(hookName string) string {
 // parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
 // When stampSession is true, it attaches the hook session context itself (used by
-// the RunE fallback since it doesn't go through PersistentPreRun). Built-in agent
-// subcommands pass false since their parent command's PersistentPreRun already
-// did it.
+// the RunE fallback since it doesn't go through PersistentPreRun). Built-in hook
+// verbs pass false because each verb's OWN PersistentPreRun already did it — not
+// an inherited one: the shared per-agent command deliberately defines no hook, so
+// anything else attached to it (Antigravity's title-tee) is not stamped either.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
-	worktreeRoot, err := paths.WorktreeRoot(cmd.Context())
-	if err != nil {
+	if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 		return nil
 	}
 
@@ -175,9 +156,6 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return fmt.Errorf("failed to parse hook event: %w", parseErr)
 	}
 
-	claudePostTodoCheckpointHook := event == nil && agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo
-	eventType := agent.EventType(0)
-
 	if event != nil {
 		// Cross-agent guard: when Cursor IDE invokes a hook configured under
 		// .claude/settings.json (because .cursor/hooks.json is missing), the
@@ -191,30 +169,9 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 			)
 			return nil
 		}
-		eventType = event.Type
-	}
-
-	if eventType == agent.SessionStart {
-		skipSessionStart, err := shouldSkipSessionStartForPolicy(ctx, cmd.ErrOrStderr(), agentName, ag, worktreeRoot)
-		if err != nil {
-			span.RecordError(err)
-			return err
-		}
-		if skipSessionStart {
-			return nil
-		}
-	} else if hookWritesCheckpointData(eventType, claudePostTodoCheckpointHook) {
-		writeHook := agentWriteHookLabel(eventType, claudePostTodoCheckpointHook)
-		if err := rejectUnsupportedCheckpointWritePolicy(ctx, cmd.ErrOrStderr(), agentName, writeHook, worktreeRoot); err != nil {
-			span.RecordError(err)
-			return err
-		}
-	}
-
-	if event != nil {
 		// Lifecycle event — use the generic dispatcher
 		hookErr = DispatchLifecycleEvent(ctx, ag, event)
-	} else if claudePostTodoCheckpointHook {
+	} else if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo {
 		// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
 		hookErr = handleClaudeCodePostTodo(ctx)
 	}
@@ -222,145 +179,6 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 
 	span.RecordError(hookErr)
 	return hookErr
-}
-
-func agentHookPolicy(ctx context.Context, worktreeRoot string) (checkpointpolicy.Policy, error) {
-	repo, err := gitrepo.OpenPath(worktreeRoot)
-	if err != nil {
-		return checkpointpolicy.Policy{}, unreadableCheckpointPolicyError(err)
-	}
-	defer repo.Close()
-
-	return checkpointPolicyForCheckpointData(ctx, repo)
-}
-
-func shouldSkipAgentHookForPolicy(policy checkpointpolicy.Policy) bool {
-	return !checkpointpolicy.CanSatisfyPolicy(policy)
-}
-
-func shouldSkipSessionStartForPolicy(ctx context.Context, errW io.Writer, agentName types.AgentName, ag agent.Agent, worktreeRoot string) (bool, error) {
-	policy, err := agentHookPolicy(ctx, worktreeRoot)
-	if err != nil {
-		logging.Warn(ctx, "checkpoint policy read failed for agent hook",
-			slog.String("error", err.Error()))
-		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
-			Hook:     "session-start",
-			HookType: telemetry.PolicyBlockedHookTypeAgent,
-			Reason:   telemetry.PolicyBlockedReasonUnreadable,
-			Outcome:  telemetry.PolicyBlockedOutcomeSkipped,
-			Agent:    string(agentName),
-		})
-		// Let the agent start; the warning explains that checkpoint capture is
-		// disabled until the policy can be read.
-		return true, writeUnsupportedPolicySessionStartWarning(errW, ag, sessionStartPolicyReadErrorWarning(err))
-	}
-	if shouldSkipAgentHookForPolicy(policy) {
-		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
-			Hook:                 "session-start",
-			HookType:             telemetry.PolicyBlockedHookTypeAgent,
-			Reason:               telemetry.PolicyBlockedReasonUnsupported,
-			Outcome:              telemetry.PolicyBlockedOutcomeSkipped,
-			Agent:                string(agentName),
-			CheckpointVersion:    policy.CheckpointVersion,
-			CheckpointMinVersion: policy.CheckpointMinVersion,
-		})
-		// Let the agent start; the warning explains that checkpoint capture is
-		// disabled until the CLI is upgraded.
-		return true, writeUnsupportedPolicySessionStartWarning(errW, ag, sessionStartPolicyWarning(policy))
-	}
-	return false, nil
-}
-
-func rejectUnsupportedCheckpointWritePolicy(ctx context.Context, errW io.Writer, agentName types.AgentName, hook string, worktreeRoot string) error {
-	policy, err := agentHookPolicy(ctx, worktreeRoot)
-	if err != nil {
-		logging.Warn(ctx, "checkpoint policy read failed for agent hook",
-			slog.String("error", err.Error()))
-		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
-			Hook:     hook,
-			HookType: telemetry.PolicyBlockedHookTypeAgent,
-			Reason:   telemetry.PolicyBlockedReasonUnreadable,
-			Outcome:  telemetry.PolicyBlockedOutcomeBlocked,
-			Agent:    string(agentName),
-		})
-		fmt.Fprint(errW, agentCheckpointCaptureDisabledReadErrorMessage(err))
-		return NewSilentError(err)
-	}
-	if shouldSkipAgentHookForPolicy(policy) {
-		emitCheckpointPolicyBlocked(ctx, telemetry.CheckpointPolicyBlockedEvent{
-			Hook:                 hook,
-			HookType:             telemetry.PolicyBlockedHookTypeAgent,
-			Reason:               telemetry.PolicyBlockedReasonUnsupported,
-			Outcome:              telemetry.PolicyBlockedOutcomeBlocked,
-			Agent:                string(agentName),
-			CheckpointVersion:    policy.CheckpointVersion,
-			CheckpointMinVersion: policy.CheckpointMinVersion,
-		})
-		fmt.Fprint(errW, agentCheckpointCaptureDisabledMessage(policy))
-		return NewSilentError(errUnsupportedCheckpointPolicy)
-	}
-	return nil
-}
-
-func hookWritesCheckpointData(eventType agent.EventType, claudePostTodoCheckpointHook bool) bool {
-	if claudePostTodoCheckpointHook {
-		return true
-	}
-	return eventType == agent.TurnEnd || eventType == agent.SubagentEnd
-}
-
-func agentWriteHookLabel(eventType agent.EventType, claudePostTodoCheckpointHook bool) string {
-	switch {
-	case claudePostTodoCheckpointHook:
-		return "post-todo"
-	case eventType == agent.SubagentEnd:
-		return "subagent-end"
-	default:
-		return "turn-end"
-	}
-}
-
-func sessionStartPolicyWarning(policy checkpointpolicy.Policy) string {
-	message := "Entire CLI is enabled, but this repository's checkpoint policy requires a newer Entire CLI. No Entire checkpoints will be created for this session until you upgrade."
-	details := strings.TrimSpace(unsupportedCheckpointPolicyMessage(policy, versioninfo.Version))
-	if details == "" {
-		return message
-	}
-	return message + "\n\n" + details
-}
-
-func sessionStartPolicyReadErrorWarning(err error) string {
-	return fmt.Sprintf("Entire CLI is enabled, but this repository's checkpoint policy could not be read. No Entire checkpoints will be created for this session until the policy can be read.\n\n[entire] Details:\n[entire]   %v", err)
-}
-
-func agentCheckpointCaptureDisabledMessage(policy checkpointpolicy.Policy) string {
-	var b strings.Builder
-	b.WriteString("[entire] Checkpoint capture is disabled for this repository.\n")
-	b.WriteString("[entire] No Entire checkpoints will be created until the CLI is upgraded.\n")
-	if details := strings.TrimSpace(unsupportedCheckpointPolicyMessage(policy, versioninfo.Version)); details != "" {
-		b.WriteString(details)
-		b.WriteByte('\n')
-	}
-	return b.String()
-}
-
-func agentCheckpointCaptureDisabledReadErrorMessage(err error) string {
-	var b strings.Builder
-	b.WriteString("[entire] Checkpoint capture is disabled for this repository.\n")
-	b.WriteString("[entire] No Entire checkpoints will be created until the checkpoint policy can be read.\n")
-	fmt.Fprintf(&b, "[entire] Details:\n[entire]   %v\n", err)
-	return b.String()
-}
-
-func writeUnsupportedPolicySessionStartWarning(errW io.Writer, ag agent.Agent, message string) error {
-	if writer, ok := agent.AsHookResponseWriter(ag); ok {
-		if err := writer.WriteHookResponse(message); err != nil {
-			return fmt.Errorf("failed to write hook response: %w", err)
-		}
-		return nil
-	}
-	fmt.Fprintln(errW, message)
-	return nil
 }
 
 // newAgentHookVerbCmdWithLogging creates a command for a specific hook verb with structured logging.
@@ -371,6 +189,19 @@ func newAgentHookVerbCmdWithLogging(agentName types.AgentName, hookName string) 
 		Use:    hookName,
 		Hidden: true,
 		Short:  "Called on " + hookName,
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// On the verb rather than the shared agent command, so only
+			// lifecycle verbs pay for it. withHookSession scans session state
+			// and loads redactors, so it must not run in a repo that never
+			// enabled Entire. Same fail-closed gate the git-hook tree applies
+			// before its own call.
+			if !settings.IsSetUpAndEnabled(cmd.Context()) {
+				return
+			}
+			// SetContext hands the session-stamped context straight to this
+			// command's RunE via cmd.Context().
+			cmd.SetContext(withHookSession(cmd.Context()))
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return executeAgentHook(cmd, agentName, hookName, false)
 		},

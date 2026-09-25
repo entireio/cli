@@ -562,7 +562,9 @@ func discoverAuthenticatedDispatchWizardRepos(ctx context.Context) ([]string, er
 		if slug == "" {
 			continue
 		}
-		slugs = append(slugs, slug)
+		// The repo index lists GitHub mirrors by bare name; the picker
+		// must offer slugs --repos accepts, so name the forge here.
+		slugs = append(slugs, dispatchpkg.GitHubForge+"/"+slug)
 	}
 	return slugs, nil
 }
@@ -582,5 +584,6 @@ func discoverRepoSlug(repoRoot string) string {
 	if err != nil {
 		return ""
 	}
-	return owner + "/" + repoName
+	// The origin remote is GitHub by construction; name the forge.
+	return dispatchpkg.GitHubForge + "/" + owner + "/" + repoName
 }

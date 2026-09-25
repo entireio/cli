@@ -50,7 +50,6 @@ func (w *wrappedAgent) DeclaredCapabilities() agent.DeclaredCaps { return w.caps
 func (w *wrappedAgent) Name() types.AgentName { return w.ea.Name() }
 func (w *wrappedAgent) Type() types.AgentType { return w.ea.Type() }
 func (w *wrappedAgent) Description() string   { return w.ea.Description() }
-func (w *wrappedAgent) IsPreview() bool       { return w.ea.IsPreview() }
 func (w *wrappedAgent) DetectPresence(ctx context.Context) (bool, error) {
 	return w.ea.DetectPresence(ctx)
 }
@@ -96,8 +95,8 @@ func (w *wrappedAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 func (w *wrappedAgent) GetTranscriptPosition(path string) (int, error) {
 	return w.ea.GetTranscriptPosition(path)
 }
-func (w *wrappedAgent) ExtractModifiedFilesFromOffset(path string, offset int) ([]string, int, error) {
-	return w.ea.ExtractModifiedFilesFromOffset(path, offset)
+func (w *wrappedAgent) ExtractModifiedFilesFromOffset(ctx context.Context, path string, offset int) ([]string, int, error) {
+	return w.ea.ExtractModifiedFilesFromOffset(ctx, path, offset)
 }
 func (w *wrappedAgent) ExtractPrompts(ref string, offset int) ([]string, error) {
 	return w.ea.ExtractPrompts(ref, offset)

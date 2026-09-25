@@ -26,7 +26,7 @@ var gitInvocationMarkers = []string{
 // renames a fresh index over .git/index. Entire only ever wants the porcelain
 // output, so that write is pure collateral — and it cost a user a commit that
 // deleted every tracked file (issue #2111). See the "`git status` Is a Write"
-// section of CLAUDE.md for the full chain.
+// section of docs/development/git-safety.md for the full chain.
 //
 // This is a source-level guard rather than a comment on purpose. The exact same
 // producer was diagnosed once before (ENT-242, Feb 2026), the fix was closed

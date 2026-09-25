@@ -45,7 +45,7 @@ See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [T
 
 - [ ] **Full transcript on every turn**: At turn-end, capture the complete session transcript, not just events since the last checkpoint
 - [ ] **Resumed session handling**: When a user resumes an existing session, the transcript must include all historical messages, not just new ones since the plugin/hook loaded
-- [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Gemini's JSON, Cursor's JSONL, Factory AI Droid's JSONL, Copilot CLI's JSONL, OpenCode's `opencode export` JSON, Pi's JSONL session file) over manually reconstructing from events
+- [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Cursor's JSONL, Factory AI Droid's JSONL, Copilot CLI's JSONL, OpenCode's `opencode export` JSON, Pi's JSONL session file, Antigravity's brain-dir transcript_full.jsonl) over manually reconstructing from events
 - [ ] **No custom formats**: Store the agent's native format directly in `NativeData` - do not convert between formats (e.g., JSON to JSONL) or create intermediate representations
 - [ ] **Graceful degradation**: If the canonical source is unavailable (e.g., agent shutting down), fall back to best-effort capture with clear documentation of limitations
 
@@ -54,7 +54,7 @@ See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [T
 See Guide: [Step 3 - Core Agent Interface](agent-guide.md#step-3-implement-core-agent-interface-youragentgo)
 
 - [ ] **`WriteSession` implementation**: Agent must implement `WriteSession(AgentSession)` to restore sessions
-- [ ] **File-based agents** (Claude, Gemini, Cursor, Factory AI Droid, Copilot CLI, Pi): Write `NativeData` to `SessionRef` path
+- [ ] **File-based agents** (Claude, Cursor, Factory AI Droid, Copilot CLI, Pi, Antigravity): Write `NativeData` to `SessionRef` path
 - [ ] **Database-backed agents** (OpenCode): Write `NativeData` to file, then import into native storage (the native format should be what the agent's import command expects)
 - [ ] **Single format per agent**: Store only the agent's native format in `NativeData` - no separate fields for different representations of the same data
 
@@ -91,6 +91,21 @@ See Guide: [Step 6 - InstallHooks](agent-guide.md)
       path that resolves inside the working tree. A repo-relative command runs
       whatever the checked-out branch contains, on every agent turn, and any repo
       could opt its cloners into it. This is why `local_dev` was removed.
+- [ ] **The config file is opened through `agent.OpenHookConfig`**, never a
+      `filepath.Join` handed to `os.ReadFile`/`os.WriteFile`. An agent's hook
+      config is one of the trees CLAUDE.md's "Root Anchors" gives an owner: a
+      symlinked `.youragent` arriving with the checkout is otherwise resolved
+      before any boundary exists, and this is the file naming the command Entire
+      runs every turn. Implement `HookConfigLocator.HookConfigRelPath` for it —
+      `TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent` requires it of
+      every agent whose config is a worktree file.
+- [ ] **The hook wrapper is chosen per host**, via the `*ForOS` selectors and one
+      of `agent.UseWindowsProductionHooks(ctx)` (the agent may reach a real sh on
+      Windows) or `agent.HookHostIsWindows()` (it always hands hooks to
+      `cmd.exe` there). An unconditional sh wrapper is cut apart by cmd.exe at
+      exit 0, so hooks silently never fire — droid shipped that way. Decide by
+      reading the agent's runner; the probe only proves a metacharacter-free
+      command runs, so a Git Bash host passes it while still being broken.
 - [ ] **Stale Entire hooks are dropped on every install, not just `--force`**, via
       `agent.DropStaleManagedHooks`. Adding the current hook without removing an
       older one leaves both firing. Two agents got this wrong independently, so

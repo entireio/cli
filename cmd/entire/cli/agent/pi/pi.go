@@ -55,13 +55,12 @@ func NewPiAgent() agent.Agent {
 func (a *PiAgent) Name() types.AgentName    { return agent.AgentNamePi }
 func (a *PiAgent) Type() types.AgentType    { return agent.AgentTypePi }
 func (a *PiAgent) Description() string      { return "Pi coding agent integration for Entire" }
-func (a *PiAgent) IsPreview() bool          { return true }
 func (a *PiAgent) ProtectedDirs() []string  { return []string{".pi"} }
 func (a *PiAgent) ProtectedFiles() []string { return nil }
 
 // DetectPresence reports whether pi is configured for *this repo*. We only
 // check repo-local config (.pi/) and intentionally ignore $PATH — in-tree
-// agents follow the convention used by Claude/Gemini/OpenCode where
+// agents follow the convention used by Claude/OpenCode where
 // detection means "this repo is set up for this agent", not "this agent is
 // installed somewhere on this machine". The external plugin uses the broader
 // $PATH check because it can't see repo state; we don't have that limitation.

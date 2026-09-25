@@ -185,10 +185,18 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	testutil.GitCommit(t, workDir, "add c")
 	setRef(head())
 
-	// C3 is not a descendant of the remote's C2 → the plain push is rejected and
-	// recovery replays C3's delta onto C2.
-	require.NoError(t, pushCheckpointRefWithRecovery(ctx, bareDir, ref),
-		"diverged ref should be recovered by fetch+replay, not rejected")
+	// C3 is not a descendant of the remote's C2 → the batch and individual
+	// pushes are rejected, then recovery replays C3's delta onto C2.
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
+	restore := captureStderr(t)
+	pushed, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir})
+	output := restore()
+	require.NoError(t, pushErr, "diverged ref should be recovered by fetch+replay, not rejected")
+	assert.Equal(t, 1, pushed)
+	assert.NotContains(t, output, "Warning:", "plain divergence should recover quietly")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "recovered ref landed and must leave the queue")
 
 	files := remoteRefFiles(t, bareDir, ref)
 	assert.Contains(t, files, "b.txt", "remote-only change must be preserved (not overwritten)")
@@ -254,27 +262,6 @@ func TestPushQueuedCheckpointRefs_PushDisabled(t *testing.T) {
 	remaining, err := queue.Drain()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining, "disabled push leaves refs queued")
-}
-
-func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
-	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
-	t.Chdir(workDir)
-	paths.ClearWorktreeRootCache()
-
-	repo, err := git.PlainOpen(workDir)
-	require.NoError(t, err)
-	writeUnsupportedCheckpointPolicy(t, repo)
-	queue := enqueueRefs(t, repo, refs)
-
-	pushed, _, err := PushQueuedCheckpointRefs(context.Background(), repo, bareDir)
-	require.ErrorContains(t, err, "checkpoint policy")
-	assert.Equal(t, 0, pushed)
-
-	remaining, err := queue.Drain()
-	require.NoError(t, err)
-	assert.ElementsMatch(t, refs, remaining, "blocked push leaves refs queued")
-
-	assertRefsAbsentFromRemote(t, bareDir, refs, "blocked push must not reach the remote")
 }
 
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {

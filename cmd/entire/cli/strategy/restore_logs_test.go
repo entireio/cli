@@ -3,6 +3,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // Register agent for ResolveAgentForResume tests
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"  // Register agent for ResolveAgentForResume tests
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -173,17 +173,6 @@ func TestResolveAgentForResume(t *testing.T) {
 		}
 	})
 
-	t.Run("Gemini CLI type resolves correctly", func(t *testing.T) {
-		t.Parallel()
-		ag, err := ResolveAgentForResume("Gemini CLI")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if ag.Name() != agent.AgentNameGemini {
-			t.Errorf("Name() = %q, want %q", ag.Name(), agent.AgentNameGemini)
-		}
-	})
-
 	t.Run("unknown type returns error", func(t *testing.T) {
 		t.Parallel()
 		_, err := ResolveAgentForResume("Nonexistent Agent")
@@ -252,7 +241,6 @@ var _ agent.Agent = (*restoreLogsOnlyAgent)(nil)
 func (a *restoreLogsOnlyAgent) Name() types.AgentName                          { return a.name }
 func (a *restoreLogsOnlyAgent) Type() types.AgentType                          { return a.agentType }
 func (a *restoreLogsOnlyAgent) Description() string                            { return "restore logs test agent" }
-func (a *restoreLogsOnlyAgent) IsPreview() bool                                { return false }
 func (a *restoreLogsOnlyAgent) DetectPresence(_ context.Context) (bool, error) { return true, nil }
 func (a *restoreLogsOnlyAgent) ProtectedDirs() []string                        { return nil }
 func (a *restoreLogsOnlyAgent) ReadTranscript(string) ([]byte, error)          { return nil, nil }
@@ -299,7 +287,6 @@ type fakeExternalAgent struct {
 func (f *fakeExternalAgent) Name() types.AgentName                          { return f.name }
 func (f *fakeExternalAgent) Type() types.AgentType                          { return f.agentType }
 func (f *fakeExternalAgent) Description() string                            { return "Fake external agent" }
-func (f *fakeExternalAgent) IsPreview() bool                                { return false }
 func (f *fakeExternalAgent) DetectPresence(_ context.Context) (bool, error) { return false, nil }
 func (f *fakeExternalAgent) ProtectedDirs() []string                        { return nil }
 func (f *fakeExternalAgent) ReadTranscript(_ string) ([]byte, error)        { return nil, nil }
@@ -315,3 +302,82 @@ func (f *fakeExternalAgent) ReadSession(_ *agent.HookInput) (*agent.AgentSession
 }
 func (f *fakeExternalAgent) WriteSession(_ context.Context, _ *agent.AgentSession) error { return nil }
 func (f *fakeExternalAgent) FormatResumeCommand(_ string) string                         { return "" }
+
+// restoredPathResolverAgent is restoreLogsOnlyAgent plus a scriptable
+// ResolveRestoredSessionFile, so the containment re-check can be exercised
+// without a real agent. Codex, the only built-in implementer, validates its own
+// answer and so cannot produce the rejected case.
+type restoredPathResolverAgent struct {
+	restoreLogsOnlyAgent
+
+	resolved string
+	err      error
+}
+
+var _ agent.RestoredSessionPathResolver = (*restoredPathResolverAgent)(nil)
+
+func (a *restoredPathResolverAgent) ResolveRestoredSessionFile(string, string, []byte) (string, error) {
+	return a.resolved, a.err
+}
+
+// The restored path replaces one SessionFile already validated, so it gets the
+// same containment check. On rejection the caller keeps the validated path.
+func TestRestoredSessionFileRechecksContainment(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	outside := t.TempDir()
+
+	tests := []struct {
+		name     string
+		resolved string
+		err      error
+		wantOK   bool
+		wantWarn string
+	}{
+		{
+			name:     "inside the store is accepted",
+			resolved: filepath.Join(storeDir, "restored.jsonl"),
+			wantOK:   true,
+		},
+		{
+			name:     "outside the store falls back",
+			resolved: filepath.Join(outside, "restored.jsonl"),
+			wantWarn: "resolves outside its session directory",
+		},
+		{
+			name:     "a resolver error falls back",
+			err:      errors.New("boom"),
+			wantWarn: "failed to resolve restored session path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ag := &restoredPathResolverAgent{
+				restoreLogsOnlyAgent: restoreLogsOnlyAgent{
+					name:       types.AgentName("restored-path-agent"),
+					agentType:  types.AgentType("Restored Path Agent"),
+					sessionDir: storeDir,
+				},
+				resolved: tt.resolved,
+				err:      tt.err,
+			}
+			store, err := agent.OpenSessionStoreAt(ag, storeDir)
+			require.NoError(t, err)
+
+			var stderr bytes.Buffer
+			got, ok := restoredSessionFile(&stderr, ag, store, storeDir, "session-1", nil, 0)
+			require.Equal(t, tt.wantOK, ok, "stderr: %s", stderr.String())
+			if tt.wantOK {
+				require.Equal(t, tt.resolved, got)
+				require.Empty(t, stderr.String())
+				return
+			}
+			require.Empty(t, got)
+			require.Contains(t, stderr.String(), tt.wantWarn)
+		})
+	}
+}

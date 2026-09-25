@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -34,6 +33,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/transcript/geminilegacy"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
 
@@ -291,7 +291,10 @@ Machine-readable export modes (additive surface for external consumers):
                    says how many were skipped. Only meaningful with --json.
 
 Summary generation:
-  --generate    Generate an AI summary for the checkpoint
+  --generate    Generate an AI summary for the checkpoint. This is the only
+                part of this command that writes: it stores the summary on the
+                checkpoint and spends tokens with the configured summary
+                provider. Every other mode only reads.
   --force       Regenerate even if a summary already exists (requires --generate)
 
 Performance options:
@@ -796,10 +799,6 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	// Handle summary generation — uses raw transcript. Imported history was
 	// already rejected above, before the content load.
 	if generate {
-		if err := ensureCheckpointPolicyAllowsCheckpointData(ctx, lookup.repo); err != nil {
-			stopLoad(false)
-			return err
-		}
 		stopLoad(false) // generation prints its own progress to w/errW
 		// RefFetcher: the summary backfill's absence probe fetches a ref that
 		// exists remotely but not locally (written/migrated on another
@@ -1254,7 +1253,7 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 	var claudeErr *claudecode.ClaudeError
 	switch {
 	case errors.As(err, &claudeErr):
-		switch claudeErr.Kind { //nolint:exhaustive // ClaudeErrorUnknown handled by default
+		switch claudeErr.Kind {
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
@@ -1285,6 +1284,8 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 		case claudecode.ClaudeErrorCLIMissing:
 			label := "Claude CLI is not installed or not on PATH"
 			return label, nil, errors.New("Claude CLI is not installed or not on PATH") //nolint:staticcheck // ST1005
+		case claudecode.ClaudeErrorUnknown:
+			fallthrough
 		default:
 			label := "Claude failed to generate the summary"
 			suffix := formatClaudeErrorSuffix(claudeErr)
@@ -1863,11 +1864,11 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 // scopeTranscriptForCheckpoint slices a transcript to include only the portion
 // relevant to a specific checkpoint, starting from the given offset.
 // For Claude Code (JSONL), the offset is a line number and we slice by line.
-// For Gemini (single JSON blob), the offset is a message index and we slice by message.
+// For historical Gemini CLI checkpoints (single JSON blob), the offset is a message index and we slice by message.
 func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentType types.AgentType) []byte {
 	switch agentType {
 	case agent.AgentTypeGemini:
-		scoped, err := geminicli.SliceFromMessage(fullTranscript, startOffset)
+		scoped, err := geminilegacy.SliceFromMessage(fullTranscript, startOffset)
 		if err != nil {
 			return nil
 		}
@@ -2162,7 +2163,7 @@ func appendTranscriptSection(sb *strings.Builder, verbose, full bool, fullTransc
 }
 
 // formatTranscriptBytes formats transcript bytes into a human-readable string.
-// It parses the transcript (JSONL for Claude, JSON for Gemini) and formats it using the condensed format.
+// It parses the transcript (JSONL for Claude, JSON for historical Gemini CLI checkpoints) and formats it using the condensed format.
 // The fallback is used for backwards compatibility when transcript parsing fails or is empty.
 func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType types.AgentType) string {
 	if len(transcriptBytes) == 0 {
@@ -3352,11 +3353,11 @@ func countLines(content []byte) int {
 }
 
 // transcriptOffset returns the appropriate offset for scoping a transcript.
-// For Claude Code (JSONL), this is the line count. For Gemini (JSON), this is the message count.
+// For Claude Code (JSONL), this is the line count. For historical Gemini CLI checkpoints (JSON), this is the message count.
 func transcriptOffset(transcriptBytes []byte, agentType types.AgentType) int {
 	switch agentType {
 	case agent.AgentTypeGemini:
-		t, err := geminicli.ParseTranscript(transcriptBytes)
+		t, err := geminilegacy.ParseTranscript(transcriptBytes)
 		if err != nil {
 			return 0
 		}

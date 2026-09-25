@@ -24,10 +24,10 @@ const (
 )
 
 type projectDiscussionResponse struct {
-	Discussion  api.TrailThreadSummary   `json:"discussion"`
-	Message     *api.TrailThreadMessage  `json:"message,omitempty"`
-	Messages    []api.TrailThreadMessage `json:"messages,omitempty"`
-	EventCursor string                   `json:"eventCursor,omitempty"`
+	Discussion  api.TrailDiscussionSummary   `json:"discussion"`
+	Message     *api.TrailDiscussionMessage  `json:"message,omitempty"`
+	Messages    []api.TrailDiscussionMessage `json:"messages,omitempty"`
+	EventCursor string                       `json:"event_cursor,omitempty"`
 }
 
 func newProjectTrailCommentCmd() *cobra.Command {
@@ -96,7 +96,7 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 	}
 	path := target.path() + "/discussions"
 	if action == cmdList {
-		items, err := fetchAllTrailThreads(cmd.Context(), target.Client, path)
+		items, err := fetchAllTrailDiscussions(cmd.Context(), target.Client, path)
 		if err != nil {
 			return err
 		}
@@ -126,17 +126,17 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 		if jsonRequested(cmd) {
 			return printJSON(cmd.OutOrStdout(), current)
 		}
-		return printTrailThreadDetail(cmd.OutOrStdout(), api.TrailThreadDetailResponse{Thread: current.Discussion, Messages: current.Messages}, false)
+		return printTrailDiscussionDetail(cmd.OutOrStdout(), api.TrailDiscussionDetailResponse{Discussion: current.Discussion, Messages: current.Messages}, false)
 	}
 	method := http.MethodPost
 	var request any
 	headers := http.Header{}
 	switch action {
 	case discussionAdd:
-		request = api.TrailThreadCreateRequest{Title: title, Body: body}
+		request = api.TrailDiscussionCreateRequest{Title: title, Body: body}
 	case discussionReply:
 		path += "/messages"
-		request = api.TrailThreadMessageRequest{Body: body}
+		request = api.TrailDiscussionMessageRequest{Body: body}
 	case discussionEdit, discussionDelete:
 		etag = projectDiscussionMessageETag(current.Messages, args[1])
 		if etag == "" {
@@ -146,7 +146,7 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 		path += "/messages/" + url.PathEscape(args[1])
 		method = http.MethodDelete
 		if action == discussionEdit {
-			method, request = http.MethodPatch, api.TrailThreadMessageRequest{Body: body}
+			method, request = http.MethodPatch, api.TrailDiscussionMessageRequest{Body: body}
 		}
 	case discussionResolve, discussionUnresolve:
 		if etag == "" {
@@ -154,7 +154,7 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 		}
 		headers.Set("If-Match", etag)
 		resolved := action == discussionResolve
-		method, request = http.MethodPatch, api.TrailThreadUpdateRequest{Resolved: &resolved}
+		method, request = http.MethodPatch, api.TrailDiscussionUpdateRequest{Resolved: &resolved}
 	default:
 		return errors.New("unknown discussion operation")
 	}
@@ -185,7 +185,7 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 	return nil
 }
 
-func projectDiscussionMessageETag(messages []api.TrailThreadMessage, id string) string {
+func projectDiscussionMessageETag(messages []api.TrailDiscussionMessage, id string) string {
 	for _, message := range messages {
 		if message.ID == id {
 			return message.ETag

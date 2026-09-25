@@ -232,6 +232,16 @@ type State struct {
 	// against this value without reading the full transcript content.
 	CheckpointTranscriptSize int64 `json:"checkpoint_transcript_size,omitempty"`
 
+	// TranscriptOffsetPending records that the turn-end advance of
+	// CheckpointTranscriptStart could not run because a late-transcript agent
+	// (agent.LateTranscriptWriter, e.g. Antigravity) had not flushed its
+	// transcript by the Stop hook. Everything the flush will eventually write
+	// is already condensed, so the next mid-turn condensation resolves the
+	// pending advance against the by-then-flushed file — without this, prompts
+	// and the scoped transcript for the next checkpoint would start inside the
+	// previous (already-condensed) turn, attributing the wrong prompt to it.
+	TranscriptOffsetPending bool `json:"transcript_offset_pending,omitempty"`
+
 	// Deprecated: CondensedTranscriptLines is replaced by CheckpointTranscriptStart.
 	// Kept for backward compatibility with existing state files.
 	// Use NormalizeAfterLoad() to migrate.
@@ -291,7 +301,7 @@ type State struct {
 	// Review/investigate sessions leave this false because they skip injection.
 	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
 
-	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
+	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Codex", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
 	// ModelName is the LLM model used in this session (e.g., "claude-sonnet-4-20250514", "gpt-4o").
@@ -1130,6 +1140,13 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
+	return s.load(ctx, sessionID, true)
+}
+
+// load reads one session. When deleteStale is false the record is returned
+// as-is instead of being cleaned up, so a passive caller can report what
+// exists without observation changing it.
+func (s *StateStore) load(ctx context.Context, sessionID string, deleteStale bool) (*State, error) {
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)
@@ -1160,6 +1177,9 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	state.NormalizeAfterLoad(ctx)
 
 	if state.IsStale() {
+		if !deleteStale {
+			return &state, nil
+		}
 		logCtx := logging.WithComponent(ctx, "session")
 		logging.Debug(logCtx, "deleting stale session state",
 			slog.String("session_id", sessionID),
@@ -1263,8 +1283,22 @@ func (s *StateStore) RemoveAll() error {
 	return nil
 }
 
-// List returns all session states.
+// List returns all session states, deleting any that have gone stale.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, true)
+}
+
+// ListReadOnly returns every persisted session without deleting or hiding
+// stale records.
+//
+// `entire status` is the caller this exists for: asking what is happening must
+// not change what is happening. Cleanup stays with the callers that own it —
+// doctor and the session sweeper — which keep using List.
+func (s *StateStore) ListReadOnly(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, false)
+}
+
+func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, error) {
 	root, err := s.dirRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
@@ -1287,7 +1321,7 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
-		state, err := s.Load(ctx, sessionID)
+		state, err := s.load(ctx, sessionID, deleteStale)
 		if err != nil {
 			continue // Skip corrupted state files
 		}

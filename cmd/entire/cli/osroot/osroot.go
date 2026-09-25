@@ -296,6 +296,14 @@ func MkdirAllNoSymlink(root *os.Root, name string, perm os.FileMode) error {
 	if !fs.ValidPath(name) {
 		return fmt.Errorf("%q is not a valid root-relative path", name)
 	}
+	// Names inside a root are slash-separated; this function splits on "/"
+	// only. A backslash is an ordinary character to io/fs, so a caller that
+	// built the name with filepath.Join on Windows would get ONE component here
+	// and a Mkdir against a parent that was never created. Refuse it loudly
+	// rather than fail later with an unexplained "path not found".
+	if strings.Contains(name, `\`) {
+		return fmt.Errorf("%q is not a slash-separated root-relative path", name)
+	}
 
 	current := root
 	var owned *os.Root

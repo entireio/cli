@@ -32,15 +32,34 @@ type fakeProjectTrailCore struct {
 	clusters       []coreapi.Cluster
 }
 
-func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, host, project string) (*coreapi.ProjectResolution, error) {
+func (f *fakeProjectTrailCore) ResolveProject(_ context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error) {
 	f.resolveCalls++
-	var out coreapi.ProjectResolution
+	resolved := struct {
+		Project *struct {
+			ID, Region, PrimaryProcessingCell, APIURL string
+		} `json:"project"`
+		Reference struct {
+			Host, Project string
+		} `json:"reference"`
+	}{}
 	body := f.resolutionJSON
 	if body == "" {
-		body = fmt.Sprintf(`{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell","apiUrl":%q},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, f.apiURL, host, project)
+		body = fmt.Sprintf(`{"project":{"id":%q,"region":"eu","primaryProcessingCell":"project-cell","apiUrl":%q},"reference":{"host":%q,"project":%q}}`, projectTrailTestProject, f.apiURL, params.Host, params.Project)
 	}
-	err := json.Unmarshal([]byte(body), &out)
-	return &out, err
+	if err := json.Unmarshal([]byte(body), &resolved); err != nil {
+		return nil, err
+	}
+	out := &coreapi.ResolveProjectOutputBody{
+		Reference: coreapi.ProjectReference{Host: coreapi.ProjectReferenceHost(resolved.Reference.Host), Project: resolved.Reference.Project},
+	}
+	if resolved.Project != nil {
+		out.Project = coreapi.Project{
+			ID: resolved.Project.ID, Region: resolved.Project.Region,
+			PrimaryProcessingCell: coreapi.NewOptString(resolved.Project.PrimaryProcessingCell),
+			ApiUrl:                coreapi.NewOptString(resolved.Project.APIURL),
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeProjectTrailCore) ListClusters(context.Context) (*coreapi.ListClustersOutputBody, error) {

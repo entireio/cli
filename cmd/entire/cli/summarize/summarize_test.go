@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -1226,5 +1227,122 @@ func TestResolveModel(t *testing.T) {
 				t.Errorf("ResolveModel(%q, %q) = %q, want %q", tt.provider, tt.model, got, tt.want)
 			}
 		})
+	}
+}
+
+// An agy transcript used to fall through to the Claude parser and condense to
+// nothing, so `explain --generate` with agy as the provider failed with
+// "transcript has no content to summarize" on a 2.4 KB transcript.
+func TestBuildCondensedTranscriptFromBytes_Antigravity(t *testing.T) {
+	t.Parallel()
+	agy := `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nCreate red.md\n</USER_REQUEST>"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"write_to_file","args":{"TargetFile":"\"/ws/red.md\""}}]}
+{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","content":"tool output"}
+{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Created red.md."}
+`
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(agy)), agent.AgentTypeAntigravity)
+	if err != nil {
+		t.Fatalf("BuildCondensedTranscriptFromBytes: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("got %d entries, want 3: %+v", len(entries), entries)
+	}
+	if entries[0].Type != EntryTypeUser || entries[0].Content != "Create red.md" {
+		t.Errorf("entry 0 = %+v, want the user request", entries[0])
+	}
+	if entries[1].Type != EntryTypeTool || entries[1].ToolName != "write_to_file" || entries[1].ToolDetail != "/ws/red.md" {
+		t.Errorf("entry 1 = %+v, want the tool call with its target file as detail", entries[1])
+	}
+	if entries[2].Type != EntryTypeAssistant || entries[2].Content != "Created red.md." {
+		t.Errorf("entry 2 = %+v, want the assistant text", entries[2])
+	}
+}
+
+// A summary prompt travels to Antigravity as a single argv element, and Linux
+// caps one argument at MAX_ARG_STRLEN (128 KiB) however large ARG_MAX is. An
+// unbounded transcript therefore failed with E2BIG on exactly the long sessions
+// a summary is most wanted for, so the formatted transcript carries a budget.
+// The file list has its own bound: FilesTouched is unbounded, and the argv
+// ceiling behind maxCondensedTranscriptBytes applies to the whole prompt.
+func TestFormatCondensedTranscript_BoundsOversizedFileLists(t *testing.T) {
+	t.Parallel()
+	files := make([]string, 0, 4000)
+	for i := range 4000 {
+		files = append(files, fmt.Sprintf("pkg/module%04d/deeply/nested/directory/structure/file_with_a_long_name_%04d.go", i, i))
+	}
+	result := FormatCondensedTranscriptForPrompt(Input{
+		Transcript:   []Entry{{Type: EntryTypeUser, Content: "touch everything"}},
+		FilesTouched: files,
+	})
+	if len(result) > maxCondensedTranscriptBytes+maxCondensedFilesBytes+512 {
+		t.Fatalf("formatted prompt is %d bytes; the file list must be bounded too", len(result))
+	}
+	if !strings.Contains(result, "- pkg/module0000/") {
+		t.Error("the first files must survive the bound")
+	}
+	if !strings.Contains(result, "more files omitted to fit the summary prompt") {
+		t.Error("the bound must say how many files were left out")
+	}
+	// The display formatter is never bounded: a reader who asked for the full
+	// transcript gets every file.
+	full := FormatCondensedTranscript(Input{FilesTouched: files})
+	if strings.Contains(full, "omitted") || !strings.Contains(full, "- pkg/module3999/") {
+		t.Error("FormatCondensedTranscript must render the whole file list for display")
+	}
+	// A short list is untouched.
+	short := FormatCondensedTranscriptForPrompt(Input{FilesTouched: []string{"a.go", "b.go"}})
+	if strings.Contains(short, "omitted") || !strings.Contains(short, "- b.go\n") {
+		t.Errorf("a short file list must be rendered in full, got %q", short)
+	}
+}
+
+func TestFormatCondensedTranscript_BoundsOversizedTranscripts(t *testing.T) {
+	t.Parallel()
+
+	// Comfortably past the budget, in entries no single one of which exceeds it.
+	var entries []Entry
+	for range 40 {
+		entries = append(entries, Entry{Type: EntryTypeAssistant, Content: strings.Repeat("x", 8*1024)})
+	}
+	input := Input{
+		Transcript:   append([]Entry{{Type: EntryTypeUser, Content: "OPENING MARKER"}}, entries...),
+		FilesTouched: []string{"/kept.go"},
+	}
+
+	result := FormatCondensedTranscriptForPrompt(input)
+	if display := FormatCondensedTranscript(input); strings.Contains(display, "truncated to fit the summary prompt") {
+		t.Error("the display formatter must not truncate; only the prompt variant is bounded")
+	}
+
+	if len(result) > maxCondensedTranscriptBytes+512 {
+		t.Errorf("formatted transcript is %d bytes, want <= budget (%d) plus the files list",
+			len(result), maxCondensedTranscriptBytes)
+	}
+	if !strings.Contains(result, "truncated to fit the summary prompt") {
+		t.Error("an over-budget transcript must say it was truncated")
+	}
+	// Both ends survive: the opening says what was asked, the files list is
+	// appended after bounding.
+	if !strings.Contains(result, "OPENING MARKER") {
+		t.Error("the start of the session was dropped; the cut must come from the middle")
+	}
+	if !strings.Contains(result, "- /kept.go") {
+		t.Error("the files list must survive bounding")
+	}
+	if !utf8.ValidString(result) {
+		t.Error("bounding cut a rune in half")
+	}
+}
+
+// Under budget, nothing is touched.
+func TestFormatCondensedTranscript_LeavesSmallTranscriptsAlone(t *testing.T) {
+	t.Parallel()
+
+	result := FormatCondensedTranscript(Input{
+		Transcript: []Entry{{Type: EntryTypeUser, Content: "short"}},
+	})
+
+	if strings.Contains(result, "truncated") {
+		t.Errorf("a short transcript must not be truncated, got %q", result)
 	}
 }

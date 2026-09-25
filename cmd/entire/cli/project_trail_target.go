@@ -17,7 +17,7 @@ import (
 )
 
 type projectTrailCoreClient interface {
-	ResolveProject(ctx context.Context, host, project string) (*coreapi.ProjectResolution, error)
+	ResolveProject(ctx context.Context, params coreapi.ResolveProjectParams) (*coreapi.ResolveProjectOutputBody, error)
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 }
 
@@ -142,20 +142,20 @@ func resolveProjectTrailCollectionFor(ctx context.Context, host, project string,
 }
 
 func resolveProjectTrailRoute(ctx context.Context, core projectTrailCoreClient, host, project string) (*projectTrailTarget, *auth.CellTarget, error) {
-	resolved, err := core.ResolveProject(ctx, host, project)
+	resolved, err := core.ResolveProject(ctx, coreapi.ResolveProjectParams{Host: coreapi.ResolveProjectHost(host), Project: project})
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve project: %w", err)
 	}
-	if resolved.Project == nil || resolved.Reference.Host != host || !strings.EqualFold(resolved.Reference.Project, project) {
+	if string(resolved.Reference.Host) != host || !strings.EqualFold(resolved.Reference.Project, project) {
 		return nil, nil, errors.New("core returned a different project reference")
 	}
 	target, err := projectTrailTargetForReference(api.TrailParentReference{
-		ProjectID: resolved.Project.ID, Host: resolved.Reference.Host, Project: resolved.Reference.Project,
+		ProjectID: resolved.Project.ID, Host: string(resolved.Reference.Host), Project: resolved.Reference.Project,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	cell, err := projectTrailResolvedCellTarget(resolved.Project.APIURL, resolved.Project.PrimaryProcessingCell, resolved.Project.Region)
+	cell, err := projectTrailResolvedCellTarget(resolved.Project.ApiUrl.Or(""), resolved.Project.PrimaryProcessingCell.Or(""), resolved.Project.Region)
 	if err != nil {
 		return nil, nil, fmt.Errorf("route project %s/%s: %w", host, project, err)
 	}

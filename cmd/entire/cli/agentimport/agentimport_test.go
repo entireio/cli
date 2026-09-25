@@ -15,6 +15,7 @@ import (
 	cp "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/redact"
 )
 
@@ -50,7 +51,7 @@ func TestRegistry_HasClaude(t *testing.T) {
 func TestRegistry_AllSupportedAgents(t *testing.T) {
 	t.Parallel()
 	want := []string{
-		"claude-code", "cursor", "pi", "factoryai-droid", "codex", "copilot-cli", "gemini",
+		"claude-code", "cursor", "pi", "factoryai-droid", "codex", "copilot-cli",
 	}
 	registered := make(map[string]Importer)
 	for _, imp := range All() {
@@ -120,7 +121,7 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 	claudeDir := t.TempDir()
 	writeFixtureSession(t, claudeDir, "sess1.jsonl")
 
-	opts := Options{RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 	imp := claudeImporter{}
 
 	res, err := Run(context.Background(), repo, imp, opts)
@@ -174,20 +175,35 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestRun_StampsLinkCommitSHA proves Options.LinkCommitSHA is copied verbatim
-// into each imported checkpoint's commit_sha metadata field, and that leaving
-// it unset leaves commit_sha empty. Run resolves nothing itself.
+// TestRun_StampsLinkCommitSHA proves a validated uppercase input is persisted
+// canonically in each checkpoint's root and session metadata.
+//
+// The anchor is deliberately the PARENT, not HEAD. Every fixture in this file
+// anchors to the repo's only commit, which makes "persisted what the caller
+// gave us" and "read HEAD itself" indistinguishable — an implementation that
+// ignored opts.LinkCommitSHA entirely would satisfy all of them. A second
+// commit is what separates the two, so this test fails if Run ever starts
+// resolving the anchor on its own. Uppercase input covers canonicalization,
+// which is a different property and does not imply this one.
 func TestRun_StampsLinkCommitSHA(t *testing.T) {
 	t.Parallel()
 	repo, repoDir := initRepoWithCommit(t)
-	const commitSHA = "b01b59663fd4860fd15a9939499be44a14dbf168"
+	commitSHA := repoHeadSHA(t, repo)
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommit(t, wt, repoDir, "y", "second")
+	if tip := repoHeadSHA(t, repo); tip == commitSHA {
+		t.Fatal("fixture needs HEAD to differ from the anchor")
+	}
 
 	claudeDirWithSHA := t.TempDir()
 	writeFixtureSession(t, claudeDirWithSHA, "sess-with-sha.jsonl")
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
 		RepoRoot: repoDir, OverridePath: claudeDirWithSHA,
 		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-		LinkCommitSHA: commitSHA,
+		LinkCommitSHA: strings.ToUpper(commitSHA),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -209,29 +225,12 @@ func TestRun_StampsLinkCommitSHA(t *testing.T) {
 		t.Fatalf("expected commit_sha %q, got %q", commitSHA, md.CommitSHA)
 	}
 
-	// A separate session fixture (own sessionID/turn UUIDs) run with
-	// LinkCommitSHA unset must persist an empty commit_sha. Reusing the same
-	// session would be idempotently skipped, so this needs its own fixture.
-	claudeDirNoSHA := t.TempDir()
-	writeFixtureSession(t, claudeDirNoSHA, "sess-no-sha.jsonl")
-	res2, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDirNoSHA,
-		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-	})
+	root, err := stores.Persistent.Read(context.Background(), cid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res2.TurnsImported != 2 {
-		t.Fatalf("want 2 imported, got %+v", res2)
-	}
-
-	cid2 := DeriveCheckpointID("sess-no-sha", "u1")
-	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if md2.CommitSHA != "" {
-		t.Fatalf("expected empty commit_sha, got %q", md2.CommitSHA)
+	if root.CommitSHA != commitSHA {
+		t.Fatalf("root commit_sha = %q, want %q", root.CommitSHA, commitSHA)
 	}
 }
 
@@ -330,7 +329,8 @@ func TestRun_AppliesConfiguredCustomRedaction(t *testing.T) {
 	}
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -372,7 +372,7 @@ func TestRun_CursorImporterEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opts := Options{RepoRoot: repoDir, OverridePath: cursorDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: cursorDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 	res, err := Run(context.Background(), repo, cursorImporter{}, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +419,8 @@ func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
 	writeFixtureSession(t, claudeDir, "sess-author.jsonl")
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -458,21 +459,19 @@ func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
 // already applies elsewhere, rather than an empty one.
 func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
 	// Cannot use t.Parallel(): isolates git config resolution via t.Setenv so
-	// this repo can't see any real identity. GetGitAuthorFromRepo resolves
-	// GlobalScope through go-git's Auto loader, which reads all of git's global
-	// sources; neutralize every one or the fallback assertion is flaky wherever
-	// an identity is configured (~/.gitconfig, XDG, GIT_CONFIG_GLOBAL, or system
-	// /etc/gitconfig). Mirrors the checkpoint package's pointHomeAt helper.
+	// this repo can't see any real identity. The package TestMain already
+	// installs an empty ConfigLoader, so GlobalScope carries no identity; this
+	// keeps the env-level isolation as well, because it is what makes the
+	// assertion hold under go-git's Auto loader too — that one reads all of
+	// git's global sources (~/.gitconfig, XDG, GIT_CONFIG_GLOBAL, system
+	// /etc/gitconfig), so a test moved onto it stays correct rather than
+	// silently picking up the developer's identity. Mirrors the checkpoint
+	// package's pointHomeAt helper.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	// t.Setenv registers restoration of the original value; unset it for the
-	// test since an empty GIT_CONFIG_GLOBAL disables global config entirely.
-	t.Setenv("GIT_CONFIG_GLOBAL", "")
-	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
-		t.Fatal(err)
-	}
+	gitenv.UnsetGlobalConfig(t)
 
 	repoDir := t.TempDir()
 	repo, err := git.PlainInit(repoDir, false)
@@ -502,7 +501,8 @@ func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
 	writeFixtureSession(t, claudeDir, "sess-noauthor.jsonl")
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -537,7 +537,8 @@ func TestRun_DryRunWritesNothing(t *testing.T) {
 	writeFixtureSession(t, claudeDir, "sess1.jsonl")
 
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir, DryRun: true,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir, DryRun: true,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -595,7 +596,8 @@ func TestRun_CodexImportSanitizesAndKeepsOffsetsAligned(t *testing.T) {
 	}
 
 	res, err := Run(context.Background(), repo, codexImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: codexDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: codexDir,
 		Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -656,11 +658,12 @@ func TestRun_StopsOnContextCancellation(t *testing.T) {
 	// Cancel as soon as the first turn is processed, standing in for a Ctrl-C
 	// during the import. DryRun reports every turn through TurnSkipped.
 	opts := Options{
-		RepoRoot:     repoDir,
-		OverridePath: claudeDir,
-		Now:          time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-		DryRun:       true,
-		Progress:     &Progress{TurnSkipped: func(int, int, int) { cancel() }},
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir,
+		OverridePath:  claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		DryRun:        true,
+		Progress:      &Progress{TurnSkipped: func(int, int, int) { cancel() }},
 	}
 
 	res, err := Run(ctx, repo, claudeImporter{}, opts)
@@ -696,10 +699,11 @@ func TestRun_CancellationStopsRefsBackedImport(t *testing.T) {
 	defer cancel()
 
 	opts := Options{
-		RepoRoot:     repoDir,
-		OverridePath: claudeDir,
-		Now:          time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
-		Progress:     &Progress{TurnWritten: func(int, int, int) { cancel() }},
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir,
+		OverridePath:  claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		Progress:      &Progress{TurnWritten: func(int, int, int) { cancel() }},
 	}
 
 	res, err := Run(ctx, repo, claudeImporter{}, opts)

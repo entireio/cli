@@ -24,8 +24,8 @@ func TestRepoChangeParentIdentityRemainsSeparate(t *testing.T) {
 	var change TrailResource
 	require.NoError(t, json.Unmarshal([]byte(`{
 		"id":"change-id","number":7,"branch":"feature/a",
-		"parent":{"id":"parent-id","number":42,"projectId":"project-id","host":"gh","project":"acme",
-		"path":"/api/v1/gh/acme/trails/parent-id","jurisdiction":"eu","primaryProcessingCell":"cell-eu"}
+		"parent":{"id":"parent-id","number":42,"project_id":"project-id","host":"gh","project":"acme",
+		"path":"/api/v1/gh/acme/trails/parent-id","jurisdiction":"eu","primary_processing_cell":"cell-eu"}
 	}`), &change))
 	require.Equal(t, "change-id", change.ID)
 	require.Equal(t, 7, change.Number)
@@ -41,8 +41,7 @@ func TestInitialChangeCreationIsFlat(t *testing.T) {
 	body, err := json.Marshal(ProjectTrailCreateRequest{
 		Title: "Intent",
 		Changes: []ChangeCreateRequest{{
-			TrailCreateRequest: TrailCreateRequest{Title: "Work", BranchName: "feature/a", BranchAction: "link"},
-			RepositoryID:       "repo-id",
+			Title: "Work", BranchName: "feature/a", BranchAction: "link", RepositoryID: "repo-id",
 		}},
 	})
 	require.NoError(t, err)

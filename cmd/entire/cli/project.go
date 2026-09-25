@@ -77,10 +77,11 @@ func newProjectCreateCmd() *cobra.Command {
 				if region != "" {
 					body.Region = coreapi.NewOptString(region)
 				}
-				project, err := c.CreateProject(ctx, body)
+				created, err := c.CreateProject(ctx, body)
 				if err != nil {
 					return "", nil, err
 				}
+				project := &created.Response
 				return fmt.Sprintf("✓ Created project %s (%s)", project.Name, project.ID), project, nil
 			})
 		},
@@ -188,11 +189,12 @@ func newProjectDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "project", args[0],
-				func(ctx context.Context, c *coreapi.Client) (string, error) {
-					return resolveProjectRef(ctx, c, args[0])
+				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
+					return resolveProjectRefResolved(ctx, c, args[0])
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
-					return c.DeleteProject(ctx, coreapi.DeleteProjectParams{ProjectId: id})
+					_, err := c.DeleteProject(ctx, coreapi.DeleteProjectParams{ProjectId: id})
+					return err
 				})
 		},
 	}

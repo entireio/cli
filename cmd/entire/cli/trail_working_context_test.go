@@ -114,6 +114,40 @@ func TestWorkingTrailCommandsKeepProjectAndRepoNumbersSeparate(t *testing.T) {
 	}
 }
 
+func TestWorkingTrailFindingResolveUsesReviewIDFromCellPayload(t *testing.T) {
+	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if !serveWorkingProjectRead(t, w, r) {
+			t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	var paths []string
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /api/v1/trails/gh/acme/widget/7/reviews/comments":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"comments": []map[string]any{{"id": "finding-one", "review_id": "review-one", "status": "open"}},
+			}))
+		case "PATCH /api/v1/trails/gh/acme/widget/7/reviews/review-one/comments/finding-one":
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"id": "finding-one", "review_id": "review-one", "status": "resolved",
+			}))
+		default:
+			t.Errorf("unexpected repository request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	out, _, err := executeProjectTrailTest(t, "finding", "resolve", "42", "finding-one", "--repo", "gh/acme/widget", "--branch", "feature/work")
+	require.NoError(t, err)
+	require.Contains(t, out, "open → resolved")
+	require.Equal(t, []string{
+		"GET /api/v1/trails/gh/acme/widget/7/reviews/comments",
+		"PATCH /api/v1/trails/gh/acme/widget/7/reviews/review-one/comments/finding-one",
+	}, paths)
+}
+
 func TestWorkingTrailRejectsChangedOwnershipBeforeWriting(t *testing.T) {
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == projectTrailTestPath {

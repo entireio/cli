@@ -16,12 +16,12 @@ import (
 type TrailParentReference struct {
 	ID                    string `json:"id"`
 	Number                int    `json:"number"`
-	ProjectID             string `json:"projectId"`
+	ProjectID             string `json:"project_id"`
 	Host                  string `json:"host"`
 	Project               string `json:"project"`
 	Path                  string `json:"path"`
 	Jurisdiction          string `json:"jurisdiction"`
-	PrimaryProcessingCell string `json:"primaryProcessingCell"`
+	PrimaryProcessingCell string `json:"primary_processing_cell"`
 }
 
 // ProjectTrail is project intent, separate from branch-backed TrailResource.
@@ -113,9 +113,16 @@ type ProjectTrailCreateRequest struct {
 }
 
 type ChangeCreateRequest struct {
-	TrailCreateRequest
-
-	RepositoryID string `json:"repositoryId"`
+	RepositoryID string   `json:"repositoryId"`
+	Title        string   `json:"title"`
+	Body         string   `json:"body,omitempty"`
+	BranchName   string   `json:"branchName,omitempty"`
+	BranchAction string   `json:"branchAction,omitempty"`
+	Base         string   `json:"base,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	Assignees    []string `json:"assignees,omitempty"`
+	Priority     string   `json:"priority,omitempty"`
+	Type         string   `json:"type,omitempty"`
 }
 
 type ChangeCreateResponse struct {

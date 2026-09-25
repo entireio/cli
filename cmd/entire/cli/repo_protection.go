@@ -93,13 +93,13 @@ func newRepoProtectionCmd() *cobra.Command {
 	cmd.AddCommand(newRepoProtectionListCmd())
 	cmd.AddCommand(newRepoProtectionAddCmd())
 	cmd.AddCommand(newRepoProtectionRemoveCmd())
-	return cmd
+	return requireSubcommand(cmd)
 }
 
 func newRepoProtectionListCmd() *cobra.Command {
 	var project string
 	cmd := &cobra.Command{
-		Use:   "list <repo>",
+		Use:   cmdListRepo,
 		Short: "Show a repository's branch-protection rules",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -213,11 +213,11 @@ func newRepoProtectionAddCmd() *cobra.Command {
 				// server keeps an existing rule's level and protects a new
 				// branch, so an add that only names a branch can never lower
 				// it; --server-side-merge-only=false is the explicit way down.
-				rule := coreapi.BranchRule{Ref: ref}
+				rule := coreapi.BranchRuleUpdate{Ref: ref}
 				if cmd.Flags().Changed(serverSideMergeOnlyFlag) {
 					rule.ServerSideMergeOnly = coreapi.NewOptBool(mergeOnly)
 				}
-				body := &coreapi.UpdateBranchProtectionInputBody{AddRules: []coreapi.BranchRule{rule}}
+				body := &coreapi.UpdateBranchProtectionInputBody{AddRules: []coreapi.BranchRuleUpdate{rule}}
 				out, err := c.UpdateBranchProtection(ctx, body, coreapi.UpdateBranchProtectionParams{RepoId: repoID})
 				if err != nil {
 					return nil, err

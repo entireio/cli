@@ -30,9 +30,9 @@ func TestProjectTrailDiscussionsUseProjectRoutes(t *testing.T) {
 				assert.Equal(t, projectTrailTestPath+"/discussions"+tt.suffix, r.URL.Path)
 				assert.Empty(t, r.Header.Get("If-Match"))
 				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
-					"discussion": api.TrailThreadSummary{ID: "discussion-one", Title: "Plan", TrailID: projectTrailTestID},
-					"message":    api.TrailThreadMessage{ID: "message-one", Body: "Plan"},
-					"items":      []api.TrailThreadSummary{{ID: "discussion-one", Title: "Plan"}},
+					"discussion": api.TrailDiscussionSummary{ID: "discussion-one", Title: "Plan", TrailID: projectTrailTestID},
+					"message":    api.TrailDiscussionMessage{ID: "message-one", Body: "Plan"},
+					"items":      []api.TrailDiscussionSummary{{ID: "discussion-one", Title: "Plan"}},
 				}))
 			})
 			args := append([]string{"comment", "--project", "gh/acme", "--trail", projectTrailTestID}, tt.args...)
@@ -62,8 +62,8 @@ func TestProjectTrailDiscussionWritesUseResourceETags(t *testing.T) {
 					assert.Equal(t, projectTrailTestPath+"/discussions/discussion-one", r.URL.Path)
 					w.Header().Set("ETag", `W/"discussion-version"`)
 					assert.NoError(t, json.NewEncoder(w).Encode(projectDiscussionResponse{
-						Discussion: api.TrailThreadSummary{ID: "discussion-one"},
-						Messages:   []api.TrailThreadMessage{{ID: "message-one", ETag: `W/"message-version"`}},
+						Discussion: api.TrailDiscussionSummary{ID: "discussion-one"},
+						Messages:   []api.TrailDiscussionMessage{{ID: "message-one", ETag: `W/"message-version"`}},
 					}))
 					return
 				}
@@ -85,7 +85,7 @@ func TestProjectTrailDiscussionWritesUseResourceETags(t *testing.T) {
 func TestProjectTrailDiscussionMissingETagRefusesWrite(t *testing.T) {
 	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
-		assert.NoError(t, json.NewEncoder(w).Encode(projectDiscussionResponse{Discussion: api.TrailThreadSummary{ID: "discussion-one"}}))
+		assert.NoError(t, json.NewEncoder(w).Encode(projectDiscussionResponse{Discussion: api.TrailDiscussionSummary{ID: "discussion-one"}}))
 	})
 	_, _, err := executeProjectTrailTest(t, "comment", "resolve", "discussion-one", "--project", "gh/acme", "--trail", projectTrailTestID)
 	require.ErrorContains(t, err, "no ETag")

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -49,11 +48,7 @@ func makeTestJWT(t *testing.T, payloadJSON string) string {
 func TestAuthTokenCmd(t *testing.T) {
 	// Guard against a real ENTIRE_TOKEN in the dev's environment leaking into
 	// the not-logged-in case; restore it afterward.
-	if v, ok := os.LookupEnv("ENTIRE_TOKEN"); ok {
-		os.Unsetenv("ENTIRE_TOKEN")
-		// t.Setenv can't unset, and there's no t.Unsetenv, so restore manually.
-		t.Cleanup(func() { os.Setenv("ENTIRE_TOKEN", v) }) //nolint:usetesting // restoring a captured value; no t.Unsetenv equivalent
-	}
+	unsetEnv(t, "ENTIRE_TOKEN")
 
 	t.Run("prints the env token verbatim", func(t *testing.T) {
 		token := makeTestJWT(t, `{"sub":"ci","aud":"https://core.us.entire.io"}`)
@@ -83,6 +78,21 @@ func TestAuthTokenCmd(t *testing.T) {
 		require.Empty(t, out.String(), "stdout must stay clean for command substitution")
 		require.Contains(t, errOut.String(), "Not logged in")
 	})
+
+	t.Run("names the acting context among several", func(t *testing.T) {
+		seedTwoContexts(t)
+		var notice strings.Builder
+		auth.CaptureContextNoticeForTest(t, &notice)
+
+		cmd := newAuthTokenCmd()
+		cmd.SetArgs([]string{"--insecure-http-auth"})
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		require.NoError(t, cmd.ExecuteContext(t.Context()))
+		require.Len(t, strings.Split(strings.TrimSpace(out.String()), "\n"), 1, "stdout carries only the token")
+		require.Regexp(t, `^Using context '[^']+'\.\n$`, notice.String())
+	})
 }
 
 // TestAuthTokenCmd_Jurisdiction covers `entire auth token --jurisdiction`.
@@ -90,10 +100,7 @@ func TestAuthTokenCmd(t *testing.T) {
 // Not parallel: it manipulates ENTIRE_TOKEN / ENTIRE_CONFIG_DIR and the
 // package-global cell-exchange seams.
 func TestAuthTokenCmd_Jurisdiction(t *testing.T) {
-	if v, ok := os.LookupEnv("ENTIRE_TOKEN"); ok {
-		os.Unsetenv("ENTIRE_TOKEN")
-		t.Cleanup(func() { os.Setenv("ENTIRE_TOKEN", v) }) //nolint:usetesting // restoring a captured value; no t.Unsetenv equivalent
-	}
+	unsetEnv(t, "ENTIRE_TOKEN")
 
 	t.Run("mints and prints a jurisdictional token from ENTIRE_TOKEN", func(t *testing.T) {
 		t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())

@@ -192,7 +192,7 @@ func TestFormatCheckpointSummaryError_DeadlineExceeded(t *testing.T) {
 	}
 	// Negative guards against regressions:
 	//   - Hardcoded "Claude" / "sonnet" / "Anthropic" would misdirect users of
-	//     alternate summary providers (codex, gemini).
+	//     alternate summary providers (codex, cursor).
 	combined := label + "\n" + err.Error()
 	var combinedSb194 strings.Builder
 	for _, r := range rows {
@@ -991,7 +991,7 @@ func TestMaybeCompactExternalTranscriptForSummary_RedactsExternalOutput(t *testi
 	script := `#!/bin/sh
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + string(kind) + `","description":"External redaction test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":true,"text_generator":false,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + string(kind) + `","description":"External redaction test agent","protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":true,"text_generator":false,"hook_response_writer":false,"subagent_aware_extractor":false}}'
     ;;
   compact-transcript)
     echo '{"transcript":"eyJ2IjoxLCJhZ2VudCI6InN1bW1hcnktcmVkYWN0IiwiY2xpX3ZlcnNpb24iOiJ0ZXN0IiwidHlwZSI6InVzZXIiLCJ0cyI6IjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwiY29udGVudCI6W3sidGV4dCI6ImtleT1xOVh2MkxtOFJ0MVlwNEtkN1d6MEhzNk5jM0JmNUpnIn1dfQo="}'
@@ -1190,39 +1190,6 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	v1After, err := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
 	require.NotEqual(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
-}
-
-func TestRunExplainGenerateBlocksWhenPolicyWriteUnsupported(t *testing.T) {
-	fixture := setupGenerateSummaryFixture(t)
-	stubSummaryProviderForTest(t)
-	writeUnsupportedCheckpointPolicyForCLITest(t, fixture.repo)
-
-	lookup, err := newExplainCheckpointLookup(context.Background())
-	require.NoError(t, err)
-	defer lookup.Close()
-
-	var stdout, stderr bytes.Buffer
-	err = runExplainCheckpointWithLookup(
-		fixture.ctx,
-		&stdout,
-		&stderr,
-		fixture.cpID.String(),
-		false,
-		false,
-		false,
-		false,
-		true,
-		false,
-		false,
-		lookup,
-		nil,
-		0,
-	)
-	require.ErrorContains(t, err, "checkpoint policy cannot be satisfied by this Entire CLI")
-
-	v1After, refErr := fixture.repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	require.NoError(t, refErr)
-	require.Equal(t, fixture.v1Hash, v1After.Hash(), "summary write must not advance metadata")
 }
 
 // TestGenerateCheckpointAISummary_ExplicitTimeoutNarrowsLongParent verifies
@@ -2257,7 +2224,7 @@ func installExternalTranscriptCompactor(t *testing.T, opts externalTranscriptCom
 	script := `#!/bin/sh
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + opts.name + `","type":"` + string(opts.agentType) + `","description":"External checkpoint display test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":true,"text_generator":false,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    echo '{"protocol_version":1,"name":"` + opts.name + `","type":"` + string(opts.agentType) + `","description":"External checkpoint display test agent","protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":true,"text_generator":false,"hook_response_writer":false,"subagent_aware_extractor":false}}'
     ;;
   compact-transcript)
     if [ "$2" != "--session-ref" ] || ! grep -q '` + opts.requiredMarker + `' "$3"; then

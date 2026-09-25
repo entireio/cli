@@ -15,7 +15,7 @@ With Entire, you can:
 - **Understand why code changed, not just what** — Transcripts, prompts, files touched, token usage, tool calls, and more are captured alongside every commit.
 - **Resume from any checkpoint** — Go back to any previous agent session and pick up exactly where you or a coworker left off.
 - **Full context preserved and searchable** — A versioned record of every AI interaction tied to your git history, with nothing lost.
-- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Gemini, Pi, and more.
+- **Zero context switching** — Git-native, two-step setup, works with Claude Code, Codex, Cursor, Antigravity, Pi, and more.
 
 ## Table of Contents
 
@@ -281,7 +281,7 @@ By default `entire login` opens a browser to sign in and stores tokens in the OS
 
 ### Interactive login on a headless machine
 
-Sign-in itself already handles this: with no interactive terminal, or over SSH, `entire login` switches to the device-code flow on its own and prints an approval URL you can open on any machine. `entire login --device` forces that flow explicitly. Only token *storage* needs an override — use the file-backed store:
+Sign-in itself already handles this: with no interactive terminal, over SSH, or on a Linux or BSD machine with no graphical display, `entire login` switches to the device-code flow on its own and prints an approval URL you can open on any machine. `entire login --device` forces that flow explicitly. Only token *storage* needs an override — use the file-backed store:
 
 ```bash
 ENTIRE_TOKEN_STORE=file entire login
@@ -337,7 +337,7 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `entire login`   | Log in to Entire (browser by default; `--device` for the device-code flow)            |
 | `entire logout`  | Log out of Entire                                                                    |
-| `entire auth`    | Manage authentication (`status`, `contexts`, `use`, `token`, `login`, `logout`)       |
+| `entire auth`    | Manage authentication (`status`, `contexts`, `switch`, `token`, `login`, `logout`)       |
 
 ### Control Plane
 
@@ -346,7 +346,7 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | `entire cluster` | Show the Entire clusters you can place projects and repos on (`list`)              |
 | `entire org`     | Manage Entire organizations (`create`, `list`, `get`, `delete`, `grant`)           |
 | `entire project` | Manage Entire projects (`create`, `list`, `get`, `delete`, `grant`)                |
-| `entire repo`    | Manage Entire repositories (`create`, `list`, `get`, `delete`, `clone`, `mirror`, `visibility`, `protection`, `grant`) |
+| `entire repo`    | Manage Entire repositories (`create`, `list`, `view`, `edit`, `delete`, `clone`, `mirror`, `remote`, `access`, `visibility`, `protection`, `grant`) |
 | `entire api`     | Make an authenticated request to an Entire API and print the response              |
 
 ### Other
@@ -364,7 +364,6 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | Command              | Description                                              |
 | -------------------- | -------------------------------------------------------- |
 | `entire review`      | Run a multi-agent review against a branch                |
-| `entire investigate` | Run a multi-agent investigation against the current branch |
 | `entire tokens`      | Analyze token usage across sessions and checkpoints       |
 | `entire blame`       | Show which lines came from Entire checkpoints             |
 | `entire why`         | Show why a line exists                                   |
@@ -378,10 +377,10 @@ These are visible in developer and nightly builds and hidden in stable releases,
 
 | Flag                                        | Description                                                                                                       |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `--agent <name>`                            | Agent to set up hooks for: `claude-code`, `codex`, `copilot-cli`, `cursor`, `factoryai-droid`, `gemini`, `opencode`, `pi` (external agents on `$PATH` also work). Enables non-interactive mode |
+| `--agent <name>`                            | Agent to set up hooks for: `antigravity`, `claude-code`, `codex`, `copilot-cli`, `cursor`, `factoryai-droid`, `opencode`, `pi` (external agents on `$PATH` also work). Enables non-interactive mode |
 | `--yes`, `-y`                               | Accept all defaults without prompting                                                                             |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
-| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo (e.g., `github:org/checkpoints-repo`)                                     |
+| `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo; providers `github`, `gitlab` (e.g., `github:org/checkpoints-repo`)      |
 | `--checkpoint-push-remote <name>`           | Select an existing Git remote for checkpoints; always saves to this clone's `.entire/settings.local.json`, even with `--project` |
 | `--skip-push-sessions`                      | Disable automatic pushing of checkpoint data on git push                                                           |
 | `--local`                                   | Write settings to `.entire/settings.local.json` instead of `.entire/settings.json`                                |
@@ -516,7 +515,7 @@ Personal overrides, gitignored by default:
 | `strategy_options.checkpoint_push_remote` | remote name, e.g. `"upstream"`               | Pin which single remote carries checkpoint data (see below)                       |
 | `strategy_options.filtered_fetches`       | `true`, `false`                              | Use `--filter=blob:none` on checkpoint fetches                                    |
 | `strategy_options.summarize.enabled`      | `true`, `false`                              | Auto-generate AI summaries at commit time                                         |
-| `summary_generation.provider`             | e.g. `claude-code`, `codex`, `gemini`        | Which agent generates summaries (defaults to Claude)                              |
+| `summary_generation.provider`             | e.g. `claude-code`, `codex`, `pi`            | Which agent generates summaries (defaults to Claude)                              |
 | `summary_generation.model`                | provider-specific model hint                 | Model hint for summary generation (requires `provider`)                            |
 | `summary_timeout_seconds`                 | seconds                                      | Hard deadline for `entire checkpoint explain --generate`. Unset or `0` means **no deadline** |
 | `redaction.*`                             | nested object                                | PII redaction, custom secret patterns, scanner engines, and the OpenAI Privacy Filter — documented in [docs/security-and-privacy.md](docs/security-and-privacy.md) |
@@ -527,12 +526,12 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 
 | Agent            | Hook Location                 | Format            |
 | ---------------- | ----------------------------- | ----------------- |
+| Antigravity      | `.agents/hooks.json`          | JSON hooks config |
 | Claude Code      | `.claude/settings.json`       | JSON hooks config |
 | Codex            | `.codex/hooks.json`           | JSON hooks config |
 | Copilot CLI      | `.github/hooks/entire.json`   | JSON hooks config |
 | Cursor           | `.cursor/hooks.json`          | JSON hooks config |
 | Factory AI Droid | `.factory/settings.json`      | JSON hooks config |
-| Gemini CLI       | `.gemini/settings.json`       | JSON hooks config |
 | OpenCode         | `.opencode/plugins/entire.ts` | TypeScript plugin |
 | Pi               | `.pi/extensions/entire/index.ts` | TypeScript extension |
 
@@ -618,7 +617,7 @@ When enabled, Entire automatically generates AI summaries for checkpoints at com
 
 Summaries are also generated on demand, with or without this setting, by `entire checkpoint explain --generate`.
 
-**Which agent writes them.** By default Claude Code (`claude` on your `PATH`, model `sonnet`). Set a different one with `summary_generation.provider` — `claude-code`, `codex`, `copilot-cli`, `cursor`, `gemini`, `opencode`, or `pi`, plus an optional `summary_generation.model` hint:
+**Which agent writes them.** By default Claude Code (`claude` on your `PATH`, model `sonnet`). Set a different one with `summary_generation.provider` — `antigravity`, `claude-code`, `codex`, `copilot-cli`, `cursor`, `opencode`, or `pi`, plus an optional `summary_generation.model` hint:
 
 ```bash
 entire configure --summarize-provider codex

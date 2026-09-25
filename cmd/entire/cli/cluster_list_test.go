@@ -53,10 +53,10 @@ func tableCells(out string) [][]string {
 }
 
 // The table is what a person copies from: REGION feeds `project create
-// --region`, HOST feeds `repo mirror create` / `repo create --cluster-host` /
-// `repo clone --cluster`, CLUSTER is the slug placements are keyed by. Rows are
-// sorted by region then slug, and a publicUrl that cannot be reduced to a safe
-// bare host renders dashed rather than spoofable. A catalog holding a
+// --region`, CLUSTER is the slug placements are keyed by and every `--cluster`
+// flag takes, and HOST is the public host those commands resolve it to. Rows
+// are sorted by region then slug, and a publicUrl that cannot be reduced to a
+// safe bare host renders dashed rather than spoofable. A catalog holding a
 // non-default cluster gains a DEFAULT column, so a reader can see which
 // cluster a region falls back to when a command names the region alone.
 //

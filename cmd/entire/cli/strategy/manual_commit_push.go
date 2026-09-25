@@ -121,21 +121,6 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// default. Defer publication until the user's own branch exists there.
 	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
 
-	refs := checkpoint.ResolveRefs(ctx)
-	repo, repoErr := OpenRepository(ctx)
-	if repoErr != nil {
-		logging.Warn(ctx, "checkpoint policy pre-push: failed to open repository; allowing checkpoint push",
-			slog.String("error", repoErr.Error()),
-		)
-	} else {
-		defer repo.Close()
-		syncCheckpointPolicyForPrePush(ctx, repo, ps)
-		if !checkpointPolicyAllowsGitHook(ctx, repo) {
-			// Policy failures should skip checkpoint pushes, not abort the user's push.
-			return nil
-		}
-	}
-
 	// OPF pre-push rewrite: if OPF is configured, resolve the user's
 	// decision (env > settings > prompt > non-TTY auto-run), then
 	// re-redact unpushed v1 commits with OPF (producing the OPF-applied,
@@ -157,15 +142,24 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			// "never"). Push regex-only (8-layer) content as-is.
 			logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
 		case OPFRun:
-			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
+			// The open is its own span: opf_pre_push_rewrite names the rewrite
+			// and nothing else, so its timings stay comparable with every trace
+			// recorded while the repository was opened further up this function.
+			// The open is not free — on a reftable repo gitrepo routes reference
+			// reads back through the git CLI.
+			_, openSpan := perf.Start(ctx, "open_repository")
+			repo, repoErr := OpenRepository(ctx)
 			if repoErr != nil {
-				opfSpan.RecordError(repoErr)
-				opfSpan.End()
+				openSpan.RecordError(repoErr)
+				openSpan.End()
 				logging.Warn(ctx, "OPF pre-push: failed to open repo; aborting push",
 					slog.String("error", repoErr.Error()),
 				)
 				return repoErr
 			}
+			openSpan.End()
+			defer repo.Close()
+			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
 			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
 				opfSpan.RecordError(rewriteErr)
 				opfSpan.End()
@@ -196,6 +190,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// from pushRefIfNeeded's delivered return and NOT from err, which is
 	// fail-soft and nil even when the remote refused the ref.
 	deliveredCount, anyFailed := 0, false
+	refs := checkpoint.ResolveRefs(ctx)
 	for _, ref := range refs.Push {
 		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
 		if err != nil {
@@ -403,11 +398,6 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 // swallowed — like the v1 path, they must not block the user's git push — and the
 // refs stay queued for the next pre-push. When OPF is enabled the queued refs
 // are re-redacted with it first (RewriteQueuedCheckpointRefsWithOPF).
-//
-// It honors the checkpoint policy exactly like the v1 path: the policy gates on
-// checkpoint *format* compatibility (diverged from the remote, or an unsupported
-// local format), which is independent of the storage backend, so a blocked
-// policy skips the ref push (leaving refs queued) rather than pushing.
 func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings, pendingCapture string) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -416,14 +406,6 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		return nil
 	}
 	defer repo.Close()
-
-	// Refresh the checkpoint policy from the remote, then skip the ref push
-	// (leaving refs queued) if the policy is diverged or the local format is
-	// unsupported — same gate the v1 path uses.
-	syncCheckpointPolicyForPrePush(ctx, repo, ps)
-	if !checkpointPolicyAllowsGitHook(ctx, repo) {
-		return nil
-	}
 
 	// OPF backend divergence: both paths fail closed, but this one does it
 	// without blocking the user. The v1 path aborts the user's git push; here a
@@ -457,18 +439,13 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 // caller owns the repo. It returns the number of refs pushed and whether
 // pushing is disabled in settings — a distinct signal from pushed==0 with
 // pushing enabled (an empty queue), so callers can report the two accurately.
-// Like the pre-push paths, a checkpoint policy that blocks pushing — or, when
-// OPF is enabled, an OPF rewrite that cannot run — errors with the refs left
-// queued. Currently used by the checkpoint migration command's opt-in
-// "push now".
+// Like the pre-push paths, an OPF rewrite that cannot run when OPF is enabled
+// errors with the refs left queued. Currently used by the checkpoint migration
+// command's opt-in "push now".
 func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote string) (pushed int, pushDisabled bool, err error) {
 	ps := resolvePushSettings(ctx, remote)
 	if ps.pushDisabled {
 		return 0, true, nil
-	}
-	syncCheckpointPolicyForPrePush(ctx, repo, ps)
-	if !checkpointPolicyAllowsGitHook(ctx, repo) {
-		return 0, false, errors.New("checkpoint policy does not allow pushing checkpoint refs; refs stay queued")
 	}
 	if opfErr := opfGateForCheckpointRefs(ctx, repo); opfErr != nil {
 		// Names no cause, matching flushCheckpointRefsQueue's retry message
@@ -551,8 +528,11 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// Non-interactive SSH auth failures cannot be fixed by per-ref
 	// fetch+replay. Surface the same actionable hint as the v1 doPushRef path
 	// (issue #1523) instead of only logging to .entire/logs/.
+	// Deliberately does not print batchErr: it now carries git's own output, and
+	// this runs inside the user's `git push`. The hint below is the actionable
+	// part; the full error still reaches .entire/logs via the caller.
 	if nonInteractiveSSHAuthFailure(pushCtx, batchErr) {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: couldn't push checkpoint refs: %v\n", batchErr)
+		fmt.Fprintln(os.Stderr, "[entire] Warning: couldn't push checkpoint refs (SSH authentication failed).")
 		printNonInteractiveSSHAuthHint()
 		if dest.checkpointRemote {
 			printCheckpointRemoteHint(dest.target)
@@ -573,12 +553,18 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	stop = startProgressDots(os.Stderr)
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
+	var rejectionWarning string
 	for _, ref := range existing {
 		if err := pushCheckpointRefWithRecovery(pushCtx, dest.target, ref); err != nil {
 			logging.Warn(ctx, "git-refs push: checkpoint ref push/sync failed; left queued, not overwritten",
 				slog.String("ref", ref.String()), slog.String("error", err.Error()))
 			if nonInteractiveSSHAuthFailure(pushCtx, err) {
 				printNonInteractiveSSHAuthHint()
+			}
+			if rejectionWarning == "" {
+				if reason := checkpointRefRejectionReason(err); reason != "" {
+					rejectionWarning = fmt.Sprintf("[entire] Warning: checkpoint ref %s remains queued (showing one rejection):\n%s", ref, reason)
+				}
 			}
 			if firstErr == nil {
 				firstErr = err
@@ -588,6 +574,12 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 		pushed = append(pushed, ref)
 	}
 	stop(fmt.Sprintf(" pushed %d of %d", len(pushed), len(existing)))
+	// One actionable example per flush, after the progress line. Label it as
+	// such: other queued refs may have different causes (all are logged).
+	// Preserve Git's line breaks rather than printing the single-line log error.
+	if rejectionWarning != "" {
+		fmt.Fprintln(os.Stderr, rejectionWarning)
+	}
 	if err := queue.Remove(pushed); err != nil {
 		logging.Warn(ctx, "git-refs push: clear pushed refs from queue failed",
 			slog.String("error", err.Error()))

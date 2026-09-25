@@ -24,7 +24,7 @@ AAEAGZmFrZS1rZXktZm9yLXJlZGFjdGlvbi1iZW5jaG1hcmstb25seQECAwQF`)
 func BenchmarkRedactStringRepeatedSecret(b *testing.B) {
 	for _, repeats := range []int{1, 10, 100, 1000} {
 		b.Run(fmt.Sprintf("Occurrences%d", repeats), func(b *testing.B) {
-			input := strings.Repeat("request key=AKIAYRWQG5EJLPZLBYNP completed\n", repeats)
+			input := strings.Repeat("request key="+awsKeyFixture+" completed\n", repeats)
 			want := strings.Repeat("request key=REDACTED completed\n", repeats)
 			b.ReportAllocs()
 			b.SetBytes(int64(len(input)))

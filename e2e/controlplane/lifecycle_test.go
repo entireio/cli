@@ -70,8 +70,13 @@ func TestControlPlane_CreateCloneDelete(t *testing.T) {
 type repoJSON struct {
 	ID          string `json:"id"`
 	ClusterHost string `json:"clusterHost"`
-	Path        string `json:"path"`
-	State       string `json:"state"`
+	// ClusterSlug and Jurisdiction name the repo's primary placement the way
+	// `--cluster` and the cluster catalog do; the native mirror tests pick a
+	// target against them rather than hardcoding a region pair.
+	ClusterSlug  string `json:"clusterSlug"`
+	Jurisdiction string `json:"jurisdiction"`
+	Path         string `json:"path"`
+	State        string `json:"state"`
 }
 
 // waitForRepoClonable reads the repo by its /et/<project>/<repo> path, the
@@ -79,15 +84,19 @@ type repoJSON struct {
 // clone coordinates. The create response already carries them, but the read
 // path can lag behind it for a few seconds, either as a repo that is not yet
 // active or as a by-name lookup that does not find the project or repo yet.
+// An /et/ path resolves through repos/resolve, whose miss reads "not found or
+// not shared with you". The older by-name lookups report their own misses;
+// those are kept here in case a caller passes a bare name.
 func waitForRepoClonable(t *testing.T, dir, ref string) repoJSON {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
-		stdout, stderr, err := runEntire(t, dir, "repo", "get", ref, "--json")
+		stdout, stderr, err := runEntire(t, dir, "repo", "view", ref, "--json")
 		var pending string
 		if err != nil {
-			require.True(t, strings.Contains(stderr, "no repo named") || strings.Contains(stderr, "no project named"),
-				"entire repo get %s --json: %v\nstdout:\n%s\nstderr:\n%s", ref, err, stdout, stderr)
+			require.True(t, strings.Contains(stderr, "not found or not shared with you") ||
+				strings.Contains(stderr, "no repo named") || strings.Contains(stderr, "no project named"),
+				"entire repo view %s --json: %v\nstdout:\n%s\nstderr:\n%s", ref, err, stdout, stderr)
 			pending = strings.TrimSpace(stderr)
 		} else {
 			repo := decodeJSON[repoJSON](t, stdout)

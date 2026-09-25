@@ -50,7 +50,7 @@ func TestImportLoggedIn(t *testing.T) {
 	origCtx, origTok := importListContexts, importTokenForContext
 	t.Cleanup(func() { importListContexts, importTokenForContext = origCtx, origTok })
 	// Ensure no env token leaks in from the environment for the context cases.
-	t.Setenv(auth.EnvTokenVar, "")
+	unsetEnv(t, auth.EnvTokenVar)
 
 	withCurrent := func() ([]*contexts.Context, string, error) {
 		return []*contexts.Context{{Name: "prod"}}, "prod", nil

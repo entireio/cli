@@ -326,7 +326,7 @@ func projectTrailChangeRequest(cmd *cobra.Command, fields projectTrailFields, br
 	}
 	return api.ChangeCreateRequest{
 		RepositoryID: placement.RepoID,
-		TrailCreateRequest: api.TrailCreateRequest{Title: fields.Title, Body: fields.Body, BranchName: branch, Base: base, BranchAction: action,
-			Status: fields.Status, Type: fields.Type, Priority: fields.Priority, Assignees: fields.Assignees},
+		Title:        fields.Title, Body: fields.Body, BranchName: branch, Base: base, BranchAction: action,
+		Status: fields.Status, Type: fields.Type, Priority: fields.Priority, Assignees: fields.Assignees,
 	}, nil
 }

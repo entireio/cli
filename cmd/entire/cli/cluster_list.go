@@ -14,10 +14,11 @@ import (
 // clusterColumns is the human table view of a cluster. Every column is a value
 // some other command takes, which is what the table is for: REGION is the
 // jurisdiction slug `org create` and `project create` name with --region,
-// CLUSTER is the slug mirror placements are keyed by (`repo mirror list
-// --cluster` accepts it), HOST is what `repo create --cluster-host`, `repo
-// mirror create` and `repo clone --cluster` take. The catalog's apiUrl is
-// --json only: the CLI dials the API URL itself.
+// CLUSTER is the placement slug `repo mirror list --cluster` filters on, and
+// HOST is what every targeting --cluster takes (`repo mirror add`, `repo mirror
+// remove`, `repo clone`, `repo remote add`) as well as the
+// host in an entire:// clone URL. The catalog's apiUrl is --json only: the CLI
+// dials the API URL itself.
 var clusterColumns = []string{colHeaderRegion, colHeaderCluster, "HOST"}
 
 func clusterRow(cl coreapi.Cluster) []string {
@@ -31,10 +32,10 @@ func clusterRow(cl coreapi.Cluster) []string {
 // clusterTable shapes the catalog's table. A DEFAULT column is added only when
 // some cluster is not its region's default: that is the one catalog in which a
 // reader needs telling where a region falls back to when a command names the
-// region alone (`repo create` without --cluster-host), and the only one in
-// which the column would not read yes on every row. Every consumer of
-// isDefault picks the default within one jurisdiction, so the column is read
-// per region.
+// region alone (`repo create`, whose home cluster is its project's region), and
+// the only one in which the column would not read yes on every row. Every
+// consumer of isDefault picks the default within one jurisdiction, so the
+// column is read per region.
 func clusterTable(clusters []coreapi.Cluster) ([]string, func(coreapi.Cluster) []string) {
 	if !slices.ContainsFunc(clusters, func(cl coreapi.Cluster) bool { return !cl.IsDefault }) {
 		return clusterColumns, clusterRow
@@ -51,9 +52,9 @@ func clusterTable(clusters []coreapi.Cluster) ([]string, func(coreapi.Cluster) [
 
 // clusterJSON is the --json view of the catalog: the wire model with a
 // synthesized `host` merged into each cluster — the same validated bare host
-// the table's HOST column shows and that `repo create --cluster-host`, `repo
-// mirror create` and `repo clone --cluster` take — so a script reads the safe
-// value instead of re-implementing hostFromPublicURL over publicUrl. Where
+// the table's HOST column shows and that every targeting `--cluster` takes —
+// so a script reads the safe value instead of re-implementing
+// hostFromPublicURL over publicUrl. Where
 // publicUrl fails validation the field is absent, not dashed: publicUrl stays
 // for the consumer that wants the raw value, and an absent host says
 // "unsafe" more honestly than a placeholder does.
