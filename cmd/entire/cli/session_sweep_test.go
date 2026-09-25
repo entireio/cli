@@ -122,6 +122,20 @@ func TestIsSweepableZombie(t *testing.T) {
 			want: true,
 		},
 		{
+			// EndedAt stamped, Phase left behind: State.IsEnded exists for
+			// exactly this shape ("a legacy record, or a partial write"). It
+			// is ended, so finalizeExitedSessions skips it (OwnerExited is
+			// false once IsEnded) — if the condense half also declined it,
+			// the session would be owned by neither.
+			name: "half-ended state with uncondensed steps is a zombie",
+			state: session.State{
+				Phase:     session.PhaseIdle,
+				EndedAt:   &old,
+				StepCount: 3,
+			},
+			want: true,
+		},
+		{
 			name: "ended with nil EndedAt falls back to LastInteractionTime",
 			state: session.State{
 				Phase:               session.PhaseEnded,
@@ -410,4 +424,60 @@ func TestSweepSessionsCommand_Registered(t *testing.T) {
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
 	require.NoError(t, root.Execute())
+}
+
+// TestRunSessionSweep_CondensesHalfEndedSession — a session can carry EndedAt
+// without PhaseEnded ("a legacy record, or a partial write", per
+// State.IsEnded), and that shape used to fall between the sweep's two halves:
+// finalizeExitedSessions skips it because OwnerExited is false once IsEnded,
+// while the condense half re-tested Phase == PhaseEnded and declined it. Nobody
+// owned it, and doctor's classifySession does not flag it either (the phase
+// switch falls through to default), so only the 7-day stale purge reached it —
+// deleting the uncondensed content rather than condensing it.
+//
+// Not parallel: uses t.Chdir.
+func TestRunSessionSweep_CondensesHalfEndedSession(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	createShadowBranchRef(t, repo, testBaseCommit, "")
+
+	old := time.Now().Add(-48 * time.Hour)
+	halfEnded := &strategy.SessionState{
+		SessionID: "2026-08-22-sweep-half-ended",
+		// EndedAt is stamped but Phase never advanced past IDLE.
+		BaseCommit: testBaseCommit,
+		Phase:      session.PhaseIdle,
+		StepCount:  2,
+		StartedAt:  old.Add(-time.Hour),
+		EndedAt:    &old,
+	}
+	require.NoError(t, strategy.SaveSessionState(ctx, halfEnded))
+
+	require.True(t, isSweepableZombie(halfEnded, time.Now()),
+		"a half-ended session with uncondensed steps must nominate the sweep")
+
+	require.NoError(t, runSessionSweep(ctx))
+
+	states, err := strategy.ListSessionStates(ctx)
+	require.NoError(t, err)
+	byID := map[string]*strategy.SessionState{}
+	for _, st := range states {
+		byID[st.SessionID] = st
+	}
+
+	after, ok := byID["2026-08-22-sweep-half-ended"]
+	require.True(t, ok, "the half-ended session must survive the sweep")
+	assert.False(t, strategy.IsCondensableEndedSession(repo, after),
+		"the half-ended session must no longer hold uncondensed content")
+	// Same two shapes the old-zombie test accepts: the skip path (no
+	// transcript/files, as here) sets FullyCondensed and keeps the phase; a
+	// full condense resets Phase to IDLE and StepCount to 0. Either proves
+	// CondenseSessionByID actually ran rather than the predicate merely
+	// ceasing to match.
+	assert.True(t, after.FullyCondensed || after.StepCount == 0,
+		"the sweep must have condensed the half-ended session, not just skipped it")
 }
