@@ -122,6 +122,22 @@ func TestPushQueue_DrainCompactsMalformedLines(t *testing.T) {
 	assert.Equal(t, 1, nonEmptyLineCount(t, q), "Drain drops malformed lines from disk")
 }
 
+func TestPushQueue_RemovePreservesNewerSameRefEntry(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	ref := mustRefName(t, "a1b2c3d4e5f6")
+	require.NoError(t, q.Enqueue(ref))
+	drained, err := q.Drain()
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.ReferenceName{ref}, drained)
+	// Simulate the same ref advancing and being enqueued during the push.
+	require.NoError(t, q.Enqueue(ref))
+	require.NoError(t, q.Remove(drained))
+	remaining, err := q.Peek()
+	require.NoError(t, err)
+	require.Equal(t, []plumbing.ReferenceName{ref}, remaining)
+}
+
 func TestPushQueue_RemovePreservesLaterEntries(t *testing.T) {
 	t.Parallel()
 	q := NewPushQueue(t.TempDir())
