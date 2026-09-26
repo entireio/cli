@@ -33,6 +33,25 @@ func CheckpointReadRemotes(ctx context.Context) []string {
 	return CheckpointReadRemotesWithElection(ctx).Candidates
 }
 
+// LeadCheckpointReadRemote returns the head of the read-candidate chain (the
+// elected sync remote) for remote.FetchURL's ownership vote. Callers that
+// resolve a configured checkpoint_remote pass it as
+// FetchURLOptions.LeadReadRemote so the fetch-side inherited check sees the
+// same fork-shaped identity the push side sees: in the "cloned the base,
+// added a fork" topology only the elected remote's owner exposes the
+// mismatch. Returns "" when no candidate resolves.
+//
+// Pass it only on paths that already confirmed a checkpoint_remote is
+// configured. On the no-config path a lead does more than vote: it selects
+// which remote serves the fetch.
+func LeadCheckpointReadRemote(ctx context.Context) string {
+	candidates := CheckpointReadRemotes(ctx)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+
 // CheckpointReadResolution is the read-candidate chain bundled with the
 // election result it was derived from.
 type CheckpointReadResolution struct {

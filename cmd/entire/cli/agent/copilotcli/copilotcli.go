@@ -45,9 +45,6 @@ func (c *CopilotCLIAgent) Description() string {
 	return "Copilot CLI - GitHub's AI-powered coding agent"
 }
 
-// IsPreview returns true because this is a new integration.
-func (c *CopilotCLIAgent) IsPreview() bool { return true }
-
 // DetectPresence checks if Entire hooks are installed in the Copilot CLI config.
 // Delegates to AreHooksInstalled which checks .github/hooks/entire.json for Entire hook entries.
 func (c *CopilotCLIAgent) DetectPresence(ctx context.Context) (bool, error) {
@@ -176,3 +173,8 @@ func (c *CopilotCLIAgent) ChunkTranscript(_ context.Context, content []byte, max
 func (c *CopilotCLIAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Copilot CLI
+// publishes into the environment of the processes it spawns — the same ID that
+// names the session's directory under Copilot's session-state store.
+func (c *CopilotCLIAgent) CallerSessionEnvVar() string { return "COPILOT_AGENT_SESSION_ID" }

@@ -75,15 +75,15 @@ func TestWriteTuneDebug(t *testing.T) {
 	}
 }
 
-func TestEnsureRunnersPresent_CreatesDefaultsWhenEmpty(t *testing.T) {
+func TestCreateDefaultRunners_WritesTheWholeSet(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := t.TempDir()
-	var out, errOut bytes.Buffer
+	var out bytes.Buffer
 
-	created, err := ensureRunnersPresent(&out, &errOut, repoRoot, true /* assumeYes */)
+	created, err := createDefaultRunners(&out, repoRoot)
 	if err != nil {
-		t.Fatalf("ensureRunnersPresent: %v", err)
+		t.Fatalf("createDefaultRunners: %v", err)
 	}
 	if len(created) < 6 {
 		t.Fatalf("expected >=6 created runner IDs, got %d: %v", len(created), created)
@@ -106,32 +106,29 @@ func TestEnsureRunnersPresent_CreatesDefaultsWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestEnsureRunnersPresent_NoopWhenRunnersExist(t *testing.T) {
+// TestRunnerConfigsExist_GatesTheScaffold covers what used to be
+// createDefaultRunners' own no-op check: the caller asks this predicate and
+// only writes when it says the repo has none, so the invariant has one home.
+func TestRunnerConfigsExist_GatesTheScaffold(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := t.TempDir()
+	if runnerConfigsExist(repoRoot) {
+		t.Error("an empty repo should report no runner configs")
+	}
+
 	dir := filepath.Join(repoRoot, ".entire", "runners")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if runnerConfigsExist(repoRoot) {
+		t.Error("an empty runners directory should report no runner configs")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "trail-risk.json"),
 		[]byte(`{"id":"trail-risk","prompt":{"template":"x"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	created, err := ensureRunnersPresent(&bytes.Buffer{}, &bytes.Buffer{}, repoRoot, true)
-	if err != nil {
-		t.Fatalf("ensureRunnersPresent: %v", err)
-	}
-	if len(created) != 0 {
-		t.Errorf("expected no created runners when they already exist, got %v", created)
-	}
-	// No defaults should have been scaffolded over the existing runner.
-	after, err := filepath.Glob(filepath.Join(dir, "*.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after) != 1 {
-		t.Errorf("expected the existing single runner untouched, got %d files", len(after))
+	if !runnerConfigsExist(repoRoot) {
+		t.Error("a repo with a runner config should report that it has one")
 	}
 }

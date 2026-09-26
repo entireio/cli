@@ -90,6 +90,19 @@ func DiscoverAndRegisterNamedAlways(ctx context.Context, name types.AgentName) e
 	return discoverAndRegisterNamed(ctx, name, discoveryTimeout)
 }
 
+// BinaryOnPath reports whether an entire-agent-<name> executable is on $PATH,
+// without executing it. For callers that must defer to a plugin that could
+// claim name but are not allowed to run plugins to find out (doctor). A lookup
+// that fails for any reason other than "not found" counts as present, so the
+// caller errs on the side of leaving the plugin's state alone.
+func BinaryOnPath(name types.AgentName) bool {
+	if name == "" || strings.ContainsAny(string(name), `/\`) {
+		return false
+	}
+	_, err := lookPathExternalAgent(binaryPrefix + string(name))
+	return !errors.Is(err, exec.ErrNotFound)
+}
+
 // discoveryCanceled reports whether either the caller's context or the derived
 // discovery-timeout context has been cancelled.
 //

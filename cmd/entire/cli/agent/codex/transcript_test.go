@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -30,6 +31,74 @@ func writeSampleRollout(t *testing.T) string {
 	path := filepath.Join(dir, "rollout.jsonl")
 	require.NoError(t, os.WriteFile(path, []byte(sampleRollout), 0o600))
 	return path
+}
+
+func TestClassifyRollout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		data      string
+		want      rolloutClassification
+		wantIssue rolloutClassificationIssue
+	}{
+		{
+			name: "root thread source",
+			data: `{"type":"session_meta","payload":{"thread_source":"user"}}` + "\n",
+			want: rolloutRoot,
+		},
+		{
+			name: "root legacy string source",
+			data: `{"type":"session_meta","payload":{"source":"exec"}}` + "\n",
+			want: rolloutRoot,
+		},
+		{
+			name: "child thread source",
+			data: `{"type":"session_meta","payload":{"thread_source":"subagent"}}` + "\n",
+			want: rolloutChild,
+		},
+		{
+			name: "child legacy structured source",
+			data: `{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"parent_thread_id":"root-thread"}}}}}` + "\n",
+			want: rolloutChild,
+		},
+		{
+			name:      "missing session metadata",
+			data:      `{"type":"response_item","payload":{}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
+		},
+		{
+			name:      "malformed JSON",
+			data:      `{"type":"session_meta","payload":` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
+		},
+		{
+			name:      "unrecognized source",
+			data:      `{"type":"session_meta","payload":{"source":"other"}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueUnclassifiedSource,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(tt.data), 0o600))
+			got := classifyRolloutDetailed(path, []string{filepath.Dir(path)})
+			require.Equal(t, tt.want, got.Classification)
+			require.Equal(t, tt.wantIssue, got.Issue)
+		})
+	}
+
+	t.Run("missing path", func(t *testing.T) {
+		t.Parallel()
+		got := classifyRolloutDetailed(filepath.Join(t.TempDir(), "missing.jsonl"), nil)
+		require.Equal(t, rolloutUnknown, got.Classification)
+		require.Equal(t, rolloutIssueUnreadable, got.Issue)
+	})
 }
 
 func TestGetTranscriptPosition(t *testing.T) {
@@ -66,7 +135,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// From beginning — should find all files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"hello.txt", "docs/readme.md"}, files)
@@ -78,7 +147,7 @@ func TestExtractModifiedFilesFromOffset_WithOffset(t *testing.T) {
 	path := writeSampleRollout(t)
 
 	// Skip first 7 lines (past the first apply_patch) — should only find second patch files
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 7)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 7)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.ElementsMatch(t, []string{"docs/readme.md", "hello.txt"}, files)
@@ -89,7 +158,7 @@ func TestExtractModifiedFilesFromOffset_PastEnd(t *testing.T) {
 	ag := &CodexAgent{}
 	path := writeSampleRollout(t)
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 100)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 100)
 	require.NoError(t, err)
 	require.Equal(t, 12, pos)
 	require.Empty(t, files)

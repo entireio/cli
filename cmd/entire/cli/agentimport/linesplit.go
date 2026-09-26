@@ -25,9 +25,6 @@ func parseTimestamp(s string) time.Time {
 // (truncating the end bounds the turn while keeping the file's beginning, which
 // branch-aware agents like Pi need). build may return a nil Turn to skip a
 // start defensively (e.g. a line that unexpectedly fails to parse).
-//
-// Gemini imports per-session and does not use this — its transcript is a single
-// JSON document, not newline-delimited records.
 func splitLineTurns(
 	rawLines [][]byte,
 	isPrompt func(raw []byte) bool,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -12,9 +13,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
-const DefaultProfileName = "general"
+// Built-in profile names. DefaultProfileName is the profile used when none is
+// named; the other two are the presets the picker offers and profileTask knows
+// a built-in task for.
+const (
+	DefaultProfileName       = "general"
+	SecurityProfileName      = "security"
+	AccessibilityProfileName = "accessibility"
+)
 
 // Review output destinations. ReviewOutputLocal prints the verdict and writes
 // the local review manifest; ReviewOutputTrail additionally posts the verdict
@@ -61,9 +70,9 @@ func profileTask(name string, cfg settings.ReviewProfileConfig) string {
 	switch strings.ToLower(name) {
 	case "", DefaultProfileName:
 		return defaultGeneralTask
-	case "security":
+	case SecurityProfileName:
 		return defaultSecurityTask
-	case "accessibility", "a11y":
+	case AccessibilityProfileName, "a11y":
 		return defaultAccessibilityTask
 	default:
 		return defaultGeneralTask
@@ -111,6 +120,33 @@ func selectReviewProfile(s *settings.EntireSettings, override string) (string, s
 		return "", settings.ReviewProfileConfig{}, fmt.Errorf("review profile %q has no configured agents", name)
 	}
 	return name, cfg, nil
+}
+
+// notifyDroppedReviewPrompts reports review prompt fields the settings loader
+// dropped as untrusted (see settings.enforceAgentPromptTrust), scoped to the
+// profile about to run plus the legacy review map it may have been built from.
+// Without the notice, a configured per-agent preamble that silently stops
+// applying is indistinguishable from one nobody wrote. The field path embeds
+// profile and worker names from the settings file, so it goes through the
+// shared single-line display sanitizer.
+func notifyDroppedReviewPrompts(w io.Writer, s *settings.EntireSettings, profileName string) {
+	for _, rej := range s.AgentPromptRejections() {
+		if !strings.HasPrefix(rej.Field, "review_profiles."+profileName+".") &&
+			!strings.HasPrefix(rej.Field, "review.") {
+			continue
+		}
+		// A dropped task that matches the built-in text for this profile name
+		// changes nothing: profileTask falls back to exactly that text. The
+		// non-interactive first-run setup persists the built-in task into the
+		// project file, so without this check every default setup would be
+		// nagged about a drop with no effect.
+		if rej.Field == "review_profiles."+profileName+".task" &&
+			strings.TrimSpace(rej.Value) == profileTask(profileName, settings.ReviewProfileConfig{}) {
+			continue
+		}
+		fmt.Fprintf(w, "Note: %s is configured but not applied: %s. Set it in .entire/settings.local.json or clone-local review preferences to use it.\n",
+			tuiutil.SanitizeDisplayText(rej.Field), rej.Reason)
+	}
 }
 
 func applyLegacyReviewProfileFallback(s *settings.EntireSettings) {
@@ -351,7 +387,7 @@ func defaultReviewProfileForInstalledAgents(
 		agents[name] = cfg
 	}
 	if len(agents) == 0 {
-		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, `entire configure --agent gemini`, or `entire configure --agent pi`")
+		return settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, or `entire configure --agent pi`")
 	}
 	profile := settings.ReviewProfileConfig{
 		Task:   profileTask(profileName, settings.ReviewProfileConfig{}),
@@ -369,11 +405,11 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 	focus := defaultProfileFocus(profileName)
 	switch agentName {
 	case string(agent.AgentNameClaudeCode):
-		if strings.EqualFold(profileName, "security") {
+		if strings.EqualFold(profileName, SecurityProfileName) {
 			return settings.ReviewConfig{Skills: []string{"/security-review"}}
 		}
 		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
-	case string(agent.AgentNameCodex), string(agent.AgentNameGemini), string(agent.AgentNamePi):
+	case string(agent.AgentNameCodex), string(agent.AgentNamePi):
 		prompt := defaultAgentReviewPrompt
 		if focus != "" {
 			prompt += " " + focus
@@ -386,9 +422,9 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 
 func defaultProfileFocus(profileName string) string {
 	switch strings.ToLower(strings.TrimSpace(profileName)) {
-	case "security":
+	case SecurityProfileName:
 		return "Focus specifically on security issues."
-	case "accessibility", "a11y":
+	case AccessibilityProfileName, "a11y":
 		return "Focus specifically on accessibility issues."
 	default:
 		return ""
@@ -396,11 +432,11 @@ func defaultProfileFocus(profileName string) string {
 }
 
 // defaultJudge auto-selects a consolidating judge from the configured
-// reviewers: it prefers claude-code, then codex, then gemini, then pi, and
+// reviewers: it prefers claude-code, then codex, then pi, and
 // otherwise takes the first reviewer that can write a verdict (text generation).
 // ok is false when no reviewer can.
 func defaultJudge(ctx context.Context, configured map[string]settings.ReviewConfig) (judgeSpec, bool) {
-	for _, preferred := range []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCodex), string(agent.AgentNameGemini), string(agent.AgentNamePi)} {
+	for _, preferred := range []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCodex), string(agent.AgentNamePi)} {
 		for _, workerName := range sortedMapKeys(configured) {
 			cfg := configured[workerName]
 			if reviewAgentName(workerName, cfg) == preferred && agentSupportsTextGeneration(ctx, preferred) {

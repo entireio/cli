@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 
 	"charm.land/huh/v2"
 
@@ -39,12 +38,12 @@ var (
 	isTerminalOut                = interactive.IsTerminalWriter
 )
 
-// MaybeAutoUpdate prints an update notification and offers an interactive
+// maybeAutoUpdate prints an update notification and offers an interactive
 // upgrade. Silent on every failure path — it must never interrupt the CLI.
 //
 // The same 3-option prompt (update / skip / skip until next version) is
 // shown for every install manager that supports auto-installation
-// (brew, mise, scoop, curl-bash). The only thing that varies between
+// (brew, mise, curl-bash). The only thing that varies between
 // installers is the shell command interpolated into option 1.
 //
 // If the installer command fails, a hint with the exact command is
@@ -57,17 +56,11 @@ var (
 // environment like CI / agent subprocess / no TTY) the installer
 // command is printed so the user still learns what to run manually.
 //
-// On Windows + unknown install manager the POSIX curl-pipe-bash fallback
-// can't auto-run and there's no native equivalent, so we point the user
-// at the releases download page instead.
-func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVersion string) AutoUpdateAction {
-	if !canAutoInstall() {
-		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, download the latest release from:\n  %s\n", downloadsURL)
-		return autoUpdateActionSkip
-	}
-
-	cmdStr := updateCommand(currentVersion)
+// On Windows the installer is never auto-run (a running entire.exe cannot
+// replace itself), so scoop, mise, and install.ps1 commands are printed
+// for the user to run once entire has exited.
+func maybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVersion string) AutoUpdateAction {
+	cmdStr := UpdateCommandForCurrentBinary(currentVersion)
 
 	// Windows can't replace a running executable, so no installer can update
 	// entire in place while it runs. For Scoop this is acute: the live
@@ -80,9 +73,9 @@ func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 	// suppress a specific version: the nudge returns every 24h until they
 	// update. That is deliberate while the Scoop rename migration is live —
 	// there is no prompt to choose from, so there is no choice to remember.
-	if goos == goosWindows {
+	if !installerAutoRuns {
 		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run the following when entire is not running:\n  %s\n", cmdStr)
+		fmt.Fprintf(w, "To update, run the following in PowerShell when entire is not running:\n  %s\n", cmdStr)
 		return autoUpdateActionSkip
 	}
 
@@ -139,27 +132,4 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 		return autoUpdateActionSkip, fmt.Errorf("update prompt: %w", err)
 	}
 	return action, nil
-}
-
-// realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
-// so password prompts and progress output reach the user. In practice it only
-// ever runs the POSIX installers (brew, mise, curl): MaybeAutoUpdate returns
-// before reaching here on Windows, so the cmd.exe branch below is unreachable
-// today. It is kept as cover for Windows print-only being lifted later, and
-// reads the same `goos` seam MaybeAutoUpdate does so a test can drive both
-// consistently.
-func realRunInstaller(ctx context.Context, cmdStr string) error {
-	var c *exec.Cmd
-	if goos == goosWindows {
-		c = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
-	} else {
-		c = exec.CommandContext(ctx, "sh", "-c", cmdStr)
-	}
-	c.Stdin = os.Stdin
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("installer exited: %w", err)
-	}
-	return nil
 }

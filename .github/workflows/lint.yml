@@ -31,8 +31,26 @@ jobs:
       # So this golangci-lint uses the same config as `mise run lint:go`, but using special sauce to
       # create inline feedback on GitHub's UI.  On local dev, the same issues should be surfaced by
       # mise-tasks/lint/go
+      #
+      # The version is read from mise.toml for the same reason setup-go reads
+      # go.mod above: the two pins must name the same version, and the hardcoded
+      # copy that used to live here is what drifted on the Go 1.27 bump. A 2.11
+      # binary refuses to lint a 1.27 module outright ("the Go language version
+      # (go1.26) used to build golangci-lint is lower than the targeted Go
+      # version"), so this step failed after `mise run lint` had already passed
+      # with the correct version.
+      - name: Resolve golangci-lint version
+        id: golangci
+        run: |
+          version=$(sed -n "s/^golangci-lint = '\(.*\)'$/\1/p" mise.toml)
+          if [ -z "$version" ]; then
+            echo "could not read the golangci-lint version from mise.toml" >&2
+            exit 1
+          fi
+          echo "version=v$version" >> "$GITHUB_OUTPUT"
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: 'v2.11.3'
+          version: ${{ steps.golangci.outputs.version }}
           debug: 'clean'

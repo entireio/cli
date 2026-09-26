@@ -1,3 +1,5 @@
+//go:build unix
+
 package versioncheck
 
 import (
@@ -9,266 +11,60 @@ import (
 	"testing"
 )
 
-// autoUpdateFixture wires the test seams for MaybeAutoUpdate.
-type autoUpdateFixture struct {
-	installCalls int
-	installErr   error
-	lastCommand  string
-	chooseValue  AutoUpdateAction
-	chooseErr    error
-	lastCmdStr   string
-}
-
-func newAutoUpdateFixture(t *testing.T) *autoUpdateFixture {
-	t.Helper()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(envKillSwitch, "")
-	// Force interactive mode on by default; individual tests can opt out.
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-
-	f := &autoUpdateFixture{chooseValue: autoUpdateActionUpdate}
-
-	origRun := runInstaller
-	runInstaller = func(_ context.Context, cmd string) error {
-		f.installCalls++
-		f.lastCommand = cmd
-		return f.installErr
-	}
-	origChoose := chooseUpdate
-	chooseUpdate = func(_ context.Context, _, _, cmdStr string) (AutoUpdateAction, error) {
-		f.lastCmdStr = cmdStr
-		return f.chooseValue, f.chooseErr
-	}
-	origIsTerminalOut := isTerminalOut
-	isTerminalOut = func(_ io.Writer) bool { return true }
-
-	t.Cleanup(func() {
-		runInstaller = origRun
-		chooseUpdate = origChoose
-		isTerminalOut = origIsTerminalOut
-	})
-	return f
-}
-
-// useBrewExecutable points the install-manager detector at a brew cellar path.
-func useBrewExecutable(t *testing.T) {
-	t.Helper()
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return "/opt/homebrew/Cellar/entire/1.0.0/bin/entire", nil
-	}
-	t.Cleanup(func() { executablePath = orig })
-}
-
-// useMiseExecutable points the install-manager detector at a mise install path.
-func useMiseExecutable(t *testing.T) {
-	t.Helper()
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return "/home/user/.local/share/mise/installs/entire/1.0.0/bin/entire", nil
-	}
-	t.Cleanup(func() { executablePath = orig })
-}
-
-// useScoopExecutable points the install-manager detector at a scoop install path.
-func useScoopExecutable(t *testing.T) {
-	t.Helper()
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return `C:\Users\test\scoop\apps\cli\current\entire.exe`, nil
-	}
-	t.Cleanup(func() { executablePath = orig })
-}
-
-// useUnknownExecutable points the install-manager detector at a plain path
-// with no recognised manager prefix (curl-bash fallback).
-func useUnknownExecutable(t *testing.T) {
-	t.Helper()
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return "/usr/local/bin/entire", nil
-	}
-	t.Cleanup(func() { executablePath = orig })
-}
-
-// pinNonWindowsGOOS pins the goos seam to a non-Windows value so the
-// table-driven tests below pass on Windows hosts. canAutoInstall() blocks
-// brew and the curl-bash fallback on Windows; without this pin those
-// installer cases would short-circuit to the downloads-page path.
-func pinNonWindowsGOOS(t *testing.T) {
-	t.Helper()
-	orig := goos
-	goos = "darwin"
-	t.Cleanup(func() { goos = orig })
-}
-
-// assertManualHint checks that the "To update, run:\n  <cmd>" hint
-// was printed when the prompt couldn't be shown, and that the wantCmd
-// installer command is included.
-func assertManualHint(t *testing.T, out, wantCmd string) {
-	t.Helper()
-	if !strings.Contains(out, "To update, run:") {
-		t.Errorf("missing manual-update hint: %q", out)
-	}
-	if !strings.Contains(out, "  "+wantCmd) {
-		t.Errorf("manual hint missing installer command %q: %q", wantCmd, out)
-	}
-}
-
 func TestMaybeAutoUpdate_KillSwitch(t *testing.T) {
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	t.Setenv(envKillSwitch, "1")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
-	if f.installCalls != 0 {
-		t.Errorf("installer called with kill-switch set")
-	}
-	assertManualHint(t, buf.String(), brewUpgradeCmd)
+	assertPrintOnly(t, f, action, buf.String(), brewUpgradeCmd)
 }
 
 func TestMaybeAutoUpdate_NoTTY(t *testing.T) {
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
-	// No TTY → MaybeAutoUpdate must print the manual hint instead of prompting.
+	setExecutablePath(t, brewCaskPath)
+	// No TTY → maybeAutoUpdate must print the manual hint instead of prompting.
 	t.Setenv("ENTIRE_TEST_TTY", "0")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
-	if f.installCalls != 0 {
-		t.Errorf("installer called without TTY")
-	}
-	assertManualHint(t, buf.String(), brewUpgradeCmd)
+	assertPrintOnly(t, f, action, buf.String(), brewUpgradeCmd)
 }
 
 func TestMaybeAutoUpdate_CIEnv(t *testing.T) {
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	// Clear the test override so the real CanPromptInteractively path runs.
 	t.Setenv("ENTIRE_TEST_TTY", "")
 	t.Setenv("CI", "true")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
-	if f.installCalls != 0 {
-		t.Errorf("installer called on CI (CI=true)")
-	}
-	assertManualHint(t, buf.String(), brewUpgradeCmd)
+	assertPrintOnly(t, f, action, buf.String(), brewUpgradeCmd)
 }
 
 func TestMaybeAutoUpdate_NonTerminalWriter(t *testing.T) {
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	isTerminalOut = func(_ io.Writer) bool { return false }
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
-	if f.installCalls != 0 {
-		t.Errorf("installer called with non-terminal output writer")
-	}
-	assertManualHint(t, buf.String(), brewUpgradeCmd)
-}
-
-// TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun verifies that on
-// Windows without a detected install manager we never execute the POSIX
-// curl-pipe-bash fallback (which would error from cmd.exe). Instead the
-// user is pointed at the releases download page.
-func TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun(t *testing.T) {
-	f := newAutoUpdateFixture(t)
-	// Force unknown install manager: point executablePath at a plain
-	// Program Files path that matches none of the known prefixes.
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return `C:\Program Files\Entire\entire.exe`, nil
-	}
-	t.Cleanup(func() { executablePath = orig })
-
-	origGOOS := goos
-	goos = goosWindows
-	t.Cleanup(func() { goos = origGOOS })
-
-	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
-
-	if f.installCalls != 0 {
-		t.Errorf("installer was auto-run on Windows + unknown install manager")
-	}
-	out := buf.String()
-	if !strings.Contains(out, "download the latest release") ||
-		!strings.Contains(out, "github.com/entireio/cli/releases") {
-		t.Errorf("expected download-page hint, got: %q", out)
-	}
-	if strings.Contains(out, "curl -fsSL") {
-		t.Errorf("Windows fallback must not show POSIX curl command: %q", out)
-	}
-}
-
-// TestMaybeAutoUpdate_WindowsNeverAutoRuns verifies that on Windows the update
-// is never auto-run — a running entire.exe can't replace its own shim — so the
-// command is printed for the user to run once entire has exited. This holds for
-// every auto-installable manager on Windows, not just Scoop: mise is covered so
-// narrowing the branch back to Scoop can't silently regress it.
-func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
-	tests := []struct {
-		name    string
-		setup   func(*testing.T)
-		wantCmd string
-	}{
-		{
-			name:    "scoop cli app prints migration command",
-			setup:   useScoopExecutable,
-			wantCmd: `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`,
-		},
-		{
-			name:    "mise prints upgrade command",
-			setup:   useMiseExecutable,
-			wantCmd: "mise upgrade entire",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newAutoUpdateFixture(t)
-			tt.setup(t)
-
-			origGOOS := goos
-			goos = goosWindows
-			t.Cleanup(func() { goos = origGOOS })
-
-			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
-
-			if f.installCalls != 0 {
-				t.Fatalf("installer must not auto-run on Windows; calls=%d", f.installCalls)
-			}
-			// Plain skip, not skip-until-next-version: Windows gets no prompt,
-			// so there is no per-version choice to persist.
-			if action != autoUpdateActionSkip {
-				t.Errorf("action = %q, want %q", action, autoUpdateActionSkip)
-			}
-			out := buf.String()
-			if !strings.Contains(out, "when entire is not running") {
-				t.Errorf("missing Windows manual-run hint: %q", out)
-			}
-			if !strings.Contains(out, "  "+tt.wantCmd) {
-				t.Errorf("manual hint missing command %q: %q", tt.wantCmd, out)
-			}
-		})
-	}
+	assertPrintOnly(t, f, action, buf.String(), brewUpgradeCmd)
 }
 
 func TestMaybeAutoUpdate_UserDeclines(t *testing.T) {
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	f.chooseValue = autoUpdateActionSkip
 
 	var buf bytes.Buffer
-	action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called after user declined")
@@ -280,10 +76,10 @@ func TestMaybeAutoUpdate_UserDeclines(t *testing.T) {
 
 func TestMaybeAutoUpdate_HappyPath(t *testing.T) {
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 
 	var buf bytes.Buffer
-	action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 1 {
 		t.Fatalf("installer called %d times, want 1", f.installCalls)
@@ -301,11 +97,11 @@ func TestMaybeAutoUpdate_HappyPath(t *testing.T) {
 
 func TestMaybeAutoUpdate_InstallerFailurePrintedToUser(t *testing.T) {
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	f.installErr = errors.New("boom")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 1 {
 		t.Fatalf("installer called %d times, want 1", f.installCalls)
@@ -324,22 +120,19 @@ func TestMaybeAutoUpdate_InstallerFailurePrintedToUser(t *testing.T) {
 }
 
 // installerCase covers the same prompt contract for every install manager
-// that supports auto-installation.
+// that supports auto-installation. Scoop is absent: Windows is print-only, see
+// autoupdate_windows_test.go.
 type installerCase struct {
-	name    string
-	setup   func(*testing.T)
-	wantCmd string
+	name     string
+	execPath string
+	wantCmd  string
 }
 
-func nonWindowsAutoInstallers() []installerCase {
-	// Scoop is intentionally absent: it is a Windows-only installer, and on
-	// Windows the update is print-only (never auto-run). Its command building is
-	// covered by TestUpdateCommand and its print-only path by
-	// TestMaybeAutoUpdate_WindowsNeverAutoRuns.
+func autoInstallers() []installerCase {
 	return []installerCase{
-		{name: "brew", setup: useBrewExecutable, wantCmd: brewUpgradeCmd},
-		{name: "mise", setup: useMiseExecutable, wantCmd: "mise upgrade entire"},
-		{name: "unknown_curl_bash", setup: useUnknownExecutable, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},
+		{name: "brew", execPath: brewCaskPath, wantCmd: brewUpgradeCmd},
+		{name: "mise", execPath: miseExecutablePath, wantCmd: miseUpgradeCmd},
+		{name: "unknown_curl_bash", execPath: plainBinPath, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},
 	}
 }
 
@@ -347,17 +140,16 @@ func nonWindowsAutoInstallers() []installerCase {
 // that the prompt seam is invoked with the right shell command for every
 // install manager. The huh.Select itself is exercised by the manual
 // smoke script (test-auto.sh); here we only check that the cmd we build
-// from updateCommand() is what reaches the prompt.
+// from UpdateCommandForCurrentBinary() is what reaches the prompt.
 func TestMaybeAutoUpdate_AllInstallers_PromptReceivesCorrectCommand(t *testing.T) {
-	pinNonWindowsGOOS(t)
-	for _, tt := range nonWindowsAutoInstallers() {
+	for _, tt := range autoInstallers() {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newAutoUpdateFixture(t)
-			tt.setup(t)
+			setExecutablePath(t, tt.execPath)
 			f.chooseValue = autoUpdateActionSkipUntilNextVersion
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 0 {
 				t.Errorf("installer called after skip-until-next-version")
@@ -373,14 +165,13 @@ func TestMaybeAutoUpdate_AllInstallers_PromptReceivesCorrectCommand(t *testing.T
 }
 
 func TestMaybeAutoUpdate_AllInstallers_HappyPathRunsInstaller(t *testing.T) {
-	pinNonWindowsGOOS(t)
-	for _, tt := range nonWindowsAutoInstallers() {
+	for _, tt := range autoInstallers() {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newAutoUpdateFixture(t)
-			tt.setup(t)
+			setExecutablePath(t, tt.execPath)
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 1 {
 				t.Fatalf("installer called %d times, want 1", f.installCalls)
@@ -399,34 +190,29 @@ func TestMaybeAutoUpdate_AllInstallers_HappyPathRunsInstaller(t *testing.T) {
 }
 
 func TestMaybeAutoUpdate_AllInstallers_KillSwitchPrintsManualHint(t *testing.T) {
-	pinNonWindowsGOOS(t)
-	for _, tt := range nonWindowsAutoInstallers() {
+	for _, tt := range autoInstallers() {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newAutoUpdateFixture(t)
-			tt.setup(t)
+			setExecutablePath(t, tt.execPath)
 			t.Setenv(envKillSwitch, "1")
 
 			var buf bytes.Buffer
-			MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
-			if f.installCalls != 0 {
-				t.Errorf("installer called with kill-switch set")
-			}
-			assertManualHint(t, buf.String(), tt.wantCmd)
+			assertPrintOnly(t, f, action, buf.String(), tt.wantCmd)
 		})
 	}
 }
 
 func TestMaybeAutoUpdate_AllInstallers_UserSkips(t *testing.T) {
-	pinNonWindowsGOOS(t)
-	for _, tt := range nonWindowsAutoInstallers() {
+	for _, tt := range autoInstallers() {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newAutoUpdateFixture(t)
-			tt.setup(t)
+			setExecutablePath(t, tt.execPath)
 			f.chooseValue = autoUpdateActionSkip
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 0 {
 				t.Errorf("installer called after user chose skip")

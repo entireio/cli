@@ -25,7 +25,10 @@ import (
 )
 
 const (
-	testAgentClaude       = "Claude Code"
+	testAgentClaude = "Claude Code"
+	testAgentCodex  = "Codex"
+	// testAgentGemini is the retired Gemini CLI agent type; sessions recorded
+	// before its removal still carry it and use whole-document JSON transcripts.
 	testAgentGemini       = "Gemini CLI"
 	testCheckpointID      = "a3b2c4d5e6f7"
 	testModelClaudeOpus   = "claude-opus-4-6[1m]"
@@ -663,7 +666,7 @@ func TestListCmd_ShowsAllSessions(t *testing.T) {
 	active.StartedAt = time.Now().Add(-1 * time.Hour)
 
 	idle := makeSessionState("test-list-idle", session.PhaseIdle)
-	idle.AgentType = testAgentGemini
+	idle.AgentType = testAgentCodex
 	idle.WorktreeID = "other-wt"
 	idle.LastCheckpointID = testCheckpointID
 	idle.StartedAt = time.Now().Add(-2 * time.Hour)
@@ -750,8 +753,8 @@ func TestListCmd_JSONReturnsAllSessionsSorted(t *testing.T) {
 	older.LastCheckpointID = testCheckpointID
 
 	newer := makeSessionState("test-list-json-newer", session.PhaseActive)
-	newer.AgentType = testAgentGemini
-	newer.ModelName = "gemini-2.5-pro"
+	newer.AgentType = testAgentCodex
+	newer.ModelName = "gpt-5-codex"
 	newer.StartedAt = time.Now().Add(-30 * time.Minute)
 	newer.WorktreeID = "wt-b"
 	newer.LastPrompt = testPromptFixLogin
@@ -787,11 +790,11 @@ func TestListCmd_JSONReturnsAllSessionsSorted(t *testing.T) {
 	}
 
 	// Envelope must carry the same fields a Baton-style consumer needs.
-	if got[0].Agent != testAgentGemini {
-		t.Errorf("expected agent='Gemini CLI', got %q", got[0].Agent)
+	if got[0].Agent != testAgentCodex {
+		t.Errorf("expected agent='Codex', got %q", got[0].Agent)
 	}
-	if got[0].Model != "gemini-2.5-pro" {
-		t.Errorf("expected model='gemini-2.5-pro', got %q", got[0].Model)
+	if got[0].Model != "gpt-5-codex" {
+		t.Errorf("expected model='gpt-5-codex', got %q", got[0].Model)
 	}
 	if got[0].LastPrompt != testPromptFixLogin {
 		t.Errorf("expected last_prompt set, got %q", got[0].LastPrompt)
@@ -1168,7 +1171,7 @@ func TestTokensCmd_JSONOutputReportsLimitations(t *testing.T) {
 
 	ctx := context.Background()
 	state := makeSessionState("test-tokens-json", session.PhaseIdle)
-	state.AgentType = testAgentGemini
+	state.AgentType = testAgentCodex
 	state.ContextTokens = 9000
 	state.ContextWindowSize = 10000
 
@@ -1193,8 +1196,8 @@ func TestTokensCmd_JSONOutputReportsLimitations(t *testing.T) {
 	if result["session_id"] != "test-tokens-json" {
 		t.Errorf("expected session_id 'test-tokens-json', got: %v", result["session_id"])
 	}
-	if result["agent"] != testAgentGemini {
-		t.Errorf("expected agent %q, got: %v", testAgentGemini, result["agent"])
+	if result["agent"] != testAgentCodex {
+		t.Errorf("expected agent %q, got: %v", testAgentCodex, result["agent"])
 	}
 	if _, ok := result["tokens"]; ok {
 		t.Errorf("expected tokens to be omitted when no token data exists, got: %v", result["tokens"])
@@ -1500,7 +1503,7 @@ func TestTokensCmd_AgentBriefNoTokenData(t *testing.T) {
 
 	ctx := context.Background()
 	state := makeSessionState("test-tokens-brief-missing", session.PhaseActive)
-	state.AgentType = testAgentGemini
+	state.AgentType = testAgentCodex
 	state.ContextTokens = 9000
 	state.ContextWindowSize = 10000
 
@@ -1814,6 +1817,7 @@ func TestTokensCmd_PrioritizesContextReplayHotspot(t *testing.T) {
 
 func TestTokensCmd_DefaultsToCurrentSession(t *testing.T) {
 	setupStopTestRepo(t)
+	clearCallerSessionEnv(t)
 
 	ctx := context.Background()
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -1859,6 +1863,7 @@ func TestTokensCmd_DefaultsToCurrentSession(t *testing.T) {
 
 func TestTokensCmd_CurrentDoesNotFallbackToOtherWorktree(t *testing.T) {
 	setupStopTestRepo(t)
+	clearCallerSessionEnv(t)
 
 	ctx := context.Background()
 	now := time.Now()
@@ -2130,7 +2135,7 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 		SessionID:    "checkpoint-token-session-two",
 		Strategy:     strategy.StrategyNameManualCommit,
 		Branch:       "multi-session-branch",
-		Agent:        testAgentGemini,
+		Agent:        testAgentCodex,
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"second session"}]}}` + "\n")),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@example.com",
@@ -2157,7 +2162,7 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 		"Checkpoint tokens",
 		"Checkpoint: feedfeedcafe",
 		"Sessions:   2",
-		"Agents:     Claude Code, Gemini CLI",
+		"Agents:     Claude Code, Codex",
 		"Branch:     multi-session-branch",
 		"Total:  4.5k tokens",
 		"Input: 1.5k",
@@ -2183,7 +2188,7 @@ func TestCheckpointTokensCmd_JSONOutput(t *testing.T) {
 		CheckpointID: cpID,
 		SessionID:    "checkpoint-token-json",
 		Strategy:     strategy.StrategyNameManualCommit,
-		Agent:        testAgentGemini,
+		Agent:        testAgentCodex,
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"token json"}]}}` + "\n")),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@example.com",
@@ -2519,7 +2524,7 @@ func TestCheckpointTokensCmd_JSONOutputWithComparison(t *testing.T) {
 		CheckpointID: baselineID,
 		SessionID:    "checkpoint-token-json-baseline",
 		Strategy:     strategy.StrategyNameManualCommit,
-		Agent:        testAgentGemini,
+		Agent:        testAgentCodex,
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"baseline json"}]}}` + "\n")),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@example.com",
@@ -2537,7 +2542,7 @@ func TestCheckpointTokensCmd_JSONOutputWithComparison(t *testing.T) {
 		CheckpointID: currentID,
 		SessionID:    "checkpoint-token-json-current",
 		Strategy:     strategy.StrategyNameManualCommit,
-		Agent:        testAgentGemini,
+		Agent:        testAgentCodex,
 		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"current json"}]}}` + "\n")),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@example.com",
@@ -3343,5 +3348,50 @@ func TestSessionPhaseLabel(t *testing.T) {
 				t.Errorf("sessionPhaseLabel() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+// A bare `session tokens` asks the same "which session am I" question as
+// `session current`, so it resolves the caller too: the agent's own session
+// wins over the most recently active one in the shared store.
+func TestTokensCmd_PrefersTheCallersSession(t *testing.T) {
+	setupStopTestRepo(t)
+	clearCallerSessionEnv(t)
+
+	ctx := context.Background()
+	now := time.Now()
+
+	mine := makeSessionState("test-tokens-caller", session.PhaseActive)
+	mine.WorktreePath = testOtherWorktreePath
+	older := now.Add(-2 * time.Hour)
+	mine.LastInteractionTime = &older
+	mine.TokenUsage = &agent.TokenUsage{InputTokens: 1200}
+
+	decoy := makeSessionState("test-tokens-decoy", session.PhaseActive)
+	decoy.WorktreePath = testOtherWorktreePath
+	decoy.LastInteractionTime = &now
+	decoy.TokenUsage = &agent.TokenUsage{InputTokens: 9999}
+
+	for _, s := range []*strategy.SessionState{mine, decoy} {
+		if err := strategy.SaveSessionState(ctx, s); err != nil {
+			t.Fatalf("SaveSessionState() error = %v", err)
+		}
+	}
+	t.Setenv("PI_SESSION_ID", mine.SessionID)
+
+	cmd := newTokensCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Session: test-tokens-caller") {
+		t.Fatalf("expected the caller's session, got:\n%s", out)
+	}
+	if strings.Contains(out, "test-tokens-decoy") {
+		t.Fatalf("expected the more recent decoy session to be ignored, got:\n%s", out)
 	}
 }

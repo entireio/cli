@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -144,6 +144,28 @@ func copyExecutable(src, dst string) error {
 	return os.WriteFile(dst, data, info.Mode())
 }
 
+func clearLocalGitIdentity(t *testing.T, repoDir string) {
+	t.Helper()
+	testutil.RunGit(t, repoDir, "config", "--local", "--unset-all", "user.name")
+	testutil.RunGit(t, repoDir, "config", "--local", "--unset-all", "user.email")
+}
+
+func localGitConfig(t *testing.T, repoDir, key string) (string, bool) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "git", "config", "--local", "--get", key)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return "", false
+	}
+	t.Fatalf("read local git config %s: %v", key, err)
+	return "", false
+}
+
 func writeExternalAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
 	writeExternalAgentBinaryEx(t, dir, name, false)
@@ -169,7 +191,7 @@ func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled b
 [ -n "$ENTIRE_TEST_EXEC_LOG" ] && echo "$1" >> "$ENTIRE_TEST_EXEC_LOG"
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","is_preview":false,"protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
     ;;
   detect)
     if [ "$ENTIRE_TEST_EXTERNAL_PRESENT" = "1" ]; then
@@ -217,7 +239,7 @@ func writeExternalSummaryAgentBinary(t *testing.T, dir, name string) {
 	script := `#!/bin/sh
 case "$1" in
   info)
-    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
+    echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External summary test agent","protected_dirs":[],"hook_names":[],"capabilities":{"hooks":false,"transcript_analyzer":false,"transcript_preparer":false,"token_calculator":false,"compact_transcript":false,"text_generator":true,"hook_response_writer":false,"subagent_aware_extractor":false}}'
     ;;
   detect)
     echo '{"present": true}'
@@ -2455,6 +2477,174 @@ func TestEnableCmd_AgentFlagEmptyValue(t *testing.T) {
 	}
 }
 
+func TestEnableCmd_ExistingRepoRepairsGitIdentityFromEntire(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	clearLocalGitIdentity(t, repoDir)
+
+	resolveCalls := 0
+	cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+		return func(context.Context) (*authProfile, error) {
+			resolveCalls++
+			return &authProfile{DisplayName: "Octo Cat", Handle: "octo", Provider: "github", ProviderUserID: "42"}, nil
+		}
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable existing repo: %v", err)
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("profile resolver calls = %d, want 1", resolveCalls)
+	}
+	if got, ok := localGitConfig(t, repoDir, "user.name"); !ok || got != "Octo Cat" {
+		t.Fatalf("local user.name = %q, configured %v", got, ok)
+	}
+	if got, ok := localGitConfig(t, repoDir, "user.email"); !ok || got != "42+octo@users.noreply.github.com" {
+		t.Fatalf("local user.email = %q, configured %v", got, ok)
+	}
+}
+
+func TestEnableCmd_IdentityPreflightOrdering(t *testing.T) {
+	tests := []struct {
+		name        string
+		newRepo     bool
+		args        []string
+		wantResolve int
+		wantErrText string
+	}{
+		{name: "invalid agent fails before identity", args: []string{"--agent", "definitely-not-an-agent"}, wantErrText: "wrong agent name"},
+		{
+			name:        "new repo skip initial commit does not need identity",
+			newRepo:     true,
+			args:        []string{"--init-repo", "--skip-initial-commit", "--agent", "claude-code"},
+			wantResolve: 0,
+		},
+		{name: "existing repo validates agent then resolves identity", args: []string{"--agent", "claude-code"}, wantResolve: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			if tt.newRepo {
+				setupTestDir(t)
+			} else {
+				repoDir := setupTestRepo(t)
+				clearLocalGitIdentity(t, repoDir)
+			}
+			resolveCalls := 0
+			cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+				return func(context.Context) (*authProfile, error) {
+					resolveCalls++
+					return &authProfile{DisplayName: "Entire User", Email: "entire@example.com"}, nil
+				}
+			})
+			var stderr bytes.Buffer
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(tt.args)
+			err := cmd.Execute()
+			if tt.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("error = %v, stderr = %q, want %q", err, stderr.String(), tt.wantErrText)
+				}
+			} else if err != nil {
+				t.Fatalf("enable: %v; stderr=%s", err, stderr.String())
+			}
+			if resolveCalls != tt.wantResolve {
+				t.Fatalf("profile resolver calls = %d, want %d", resolveCalls, tt.wantResolve)
+			}
+		})
+	}
+}
+
+func TestEnableCmd_IdentityFailureLeavesSetupAbsent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	clearLocalGitIdentity(t, repoDir)
+
+	cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+		return func(context.Context) (*authProfile, error) { return nil, errors.New("profile unavailable") }
+	})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--agent", "claude-code"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "profile unavailable") {
+		t.Fatalf("error = %v, want profile failure", err)
+	}
+	for _, path := range []string{
+		EntireSettingsFile,
+		EntireSettingsLocalFile,
+		filepath.Join(paths.EntireDir, "logs"),
+		filepath.Join(".claude", "settings.json"),
+	} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("setup artifact %s exists or could not be checked: %v", path, statErr)
+		}
+	}
+}
+
+func TestRunManageAgents_PreflightFollowsSelection(t *testing.T) {
+	setupTestRepo(t)
+	events := make([]string, 0, 2)
+	selectFn := func(available []string) ([]string, error) {
+		events = append(events, "select")
+		if len(available) == 0 {
+			return nil, errors.New("no available agents")
+		}
+		return []string{available[0]}, nil
+	}
+	preflight := func() error {
+		events = append(events, "identity")
+		return errors.New("stop before apply")
+	}
+	err := runManageAgentsWithPreflight(t.Context(), io.Discard, EnableOptions{}, selectFn, preflight)
+	if err == nil || !strings.Contains(err.Error(), "stop before apply") {
+		t.Fatalf("error = %v, want preflight error", err)
+	}
+	if got := strings.Join(events, " -> "); got != "select -> identity" {
+		t.Fatalf("events = %q, want selection before identity", got)
+	}
+}
+
+func TestEnableCmd_IdentityFailurePreservesConfiguredSettings(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "direct settings flow", args: []string{"--checkpoint-backend", "git-refs"}},
+		{name: "noninteractive agent-management fallback", args: []string{"--telemetry=false"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			repoDir := setupTestRepo(t)
+			clearLocalGitIdentity(t, repoDir)
+			original := `{"enabled":true,"strategy":"manual-commit","strategy_options":{"push_sessions":true}}`
+			writeSettings(t, original)
+
+			cmd := newEnableCmdWithIdentityResolverFactory(func(io.Writer, io.Writer, bool) gitIdentityResolver {
+				return func(context.Context) (*authProfile, error) { return nil, errors.New("profile unavailable") }
+			})
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "profile unavailable") {
+				t.Fatalf("error = %v, want profile failure", err)
+			}
+			raw, err := os.ReadFile(EntireSettingsFile)
+			if err != nil {
+				t.Fatalf("read settings: %v", err)
+			}
+			if string(raw) != original {
+				t.Fatalf("settings changed on identity failure:\n got: %s\nwant: %s", raw, original)
+			}
+		})
+	}
+}
+
 func TestEnableUsesSetupFlow(t *testing.T) {
 	t.Parallel()
 
@@ -2672,13 +2862,13 @@ func TestDetectOrSelectAgent_AgentDetected(t *testing.T) {
 	}
 }
 
-func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
+func TestDetectOrSelectAgent_CursorDetected(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
 
-	// Create .gemini directory so Gemini agent is detected
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	// Create .cursor directory so Cursor agent is detected
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -2687,12 +2877,12 @@ func TestDetectOrSelectAgent_GeminiDetected(t *testing.T) {
 		t.Fatalf("detectOrSelectAgent() error = %v", err)
 	}
 
-	// Should detect Gemini
+	// Should detect Cursor
 	if len(agents) != 1 {
 		t.Fatalf("detectOrSelectAgent() returned %d agents, want 1", len(agents))
 	}
-	if agents[0].Name() != agent.AgentNameGemini {
-		t.Errorf("detectOrSelectAgent() agent name = %v, want %v", agents[0].Name(), agent.AgentNameGemini)
+	if agents[0].Name() != agent.AgentNameCursor {
+		t.Errorf("detectOrSelectAgent() agent name = %v, want %v", agents[0].Name(), agent.AgentNameCursor)
 	}
 
 	output := buf.String()
@@ -2841,7 +3031,7 @@ func TestDetectOrSelectAgent_NoDetection_NoTTY_FallsBackToDefault(t *testing.T) 
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
 
-	// No .claude or .gemini directory - detection will fail
+	// No .claude or .cursor directory - detection will fail
 
 	var buf bytes.Buffer
 	agents, err := detectOrSelectAgent(context.Background(), &buf, nil)
@@ -2871,7 +3061,7 @@ func TestDetectOrSelectAgent_NoDetection_WithTTY_ShowsPromptMessages(t *testing.
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	// No .claude or .gemini directory - detection will fail
+	// No .claude or .cursor directory - detection will fail
 
 	// Inject selector to avoid blocking on interactive form.Run().
 	// The selector receives available agent names so tests can validate the options.
@@ -2945,12 +3135,12 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 
-	// Create both .claude and .gemini directories
+	// Create both .claude and .cursor directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	// Inject selector — receives available names, returns both
@@ -2958,7 +3148,7 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 		if len(available) < 2 {
 			t.Errorf("expected at least 2 available agents, got %d", len(available))
 		}
-		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -2979,8 +3169,8 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_PromptsUser(t *testing.T) {
 	if !strings.Contains(output, "Claude Code") {
 		t.Errorf("Expected output to mention Claude Code, got: %s", output)
 	}
-	if !strings.Contains(output, "Gemini CLI") {
-		t.Errorf("Expected output to mention Gemini CLI, got: %s", output)
+	if !strings.Contains(output, string(agent.AgentTypeCursor)) {
+		t.Errorf("Expected output to mention Cursor, got: %s", output)
 	}
 	if !strings.Contains(output, "Selected agents:") {
 		t.Errorf("Expected output to contain 'Selected agents:', got: %s", output)
@@ -2991,12 +3181,12 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_NoTTY_UsesAll(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
 	setupTestRepo(t)
 
-	// Create both .claude and .gemini directories
+	// Create both .claude and .cursor directories
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
 		t.Fatalf("Failed to create .claude directory: %v", err)
 	}
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	var buf bytes.Buffer
@@ -3028,21 +3218,21 @@ func writeClaudeHooksFixture(t *testing.T) {
 	}
 }
 
-// writeGeminiHooksFixture writes a minimal .gemini/settings.json with Entire hooks installed.
-// AreHooksInstalled() checks for any hook command starting with "entire ".
-func writeGeminiHooksFixture(t *testing.T) {
+// writeCursorHooksFixture writes a minimal .cursor/hooks.json with Entire hooks installed.
+// AreHooksInstalled() checks each hook list for an Entire-managed command.
+func writeCursorHooksFixture(t *testing.T) {
 	t.Helper()
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 	hooksJSON := `{
+		"version": 1,
 		"hooks": {
-			"enabled": true,
-			"SessionStart": [{"hooks": [{"type": "command", "command": "entire hooks gemini session-start"}]}]
+			"sessionStart": [{"command": "entire hooks cursor session-start"}]
 		}
 	}`
-	if err := os.WriteFile(".gemini/settings.json", []byte(hooksJSON), 0o644); err != nil {
-		t.Fatalf("Failed to write .gemini/settings.json: %v", err)
+	if err := os.WriteFile(".cursor/hooks.json", []byte(hooksJSON), 0o644); err != nil {
+		t.Fatalf("Failed to write .cursor/hooks.json: %v", err)
 	}
 }
 
@@ -3127,9 +3317,9 @@ func checkClaudeCodeHooksInstalled() bool {
 	return err == nil && installed
 }
 
-// checkGeminiCLIHooksInstalled checks if Gemini CLI hooks are installed.
-func checkGeminiCLIHooksInstalled() bool {
-	ag, err := agent.Get(agent.AgentNameGemini)
+// checkCursorHooksInstalled checks if Cursor hooks are installed.
+func checkCursorHooksInstalled() bool {
+	ag, err := agent.Get(agent.AgentNameCursor)
 	if err != nil {
 		return false
 	}
@@ -3447,9 +3637,9 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
 
-	// Install both Claude Code and Gemini hooks
+	// Install both Claude Code and Cursor hooks
 	writeClaudeHooksFixture(t)
-	writeGeminiHooksFixture(t)
+	writeCursorHooksFixture(t)
 
 	// Verify both are installed
 	installed := GetAgentsWithHooksInstalled(context.Background())
@@ -3457,7 +3647,7 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 		t.Fatalf("Expected at least 2 agents installed, got %d", len(installed))
 	}
 
-	// Keep only Claude Code selected (deselect Gemini)
+	// Keep only Claude Code selected (deselect Cursor)
 	claudeAgent, err := agent.Get(agent.AgentNameClaudeCode)
 	if err != nil {
 		t.Fatalf("Failed to get claude-code agent: %v", err)
@@ -3474,9 +3664,9 @@ func TestUninstallDeselectedAgentHooks_MultipleInstalled_DeselectOne(t *testing.
 		t.Error("Expected Claude Code hooks to remain installed")
 	}
 
-	// Gemini hooks should be removed
-	if checkGeminiCLIHooksInstalled() {
-		t.Error("Expected Gemini CLI hooks to be uninstalled after deselection")
+	// Cursor hooks should be removed
+	if checkCursorHooksInstalled() {
+		t.Error("Expected Cursor hooks to be uninstalled after deselection")
 	}
 
 	output := buf.String()
@@ -3498,9 +3688,9 @@ func TestManageAgents_DeselectRemovesAgent(t *testing.T) {
 		t.Fatal("Expected Claude Code hooks to be installed before test")
 	}
 
-	// Deselect claude-code, select gemini instead
+	// Deselect claude-code, select cursor instead
 	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -3774,9 +3964,9 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 	// Install Claude Code hooks
 	writeClaudeHooksFixture(t)
 
-	// Deselect claude-code, add gemini
+	// Deselect claude-code, add cursor
 	selectFn := func(_ []string) ([]string, error) {
-		return []string{string(agent.AgentNameGemini)}, nil
+		return []string{string(agent.AgentNameCursor)}, nil
 	}
 
 	var buf bytes.Buffer
@@ -3793,12 +3983,98 @@ func TestManageAgents_AddAndRemove(t *testing.T) {
 		t.Errorf("Expected 'Removed agents' in output, got: %s", output)
 	}
 
-	// Verify hooks on disk: Claude removed, Gemini added
+	// Verify hooks on disk: Claude removed, Cursor added
 	if checkClaudeCodeHooksInstalled() {
 		t.Error("Expected Claude Code hooks to be uninstalled after deselection")
 	}
-	if !checkGeminiCLIHooksInstalled() {
-		t.Error("Expected Gemini CLI hooks to be installed after selection")
+	if !checkCursorHooksInstalled() {
+		t.Error("Expected Cursor hooks to be installed after selection")
+	}
+}
+
+func TestManageAgents_ExternalAgentSettingDoesNotLeakAcrossScopes(t *testing.T) {
+	// Cannot use t.Parallel because setupTestRepo changes the working directory
+	// and the external agent registry is process-global.
+	tests := []struct {
+		name string
+		opts EnableOptions
+	}{
+		{
+			name: "default scope",
+		},
+		{
+			name: "project scope",
+			opts: EnableOptions{UseProjectSettings: true},
+		},
+		{
+			name: "local scope",
+			opts: EnableOptions{UseLocalSettings: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const externalAgentName = "external-settings-scope-test"
+			const projectSettings = `{"log_level":"warn"}`
+			const localSettings = `{"strategy_options":{"push":false},"absolute_git_hook_path":true}`
+
+			setupTestRepo(t)
+			writeSettings(t, projectSettings)
+			writeLocalSettings(t, localSettings)
+
+			externalDir := t.TempDir()
+			writeExternalAgentBinary(t, externalDir, externalAgentName)
+			t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("ENTIRE_TEST_EXTERNAL_PRESENT", "1")
+
+			selectExternalAgent := func(_ []string) ([]string, error) {
+				return []string{externalAgentName}, nil
+			}
+			if err := runManageAgents(t.Context(), &bytes.Buffer{}, tt.opts, selectExternalAgent); err != nil {
+				t.Fatalf("runManageAgents() error = %v", err)
+			}
+
+			if projectData := readSetupTestFile(t, EntireSettingsFile); projectData != projectSettings {
+				t.Fatalf("adding an external agent changed project settings:\n%s", projectData)
+			}
+
+			data, err := os.ReadFile(EntireSettingsLocalFile)
+			if err != nil {
+				t.Fatalf("read target settings: %v", err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("parse target settings: %v", err)
+			}
+			if _, exists := raw["log_level"]; exists {
+				t.Fatalf("project log_level leaked into local settings:\n%s", data)
+			}
+			var original map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(localSettings), &original); err != nil {
+				t.Fatalf("parse original local settings: %v", err)
+			}
+			for key, want := range original {
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, raw[key]); err != nil || !bytes.Equal(compact.Bytes(), want) {
+					t.Errorf("local setting %s changed: got %s, want %s", key, raw[key], want)
+				}
+			}
+			var externalAgents bool
+			if err := json.Unmarshal(raw["external_agents"], &externalAgents); err != nil || !externalAgents {
+				t.Fatalf("external_agents was not enabled in local settings:\n%s", data)
+			}
+			if len(raw) != len(original)+1 {
+				t.Fatalf("adding an external agent changed fields other than external_agents in local settings:\n%s", data)
+			}
+			effective, err := settings.Load(t.Context())
+			if err != nil {
+				t.Fatalf("load effective settings: %v", err)
+			}
+			if !effective.ExternalAgents {
+				reason, _ := effective.ExternalAgentsRejection()
+				t.Fatalf("external_agents grant was not honored by the settings loader: %s", reason)
+			}
+		})
 	}
 }
 
@@ -3965,9 +4241,9 @@ func TestDetectOrSelectAgent_ReRun_NewlyDetectedAgentAvailableNotPreSelected(t *
 	// Simulate: Claude Code hooks installed from a previous run
 	writeClaudeHooksFixture(t)
 
-	// Simulate: user added .gemini directory since last enable (detected but not installed)
-	if err := os.MkdirAll(".gemini", 0o755); err != nil {
-		t.Fatalf("Failed to create .gemini directory: %v", err)
+	// Simulate: user added .cursor directory since last enable (detected but not installed)
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatalf("Failed to create .cursor directory: %v", err)
 	}
 
 	// Track which agents the selector receives
@@ -4441,7 +4717,7 @@ func TestConfigureCmd_SummarizeProvider_InvalidProvider(t *testing.T) {
 	cmd := newSetupCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--summarize-provider", "opencode"})
+	cmd.SetArgs([]string{"--summarize-provider", "factoryai-droid"})
 
 	err := cmd.Execute()
 	if err == nil {
@@ -4560,7 +4836,7 @@ func TestConfigureCmd_SummarizeModel_UsesExistingProvider(t *testing.T) {
 
 func TestSelectAllAgents_ReturnsAll(t *testing.T) {
 	t.Parallel()
-	available := []string{"claude-code", "gemini-cli", "opencode"}
+	available := []string{"claude-code", "cursor", "opencode"}
 	selected, err := selectAllAgents(available)
 	if err != nil {
 		t.Fatalf("selectAllAgents() error = %v", err)
@@ -4589,7 +4865,7 @@ func TestDetectOrSelectAgent_YesSelectsAll(t *testing.T) {
 		t.Fatalf("detectOrSelectAgent() with selectAllAgents error = %v", err)
 	}
 
-	// Should return at least 2 agents (claude-code + gemini-cli are registered in test imports)
+	// Should return at least 2 agents (every built-in agent is registered in package cli)
 	if len(agents) < 2 {
 		t.Errorf("expected at least 2 agents with selectAllAgents, got %d", len(agents))
 	}
@@ -5032,6 +5308,48 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 	}
 }
 
+// TestRunRemoveAgent_AntigravityWarnsAboutGlobalTeeRemoval pins the
+// machine-global side effect of a repo-scoped command: removing the
+// Antigravity agent uninstalls the title-tee from agy's GLOBAL settings, which
+// disables token capture for every other repo still using Antigravity. The
+// user must be told, since the breakage is otherwise silent (zero-token
+// checkpoints) until doctor or agent add runs in the other repo.
+func TestRunRemoveAgent_AntigravityWarnsAboutGlobalTeeRemoval(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	agentsDir := filepath.Join(dir, ".agents")
+	if err := os.MkdirAll(agentsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "hooks.json"), []byte(antigravityHooksJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgDir := filepath.Join(t.TempDir(), "agy")
+	if err := os.MkdirAll(cfgDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	teeSettings := `{"title":{"type":"command","command":"entire hooks antigravity title-tee"}}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(teeSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENTIRE_ANTIGRAVITY_CONFIG_DIR", cfgDir)
+
+	var out bytes.Buffer
+	if err := runRemoveAgent(context.Background(), &out, "antigravity"); err != nil {
+		t.Fatalf("runRemoveAgent: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "Removed Antigravity hooks.") {
+		t.Errorf("missing removal confirmation: %q", got)
+	}
+	if !strings.Contains(got, "token capture") || !strings.Contains(got, "other repositories") {
+		t.Errorf("missing global title-tee removal warning: %q", got)
+	}
+}
+
 // First-time setups get the git-refs checkpoint backend written explicitly
 // into the new settings.json — new users must not answer a storage-topology
 // question (the old wizard prompt), and the explicit write is what keeps the
@@ -5203,5 +5521,114 @@ func TestConfigureCmd_SummarizeProvider_ExternalLocalOnlyRepo_GrantSurvives(t *t
 		reason, _ := effective.ExternalAgentsRejection()
 		t.Fatalf("external_agents grant did not survive the settings save (rejection: %q); stdout:\n%s",
 			reason, stdout.String())
+	}
+}
+
+// TestWorktreeFileName covers the shapes vercel.json can arrive in. The
+// absolute-in-repo row is the regression the helper exists for: os.Root reports
+// `vercel.json -> /abs/path/inside/repo/shared/vercel.json` as "path escapes
+// from parent", which is not os.ErrNotExist, so detection printed a note and
+// skipped — silently dropping the feature for a monorepo setup that worked
+// before the anchor went in.
+//
+// worktreedir.TestNameFollowingLinks asserts the link cases one layer down;
+// this table is the caller's view, plus the rows that never reach the resolve.
+func TestWorktreeFileName(t *testing.T) {
+	t.Parallel()
+
+	const name = "vercel.json"
+	for _, tc := range []struct {
+		desc     string
+		link     func(t *testing.T, dir string) // nil: a real file, no link
+		wantName string                         // "" means absent
+		wantErr  bool
+	}{
+		{
+			desc:     "a real file is read by its own name",
+			wantName: name,
+		},
+		{
+			desc: "an absolute link inside the worktree resolves to its target",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "shared", name))
+			},
+			wantName: "shared/vercel.json",
+		},
+		{
+			// os.Root follows a RELATIVE link that stays inside it, so the fast
+			// path succeeds and the original name is what to read by. Only an
+			// absolute target reaches the resolve, which is the whole asymmetry
+			// this helper exists for.
+			desc: "a relative link inside the worktree needs no resolving",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join("shared", name))
+			},
+			wantName: name,
+		},
+		{
+			desc: "a link out of the worktree is refused, not followed",
+			link: func(t *testing.T, dir string) {
+				outside := filepath.Join(t.TempDir(), name)
+				if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				linkTo(t, dir, outside)
+			},
+			wantErr: true,
+		},
+		{
+			desc: "a dangling link reads as absent, as os.Stat gave before",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "missing.json"))
+			},
+		},
+		{
+			desc: "an absent file reads as absent",
+			link: func(*testing.T, string) {}, // no file at all
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			shared := filepath.Join(dir, "shared")
+			if err := os.MkdirAll(shared, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(shared, name), []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.link == nil {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				tc.link(t, dir)
+			}
+
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+
+			gotName, gotErr := worktreeFileName(dir, root, name)
+			if (gotErr != nil) != tc.wantErr {
+				t.Fatalf("worktreeFileName() error = %v, wantErr %v", gotErr, tc.wantErr)
+			}
+			if gotName != tc.wantName {
+				t.Errorf("worktreeFileName() = %q, want %q", gotName, tc.wantName)
+			}
+		})
+	}
+}
+
+// linkTo symlinks the vercel.json under test inside dir to target, skipping
+// where symlinks need privileges.
+func linkTo(t *testing.T, dir, target string) {
+	t.Helper()
+	testutil.SkipWithoutSymlinks(t)
+	if err := os.Symlink(target, filepath.Join(dir, "vercel.json")); err != nil {
+		t.Fatal(err)
 	}
 }

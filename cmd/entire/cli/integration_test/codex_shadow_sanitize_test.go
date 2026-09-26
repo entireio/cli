@@ -29,7 +29,7 @@ var codexCiphertext = strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph", 40)
 // the `encrypted_content` key; that is the only key the sanitizer strips.
 func codexRolloutWithEncryptedReasoning(sessionID, repoDir, ciphertext string) string {
 	return strings.Join([]string{
-		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + repoDir + `"}}`,
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","thread_source":"user","cwd":"` + repoDir + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add feature.txt"}]}}`,
 		`{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"` + ciphertext + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:03Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"` + ciphertext + `"}}`,
@@ -318,7 +318,7 @@ func TestCodexCondense_NoAssetsFromSanitizedAwayContent(t *testing.T) {
 	sessionID := "codex-sanitize-before-extract"
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-rollout.jsonl")
 	rollout := strings.Join([]string{
-		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + env.RepoDir + `"}}`,
+		`{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","thread_source":"user","cwd":"` + env.RepoDir + `"}}`,
 		`{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[` +
 			`{"type":"input_text","text":"add feature.txt and look at this screenshot"},` +
 			`{"type":"input_image","image_url":"data:image/png;base64,` + keptB64 + `"}` +

@@ -1,0 +1,102 @@
+name: E2E Control Plane
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# One shared test account with a three-org quota: never two runs at once, and
+# never cancel one mid-flight — a cancelled run skips t.Cleanup and leaks the
+# resources it created. PR runs share this group, so they queue behind any run
+# in flight rather than racing it on the account.
+concurrency:
+  group: e2e-controlplane
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  controlplane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Fork PRs get no secrets, and Dependabot-triggered runs get only
+    # Dependabot secrets, so either could only fail at login. It runs for other
+    # same-repo PRs, pushes to main, and manual dispatches.
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+
+      # The mise task installs Chromium itself; this step adds the OS packages
+      # Chromium needs, which require root.
+      - name: Install Playwright driver, Chromium, and system dependencies
+        run: |
+          version="$(go list -m -f '{{.Version}}' github.com/mxschmitt/playwright-go)"
+          go run "github.com/mxschmitt/playwright-go/cmd/playwright@$version" install --with-deps chromium
+
+      - name: Run control-plane E2E tests
+        env:
+          E2E_GH_USERNAME: ${{ secrets.E2E_GH_USERNAME }}
+          E2E_GH_PASSWORD: ${{ secrets.E2E_GH_PASSWORD }}
+          E2E_GH_TOTP_SECRET: ${{ secrets.E2E_GH_TOTP_SECRET }}
+        run: mise run test:e2e:controlplane
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: e2e-controlplane-artifacts
+          path: e2e/artifacts/
+          retention-days: 7
+
+  # Only a push to main notifies: a PR's own checks already report its
+  # failure to its author, and a red main is what nobody is watching.
+  notify-slack:
+    runs-on: ubuntu-latest
+    permissions: {}
+    needs: [controlplane]
+    if: ${{ always() && needs.controlplane.result == 'failure' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Notify Slack of control-plane E2E failure
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "attachments": [
+                {
+                  "color": "#d50200",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ":red_circle: *Control-plane E2E failed* on `main` — these tests run against production, so main is now broken. A killed run skips cleanup: check the shared test account for leftover `e2e-cp-*` orgs.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                      }
+                    },
+                    {
+                      "type": "context",
+                      "elements": [
+                        {
+                          "type": "mrkdwn",
+                          "text": "Commit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}> by ${{ github.actor }}"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }

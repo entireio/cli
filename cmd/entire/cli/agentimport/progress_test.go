@@ -42,7 +42,8 @@ func TestRun_ReportsProgress(t *testing.T) {
 
 	imp := claudeImporter{}
 	res, err := Run(context.Background(), repo, imp, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir,
 		Now:      time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 		Progress: progress,
 	})
@@ -85,7 +86,8 @@ func TestRun_NilProgressDoesNotPanic(t *testing.T) {
 
 	repoNil, repoNilDir := initRepoWithCommit(t)
 	resNil, err := Run(context.Background(), repoNil, claudeImporter{}, Options{
-		RepoRoot: repoNilDir, OverridePath: claudeDir, Now: now,
+		LinkCommitSHA: repoHeadSHA(t, repoNil),
+		RepoRoot:      repoNilDir, OverridePath: claudeDir, Now: now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +95,8 @@ func TestRun_NilProgressDoesNotPanic(t *testing.T) {
 
 	repoWith, repoWithDir := initRepoWithCommit(t)
 	resWith, err := Run(context.Background(), repoWith, claudeImporter{}, Options{
-		RepoRoot: repoWithDir, OverridePath: claudeDir, Now: now,
+		LinkCommitSHA: repoHeadSHA(t, repoWith),
+		RepoRoot:      repoWithDir, OverridePath: claudeDir, Now: now,
 		Progress: &Progress{
 			SessionStart: func(int, int, string, string, int) {},
 			TurnWritten:  func(int, int, int) {},
@@ -139,7 +142,7 @@ func TestRun_ReimportFiresTurnSkippedNotTurnWritten(t *testing.T) {
 	claudeDir := t.TempDir()
 	writeFixtureSession(t, claudeDir, "sess1.jsonl")
 	writeFixtureSession(t, claudeDir, "sess2.jsonl")
-	opts := Options{RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 
 	// First run: no progress, just to populate the store so the second run
 	// hits the idempotent-skip path for every turn.
@@ -182,7 +185,8 @@ func TestRun_DryRunFiresTurnSkippedForEveryTurn(t *testing.T) {
 
 	rec := &progressRecorder{}
 	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
-		RepoRoot: repoDir, OverridePath: claudeDir, DryRun: true,
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir, OverridePath: claudeDir, DryRun: true,
 		Now:      time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
 		Progress: rec.progress(),
 	})
@@ -214,7 +218,7 @@ func TestRun_MixedSkipAndWriteSatisfiesInvariant(t *testing.T) {
 	claudeDir := t.TempDir()
 	writeFixtureSession(t, claudeDir, "sess1.jsonl")
 	writeFixtureSession(t, claudeDir, "sess2.jsonl")
-	opts := Options{RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
+	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: claudeDir, Now: time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)}
 
 	// Import sess1 and sess2 first, so a second run finds them already
 	// imported while a newly-added sess3 is still fresh.

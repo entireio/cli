@@ -415,10 +415,8 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
 			if transcriptContent, readErr := agent.ReadTranscriptFile(opts.TranscriptPath); readErr == nil {
-				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
-
 				// Chunk if necessary
-				chunks, chunkErr := agent.ChunkTranscript(ctx, transcriptContent, agentType)
+				chunks, chunkErr := agent.ChunkTranscript(ctx, transcriptContent, opts.Agent)
 				if chunkErr != nil {
 					logging.Warn(ctx, "failed to chunk transcript, checkpoint will be saved without transcript",
 						slog.String("error", chunkErr.Error()),
@@ -452,9 +450,13 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 			if readErr == nil && !tooLarge {
 				// Try JSONL-aware redaction first; fall back to plain string redaction
 				// only on a JSONL parse error (avoids silently dropping the transcript).
+				// ErrRedactionIncomplete is NOT a parse error: the content parsed and
+				// redaction flagged a leaf it could not rewrite, so the plain fallback
+				// would ship exactly that leaf. Fail the write instead, like
+				// ErrScannerDegraded.
 				redacted, jsonlErr := redact.JSONLBytes(agentContent)
 				if jsonlErr != nil {
-					if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
+					if errors.Is(jsonlErr, redact.ErrScannerDegraded) || errors.Is(jsonlErr, redact.ErrRedactionIncomplete) {
 						return plumbing.ZeroHash, fmt.Errorf("redact subagent transcript %s: %w", opts.SubagentTranscriptPath, jsonlErr)
 					}
 					logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
@@ -1344,8 +1346,7 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 
 	// Use -z for NUL-separated output (handles quoted filenames with spaces/special chars)
 	// Use -uall to list individual untracked files instead of collapsed directories.
-	// Note: CLAUDE.md warns against -uall for user-facing display, but we need the full list
-	// for checkpointing.
+	// Checkpointing needs the full list, not the collapsed user-facing display.
 	//
 	// --no-optional-locks matters because `git status` is a WRITE, not a read.
 	// It refreshes the index's stat cache and, whenever any entry is stale,

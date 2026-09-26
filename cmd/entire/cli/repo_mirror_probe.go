@@ -15,7 +15,7 @@ import (
 )
 
 // gitHubHTTPSRe / gitHubSSHRe / gitHubBareRe parse the GitHub URL shapes
-// `mirror create`/`remove` accept, mirroring the standalone entiredb CLI:
+// `mirror add`/`remove` accept, mirroring the standalone entiredb CLI:
 //
 //	https://github.com/<owner>/<repo>(.git)
 //	git@github.com:<owner>/<repo>(.git)
@@ -118,7 +118,7 @@ type mirrorRequestGetter interface {
 	GetMirrorRequest(ctx context.Context, params coreapi.GetMirrorRequestParams) (*coreapi.MirrorRequest, error)
 }
 
-func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial coreapi.MirrorRequest, location string, onStatus func(coreapi.MirrorRequestStatus)) (*coreapi.CreatedMirror, error) {
+func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial coreapi.MirrorRequest, location string, onStatus func(coreapi.MirrorRequestStatus)) (*coreapi.MirrorRequestResult, error) {
 	serverURL, requestID, err := mirrorRequestPollTarget(location)
 	if err != nil {
 		return nil, err
@@ -145,11 +145,7 @@ func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial co
 			if !ok || result.MirrorId == "" || result.MirrorUrl == "" {
 				return nil, errors.New("mirror request succeeded without a mirror id and URL")
 			}
-			return &coreapi.CreatedMirror{
-				MirrorId:  result.MirrorId,
-				MirrorUrl: result.MirrorUrl,
-				PublicUrl: result.PublicUrl,
-			}, nil
+			return &result, nil
 		case coreapi.MirrorRequestStatusFailed:
 			return nil, mirrorRequestFailureError(*request)
 		case coreapi.MirrorRequestStatusPending, coreapi.MirrorRequestStatusProcessing:

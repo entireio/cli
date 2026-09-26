@@ -2,13 +2,233 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
+
+// tunedRunner is one accepted rewrite: the runner, its new file bytes, and the
+// new template on its own. The template is kept because --dry-run diffs the
+// template rather than the JSON file.
+type tunedRunner struct {
+	runner   tuneRunner
+	newRaw   []byte
+	template string
+}
+
+// runTuning runs the prompt through an already-resolved summary provider
+// (prompt -> text) and turns the runner-id -> template map it returns into
+// accepted rewrites. Rejections — out of scope, invalid template, unpatchable
+// file — are reported on errW and counted rather than returned, so one bad
+// runner does not sink the rest. Nothing is written here: the caller chooses
+// between applying the changes and previewing them.
+//
+// The provider is resolved by the caller, before it gathers repository signal:
+// resolution can fail outright or stop to ask which provider to use, and
+// neither belongs after the seconds the gather costs.
+func runTuning(ctx context.Context, errW io.Writer, provider *checkpointSummaryProvider, runners []tuneRunner, prompt, debugDir string) (changes []tunedRunner, skipped int, err error) {
+	// provider.TextGenerator is the plain prompt->text generator, and is
+	// guaranteed non-nil: its constructor fails when the agent has none.
+	// provider.Generator is deliberately not used — that is a
+	// summarize.Generator, which turns a transcript into a checkpoint Summary.
+	stop := startSpinner(errW, fmt.Sprintf("Tuning %d runner(s) with %s", len(runners), provider.DisplayName))
+	out, err := provider.TextGenerator.GenerateText(ctx, prompt, provider.Model)
+	stop(err == nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("agent run failed: %w", err)
+	}
+	if debugDir != "" {
+		writeTuneDebug(errW, debugDir, "response.txt", out)
+	}
+
+	templates, err := parseTuneOutput(out)
+	if err != nil {
+		return nil, 0, err
+	}
+	changes, skipped = classifyTuneProposals(errW, runners, templates)
+	return changes, skipped, nil
+}
+
+// classifyTuneProposals turns the model's runner-id -> template map into the
+// rewrites that will actually be used, reporting each rejection on errW and
+// counting it. It is separate from the provider call so the accept/reject rules
+// can be tested against canned proposals.
+//
+// A rejection is never fatal: one unusable proposal must not cost the other
+// runners their tailoring.
+func classifyTuneProposals(errW io.Writer, runners []tuneRunner, templates map[string]string) (changes []tunedRunner, skipped int) {
+	byID := make(map[string]tuneRunner, len(runners))
+	for _, r := range runners {
+		byID[normalizeRunnerID(r.ID)] = r
+	}
+
+	// Sorted so the skip/note messages and the preview diff come out in a stable
+	// order rather than in Go's randomized map order.
+	for _, id := range slices.Sorted(maps.Keys(templates)) {
+		tmpl := templates[id]
+		r, ok := byID[normalizeRunnerID(id)]
+		if !ok {
+			fmt.Fprintf(errW, "skip %q: not a runner in scope\n", id)
+			skipped++
+			continue
+		}
+		if err := validateNewTemplate(r.Template, tmpl); err != nil {
+			fmt.Fprintf(errW, "skip %s: %v\n", r.ID, err)
+			skipped++
+			continue
+		}
+		if dropped := droppedPlaceholders(r.Template, tmpl); len(dropped) > 0 {
+			fmt.Fprintf(errW, "note: %s no longer references %v\n", r.ID, dropped)
+		}
+		newRaw, err := replaceRunnerTemplate(r.Raw, tmpl)
+		if err != nil {
+			fmt.Fprintf(errW, "skip %s: %v\n", r.ID, err)
+			skipped++
+			continue
+		}
+		if bytes.Equal(newRaw, r.Raw) {
+			continue // model returned the current template verbatim — benign no-op
+		}
+		changes = append(changes, tunedRunner{runner: r, newRaw: newRaw, template: tmpl})
+	}
+	return changes, skipped
+}
+
+// applyTunedRunners writes each accepted rewrite over its runner file.
+// createdIDs are runners this invocation just scaffolded from defaults; any of
+// those left un-tailored is flagged so it is not committed as if it were
+// repo-specific.
+func applyTunedRunners(w, errW io.Writer, repoRoot string, changes []tunedRunner, skipped int, createdIDs []string) error {
+	root, err := entiredir.OpenAt(repoRoot)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", paths.EntireDir, err)
+	}
+
+	tailored := make(map[string]bool, len(changes))
+	for _, c := range changes {
+		if err := entiredir.WriteFile(root, c.runner.Name, c.newRaw, 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", c.runner.Path, err)
+		}
+		fmt.Fprintf(w, "updated %s\n", filepath.Base(c.runner.Path))
+		tailored[normalizeRunnerID(c.runner.ID)] = true
+	}
+
+	switch {
+	case len(changes) > 0:
+		fmt.Fprintf(w, "\nUpdated %d runner(s). Review with: git diff %s\n",
+			len(changes), filepath.Join(paths.EntireDir, runnersName))
+	case len(createdIDs) == 0 && skipped > 0:
+		// Existing runners, model proposed templates, all rejected — a failed run.
+		// (When onboarding just created the set, an un-tailored runner is reported
+		// below as a generic default instead, which is more actionable.)
+		return fmt.Errorf("model proposed %d template(s) but all were rejected or out of scope (see messages above)", skipped)
+	case len(createdIDs) == 0:
+		fmt.Fprintln(w, "No runner changes proposed.")
+	}
+
+	// Runners onboarding scaffolded but tailoring did not change remain the
+	// generic defaults. Those are working minimal prompts (valid output
+	// contract), so they are committable as-is — just note which are generic.
+	if untailored := untailoredRunners(createdIDs, tailored); len(untailored) > 0 {
+		fmt.Fprintf(errW, "\n%d runner(s) kept as working defaults (generic, not tailored to this repo): %s\n",
+			len(untailored), strings.Join(untailored, ", "))
+		fmt.Fprintln(errW, "They are functional as-is; re-run `entire runner setup -y` to tailor them.")
+	}
+	return nil
+}
+
+// previewTunedRunners prints what tailoring would change and writes nothing.
+// It diffs each runner's prompt template rather than its JSON file: the
+// template is the only field that changes and it is stored as one long JSON
+// string, so a file-level diff would be a single unreadable line.
+func previewTunedRunners(w, errW io.Writer, inScope int, changes []tunedRunner, skipped int) {
+	for _, c := range changes {
+		fmt.Fprintf(w, "=== %s — prompt.template would change ===\n", c.runner.ID)
+		fmt.Fprint(w, renderTemplateDiff(c.runner.Template, c.template))
+		fmt.Fprintln(w)
+	}
+
+	switch {
+	case len(changes) > 0:
+		fmt.Fprintf(errW, "%d of %d runner(s) would change", len(changes), inScope)
+		if skipped > 0 {
+			fmt.Fprintf(errW, ", %d proposal(s) rejected", skipped)
+		}
+		fmt.Fprintln(errW, ". Nothing was written — re-run with --yes to apply.")
+	case skipped > 0:
+		fmt.Fprintf(errW, "No runner would change: all %d proposal(s) were rejected or out of scope (see messages above).\n", skipped)
+	default:
+		fmt.Fprintln(errW, "No runner changes proposed.")
+	}
+}
+
+// diffContextLines is how many unchanged template lines to keep either side of
+// a change in the --dry-run preview. A tailored template is mostly rewritten,
+// so the point of the collapse is the long unchanged tail (the output-JSON
+// contract), not economy on the changed part.
+const diffContextLines = 3
+
+// renderTemplateDiff renders a line-level diff of two prompt templates, with
+// unchanged runs longer than twice the context collapsed to a count.
+// diffmatchpatch is character-oriented, so the templates are folded to one
+// char per line first (the DiffLinesToChars/DiffCharsToLines pattern, as in
+// strategy/manual_commit_attribution.go).
+func renderTemplateDiff(oldText, newText string) string {
+	dmp := diffmatchpatch.New()
+	a, b, lines := dmp.DiffLinesToChars(oldText, newText)
+	diffs := dmp.DiffCharsToLines(dmp.DiffMain(a, b, false), lines)
+
+	var out strings.Builder
+	for _, d := range diffs {
+		switch d.Type {
+		case diffmatchpatch.DiffInsert:
+			writeDiffLines(&out, "+", splitLines(d.Text))
+		case diffmatchpatch.DiffDelete:
+			writeDiffLines(&out, "-", splitLines(d.Text))
+		case diffmatchpatch.DiffEqual:
+			ls := splitLines(d.Text)
+			if len(ls) <= 2*diffContextLines {
+				writeDiffLines(&out, " ", ls)
+				continue
+			}
+			writeDiffLines(&out, " ", ls[:diffContextLines])
+			fmt.Fprintf(&out, "@@ %d unchanged line(s) @@\n", len(ls)-2*diffContextLines)
+			writeDiffLines(&out, " ", ls[len(ls)-diffContextLines:])
+		}
+	}
+	return out.String()
+}
+
+func writeDiffLines(out *strings.Builder, prefix string, lines []string) {
+	for _, line := range lines {
+		out.WriteString(prefix)
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+}
+
+// splitLines splits a diff chunk into lines, dropping the empty element a
+// trailing newline produces so it is not rendered as a blank diff line. The
+// empty-string guard matters: Split("") is [""], which would render one blank.
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
 
 // parseTuneOutput extracts the runner-id -> new-template map the tuning model
 // is instructed to emit as a single JSON object. The model may wrap the object

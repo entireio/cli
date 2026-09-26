@@ -661,7 +661,7 @@ func (r *CodexHookRunner) runCodexHook(hookName string, inputJSON []byte) error 
 	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", "codex", hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
-	cmd.Env = testutil.GitIsolatedEnv()
+	cmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_CODEX_SESSION_DIR="+filepath.Join(r.RepoDir, ".entire", "tmp"))
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -807,33 +807,33 @@ func (s *FactoryDroidSession) CreateDroidTranscript(prompt string, changes []Fil
 
 	// User message with prompt
 	lines = append(lines, map[string]interface{}{
-		"type": "message",
+		"type": entryTypeMessage,
 		"id":   "m1",
 		"message": map[string]interface{}{
-			"role": "user",
+			"role": roleUser,
 			"content": []map[string]interface{}{
-				{"type": "text", "text": prompt},
+				{"type": blockTypeText, "text": prompt},
 			},
 		},
 	})
 
 	// Assistant message with tool uses
 	assistantContent := []interface{}{
-		map[string]interface{}{"type": "text", "text": "I'll help you with that."},
+		map[string]interface{}{"type": blockTypeText, "text": "I'll help you with that."},
 	}
 	for i, change := range changes {
 		assistantContent = append(assistantContent, map[string]interface{}{
-			"type":  "tool_use",
+			"type":  blockTypeToolUse,
 			"id":    fmt.Sprintf("toolu_%d", i+1),
 			"name":  "Write",
 			"input": map[string]string{"file_path": change.Path, "content": change.Content},
 		})
 	}
 	lines = append(lines, map[string]interface{}{
-		"type": "message",
+		"type": entryTypeMessage,
 		"id":   "m2",
 		"message": map[string]interface{}{
-			"role":    "assistant",
+			"role":    roleAssistant,
 			"content": assistantContent,
 		},
 	})
@@ -842,28 +842,28 @@ func (s *FactoryDroidSession) CreateDroidTranscript(prompt string, changes []Fil
 	toolResultContent := make([]map[string]interface{}, 0, len(changes))
 	for i := range changes {
 		toolResultContent = append(toolResultContent, map[string]interface{}{
-			"type":        "tool_result",
+			"type":        blockTypeToolResult,
 			"tool_use_id": fmt.Sprintf("toolu_%d", i+1),
 			"content":     "Success",
 		})
 	}
 	lines = append(lines, map[string]interface{}{
-		"type": "message",
+		"type": entryTypeMessage,
 		"id":   "m3",
 		"message": map[string]interface{}{
-			"role":    "user",
+			"role":    roleUser,
 			"content": toolResultContent,
 		},
 	})
 
 	// Final assistant message
 	lines = append(lines, map[string]interface{}{
-		"type": "message",
+		"type": entryTypeMessage,
 		"id":   "m4",
 		"message": map[string]interface{}{
-			"role": "assistant",
+			"role": roleAssistant,
 			"content": []map[string]interface{}{
-				{"type": "text", "text": "Done!"},
+				{"type": blockTypeText, "text": "Done!"},
 			},
 		},
 	})
@@ -1096,11 +1096,11 @@ func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []File
 	s.messages = append(s.messages, map[string]interface{}{
 		"info": map[string]interface{}{
 			"id":   fmt.Sprintf("msg-%d", s.msgCounter),
-			"role": "user",
+			"role": roleUser,
 			"time": map[string]interface{}{"created": 1708300000 + s.msgCounter},
 		},
 		"parts": []map[string]interface{}{
-			{"type": "text", "text": prompt},
+			{"type": blockTypeText, "text": prompt},
 		},
 	})
 
@@ -1108,7 +1108,7 @@ func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []File
 	s.msgCounter++
 	var parts []map[string]interface{}
 	parts = append(parts, map[string]interface{}{
-		"type": "text",
+		"type": blockTypeText,
 		"text": "I'll help you with that.",
 	})
 	for i, change := range changes {
@@ -1124,14 +1124,14 @@ func (s *OpenCodeSession) CreateOpenCodeTranscript(prompt string, changes []File
 		})
 	}
 	parts = append(parts, map[string]interface{}{
-		"type": "text",
+		"type": blockTypeText,
 		"text": "Done!",
 	})
 
 	s.messages = append(s.messages, map[string]interface{}{
 		"info": map[string]interface{}{
 			"id":   fmt.Sprintf("msg-%d", s.msgCounter),
-			"role": "assistant",
+			"role": roleAssistant,
 			"time": map[string]interface{}{
 				"created":   1708300000 + s.msgCounter,
 				"completed": 1708300000 + s.msgCounter + 5,

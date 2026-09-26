@@ -78,7 +78,7 @@ Entire is a Go project managed by `mise`. Three commands and you're set up:
 # Install mise (skip if you already have it)
 curl https://mise.run | sh
 
-# Trust this repo's mise config and install Go 1.26
+# Trust this repo's mise config and install Go 1.27
 mise trust
 mise install
 
@@ -89,7 +89,7 @@ mise run test
 
 If `mise run test` passes, you're good to go. If something failed, see [Troubleshooting](#troubleshooting) below.
 
-> Detailed setup notes live in [CONTRIBUTING.md](../CONTRIBUTING.md#local-setup), and architecture notes live in [AGENTS.md](../AGENTS.md).
+> Detailed setup notes live in [CONTRIBUTING.md](../CONTRIBUTING.md#local-setup), and architecture notes are indexed in the [reference map](../AGENTS.md#read-when-relevant).
 
 ---
 
@@ -97,7 +97,7 @@ If `mise run test` passes, you're good to go. If something failed, see [Troubles
 
 Entire exists to help you work with AI coding agents, so it would be odd if you weren't using one to contribute. There's no need to tell us you did. Our general thinking: use whatever agent and methodology you like, but until the robot revolution comes, you are responsible for the final code. Before submitting a PR for review, make sure you have reviewed it yourself. We'll close PRs that obviously skipped this step.
 
-Entire supports agents including Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with. Whichever you choose, your session will be captured the same way (see [Using Entire while you contribute](#using-entire-while-you-contribute) below).
+Entire supports agents including Claude Code, Codex, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with. Whichever you choose, your session will be captured the same way (see [Using Entire while you contribute](#using-entire-while-you-contribute) below).
 
 One thing to watch out for is LLM eagerness. Agents like to please and they're in a hurry. A few common failure modes to push back on:
 
@@ -220,5 +220,5 @@ type -a entire
 Once you've landed your first PR:
 
 - [CONTRIBUTING.md](../CONTRIBUTING.md): the full contribution guide, including PR conventions and the Entire-specific workflow notes.
-- [AGENTS.md](../AGENTS.md): architecture and development reference. Read this before tackling a non-trivial change.
+- [AGENTS.md](../AGENTS.md): repository rules and task-specific reference map. Read this before tackling a non-trivial change.
 - [Discord](https://discord.gg/jZJs3Tue4S): say hi, hang out, help the next first-time contributor.

@@ -40,7 +40,8 @@ import (
 //     Only one line is held in memory at a time. A trailing partial line
 //     (agent mid-write) is silently dropped so consumers never see a
 //     truncated record.
-//   - Whole-document JSON agents (Gemini) — read snapshot into memory and
+//   - Whole-document JSON agents (Gemini CLI sessions recorded before its
+//     support was removed) — read snapshot into memory and
 //     validate with json.Valid before emitting. These transcripts are
 //     bounded by conversation size and rarely exceed a few MB even for
 //     long sessions, so buffering is acceptable here.
@@ -96,7 +97,8 @@ func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, age
 }
 
 // isWholeDocumentJSONAgent reports whether an agent's on-disk transcript is
-// a single JSON document (e.g. Gemini's session-*.json) versus JSONL.
+// a single JSON document (Gemini's session-*.json) versus JSONL. Gemini CLI is
+// no longer supported, but session state it left behind can still be read.
 func isWholeDocumentJSONAgent(agentType types.AgentType) bool {
 	return agentType == agent.AgentTypeGemini
 }
@@ -156,8 +158,8 @@ func writeWholeDocumentJSONTranscript(ctx context.Context, w io.Writer, r io.Rea
 
 func newSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "session",
-		Aliases: []string{"sessions"},
+		Use:     cmdSession,
+		Aliases: []string{cmdSessionsAlias},
 		Short:   "Manage agent sessions tracked by Entire",
 		Long: `View and manage agent sessions tracked by Entire.
 
@@ -325,7 +327,7 @@ func newListCmd() *cobra.Command {
 	var jsonFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List all sessions",
 		Long: `List all sessions tracked by Entire, including ended sessions.
 
@@ -483,8 +485,8 @@ Output modes:
   Default       Human-readable summary.
   --json        Metadata-only JSON envelope (no transcript bytes).
   --transcript  Stream the live raw agent transcript bytes to stdout in
-                the agent's native format (JSONL for Claude/Cursor/Codex,
-                JSON for Gemini). Snapshot is bounded to the file size
+                the agent's native format (e.g. JSONL for
+                Claude/Cursor/Codex). Snapshot is bounded to the file size
                 observed at open. JSONL streams have a trailing partial
                 line trimmed; JSON documents are emitted intact.
 
@@ -494,7 +496,7 @@ Examples:
   entire sessions info <session-id> --transcript > session.jsonl`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionInfo(cmd.Context(), cmd, args[0], sessionOutputModeFromFlags(jsonFlag, transcriptFlag))
+			return runSessionInfo(cmd.Context(), cmd, args[0], sessionOutputModeFromFlags(jsonFlag, transcriptFlag), strategy.ResolutionNone)
 		},
 	}
 
@@ -516,7 +518,10 @@ func sessionOutputModeFromFlags(jsonFlag, transcriptFlag bool) sessionOutputMode
 	}
 }
 
-func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, mode sessionOutputMode) error {
+// runSessionInfo renders one session. resolution describes how sessionID was
+// arrived at and is reported alongside it; pass strategy.ResolutionNone when
+// the caller named the session outright, as `session info` does.
+func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, mode sessionOutputMode, resolution strategy.SessionResolution) error {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to load session: %w", err)
@@ -533,9 +538,9 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 	case sessionOutputTranscript:
 		return writeSessionTranscript(ctx, cmd, state)
 	case sessionOutputJSON:
-		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status)
+		return writeSessionInfoJSON(cmd.OutOrStdout(), state, status, resolution)
 	case sessionOutputText:
-		return writeSessionInfoText(cmd.OutOrStdout(), state, status)
+		return writeSessionInfoText(cmd.OutOrStdout(), state, status, resolution)
 	default:
 		return fmt.Errorf("unknown session output mode: %d", mode)
 	}
@@ -543,8 +548,8 @@ func runSessionInfo(ctx context.Context, cmd *cobra.Command, sessionID string, m
 
 // writeSessionTranscript streams the live raw agent transcript for a session
 // to stdout. The transcript bytes are exactly what the agent has written to
-// disk in its native per-agent format (JSONL for Claude Code/Cursor, JSON for
-// Gemini, etc.) — Entire performs no normalization here.
+// disk in its native per-agent format (JSONL for Claude Code/Cursor,
+// etc.) — Entire performs no normalization here.
 func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	if state.TranscriptPath == "" {
 		cmd.SilenceUsage = true
@@ -587,6 +592,17 @@ type sessionInfoJSON struct {
 	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
 	LastPrompt     string         `json:"last_prompt,omitempty"`
 	FilesTouched   []string       `json:"files_touched,omitempty"`
+
+	// Resolution says how this session was picked when the caller did not name
+	// one — see strategy.SessionResolution. Present only for `session
+	// current`, which resolves; `session info <id>` and `session list` were
+	// told which sessions to report, so they omit it.
+	//
+	// A consumer that acts on the session rather than displaying it must check
+	// this: only "caller-env" and "ancestry" identify the calling process's
+	// own session. "other-worktree" in particular can be any unrelated session
+	// in the shared store.
+	Resolution string `json:"resolution,omitempty"`
 }
 
 type tokenInfoJSON struct {
@@ -635,17 +651,22 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 	return info
 }
 
-func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string) error {
+func writeSessionInfoJSON(w io.Writer, state *strategy.SessionState, status string, resolution strategy.SessionResolution) error {
+	info := buildSessionInfoJSON(state, status)
+	info.Resolution = string(resolution)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(buildSessionInfoJSON(state, status)); err != nil {
+	if err := enc.Encode(info); err != nil {
 		return fmt.Errorf("failed to encode session info: %w", err)
 	}
 	return nil
 }
 
-func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string) error {
+func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status string, resolution strategy.SessionResolution) error {
 	fmt.Fprintf(w, "Session %s\n\n", state.SessionID)
+	if label := sessionResolutionLabel(resolution); label != "" {
+		fmt.Fprintf(w, "Resolved:    %s\n", label)
+	}
 
 	agentLabel := string(state.AgentType)
 	if agentLabel == "" {
@@ -900,4 +921,33 @@ func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strateg
 		fmt.Fprintln(cmd.OutOrStdout(), "  No work recorded.")
 	}
 	return nil
+}
+
+// sessionResolutionLabel renders how a session was resolved, for humans.
+//
+// Every resolution gets a line except ResolutionNone, which means the caller
+// named the session outright and there is nothing to explain. An earlier
+// revision also returned "" for the plain worktree tier, on the grounds that
+// "the most recent session recorded here" is what someone typing `session
+// current` already assumes — but the command's own help promises the output
+// always says which question it answered, and silently omitting the most
+// common tier made that false. Cheaper to keep the promise than to qualify
+// it.
+func sessionResolutionLabel(resolution strategy.SessionResolution) string {
+	switch resolution {
+	case strategy.ResolutionCallerEnv:
+		return "your own session, named by the agent running this command"
+	case strategy.ResolutionAncestry:
+		return "your own session, matched by process ancestry"
+	case strategy.ResolutionCallerAmbiguous:
+		return "a guess — several agents claim this command and nothing could order them"
+	case strategy.ResolutionOtherWorktree:
+		return "another worktree's session — this worktree has none of its own"
+	case strategy.ResolutionWorktree:
+		return "the most recently active session recorded in this worktree"
+	case strategy.ResolutionNone:
+		return ""
+	default:
+		return ""
+	}
 }

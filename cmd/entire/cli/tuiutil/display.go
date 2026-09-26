@@ -37,6 +37,64 @@ func SanitizeDisplayText(s string) string {
 	}, stripped)
 }
 
+// SanitizeTerminalText strips ANSI escape sequences and non-printable runes
+// from multi-line terminal output while preserving tabs and newlines. Unlike
+// SanitizeDisplayText, which flattens text into a single table cell, this
+// keeps line structure. It is the one filter for free-form session content
+// (prompts, transcript text, summary bodies) printed to a terminal, so escape
+// sequences carried in agent-influenced content cannot drive the reader's
+// terminal.
+//
+// Emoji sequences are deliberately left intact: this filter serves prose,
+// where nothing is being width-aligned, and stripping joiners turns a family
+// emoji into three separate people. SanitizeTerminalLabel is the variant for
+// width-aligned labels.
+func SanitizeTerminalText(s string) string {
+	stripped := StripANSI(s)
+	var result strings.Builder
+	result.Grow(len(stripped))
+	for _, r := range stripped {
+		// U+200D joins emoji sequences (family, profession) and is a format
+		// rune, so unicode.IsPrint alone would drop it and split those
+		// sequences apart. Every other format rune stays dropped: that class
+		// carries the bidi controls used for terminal spoofing.
+		if unicode.IsPrint(r) || r == '\t' || r == '\n' || r == '\u200d' {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
+}
+
+// SanitizeTerminalLabel is SanitizeTerminalText for width-aligned list labels:
+// it additionally drops emoji skin-tone modifiers, zero-width joiners, and
+// variation selectors, multi-codepoint sequences that confuse terminal width
+// calculations. That normalization visibly mangles emoji in prose, so it is
+// kept out of the general filter and applied only where a fixed-width line is
+// actually being filled.
+func SanitizeTerminalLabel(s string) string {
+	stripped := StripANSI(s)
+	var result strings.Builder
+	result.Grow(len(stripped))
+	for _, r := range stripped {
+		// Emoji skin tone modifiers (U+1F3FB to U+1F3FF).
+		if r >= 0x1F3FB && r <= 0x1F3FF {
+			continue
+		}
+		// Zero-width joiners used in emoji sequences.
+		if r == 0x200D {
+			continue
+		}
+		// Variation selectors (U+FE00 to U+FE0F).
+		if r >= 0xFE00 && r <= 0xFE0F {
+			continue
+		}
+		if unicode.IsPrint(r) || r == '\t' || r == '\n' {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
+}
+
 // PadDisplayWidth truncates or right-pads s with spaces so its display
 // width is exactly width cells (ANSI-aware).
 func PadDisplayWidth(s string, width int) string {

@@ -325,7 +325,7 @@ func TestBuildConfiguredProfile_PreservesExistingTask(t *testing.T) {
 func TestSelectReviewProfile_LegacyReviewFallback(t *testing.T) {
 	t.Parallel()
 	s := &settings.EntireSettings{
-		Review: map[string]settings.ReviewConfig{
+		Review: map[string]settings.ReviewConfig{ //nolint:staticcheck // exercises the legacy pre-profile fallback on purpose
 			tAgentClaude: {Skills: []string{"/review"}, Model: tModelSonnet},
 		},
 	}
@@ -353,7 +353,7 @@ func TestSelectReviewProfile_ConfiguredProfilesOverrideLegacyReview(t *testing.T
 	t.Parallel()
 	const securityProfile = "security"
 	s := &settings.EntireSettings{
-		Review: map[string]settings.ReviewConfig{
+		Review: map[string]settings.ReviewConfig{ //nolint:staticcheck // exercises the legacy pre-profile fallback on purpose
 			tAgentClaude: {Skills: []string{"/legacy"}},
 		},
 		ReviewProfiles: map[string]settings.ReviewProfileConfig{

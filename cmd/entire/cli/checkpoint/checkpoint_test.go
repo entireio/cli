@@ -121,7 +121,6 @@ var (
 func (fakePluginAgent) Name() types.AgentName                { return "terminalhire-plugin" }
 func (fakePluginAgent) Type() types.AgentType                { return "TerminalHire" }
 func (fakePluginAgent) Description() string                  { return "fake external plugin for tests" }
-func (fakePluginAgent) IsPreview() bool                      { return true }
 func (fakePluginAgent) ProtectedDirs() []string              { return []string{".terminalhire"} }
 func (fakePluginAgent) ProtectedFiles() []string             { return []string{".terminalhirerc"} }
 func (fakePluginAgent) GetSessionID(*agent.HookInput) string { return "" }
@@ -3864,6 +3863,48 @@ func TestWriteCommitted_RedactsPromptSecrets(t *testing.T) {
 	}
 }
 
+// ReviewPrompt and InvestigateTopic are free text written into metadata.json.
+// A review's prompt can be a session's first user prompt (session attach
+// --review), so it must get the same redaction as prompt.txt.
+func TestWriteCommitted_RedactsReviewPromptAndInvestigateTopic(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("aabbccddeef3")
+
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "redact-review-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}`)),
+		ReviewPrompt:     "Deploy fails with 403. Config line is: key=" + awsKeyFixture + " -- why?",
+		InvestigateTopic: "Why does API_KEY=" + highEntropySecret + " get rejected?",
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	content, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
+	}
+
+	for field, got := range map[string]string{
+		"ReviewPrompt":     content.Metadata.ReviewPrompt,
+		"InvestigateTopic": content.Metadata.InvestigateTopic,
+	} {
+		if strings.Contains(got, awsKeyFixture) || strings.Contains(got, highEntropySecret) {
+			t.Errorf("%s should not contain the secret after redaction, got %q", field, got)
+		}
+		if !strings.Contains(got, "REDACTED") {
+			t.Errorf("%s should contain REDACTED placeholder, got %q", field, got)
+		}
+	}
+}
+
 func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -4657,7 +4698,7 @@ func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
 						ToolUseID:       "toolu_desc",
 						AgentID:         "agent3",
 						SubagentType:    "general-purpose",
-						TaskDescription: "rotate key=AKIAYRWQG5EJLPZLBYNP in staging",
+						TaskDescription: "rotate key=" + awsKeyFixture + " in staging",
 						Transcript:      redact.AlreadyRedacted([]byte(`{"msg":"child"}` + "\n")),
 					},
 				},
@@ -4677,7 +4718,7 @@ func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to read task.json: %v", err)
 			}
-			if strings.Contains(taskContent, "AKIAYRWQG5EJLPZLBYNP") {
+			if strings.Contains(taskContent, awsKeyFixture) {
 				t.Errorf("task.json still carries the secret: %s", taskContent)
 			}
 			var meta taskRecordMetadata
@@ -5394,9 +5435,9 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 
 	meta := Metadata{
 		Kind:         "agent_review",
-		ReviewPrompt: "credential leak: key=AKIAYRWQG5EJLPZLBYNP",
+		ReviewPrompt: "credential leak: key=" + awsKeyFixture,
 		Summary: &Summary{
-			Intent: "leak: key=AKIAYRWQG5EJLPZLBYNP",
+			Intent: "leak: key=" + awsKeyFixture,
 		},
 	}
 	b, err := json.Marshal(meta)
@@ -5408,7 +5449,7 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RedactBlobBytes() error = %v", err)
 	}
-	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+	if strings.Contains(string(got), awsKeyFixture) {
 		t.Errorf("expected AWS key redacted in metadata.json blob, got %s", string(got))
 	}
 	if !strings.Contains(string(got), "REDACTED") {
@@ -5445,7 +5486,7 @@ func TestRedactBlobBytes_ScannerDegraded(t *testing.T) {
 	// even while the flag is set — the sentinel is confined to transcript-shaped
 	// blobs whose only scanner produced no coverage. The AWS-key shaped secret
 	// is caught by the always-on regex layers, independent of scanner selection.
-	secretContent := []byte("credential leak: key=AKIAYRWQG5EJLPZLBYNP")
+	secretContent := []byte("credential leak: key=" + awsKeyFixture)
 	got, err = RedactBlobBytes(context.Background(), secretContent, "prompt.txt", false)
 	if err != nil {
 		t.Fatalf("RedactBlobBytes(.txt) error = %v, want nil", err)
@@ -5453,7 +5494,7 @@ func TestRedactBlobBytes_ScannerDegraded(t *testing.T) {
 	if want := redact.Bytes(secretContent); string(got) != string(want) {
 		t.Errorf("RedactBlobBytes(.txt) = %q, want redact.Bytes output %q", got, want)
 	}
-	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+	if strings.Contains(string(got), awsKeyFixture) {
 		t.Error("RedactBlobBytes(.txt) left the secret unredacted")
 	}
 	if !strings.Contains(string(got), "REDACTED") {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"os"
 	"path/filepath"
 	"slices"
@@ -53,14 +54,14 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify hook commands
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start"), "SessionStart")
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "SessionStart user-prompt-submit")
-	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end"), "SessionEnd")
-	assertFactoryHookExists(t, settings.Hooks.Stop, "", agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine), "Stop")
-	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "UserPromptSubmit")
-	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use"), "PreToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"), "PostToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"), "PreCompact")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidHookCommand("session-start"), "SessionStart")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidHookCommand("user-prompt-submit"), "SessionStart user-prompt-submit")
+	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", droidHookCommand("session-end"), "SessionEnd")
+	assertFactoryHookExists(t, settings.Hooks.Stop, "", droidStopHookCommand(), "Stop")
+	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", droidHookCommand("user-prompt-submit"), "UserPromptSubmit")
+	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", droidHookCommand("pre-tool-use"), "PreToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", droidHookCommand("post-tool-use"), "PostToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", droidHookCommand("pre-compact"), "PreCompact")
 
 	// Verify AreHooksInstalled returns true
 	if !hooksInstalledNow(t, agent) {
@@ -110,7 +111,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 
 	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".factory", "settings.json"),
-		agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
+		droidStopHookCommand(),
 		testutil.LegacyLocalDevCommand("hooks factoryai-droid stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
@@ -342,7 +343,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse Stop hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "", "echo user stop hook", "user Stop hook")
-		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine), "Entire Stop hook")
+		assertFactoryHookExists(t, matchers, "", droidStopHookCommand(), "Entire Stop hook")
 	})
 
 	t.Run("SessionStart", func(t *testing.T) {
@@ -352,8 +353,8 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse SessionStart hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "", "echo user session start", "user SessionStart hook")
-		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start"), "Entire SessionStart hook")
-		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "Entire SessionStart user-prompt-submit hook")
+		assertFactoryHookExists(t, matchers, "", droidHookCommand("session-start"), "Entire SessionStart hook")
+		assertFactoryHookExists(t, matchers, "", droidHookCommand("user-prompt-submit"), "Entire SessionStart user-prompt-submit hook")
 	})
 
 	t.Run("PostToolUse", func(t *testing.T) {
@@ -363,7 +364,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse PostToolUse hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
-		assertFactoryHookExists(t, matchers, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"), "Entire Task hook")
+		assertFactoryHookExists(t, matchers, "Task", droidHookCommand("post-tool-use"), "Entire Task hook")
 	})
 }
 
@@ -725,6 +726,24 @@ func readFactorySettings(t *testing.T, tempDir string) FactorySettings {
 	return settings
 }
 
+// droidHookCommand is the silent-wrapper command InstallHooks writes on THIS
+// host. The wrapper form is host-dependent — sh off Windows, cmd.exe on it —
+// so an expectation that names one form directly passes on Linux and fails on
+// Windows against the very same install.
+//
+// Tests that assert WHICH form is chosen do not use this: they pin the host
+// with agentpkg.SetWindowsHookProbeForTesting and name the wrapper outright,
+// or the assertion would restate the implementation and pass either way.
+func droidHookCommand(verb string) string {
+	return silentHookCommand(verb, agentpkg.HookHostIsWindows())
+}
+
+// droidStopHookCommand is droidHookCommand for the Stop hook, which uses the
+// plain-text-warning wrapper rather than the silent one.
+func droidStopHookCommand() string {
+	return stopHookCommand(agentpkg.HookHostIsWindows())
+}
+
 func assertFactoryHookExists(t *testing.T, matchers []FactoryHookMatcher, matcher, command, description string) {
 	t.Helper()
 	for _, m := range matchers {
@@ -753,4 +772,118 @@ func hooksInstalledNow(t *testing.T, ag interface {
 		t.Fatalf("AreHooksInstalled() error = %v", err)
 	}
 	return installed
+}
+
+// droidWindowsHookCommand names the Windows wrapper outright rather than
+// reusing the ForOS selector InstallHooks uses: these tests assert WHICH form
+// is chosen, so sharing the selector would restate the implementation and pass
+// either way.
+func droidWindowsHookCommand(verb string) string {
+	return agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid " + verb)
+}
+
+func droidWindowsStopHookCommand() string {
+	return agentpkg.WrapWindowsProductionPlainTextWarningHookCommand(
+		"entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine)
+}
+
+func assertDroidWindowsHooks(t *testing.T, settings FactorySettings) {
+	t.Helper()
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidWindowsHookCommand("session-start"), "SessionStart")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidWindowsHookCommand("user-prompt-submit"), "SessionStart user-prompt-submit")
+	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", droidWindowsHookCommand("session-end"), "SessionEnd")
+	assertFactoryHookExists(t, settings.Hooks.Stop, "", droidWindowsStopHookCommand(), "Stop")
+	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", droidWindowsHookCommand("user-prompt-submit"), "UserPromptSubmit")
+	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", droidWindowsHookCommand("pre-tool-use"), "PreToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", droidWindowsHookCommand("post-tool-use"), "PostToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", droidWindowsHookCommand("pre-compact"), "PreCompact")
+}
+
+// TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh pins that droid picks
+// the native cmd.exe wrappers on a Windows host even when a POSIX sh is
+// runnable there. The probe deliberately reports a working sh: droid's Windows
+// build never spawns sh for a hook, so its presence must not keep the sh
+// wrapper — which cmd.exe would cut apart at the first `>`, firing no hook at
+// all. Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh(t *testing.T) {
+	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return true // a working sh, which must not change the decision
+	}))
+
+	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(tempDir)
+
+	ag := &FactoryAIDroidAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	assertDroidWindowsHooks(t, readFactorySettings(t, tempDir))
+}
+
+// TestInstallHooks_WindowsMigratesShWrappers pins that a repo whose hooks were
+// installed from a non-Windows host is migrated to the cmd.exe wrappers by a
+// plain (non-force) reinstall, replacing the sh entries rather than leaving
+// both — two entries would fire the same hook twice. Mutates the shared probe,
+// so no t.Parallel().
+func TestInstallHooks_WindowsMigratesShWrappers(t *testing.T) {
+	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting("linux", func(context.Context, string) bool {
+		return true
+	}))
+
+	tempDir := t.TempDir()
+	// See TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh for why the
+	// root registry is reset before t.TempDir removes the directory.
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(tempDir)
+
+	ag := &FactoryAIDroidAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+	assertFactoryHookExists(t, readFactorySettings(t, tempDir).Hooks.Stop, "",
+		agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
+		"sh-wrapped Stop hook")
+
+	restore := agentpkg.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return true
+	})
+	t.Cleanup(restore)
+
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+
+	settings := readFactorySettings(t, tempDir)
+	assertDroidWindowsHooks(t, settings)
+
+	// SessionStart legitimately carries two Entire hooks (session-start and
+	// user-prompt-submit); every other type carries exactly one.
+	for _, tc := range []struct {
+		name     string
+		matchers []FactoryHookMatcher
+		want     int
+	}{
+		{"SessionStart", settings.Hooks.SessionStart, 2},
+		{"SessionEnd", settings.Hooks.SessionEnd, 1},
+		{"Stop", settings.Hooks.Stop, 1},
+		{"UserPromptSubmit", settings.Hooks.UserPromptSubmit, 1},
+		{"PreToolUse", settings.Hooks.PreToolUse, 1},
+		{"PostToolUse", settings.Hooks.PostToolUse, 1},
+		{"PreCompact", settings.Hooks.PreCompact, 1},
+	} {
+		got := 0
+		for _, m := range tc.matchers {
+			got += len(m.Hooks)
+		}
+		if got != tc.want {
+			t.Errorf("%s hook count = %d, want %d (stale sh entry left behind?)", tc.name, got, tc.want)
+		}
+	}
 }

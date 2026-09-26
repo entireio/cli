@@ -59,9 +59,10 @@ snippet, and a truncated title instead of the full prompt (repo hits add
 description and checkpoint count). Fetch full detail
 for a single result with 'entire checkpoint explain <id>', or add --full to
 that command to pull the checkpoint's entire session transcript. For a
-checkpoint hit from another GitHub repo, add --repo <owner/name> to
-'entire checkpoint explain' (requires the full checkpoint ID; unrelated to
-this command's --repo filter below).
+checkpoint hit from another repo, add --repo gh/<owner>/<repo> for a GitHub
+mirror or --repo et/<project>/<repo> for an Entire-native repo. The forge
+prefix and full checkpoint ID are required; this is unrelated to this
+command's --repo filter below.
 
 CLI queries also support inline filters like author:<name>, date:<week|month>,
 branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
@@ -214,7 +215,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 
 			// Semantic search goes to the v4 query-serve path (entire-api
 			// cell gateway) via newSemanticSearcher, which fans out across
-			// cells and mints per-cell identity tokens itself (ENT-1055).
+			// cells with the login JWT as bearer (ENT-1055).
 			// Instrumented at the seam so the TUI's re-searches and
 			// pagination emit outcome telemetry too, not just this one-shot.
 			searcher := instrumentSemanticSearcher(cmd.CommandPath(), newSemanticSearcher(insecureHTTPAuth))
@@ -456,7 +457,7 @@ func buildCodeSearchOpts(ctx context.Context, commandPath, owner, repoName strin
 	}
 }
 
-// codeSearchCellTimeout bounds each per-cell search call (token exchange + API).
+// codeSearchCellTimeout bounds each per-cell search call (login refresh + API).
 const codeSearchCellTimeout = 30 * time.Second
 
 // runCodeSearch handles the --code flag path: search code content via peregrine.

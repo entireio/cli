@@ -149,6 +149,12 @@ func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 		model = defaultDroidModel
 	}
 
+	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	if err != nil {
+		return Output{}, err
+	}
+	defer cancel()
+
 	args := []string{"exec", "--skip-permissions-unsafe", "--model", model, prompt}
 	displayArgs := []string{"exec", "--skip-permissions-unsafe", "--model", model, fmt.Sprintf("%q", prompt)}
 
@@ -163,7 +169,7 @@ func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
 		exitErr := &exec.ExitError{}

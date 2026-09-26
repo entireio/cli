@@ -472,16 +472,21 @@ func TestDownloadPluginAsset_ViaChecksumManifest(t *testing.T) {
 func TestDownloadPluginAsset_ProbeFallbackWithoutChecksums(t *testing.T) {
 	t.Parallel()
 	payload := makeTarGz(t, map[string][]byte{"entire-run": []byte("bin")})
-	asset := fmt.Sprintf("entire-run_1.0.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	candidates := assetCandidates("run", "v1.0.0")
+	asset := candidates[len(candidates)-1]
 	srv := assetServer(t, asset, payload, "")
 
 	meta := &PluginMetadata{DownloadURL: srv.URL + "/dl/{asset}"}
-	fa, err := downloadPluginAsset(context.Background(), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), true)
+	var progress bytes.Buffer
+	fa, err := downloadPluginAsset(withPluginProgress(t.Context(), &progress), meta, "https://example.invalid/entire-run", "run", "v1.0.0", t.TempDir(), true)
 	if err != nil {
 		t.Fatalf("downloadPluginAsset: %v", err)
 	}
 	if fa.Asset != asset {
 		t.Errorf("Asset = %q, want %q", fa.Asset, asset)
+	}
+	if got := strings.Count(progress.String(), "Downloading plugin archive..."); got != 1 {
+		t.Fatalf("download phase reported %d times: %s", got, &progress)
 	}
 }
 

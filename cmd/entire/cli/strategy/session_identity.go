@@ -89,14 +89,17 @@ func (s *ManualCommitStrategy) findSessionByCommitAncestry(ctx context.Context, 
 	var best *SessionState
 	bestDepth := -1
 	for _, state := range states {
-		if state.WorktreePath == "" || state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || state.Owner == nil {
+		// WorktreePath is required here and NOT by caller resolution: a commit
+		// is attributed in order to condense and link it, and both need
+		// somewhere to do that, while resolving a caller only names a session.
+		if state.Owner == nil || state.WorktreePath == "" || state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" {
 			continue
 		}
 		depth := ancestry.Depth(*state.Owner)
 		if depth < 0 {
 			continue
 		}
-		if best == nil || depth < bestDepth || (depth == bestDepth && interactedAfter(state, best)) {
+		if best == nil || isNearerOwner(depth, bestDepth, state, best) {
 			best, bestDepth = state, depth
 		}
 	}
@@ -109,6 +112,43 @@ func (s *ManualCommitStrategy) findSessionByCommitAncestry(ctx context.Context, 
 		)
 	}
 	return best
+}
+
+// isNearerOwner reports whether an owner match at depth beats the incumbent at
+// bestDepth. A depth of -1 means the owner could not be placed in our
+// ancestry at all. The contract, for any pair of inputs:
+//
+//   - exactly one placed — the placed one wins, at any depth;
+//   - both placed — the nearer wins, and an exact tie goes to the more
+//     recently interacting session;
+//   - neither placed — the more recently interacting session wins.
+//
+// Recency therefore only ever breaks a tie between equals, never across
+// depths, where the nearer process is the answer whatever the clocks say. Two
+// equal placed depths means one agent process hosting several sessions over
+// its lifetime, e.g. after a resume. Two unplaced depths means nothing located
+// either, and recency is the last thing left — deliberate rather than a
+// fallthrough, though a caller that treats the result as an identification
+// must not use it (see claimsRuledOut, which is why resolveCallerIdentity
+// reports caller-ambiguous in exactly that case).
+//
+// The one shared piece between commit attribution
+// (findSessionByCommitAncestry, above) and caller resolution
+// (resolveCallerIdentity in caller_session.go). Their loops differ in what
+// they admit as a candidate, so only the comparison is common — an earlier
+// revision extracted the whole loop, which stopped paying for itself the
+// moment caller resolution merged its ancestry pass into the environment one
+// and left the extraction with a single caller. Attribution never passes an
+// unplaced depth today; the contract above holds regardless, so a future
+// caller that does needs no change here.
+func isNearerOwner(depth, bestDepth int, state, best *SessionState) bool {
+	if (depth >= 0) != (bestDepth >= 0) {
+		return depth >= 0
+	}
+	if depth >= 0 {
+		return depth < bestDepth || (depth == bestDepth && interactedAfter(state, best))
+	}
+	return interactedAfter(state, best)
 }
 
 // isSessionHomeWorktree reports whether worktreePath — the commit's worktree,

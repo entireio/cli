@@ -1,0 +1,85 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a new query release is picked up even on a quiet week.
+    - cron: '34 14 * * 0'
+
+# Deny by default; the analyze job declares exactly what it needs.
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Upload the SARIF result to the code-scanning API.
+      security-events: write
+      # Fetch the CodeQL query packs.
+      packages: read
+      # Read workflow metadata (required for private repositories).
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The query suite is set per language, not once for the workflow,
+          # because the two languages have very different cost profiles.
+          #
+          # actions: measured at 49s with the extended+quality suites versus
+          # 50s with the default suite, so the extra 10 queries are free. They
+          # are also the ones this repo wants: `unpinned-tag`, the
+          # `*-injection/medium` and `untrusted-checkout/medium` variants (the
+          # default suite ships only the high/critical precision ones), and
+          # `if-expression-always-true`.
+          - language: actions
+            build-mode: none
+            queries: security-extended,security-and-quality
+          # go: autobuild compiles the module, which dominates this leg, so the
+          # query suite is close to free here too. Measured on this repo:
+          # 36 queries (default) 192s, 37 (extended) 150s, 59
+          # (extended+quality) 140s — the spread is runner noise, not suites.
+          #
+          # security-and-quality is enabled because its 23 Go additions are
+          # bug-finding queries, not style: the InconsistentCode family
+          # (MissingErrorCheck, WrappedErrorAlwaysNil, LengthComparisonOffByOne,
+          # UnhandledCloseWritableHandle) and the RedundantCode family
+          # (ImpossibleInterfaceNilCheck, DuplicateSwitchCase, ShiftOutOfRange,
+          # UnreachableStatement). Run against a local database they add two
+          # high-precision findings that golangci-lint does not report, so this
+          # is incremental coverage rather than overlap.
+          - language: go
+            build-mode: autobuild
+            queries: security-extended,security-and-quality
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: ${{ matrix.queries }}
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          category: /language:${{ matrix.language }}
+          # A fork PR gets a read-only GITHUB_TOKEN, so `security-events: write`
+          # is not granted and the upload fails the job. Analyze still runs and
+          # surfaces findings in the log. Note the condition tests the EVENT
+          # first: the predecessor workflow ran only on pull_request, so it could
+          # compare head.repo directly, but that expression is null on push and
+          # schedule — copied here verbatim it would resolve to 'never' and
+          # silently stop main from ever being uploaded, which is the one thing
+          # this workflow exists to do.
+          upload: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'always' || 'never' }}

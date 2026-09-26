@@ -2,16 +2,42 @@ name: E2E Tests (Windows)
 
 on:
   workflow_call:
+    inputs:
+      test:
+        description: "Test name filter (regex)"
+        required: false
+        type: string
+        default: ""
+      agent:
+        description: "Agent to test (claude-code, factoryai-droid, antigravity)"
+        required: false
+        type: string
+        default: claude-code
   workflow_dispatch:
     inputs:
       test:
         description: "Test name filter (regex)"
         required: false
         default: ""
+      agent:
+        description: "Agent to test"
+        required: false
+        default: claude-code
+        type: choice
+        options:
+          - claude-code
+          - factoryai-droid
+          - antigravity
 
 concurrency:
-  group: e2e-windows-tests
+  group: e2e-windows-tests-${{ inputs.agent }}
   cancel-in-progress: true
+
+# Least privilege: this job only checks out the repository. Called via
+# `workflow_call` from e2e.yml, whose calling job must therefore grant at least
+# `contents: read` — a reusable workflow can never hold more than its caller.
+permissions:
+  contents: read
 
 jobs:
   e2e-windows:
@@ -25,31 +51,116 @@ jobs:
       - name: Setup mise
         uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
 
-      - name: Install Claude Code
+      # One step per agent rather than an interpolated installer name: each
+      # ships its own script and each lands its binary somewhere different, and
+      # the installer updates only the stored user PATH, which later steps do
+      # not re-read — hence the explicit GITHUB_PATH line in both.
+      - name: Install claude-code
+        if: inputs.agent == 'claude-code'
         run: |
-          irm https://claude.ai/install.ps1 | iex
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846). Retry the throw path; an
+          # installer that exits instead still ends the step.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://claude.ai/install.ps1 | iex }
           "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install factoryai-droid
+        if: inputs.agent == 'factoryai-droid'
+        run: |
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846). Retry the throw path; an
+          # installer that exits instead still ends the step.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://app.factory.ai/cli/windows | iex }
+          # droid.exe lands in %USERPROFILE%\bin, not .local\bin.
+          "$env:USERPROFILE\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install antigravity
+        if: inputs.agent == 'antigravity'
+        run: |
+          # agy's official installer: it resolves the architecture, verifies a
+          # SHA-512 from the release manifest, and installs into
+          # %LOCALAPPDATA%\agy\bin. It always takes latest and has no version
+          # flag — right for a dispatch-only workflow, which wants whatever agy
+          # users actually have. e2e.yml pins instead; see its own comment.
+          # Third-party install endpoints fail for reasons this repo can neither
+          # fix nor predict (run 36007855846). Retry the throw path; an
+          # installer that exits instead still ends the step.
+          function Invoke-WithRetry {
+            param([Parameter(Mandatory)][scriptblock] $Install)
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                & $Install
+                return
+              } catch {
+                if ($attempt -eq 3) { throw }
+                Write-Host "install attempt $attempt failed: $($_.Exception.Message); retrying in $($attempt * 5)s"
+                Start-Sleep -Seconds ($attempt * 5)
+              }
+            }
+          }
+
+          Invoke-WithRetry { irm https://antigravity.google/cli/install.ps1 | iex }
+          "$env:LOCALAPPDATA\agy\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Bootstrap agent
         shell: bash
         env:
+          AGENT: ${{ inputs.agent }}
+          # droid's runner writes ANTHROPIC_API_KEY into its BYOK settings, so
+          # both agents bootstrap off the same key; FACTORY_API_KEY is droid's
+          # own auth. antigravity runs in agy's Gemini API-key mode off the
+          # shared GEMINI_API_KEY, as on Linux.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: go run ./e2e/bootstrap claude-code
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: go run ./e2e/bootstrap "$AGENT"
 
       - name: Run isolated test
         shell: bash
         env:
+          TEST_FILTER: ${{ inputs.test }}
+          AGENT: ${{ inputs.agent }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_PARALLEL: 1
         run: |
           mkdir -p "$E2E_ARTIFACT_DIR"
-          mise run test:e2e --agent claude-code "${{ inputs.test }}"
+          mise run test:e2e --agent "$AGENT" "$TEST_FILTER"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: e2e-isolated-claude-code-${{ inputs.test }}
+          name: e2e-isolated-${{ inputs.agent }}-${{ inputs.test }}
           path: e2e-artifacts/
           retention-days: 7

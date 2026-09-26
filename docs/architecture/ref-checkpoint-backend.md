@@ -34,7 +34,7 @@ Backends register in `checkpoint/registry.go`. Each carries a `gitBacked` capabi
 
 Only a git-backed backend can be the primary, because the lifecycle paths above operate through the repo and its refs; a non-git-backed backend has no such ref to drive them. The two built-in backends — `git-branch` and `git-refs` — are **both** git-backed and are registered directly in the built-in registry map. The `Register()` entry point is for non-git-backed (mirror-only) backends and is used in practice only by test-only backends, so a production binary can never select an unregistered one.
 
-A **one-of-each-type** rule permits two distinct git-backed backends in the same topology. Note, though, that the branch→refs migration deliberately does **not** run `git-branch` as a mirror of `git-refs`. Cross-format compatibility comes from read routing plus the version policy — every reader (CLI, entire.io, entire-api) reads refs first and falls back to the branch — not from dual-writing the same checkpoint into both backends (see [Migration and coexistence](#migration-and-coexistence)). Mirroring stays available as a general mechanism, primarily for non-git-backed targets (e.g. a filesystem store).
+A **one-of-each-type** rule permits two distinct git-backed backends in the same topology. Note, though, that the branch→refs migration deliberately does **not** run `git-branch` as a mirror of `git-refs`. Cross-format compatibility comes from read routing — every reader (CLI, entire.io, entire-api) reads refs first and falls back to the branch — not from dual-writing the same checkpoint into both backends (see [Migration and coexistence](#migration-and-coexistence)). Mirroring stays available as a general mechanism, primarily for non-git-backed targets (e.g. a filesystem store).
 
 ## Ref layout and sharding
 
@@ -104,6 +104,20 @@ Rewrites are atomic (temp file + rename under the lock) so a concurrent reader n
 3. **Batch-pushes** the existing refs in one network round-trip (`batchPushRefs`, `strategy/push_common.go`).
 4. On success, **removes** the pushed refs from the queue and runs shadow-branch cleanup.
 5. On a batch failure (typically a non-fast-forward rejection), **falls back to per-ref recovery** (`pushCheckpointRefWithRecovery`) and removes from the queue only the refs that land.
+
+Confirmed remote policy/hook rejections skip fetch/replay: replay cannot fix a
+policy block and would needlessly rewrite local commits if the ref already exists
+remotely. Other failures still attempt recovery; a failed recovery preserves the
+original push error as the primary cause with its fetch/replay error wrapped
+alongside it, rather than assuming divergence. Confirmed remote rejections surface
+one bounded warning per flush naming a ref and Git's reason
+(including push-protection guidance). The warning explicitly labels the reason as
+one example because other queued refs may have different failures (all are logged).
+Terminal diagnostics preserve Git's line breaks and indentation; log errors stay
+single-line. Both forms use the existing output cap and push-target URL masking,
+without additional secret redaction of the remote's diagnostic output. Plain non-fast-forward recovery stays quiet;
+SSH authentication failures retain their dedicated hint. Failures remain queued
+and **never fail the user's git push**.
 
 ### Non-force, fast-forward-only
 
@@ -181,29 +195,18 @@ The switch is a **primary flip**, not a dual-write phase. There is no "run both 
 | **Config-less fallback** | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior for repos set up before the git-refs default. A repo reaches this state only by predating that default (or by having its `checkpoints` block removed) — a first-time `entire enable` always writes an explicit primary |
 | **Refs-only** | `git-refs` | New checkpoints are ULIDs written as per-checkpoint refs; pre-existing hex/`v1` checkpoints stay readable via the read-routing fallback |
 
-## Checkpoint version and policy
-
-Checkpoint formats are named `<family>-v<major>` and validated in `checkpointpolicy/format.go`:
-
-| Format | Family | Written by |
-|--------|--------|------------|
-| `branch-v1` | `branch` | git-branch backend |
-| `refs-v1` | `refs` | git-refs backend |
-
-Both are in the CLI's read **and** write sets. The repo-wide checkpoint policy (`refs/entire/policies/checkpoint`, `checkpoint_version` / `checkpoint_min_version`) gates which formats a client may write and nudges upgrades; see [Sessions and Checkpoints → Checkpoint Policy](sessions-and-checkpoints.md#checkpoint-policy).
-
 ## Migration and coexistence
 
 The read-routing rules above are what make a hex-on-branch repo and a ULID-in-refs repo the same repo: nothing needs to move for both formats to be readable, so the branch→refs switch is a primary flip with **no dual-write step**.
 
 Concretely, flipping the primary to git-refs means new checkpoints are ULIDs stored as per-checkpoint refs, while every checkpoint already written to the `v1` branch stays exactly where it is and keeps resolving through the branch fallback. This works because **every reader routes the same way — refs first (for both ID formats), branch fallback for the legacy format** — not just the CLI but also entire.io and entire-api. So a repo can move to refs-only on the remote without keeping the `v1` branch alive for any reader's benefit.
 
-A mixed fleet is fine and needs no special handling:
+A mixed fleet works, with one limitation:
 
 - A **modern** CLI (or the server) on git-refs primary reads everything: ULID/refs checkpoints directly, and older hex/`v1` checkpoints via the fallback.
-- An **old** CLI keeps writing hex checkpoints to the `v1` branch, and everyone modern still reads those. It simply **cannot read** newer ULID/refs checkpoints — which is the intended behavior: it fails closed, and the [version policy](#checkpoint-version-and-policy) (`checkpoint_min_version`) turns that into an explicit "upgrade" nudge rather than a silent half-working state.
+- An **old** CLI keeps writing hex checkpoints to the `v1` branch, and everyone modern still reads those. Reading ULID/refs checkpoints requires a CLI with git-refs support; an old CLI does not see them.
 
-This is why running `git-branch` as a *mirror* of git-refs is **not** part of the migration: it would dual-write every checkpoint into both backends to keep `v1` populated, but no reader needs that — read routing already covers both formats, and the "old client can't read the new format" case is a feature, not something to paper over.
+This is why running `git-branch` as a *mirror* of git-refs is **not** part of the migration: it would dual-write every checkpoint into both backends to keep `v1` populated, but no reader needs that — read routing already covers both formats, and an old client not reading the new format is an accepted consequence rather than something to paper over. It is now a **silent** one: the `checkpoint_min_version` policy that used to turn it into an explicit "upgrade" nudge was removed with the checkpoint policy feature, and nothing replaced it. An old CLI in a refs-primary repo sees a partial history and is told nothing.
 
 When checkpoints *are* actively migrated from the branch into refs (a path that is tooling-only today, not an official flow), they are written under `RefName(hexID)` — i.e. **hex-named refs** — which is why a hex ID under a git-refs primary is looked up in refs first and only then falls back to the branch.
 
@@ -218,7 +221,6 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 | `checkpoint/pushqueue.go` | Flock JSONL push-discovery queue |
 | `checkpoint/routing_store.go` | `kindRoutingStore` — id-kind read + backfill-write routing across both backends |
 | `checkpoint/id/id.go` | `ShardFor`, `Kind`/`KindOf`, ID generation |
-| `checkpointpolicy/format.go` | `branch-v1` / `refs-v1` format families and read/write sets |
 | `settings/checkpoints.go` | `checkpoints` block parsing + env override |
 | `strategy/manual_commit_push.go` | Pre-push: drain queue, batch push, per-ref recovery |
 | `strategy/push_common.go` | `batchPushRefs`, `pushCheckpointRefWithRecovery`, fetch+replay |

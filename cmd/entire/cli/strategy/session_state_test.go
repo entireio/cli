@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
@@ -443,96 +442,6 @@ func TestManualCommitStrategy_SessionState_UsesPackageFunctions(t *testing.T) {
 
 	if loaded2.SessionID != state2.SessionID {
 		t.Errorf("SessionID = %q, want %q", loaded2.SessionID, state2.SessionID)
-	}
-}
-
-// TestFindMostRecentSession_FiltersByWorktree tests that FindMostRecentSession
-// returns sessions from the current worktree, not from other worktrees.
-func TestFindMostRecentSession_FiltersByWorktree(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	// Get the resolved worktree path (git resolves symlinks, e.g. /var → /private/var on macOS)
-	resolvedDir, err := paths.WorktreeRoot(context.Background())
-	if err != nil {
-		t.Fatalf("paths.WorktreeRoot() error = %v", err)
-	}
-
-	older := time.Now().Add(-1 * time.Hour)
-	newer := time.Now()
-
-	// Session from a different worktree (more recent)
-	otherWorktree := &SessionState{
-		SessionID:           "other-worktree-session",
-		BaseCommit:          "abc1234",
-		WorktreePath:        "/some/other/worktree",
-		StartedAt:           newer,
-		LastInteractionTime: &newer,
-		Phase:               "idle",
-	}
-
-	// Session from current worktree (older)
-	currentWorktree := &SessionState{
-		SessionID:           "current-worktree-session",
-		BaseCommit:          "xyz7890",
-		WorktreePath:        resolvedDir, // matches current worktree
-		StartedAt:           older,
-		LastInteractionTime: &older,
-		Phase:               "idle",
-	}
-
-	if err := SaveSessionState(context.Background(), otherWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-	if err := SaveSessionState(context.Background(), currentWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// FindMostRecentSession should return the current worktree's session,
-	// not the other worktree's session (even though it's more recent).
-	result := FindMostRecentSession(context.Background())
-	if result != "current-worktree-session" {
-		t.Errorf("FindMostRecentSession(context.Background()) = %q, want %q (should prefer current worktree)",
-			result, "current-worktree-session")
-	}
-}
-
-// TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch tests that
-// FindMostRecentSession falls back to all sessions when none match the current worktree.
-func TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	newer := time.Now()
-
-	// Session from a different worktree only (no sessions for current worktree)
-	otherWorktree := &SessionState{
-		SessionID:           "only-session",
-		BaseCommit:          "abc1234",
-		WorktreePath:        "/some/other/worktree",
-		StartedAt:           newer,
-		LastInteractionTime: &newer,
-		Phase:               "idle",
-	}
-
-	if err := SaveSessionState(context.Background(), otherWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// Should fall back to the only available session since none match current worktree
-	result := FindMostRecentSession(context.Background())
-	if result != "only-session" {
-		t.Errorf("FindMostRecentSession(context.Background()) = %q, want %q (should fall back when no worktree match)",
-			result, "only-session")
-	}
-
-	// Cleanup
-	if err := os.Remove(dir + "/.git/entire-sessions/only-session.json"); err != nil && !os.IsNotExist(err) {
-		t.Logf("cleanup warning: %v", err)
 	}
 }
 

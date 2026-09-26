@@ -52,8 +52,6 @@ func (c *ClaudeCodeAgent) Description() string {
 	return "Claude Code - Anthropic's CLI coding assistant"
 }
 
-func (c *ClaudeCodeAgent) IsPreview() bool { return false }
-
 // DetectPresence checks if Claude Code is configured in the repository.
 func (c *ClaudeCodeAgent) DetectPresence(ctx context.Context) (bool, error) {
 	// Get worktree root to check for .claude directory
@@ -238,7 +236,7 @@ func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 //   - files: list of file paths modified by Claude (from Write/Edit tools)
 //   - currentPosition: total number of lines in the file
 //   - error: any error encountered during reading
-func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}
@@ -312,3 +310,9 @@ func (c *ClaudeCodeAgent) LaunchCmd(ctx context.Context, initialPrompt string) (
 	cmd.Env = os.Environ()
 	return cmd, nil
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Claude Code
+// publishes into the environment of the processes it spawns. A nested session
+// gets its own ID rather than its parent's, so this names the session actually
+// running the caller.
+func (c *ClaudeCodeAgent) CallerSessionEnvVar() string { return "CLAUDE_CODE_SESSION_ID" }

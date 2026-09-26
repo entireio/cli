@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -341,195 +340,54 @@ func TestParseGitHubRelease(t *testing.T) {
 	}
 }
 
-// brewUpgradeCmd is the install command produced for any brew-installed
-// binary on a stable channel. Hoisted to a const so tests can reference
-// it without tripping goconst on repeated string literals.
-const brewUpgradeCmd = "brew upgrade --yes entire"
+// brewCaskPath is a brew-installed binary; tests that do not care about the
+// install manager use it.
+const brewCaskPath = "/opt/homebrew/Caskroom/entire/1.0.0/entire"
 
-// scoopExecutablePath is the pre-rename `cli` app dir; scoopEntireExecutablePath
-// is the renamed `entire` app dir. The Scoop update command is chosen by which
-// app dir the binary runs from, not by version.
-const scoopExecutablePath = `C:\Users\test\scoop\apps\cli\current\entire.exe`
-const scoopEntireExecutablePath = `C:\Users\test\scoop\apps\entire\current\entire.exe`
+const miseExecutablePath = "/home/user/.local/share/mise/installs/entire/1.0.0/bin/entire"
 
-// plainBinPath is a POSIX install under no recognized install manager.
-const plainBinPath = "/usr/local/bin/entire"
-
-// TestScoopAppName pins the signal the rename migration keys off. The ""
-// results matter most: they are what keeps the `== "cli"` comparison in
-// updateCommand from misfiring on a non-Scoop binary that happens to live in a
-// directory named `cli`.
-func TestScoopAppName(t *testing.T) {
-	tests := []struct {
-		name     string
-		execPath func() (string, error)
-		want     string
-	}{
-		{
-			name:     "pre-rename cli app dir",
-			execPath: func() (string, error) { return scoopExecutablePath, nil },
-			want:     "cli",
-		},
-		{
-			name:     "renamed entire app dir",
-			execPath: func() (string, error) { return scoopEntireExecutablePath, nil },
-			want:     "entire",
-		},
-		{
-			name:     "non-scoop path in a cli directory",
-			execPath: func() (string, error) { return `C:\tools\cli\entire.exe`, nil },
-			want:     "",
-		},
-		{
-			name:     "posix install",
-			execPath: func() (string, error) { return plainBinPath, nil },
-			want:     "",
-		},
-		{
-			name:     "executable path unavailable",
-			execPath: func() (string, error) { return "", errors.New("not found") },
-			want:     "",
-		},
+func relocatedTestRoot(elem string) string {
+	if runtime.GOOS == "windows" {
+		return `D:\` + elem
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			original := executablePath
-			executablePath = tt.execPath
-			t.Cleanup(func() { executablePath = original })
-
-			if got := scoopAppName(); got != tt.want {
-				t.Errorf("scoopAppName() = %q, want %q", got, tt.want)
-			}
-		})
-	}
+	return "/" + elem
 }
 
-func TestUpdateCommand(t *testing.T) {
+// TestUpdateCommandForCurrentBinary_MiseRoots covers mise detection through
+// the env-relocated roots and the default marker.
+func TestUpdateCommandForCurrentBinary_MiseRoots(t *testing.T) {
+	installsDir := relocatedTestRoot("srv/tools")
+	dataDir := relocatedTestRoot("srv/mise")
 	tests := []struct {
-		name           string
-		currentVersion string
-		execPath       func() (string, error)
-		want           string
+		name        string
+		installsDir string
+		dataDir     string
+		execPath    string
 	}{
 		{
-			name:           "homebrew stable cellar path uses brew command",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return "/opt/homebrew/Cellar/entire/1.0.0/bin/entire", nil },
-			want:           brewUpgradeCmd,
+			name:        "MISE_INSTALLS_DIR",
+			installsDir: installsDir,
+			execPath:    filepath.Join(installsDir, "entire", "1.0.0", "bin", "entire"),
 		},
 		{
-			name:           "homebrew stable cask path uses brew command",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           brewUpgradeCmd,
+			name:     "MISE_DATA_DIR",
+			dataDir:  dataDir,
+			execPath: filepath.Join(dataDir, "installs", "entire", "1.0.0", "bin", "entire"),
 		},
 		{
-			name:           "homebrew nightly path uses brew command",
-			currentVersion: "1.0.1-nightly.202604101200.abc1234",
-			execPath:       func() (string, error) { return "/opt/homebrew/bin/entire", nil },
-			want:           "brew upgrade --yes entire@nightly",
-		},
-		{
-			name:           "linuxbrew path",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return "/home/linuxbrew/.linuxbrew/bin/entire", nil },
-			want:           brewUpgradeCmd,
-		},
-		{
-			name:           "mise path",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return "/home/user/.local/share/mise/installs/entire/1.0.0/bin/entire", nil },
-			want:           "mise upgrade entire",
-		},
-		{
-			name:           "scoop entire app updates in place",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return scoopEntireExecutablePath, nil },
-			want:           "scoop update entire/entire",
-		},
-		{
-			name:           "scoop cli app routes through package rename regardless of version",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return scoopExecutablePath, nil },
-			want:           `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`,
-		},
-		{
-			name:           "unknown path stable falls back to stable curl command",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return plainBinPath, nil },
-			want:           "curl -fsSL https://entire.io/install.sh | bash",
-		},
-		{
-			name:           "unknown path nightly falls back to nightly curl command",
-			currentVersion: "1.0.1-nightly.202604101200.abc1234",
-			execPath:       func() (string, error) { return plainBinPath, nil },
-			want:           "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly",
-		},
-		{
-			name:           "executable error falls back to stable curl command",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return "", errors.New("not found") },
-			want:           "curl -fsSL https://entire.io/install.sh | bash",
+			name:     "default marker",
+			execPath: miseExecutablePath,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := executablePath
-			executablePath = tt.execPath
-			t.Cleanup(func() { executablePath = original })
+			t.Setenv("MISE_INSTALLS_DIR", tt.installsDir)
+			t.Setenv("MISE_DATA_DIR", tt.dataDir)
+			setExecutablePath(t, tt.execPath)
 
-			if got := updateCommand(tt.currentVersion); got != tt.want {
-				t.Errorf("updateCommand() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestUpdateCommandForCurrentBinary(t *testing.T) {
-	tests := []struct {
-		name           string
-		currentVersion string
-		goos           string
-		execPath       func() (string, error)
-		want           string
-	}{
-		{
-			name:           "known installer returns command",
-			currentVersion: "1.2.3",
-			goos:           goosWindows,
-			execPath:       func() (string, error) { return scoopEntireExecutablePath, nil },
-			want:           "scoop update entire/entire",
-		},
-		{
-			name:           "windows unknown installer returns releases URL",
-			currentVersion: "1.2.3",
-			goos:           goosWindows,
-			execPath:       func() (string, error) { return `C:\Program Files\Entire\entire.exe`, nil },
-			want:           downloadsURL,
-		},
-		{
-			name:           "non-windows unknown installer returns curl command",
-			currentVersion: "1.2.3",
-			goos:           "linux",
-			execPath:       func() (string, error) { return plainBinPath, nil },
-			want:           "curl -fsSL https://entire.io/install.sh | bash",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			originalExecPath := executablePath
-			executablePath = tt.execPath
-			t.Cleanup(func() { executablePath = originalExecPath })
-
-			originalGOOS := goos
-			goos = tt.goos
-			t.Cleanup(func() { goos = originalGOOS })
-
-			if got := UpdateCommandForCurrentBinary(tt.currentVersion); got != tt.want {
-				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
+			if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
+				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
 			}
 		})
 	}
@@ -649,62 +507,11 @@ func TestCheckAndNotify_PrintsNotificationWhenOutdated(t *testing.T) {
 	}
 }
 
-func TestCheckAndNotify_BrewSkipUntilNextVersionCachesLatest(t *testing.T) {
-	server := newVersionServer(t, "v2.0.0")
-	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
-	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
-	f.chooseValue = autoUpdateActionSkipUntilNextVersion
-
-	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
-
-	if f.installCalls != 0 {
-		t.Fatalf("installer called %d times, want 0", f.installCalls)
-	}
-	cache, err := loadCache()
-	if err != nil {
-		t.Fatalf("loadCache() error = %v", err)
-	}
-	if cache.SkippedVersion != "v2.0.0" {
-		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
-	}
-	if f.lastCmdStr != brewUpgradeCmd {
-		t.Errorf("prompt got cmd %q, want %q", f.lastCmdStr, brewUpgradeCmd)
-	}
-}
-
-// TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest verifies the
-// skip-until-next-version persistence works for non-brew installers too.
-// The cache flow is installer-agnostic; this locks that contract in.
-func TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest(t *testing.T) {
-	server := newVersionServer(t, "v2.0.0")
-	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
-	f := newAutoUpdateFixture(t)
-	useMiseExecutable(t)
-	f.chooseValue = autoUpdateActionSkipUntilNextVersion
-
-	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
-
-	if f.installCalls != 0 {
-		t.Fatalf("installer called %d times, want 0", f.installCalls)
-	}
-	cache, err := loadCache()
-	if err != nil {
-		t.Fatalf("loadCache() error = %v", err)
-	}
-	if cache.SkippedVersion != "v2.0.0" {
-		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
-	}
-	if f.lastCmdStr != "mise upgrade entire" {
-		t.Errorf("prompt got cmd %q, want mise upgrade entire", f.lastCmdStr)
-	}
-}
-
 func TestCheckAndNotify_SkipsVersionMarkedSkipped(t *testing.T) {
 	server := newVersionServer(t, "v2.0.0")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	seedVersionCache(t, &VersionCache{
 		LastCheckTime:  time.Now().Add(-checkInterval - time.Minute),
 		SkippedVersion: "v2.0.0",
@@ -728,51 +535,6 @@ func TestCheckAndNotify_NoNotificationWhenUpToDate(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("expected no output when up to date, got %q", buf.String())
-	}
-}
-
-func TestCheckAndNotify_InstallerFailureKeepsCacheFresh(t *testing.T) {
-	server := newVersionServer(t, "v2.0.0")
-	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
-
-	// Simulate an interactive user who accepts the upgrade prompt, and an
-	// installer that fails (e.g. brew upgrade blew up mid-run).
-	t.Setenv("ENTIRE_TEST_TTY", "1")
-	useBrewExecutable(t)
-
-	origChoose := chooseUpdate
-	chooseUpdate = func(_ context.Context, _, _, _ string) (AutoUpdateAction, error) {
-		return autoUpdateActionUpdate, nil
-	}
-	t.Cleanup(func() { chooseUpdate = origChoose })
-
-	origRun := runInstaller
-	runInstaller = func(_ context.Context, _ string) error { return errors.New("boom") }
-	t.Cleanup(func() { runInstaller = origRun })
-
-	origIsTerminalOut := isTerminalOut
-	isTerminalOut = func(_ io.Writer) bool { return true }
-	t.Cleanup(func() { isTerminalOut = origIsTerminalOut })
-
-	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
-
-	// User sees the failure message with a manual-retry hint.
-	if !strings.Contains(buf.String(), "Try again later running:") {
-		t.Errorf("missing retry hint in output: %q", buf.String())
-	}
-
-	// Cache must remain bumped: we don't want to re-prompt every invocation
-	// while the upstream issue is still in place. The user already has the
-	// hint with the exact command to run manually.
-	cache, err := loadCache()
-	if err != nil {
-		t.Fatalf("loadCache() error = %v", err)
-	}
-	if cache.LastCheckTime.IsZero() {
-		t.Errorf("cache LastCheckTime was reset after installer failure; want fresh bump")
-	}
-	if time.Since(cache.LastCheckTime) > time.Minute {
-		t.Errorf("cache LastCheckTime not fresh after installer failure: %v", cache.LastCheckTime)
 	}
 }
 

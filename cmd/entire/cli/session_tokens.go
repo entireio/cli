@@ -13,12 +13,33 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// The token-report vocabulary, shared by `session tokens`, `checkpoint tokens`
+// and `tokens profile`: these strings are part of those commands' --json
+// contract, so they are named once rather than spelled per call site.
+const (
+	tokensKindSubagents       = "subagents"
+	tokensKindContextPressure = "context_pressure"
+
+	tokensConfidenceReported = "reported"
+
+	tokensSignalSubagentTokens  = "subagent_tokens"
+	tokensSignalMissingUsage    = "missing_token_usage"
+	tokensSignalContextTokens   = "context_tokens"
+	tokensSignalCacheReadTokens = "cache_read_tokens"
+	tokensSignalAPICallCount    = "api_call_count"
+
+	tokensSeverityLow    = "low"
+	tokensSeverityMedium = "medium"
+	tokensSeverityHigh   = "high"
+)
+
 type sessionTokensReport struct {
 	SessionID       string                        `json:"session_id"`
 	Agent           string                        `json:"agent"`
 	Model           string                        `json:"model,omitempty"`
 	Status          string                        `json:"status"`
 	Source          string                        `json:"source"`
+	Resolution      strategy.SessionResolution    `json:"resolution,omitempty"`
 	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
 	Context         *sessionTokensContext         `json:"context,omitempty"`
 	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
@@ -87,10 +108,12 @@ func newTokensCmd() *cobra.Command {
 		Short: "Show token usage and optimization recommendations for a session",
 		Long: `Show token usage and optimization recommendations for a session.
 
-When no session ID is provided, Entire reports on the most recently active
-session, preferring the current worktree and falling back to the newest session
-if no state matches this worktree. The report uses token and context data Entire
-already captured for the session.
+When no session ID is provided, Entire identifies the caller using agent session
+IDs and process ancestry, falling back to the most recently active session in
+this worktree and then elsewhere in the repository. The report includes how the
+session was resolved; ambiguous and cross-worktree matches also warn on stderr.
+Use --current to select only the current worktree's most recent session.
+The report uses token and context data Entire already captured for the session.
 
 Use --agent-brief when an agent needs compact guidance for the next step, for
 example: "Use Entire token tracking to check how this session is doing and
@@ -120,11 +143,30 @@ optimize next steps."`,
 }
 
 func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string, current, jsonOutput, agentBrief bool) error {
+	resolution := strategy.ResolutionNone
 	if sessionID == "" {
+		// --current pins the answer to this worktree and nothing else, which
+		// is the one thing the resolver deliberately will not do: it prefers
+		// the caller's own session wherever that session lives. Keep the flag
+		// literal, and let the default path identify the caller.
 		if current {
 			sessionID = strategy.FindMostRecentSessionInCurrentWorktree(ctx)
+			resolution = strategy.ResolutionWorktree
 		} else {
-			sessionID = strategy.FindMostRecentSession(ctx)
+			resolved := strategy.ResolveCallerSession(ctx)
+			if resolved.Found() && !resolved.Tracked {
+				return reportUntrackedCallerSession(cmd, resolved, jsonOutput || agentBrief)
+			}
+			sessionID = resolved.SessionID
+			resolution = resolved.Resolution
+			if resolution == strategy.ResolutionCallerAmbiguous {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"[entire] Caller session is ambiguous; these tokens may belong to another session. Confirm the session ID before acting on the recommendations.")
+			}
+			if resolved.Resolution == strategy.ResolutionOtherWorktree {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"[entire] No session is recorded in this worktree; reporting the most recent one from elsewhere in this repository. It is not this command's caller.")
+			}
 		}
 		if sessionID == "" {
 			fmt.Fprintln(cmd.OutOrStdout(), "No active session found in this worktree.")
@@ -143,6 +185,7 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 	}
 
 	report := buildSessionTokensReport(state, sessionPhaseLabel(state))
+	report.Resolution = resolution
 	if jsonOutput {
 		return printJSON(cmd.OutOrStdout(), report)
 	}
@@ -186,31 +229,31 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		report.Tokens = tokens
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
-				Kind:       "subagents",
+				Kind:       tokensKindSubagents,
 				Label:      "Subagents",
 				Tokens:     tokens.SubagentTotal,
-				Confidence: "reported",
-				Signals:    []string{"subagent_tokens"},
+				Confidence: tokensConfidenceReported,
+				Signals:    []string{tokensSignalSubagentTokens},
 			})
 		}
 	} else {
 		report.Limitations = append(report.Limitations, "No token usage recorded for this session.")
 		report.Recommendations = append(report.Recommendations, sessionTokensRecommendation{
 			ID:       "no-token-data",
-			Severity: "low",
+			Severity: tokensSeverityLow,
 			Message:  "Token usage is unavailable for this session; the agent may not expose token data yet, or no checkpoint has captured it.",
-			Signals:  []string{"missing_token_usage"},
+			Signals:  []string{tokensSignalMissingUsage},
 		})
 	}
 
 	if contextInfo := buildSessionTokensContext(state.ContextTokens, state.ContextWindowSize); contextInfo != nil {
 		report.Context = contextInfo
 		report.Contributors = append(report.Contributors, sessionTokensContributor{
-			Kind:       "context_pressure",
+			Kind:       tokensKindContextPressure,
 			Label:      "Context pressure",
 			Percent:    contextInfo.Percent,
-			Confidence: "reported",
-			Signals:    []string{"context_tokens"},
+			Confidence: tokensConfidenceReported,
+			Signals:    []string{tokensSignalContextTokens},
 		})
 	}
 
@@ -218,7 +261,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		report.Contributors = append(report.Contributors, sessionTokensContributor{
 			Kind:       "skills",
 			Label:      "Skills/slash commands: " + strings.Join(labels, ", "),
-			Confidence: "reported",
+			Confidence: tokensConfidenceReported,
 			Signals:    []string{"skill_events"},
 		})
 	}
@@ -305,12 +348,12 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 			cacheReadHotspot = true
 			recs = append(recs, sessionTokensRecommendation{
 				ID:       "context-replay-hotspot",
-				Severity: "high",
+				Severity: tokensSeverityHigh,
 				Message: fmt.Sprintf(
 					"Cache/context replay is %s of token volume; reduce unnecessary follow-up calls in this large-context session.",
 					formatPercent(cacheReadPercent),
 				),
-				Signals: []string{"cache_read_tokens"},
+				Signals: []string{tokensSignalCacheReadTokens},
 			})
 		}
 	}
@@ -321,24 +364,24 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 		}
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "api-call-amplification",
-			Severity: "medium",
+			Severity: tokensSeverityMedium,
 			Message:  message,
-			Signals:  []string{"api_call_count"},
+			Signals:  []string{tokensSignalAPICallCount},
 		})
 	}
 	if signals.Tokens != nil && tokenShareAtLeastOneTenth(signals.Tokens.SubagentTotal, signals.Tokens.Total) {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "subagent-heavy",
-			Severity: "medium",
+			Severity: tokensSeverityMedium,
 			Message:  "Scope subagent tasks tightly; give each subagent a narrow objective and expected output.",
-			Signals:  []string{"subagent_tokens"},
+			Signals:  []string{tokensSignalSubagentTokens},
 		})
 	}
 	if signals.Tokens != nil && signals.Tokens.Total > 0 &&
 		tokenClassPressure(signals.Tokens.CacheWrite, signals.Tokens.Total, 5000, 10, 50_000) {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "cache-write-pressure",
-			Severity: "medium",
+			Severity: tokensSeverityMedium,
 			Message:  "Cache write is elevated; avoid broad new context and narrow the next read before continuing.",
 			Signals:  []string{"cache_write_tokens"},
 		})
@@ -347,7 +390,7 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 		tokenClassPressure(signals.Tokens.Output, signals.Tokens.Total, 3000, 2, 10_000) {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "output-pressure",
-			Severity: "medium",
+			Severity: tokensSeverityMedium,
 			Message:  "Output tokens are elevated; keep the next answer tight and avoid restating evidence.",
 			Signals:  []string{"output_tokens"},
 		})
@@ -355,23 +398,23 @@ func recommendationRules(signals tokenRecommendationSignals) []sessionTokensReco
 	if signals.Context != nil && signals.Context.Percent >= recommendationHighContextPercent {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "high-context-pressure",
-			Severity: "medium",
+			Severity: tokensSeverityMedium,
 			Message:  fmt.Sprintf("Context pressure is %d%% of the window; preserve only relevant context before continuing.", signals.Context.Percent),
-			Signals:  []string{"context_tokens"},
+			Signals:  []string{tokensSignalContextTokens},
 		})
 	}
 	if cacheReadHotspot && signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "summarize-before-boundary",
-			Severity: "low",
+			Severity: tokensSeverityLow,
 			Message:  "Compact or restart after summarizing this investigation; do not discard useful findings just because cache read is high.",
-			Signals:  []string{"cache_read_tokens", "api_call_count"},
+			Signals:  []string{tokensSignalCacheReadTokens, tokensSignalAPICallCount},
 		})
 	}
 	if signals.TurnCount >= recommendationLongSessionTurns || signals.CheckpointCount >= recommendationLongSessionCheckpoints {
 		recs = append(recs, sessionTokensRecommendation{
 			ID:       "long-session",
-			Severity: "low",
+			Severity: tokensSeverityLow,
 			Message:  "Compact or restart after summarizing the useful findings if older context is no longer needed.",
 			Signals:  []string{"turn_count", "checkpoint_count"},
 		})
@@ -437,6 +480,9 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session tokens")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Session: %s\n", report.SessionID)
+	if report.Resolution != strategy.ResolutionNone {
+		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
+	}
 	fmt.Fprintf(w, "Agent:   %s\n", report.Agent)
 	if report.Model != "" {
 		fmt.Fprintf(w, "Model:   %s\n", report.Model)
@@ -455,6 +501,9 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 func writeSessionTokensAgentBrief(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session token brief")
 	fmt.Fprintf(w, "Session: %s\n", report.SessionID)
+	if report.Resolution != strategy.ResolutionNone {
+		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, agentBriefUsageLine(report.Tokens))
 	fmt.Fprintln(w)
@@ -608,9 +657,9 @@ func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor
 		fmt.Fprintln(w, "Likely contributors")
 		for _, contributor := range contributors {
 			switch contributor.Kind {
-			case "subagents":
+			case tokensKindSubagents:
 				fmt.Fprintf(w, "- %s: %s tokens\n", contributor.Label, formatTokenCount(contributor.Tokens))
-			case "context_pressure":
+			case tokensKindContextPressure:
 				if contextInfo != nil {
 					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", contributor.Label, contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
 				}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -34,7 +35,7 @@ const (
 	defaultTrailListStatus = string(trail.StatusOpen)
 	// trailListStatusAny disables the status filter; user-facing value for --status.
 	trailListStatusAny = "any"
-	// trailListServerMaxLimit is entire-api's maximum pageSize.
+	// trailListServerMaxLimit is entire-api's maximum perPage.
 	trailListServerMaxLimit = 100
 	// trailFindMaxPages bounds a branch/ID lookup at a 2,000-trail search budget.
 	trailFindMaxPages = 20
@@ -49,7 +50,7 @@ func newTrailCmd() *cobra.Command {
 	var repoOverride string
 
 	cmd := &cobra.Command{
-		Use:    "trail",
+		Use:    cmdTrail,
 		Short:  "Manage trails for your branches",
 		Hidden: true,
 		// Hidden from root help while the surface matures, but advertised to
@@ -197,7 +198,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 		},
 	}
 	cmd.Flags().StringVar(&branchFlag, "branch", "", "Show the trail for this branch instead of the current branch; cannot be combined with a trail selector")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (same object shape as one entry of 'trail list --json')")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output the trail as JSON (one entry of 'trail list --json' plus a mergeability snapshot, null when unknown)")
 	return cmd
 }
 
@@ -226,10 +227,11 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	}
 
 	// Enrich the list result with the detail endpoint, which carries the
-	// rendered description (trail.body_document.text_snapshot) the list
-	// omits, and surface a browser URL. The detail fetch is best-effort:
-	// the core metadata already came from the list, so a detail failure
-	// falls back to the list body with a warning rather than failing.
+	// rendered description (trail.body_document.text_snapshot) and the
+	// mergeability snapshot the list omits, and surface a browser URL. The
+	// detail fetch is best-effort: the core metadata already came from the
+	// list, so a detail failure falls back to the list body, leaves
+	// mergeability unknown, and warns rather than failing.
 	m := found.ToMetadata()
 	m.URL = trailDisplayURL(*found, forge, owner, repo)
 	// Seed the description from the list body so a failed (or skipped)
@@ -237,31 +239,40 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	// supersedes it with the richer body_document text below.
 	bodyText := found.Body
 	descriptionLoaded := strings.TrimSpace(found.Body) != ""
+	// A numeric selector already resolved through the detail route, so the
+	// detail is in hand — re-requesting the same URL would double the round
+	// trips for every `trail show <number>`.
+	var detail *api.TrailResource
 	switch {
-	case found.BodyDocument != nil:
-		// A numeric selector already resolved through the detail route, so the
-		// description is in hand — re-requesting the same URL would double the
-		// round trips for every `trail show <number>`. Same precedence as the
-		// fetch below: authoritative, but only supersedes a non-empty snapshot.
-		descriptionLoaded = true
-		if snapshot := strings.TrimSpace(found.BodyDocument.TextSnapshot); snapshot != "" {
-			bodyText = snapshot
-		}
+	case found.FromDetail:
+		detail = found
 	case found.Number > 0:
-		if bt, _, derr := fetchTrailDescriptionAtPath(ctx, client, basePath, found.Number); derr == nil {
-			// A successful fetch means we authoritatively consulted the
-			// description, but it only supersedes the seeded list body when
-			// it actually carries text: an older/partial server that omits
-			// body_document returns "" here and must not blank out a list
-			// body that is present.
-			descriptionLoaded = true
-			if strings.TrimSpace(bt) != "" {
-				bodyText = bt
-			}
+		if d, derr := fetchTrailDetailAtPath(ctx, client, basePath, found.Number); derr == nil {
+			detail = &d
 		} else {
 			// Best-effort: warn but still render metadata + URL (and the
 			// list body) rather than failing the whole command.
-			fmt.Fprintf(errW, "Warning: could not load trail description: %v\n", derr)
+			fmt.Fprintf(errW, "Warning: could not load trail detail (description, mergeability): %v\n", derr)
+		}
+	}
+	var mergeability *api.TrailMergeability
+	if detail != nil {
+		// A successful fetch means we authoritatively consulted the
+		// description, but it only supersedes the seeded list body when it
+		// actually carries text: an older/partial server that omits
+		// body_document must not blank out a list body that is present.
+		descriptionLoaded = true
+		if detail.BodyDocument != nil {
+			if snapshot := strings.TrimSpace(detail.BodyDocument.TextSnapshot); snapshot != "" {
+				bodyText = snapshot
+			}
+		}
+		// Best-effort like the description: a snapshot the CLI cannot decode
+		// leaves the verdict unknown rather than failing the command.
+		if mg, merr := detail.DecodeMergeability(); merr == nil {
+			mergeability = mg
+		} else {
+			fmt.Fprintf(errW, "Warning: could not read trail mergeability: %v\n", merr)
 		}
 	}
 	// The list body is the weaker source; carry the resolved description on the
@@ -271,16 +282,17 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	if opts.JSON {
 		// Emit the raw body — never the "no description" placeholder, which is
 		// display text, not data. A single object mirrors one entry of
-		// `trail list --json` so both can feed the same parser.
+		// `trail list --json` so both can feed the same parser; the
+		// detail-only mergeability snapshot is the one addition.
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(m); err != nil {
+		if err := enc.Encode(trailShowJSON{Metadata: m, Mergeability: toTrailMergeabilityJSON(mergeability)}); err != nil {
 			return fmt.Errorf("failed to encode JSON: %w", err)
 		}
 		return nil
 	}
 
-	printTrailDetails(w, m, m.URL, trailDescriptionForDisplay(bodyText, descriptionLoaded))
+	printTrailDetails(w, m, m.URL, mergeability, trailDescriptionForDisplay(bodyText, descriptionLoaded))
 	return nil
 }
 
@@ -314,7 +326,9 @@ func resolveTrailBySelectorAtPath(ctx context.Context, client *api.Client, baseP
 	return found, nil
 }
 
-func printTrailDetails(w io.Writer, m *trail.Metadata, webURL, bodyText string) {
+// printTrailDetails renders the human `trail show` view. A nil mergeability
+// means the detail could not be loaded, and renders as unknown.
+func printTrailDetails(w io.Writer, m *trail.Metadata, webURL string, mergeability *api.TrailMergeability, bodyText string) {
 	// Color the same fields as the list view (STATUS/PHASE/AUTHOR); everything
 	// else stays plain. Values are pre-colored, so alignment is unaffected.
 	styles := newStatusStyles(w)
@@ -372,6 +386,7 @@ func printTrailDetails(w io.Writer, m *trail.Metadata, webURL, bodyText string) 
 	}
 	fmt.Fprintf(w, "  %s%s\n", label("Created: "), m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	fmt.Fprintf(w, "  %s%s\n", label("Updated: "), m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	printTrailMergeability(w, styles, label, mergeability)
 	if strings.TrimSpace(bodyText) != "" {
 		fmt.Fprintf(w, "\n%s\n%s\n", label("Description:"), bodyText)
 	}
@@ -416,40 +431,50 @@ func trailDisplayURL(t api.TrailResource, forge, owner, repo string) string {
 	if strings.TrimSpace(t.URL) != "" {
 		return t.URL
 	}
-	if t.Number > 0 {
-		return trailWebURL(api.BaseURL(), forge, owner, repo, t.Number)
+	base, err := auth.DataBaseURL()
+	if t.Number > 0 && err == nil {
+		return trailWebURL(base, forge, owner, repo, t.Number)
 	}
 	return ""
 }
 
 // trailWebURL builds a fallback browser URL for a trail used only when the
 // server does not supply one (older servers):
-// <web-origin>/<forge>/<owner>/<repo>/trails/<number>. In production the web app
-// is served from the same origin as the data API, so the API base URL doubles
-// as the web origin. A split local-dev setup (API and frontend on different
-// ports) would point this at the API port rather than the dev frontend.
+// <web-origin>/<forge>/<owner>/<repo>/trails/<number>. The web app is served
+// from the same origin as the data API, so that base doubles as the web
+// origin. A split local-dev setup (API and frontend on different ports) would
+// point this at the API port rather than the dev frontend.
 func trailWebURL(base, forge, owner, repo string, number int) string {
 	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
+}
+
+// fetchTrailDetailAtPath fetches a trail's detail resource by integer number.
+// The detail carries what the list endpoint omits: the rendered description
+// (body_document) and the mergeability snapshot.
+func fetchTrailDetailAtPath(ctx context.Context, client *api.Client, basePath string, number int) (api.TrailResource, error) {
+	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
+	if err != nil {
+		return api.TrailResource{}, fmt.Errorf("failed to fetch trail detail: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := checkTrailResponse(resp); err != nil {
+		return api.TrailResource{}, err
+	}
+	detail, err := decodeTrailResource(resp)
+	if err != nil {
+		return api.TrailResource{}, fmt.Errorf("failed to decode trail detail: %w", err)
+	}
+	return detail, nil
 }
 
 // fetchTrailDescriptionAtPath fetches a trail's rendered description text
 // (`trail.body_document.text_snapshot`) and its etag, which the list endpoint
 // omits, by integer number. It returns only the description and etag — the
-// list result already supplies the metadata — and decodes only the fields it
-// needs, so it is unaffected by the shape of sibling fields like
-// `checkpoints`/`thread`.
+// list result already supplies the metadata.
 func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePath string, number int) (string, string, error) {
-	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
+	detail, err := fetchTrailDetailAtPath(ctx, client, basePath, number)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to fetch trail detail: %w", err)
-	}
-	defer resp.Body.Close()
-	if err := checkTrailResponse(resp); err != nil {
 		return "", "", err
-	}
-	detail, err := decodeTrailResource(resp)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to decode trail detail: %w", err)
 	}
 	if detail.BodyDocument == nil {
 		return "", "", nil
@@ -457,12 +482,14 @@ func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePa
 	return strings.TrimSpace(detail.BodyDocument.TextSnapshot), detail.BodyDocument.ETag, nil
 }
 
-// decodeTrailResource decodes entire-api's direct detail resource.
+// decodeTrailResource decodes entire-api's direct detail resource and marks it
+// FromDetail.
 func decodeTrailResource(resp *http.Response) (api.TrailResource, error) {
 	var resource api.TrailResource
 	if err := api.DecodeJSON(resp, &resource); err != nil {
 		return api.TrailResource{}, fmt.Errorf("decode trail resource: %w", err)
 	}
+	resource.FromDetail = true
 	return resource, nil
 }
 
@@ -470,7 +497,7 @@ func newTrailListCmd() *cobra.Command {
 	var opts trailListOptions
 
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List recent trails",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts.InsecureHTTP = trailInsecureHTTP(cmd)
@@ -574,15 +601,15 @@ func listTrailResources(ctx context.Context, client *api.Client, basePath string
 		return nil, 0, errors.New("limit must be greater than 0")
 	}
 	items := make([]api.TrailResource, 0, min(limit, trailListServerMaxLimit))
-	pageToken := ""
+	cursor := ""
 	seenTokens := map[string]bool{}
 	totalMatched := 0
 	for {
-		pageSize := trailListServerMaxLimit
-		if author == "" && limit-len(items) < pageSize {
-			pageSize = limit - len(items)
+		perPage := trailListServerMaxLimit
+		if author == "" && limit-len(items) < perPage {
+			perPage = limit - len(items)
 		}
-		resp, err := client.Get(ctx, basePath+trailListPageQuery(statuses, pageSize, pageToken))
+		resp, err := client.Get(ctx, basePath+trailListPageQuery(statuses, perPage, cursor))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to list trails: %w", err)
 		}
@@ -634,14 +661,14 @@ func listTrailResources(ctx context.Context, client *api.Client, basePath string
 				break
 			}
 		}
-		if page.NextPageToken == nil || strings.TrimSpace(*page.NextPageToken) == "" {
+		if page.NextCursor == nil || strings.TrimSpace(*page.NextCursor) == "" {
 			break
 		}
-		pageToken = strings.TrimSpace(*page.NextPageToken)
-		if seenTokens[pageToken] {
-			return nil, 0, fmt.Errorf("trail list pagination repeated page token %q", pageToken)
+		cursor = strings.TrimSpace(*page.NextCursor)
+		if seenTokens[cursor] {
+			return nil, 0, fmt.Errorf("trail list pagination repeated cursor %q", cursor)
 		}
-		seenTokens[pageToken] = true
+		seenTokens[cursor] = true
 	}
 	return items, totalMatched, nil
 }
@@ -649,21 +676,26 @@ func listTrailResources(ctx context.Context, client *api.Client, basePath string
 // trailListPageQuery builds entire-api's cursor-paginated list query. Empty
 // statuses (--status any) omit the filter. Author is intentionally absent: the
 // CLI accepts a login while this API's author filter accepts account ULIDs.
-func trailListPageQuery(statusFilters []trail.Status, pageSize int, pageToken string) string {
+//
+// Filters ride only the FIRST page on purpose (RFD-026 §8): the opaque cursor
+// carries the active filters, the server restores them on every continuation,
+// and it 400s a continuation whose repeated filters conflict with the
+// cursor's. Later pages are therefore filtered by the cursor, not unfiltered.
+func trailListPageQuery(statusFilters []trail.Status, perPage int, cursor string) string {
 	q := url.Values{}
-	if len(statusFilters) > 0 {
+	if cursor == "" && len(statusFilters) > 0 {
 		parts := make([]string, len(statusFilters))
 		for i, status := range statusFilters {
 			parts[i] = string(status)
 		}
-		q.Set("status", strings.Join(parts, ","))
+		q.Set("status[eq]", strings.Join(parts, ","))
 	}
-	if pageSize <= 0 || pageSize > trailListServerMaxLimit {
-		pageSize = trailListServerMaxLimit
+	if perPage <= 0 || perPage > trailListServerMaxLimit {
+		perPage = trailListServerMaxLimit
 	}
-	q.Set("pageSize", strconv.Itoa(pageSize))
-	if strings.TrimSpace(pageToken) != "" {
-		q.Set("pageToken", strings.TrimSpace(pageToken))
+	q.Set("per_page", strconv.Itoa(perPage))
+	if strings.TrimSpace(cursor) != "" {
+		q.Set("cursor", strings.TrimSpace(cursor))
 	}
 	return "?" + q.Encode()
 }
@@ -1135,9 +1167,14 @@ func prepareTrailCreateBranch(ctx context.Context, w, errW io.Writer, repo *git.
 	// For branch-backed trails, always push the branch first: the trail binds to a
 	// remote branch, so deliver it before creating the trail rather than letting
 	// the server backfill it at the base tip. Branchless trails skip this entirely.
-	if err := pushBranchToRemote(ctx, remote, branch); err != nil {
+	if err := pushBranchToRemote(ctx, w, errW, remote, branch); err != nil {
 		cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, false, errW)
-		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
+		// The push runs pre-push hooks, so a failure here is no longer only a
+		// delivery problem: Entire's hook can decline the push, and so can any
+		// hook the repo installed for its own reasons. The hook's own reason has
+		// already streamed to errW, so the hint names that cause and points at
+		// it rather than reprinting it.
+		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if a pre-push hook rejected the push, see its output above and retry once it passes\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
 	}
 	state.RemotePushed = !existedOnRemote
 	fmt.Fprintf(w, "Pushed branch %s to %s\n", branch, remote)
@@ -2159,10 +2196,10 @@ func findTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath s
 func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
 	// Walk bounded opaque-cursor pages so selector lookups do not silently miss
 	// trails beyond the first entire-api page.
-	pageToken := ""
+	cursor := ""
 	seenTokens := map[string]bool{}
 	for range trailFindMaxPages {
-		resp, err := client.Get(ctx, basePath+trailListPageQuery(nil, trailListServerMaxLimit, pageToken))
+		resp, err := client.Get(ctx, basePath+trailListPageQuery(nil, trailListServerMaxLimit, cursor))
 		if err != nil {
 			return nil, fmt.Errorf("list trails: %w", err)
 		}
@@ -2187,14 +2224,14 @@ func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, m
 				return &listResp.Trails[i], nil
 			}
 		}
-		if listResp.NextPageToken == nil || strings.TrimSpace(*listResp.NextPageToken) == "" {
+		if listResp.NextCursor == nil || strings.TrimSpace(*listResp.NextCursor) == "" {
 			break
 		}
-		pageToken = strings.TrimSpace(*listResp.NextPageToken)
-		if seenTokens[pageToken] {
+		cursor = strings.TrimSpace(*listResp.NextCursor)
+		if seenTokens[cursor] {
 			break
 		}
-		seenTokens[pageToken] = true
+		seenTokens[cursor] = true
 	}
 	return nil, nil //nolint:nilnil // nil, nil means "not found" — callers check both
 }
@@ -2269,7 +2306,7 @@ func resolveTrailBranch(ctx context.Context, branchOverride string) (string, err
 
 // defaultTrailPushRemote is where a trail branch goes when git config declares
 // nothing — git's own fallback for a bare push. Not defaultMirrorRemote, which
-// shares the value but means "the remote `mirror use` repoints".
+// shares the value but means "the remote `remote add` repoints".
 const defaultTrailPushRemote = "origin"
 
 // resolveTrailPushRemote returns the remote a trail's branch is delivered to,
@@ -2311,7 +2348,8 @@ func resolveTrailPushRemote(ctx context.Context, branch string) (string, error) 
 // parseTrailRepoArg parses an explicit --repo value into the forge/owner/repo
 // triple. It accepts the canonical "forge/owner/repo" form (e.g. gh/acme/app)
 // as well as a full clone URL (https://, git@, or entire://) that gitremote
-// can parse. A trailing ".git" on the repo is stripped.
+// can parse. A trailing ".git" on the repo is stripped for every forge except
+// the native one, where it is part of the name.
 func parseTrailRepoArg(raw string) (forge, owner, repo string, err error) {
 	return parseTrailRepoShape(raw)
 }
@@ -2337,7 +2375,12 @@ func parseTrailRepoShape(raw string) (forge, owner, repo string, err error) {
 		if !gitremote.IsForgePathToken(parts[0]) {
 			return "", "", "", fmt.Errorf("invalid --repo %q: %q is not a supported forge id (use a forge id like \"gh\", or pass a clone URL such as https://github.com/%s/%s)", raw, parts[0], parts[1], parts[2])
 		}
-		return parts[0], parts[1], strings.TrimSuffix(parts[2], gitDirSuffix), nil
+		// `.git` is decoration on a mirror and part of the name on a native
+		// repo, so the trim follows the forge the ref named.
+		if parts[0] == gitremote.ForgeNative {
+			return parts[0], parts[1], parts[2], nil
+		}
+		return parts[0], parts[1], strings.TrimSuffix(parts[2], mirrorGitDirSuffix), nil
 	}
 	info, perr := gitremote.ParseURL(raw)
 	if perr != nil {
@@ -2455,14 +2498,101 @@ func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error
 	return nil
 }
 
+// trailBranchPushTimeout bounds the trail branch delivery, which now covers the
+// pre-push hook as well as the network push.
+//
+// The hook's compute cost is smaller than it looks: OPF makes exactly one
+// shell-out per push (see manual_commit_opf_rewrite.go and
+// manual_commit_opf_refs.go), bounded by
+// redaction.openai_privacy_filter.timeout_seconds — 30s by default — and an
+// oversized first run is rejected outright by BootstrapTooLargeError or
+// OPFRawBytesTooLargeError rather than allowed to run long. What is genuinely
+// unbounded is the OPF prompt, which waits on a person. Ten minutes is sized to
+// leave room for someone to answer it, not to cover a slow scan; two minutes
+// was not enough for either.
+//
+// Known limitation: timeout_seconds is validated only as >= 0, so a value
+// configured above this bound is truncated and the push is cut short. Deriving
+// the bound from that setting is the fix if anyone hits it.
+//
+// What expiry kills is git, and only git: exec.CommandContext's default Cancel
+// is Process.Kill() on the child's PID, no Setpgid is set, and no group signal
+// is sent. The OPF re-redaction and the checkpoint ref CAS-updates do not run
+// there — they run in the pre-push hook, a grandchild (.git/hooks/pre-push,
+// which execs `entire hooks pre-push`). So the hook is orphaned, not
+// interrupted: expiry cannot leave a half-rewritten ref or a stale lock the way
+// StatusWalkBudget's SIGKILL can, because that one kills the process holding
+// the lock and this one does not. Nor is expiry likely to land on a local write
+// at all — the reason it fires is the OPF prompt, and pre-push runs before any
+// transfer or ref update, so git is parked holding nothing.
+//
+// The orphan is the real cost, and it is deliberately accepted: the hook keeps
+// the inherited terminal and can go on publishing checkpoint refs and printing
+// after trail create has failed and begun retracting the branch. Killing the
+// process group instead would trade that for the mid-rewrite kill this note
+// used to describe, which is the worse of the two.
+//
+// A bound exists at all only because trail create is a multi-step command and a
+// wedged push must not hang it forever. A plain `git push` has none — the hook
+// runs undeadlined — so this ceiling is Entire's, not git's.
+const trailBranchPushTimeout = 10 * time.Minute
+
 // pushBranchToRemote pushes a branch to remote, which callers resolve through
-// resolveTrailPushRemote rather than assuming "origin".
-func pushBranchToRemote(ctx context.Context, remote, branchName string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+// resolveTrailPushRemote rather than assuming "origin". This must run Git's
+// pre-push hooks: Entire's hook publishes any checkpoint data that was captured
+// before the trail branch was created.
+//
+// Because the hook runs, this has to be a real push rather than an internal
+// subprocess whose output nobody reads, so stdout and stderr stream to the
+// caller's writers instead of into a CombinedOutput() buffer read only on
+// failure. Two things went wrong while that buffer swallowed them:
+//
+//   - Entire's hook reports on stderr both when it pushes checkpoint refs and
+//     when it withholds them, and on the git-refs backend it withholds them
+//     while still exiting zero. So trail create could print "Pushed branch" for
+//     a push that published nothing — the failure this path exists to prevent,
+//     with its only diagnostic discarded.
+//   - The OPF prompt became unanswerable-in-practice rather than skipped.
+//     interactive.CanPromptInteractively() decides from a /dev/tty probe and
+//     never consults stdio, so it still said yes; bubbletea then falls back to
+//     /dev/tty for prompt INPUT when stdin is not a terminal but has no such
+//     fallback for OUTPUT, which is unconditionally os.Stdout. The form
+//     therefore rendered into the buffer while reading real keystrokes: a push
+//     that blocks on a prompt the user cannot see.
+//
+// Both fixes rest on the writers arriving here being real *os.File values:
+// os/exec hands an *os.File's descriptor straight to the child, so the hook
+// inherits the terminal, whereas any other io.Writer gets an os.Pipe and the
+// child's stdout stops being a tty. Today they are — cobra's OutOrStdout and
+// ErrOrStderr fall through to os.Stdout/os.Stderr, and nothing on the path to
+// trail create calls SetOut/SetErr — so a pager or output tee added to the root
+// command would silently undo this.
+//
+// It would undo more than the tty. Once os/exec has to interpose a pipe,
+// Cmd.Wait blocks on its copy goroutine until every holder of the write end
+// closes it — and an orphaned hook (see trailBranchPushTimeout) holds one.
+// WaitDelay is unset, so that wait has no ceiling: the timeout above would stop
+// bounding this call at all, which is the one thing it exists to do.
+//
+// stdin is deliberately NOT inherited, though a real push would inherit it,
+// because nothing downstream reads it and /dev/null is what makes a
+// non-interactive trail create fail fast rather than block to the timeout. The
+// justification this note used to give — git prompting for credentials — does
+// not hold: git push has no --stdin mode, git's credential prompt uses /dev/tty
+// or askpass, the OPF prompt reads /dev/tty per bubbletea's fallback above, and
+// the hook never receives ours anyway, since git hands it a pipe carrying the
+// ref list. Inheriting it only converted an immediate EOF into a real blocking
+// read for an agent whose stdin is a long-lived pipe.
+func pushBranchToRemote(ctx context.Context, out, errOut io.Writer, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, trailBranchPushTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remote, branchName)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	cmd := exec.CommandContext(ctx, "git", "push", "-u", remote, branchName)
+	cmd.Stdout = out
+	cmd.Stderr = errOut
+	if err := cmd.Run(); err != nil {
+		// git's own message already reached errOut, so this names the command
+		// and carries the exit status rather than repeating the diagnostic.
+		return fmt.Errorf("git push: %w", err)
 	}
 	return nil
 }
@@ -2488,6 +2618,13 @@ func remoteHasBranch(ctx context.Context, remote, branchName string) (bool, erro
 	return strings.TrimSpace(string(output)) != "", nil
 }
 
+// deleteBranchFromRemote keeps --no-verify, which is deliberate and is the
+// opposite of the rule pushBranchToRemote documents. That one must run the hook
+// because it delivers commits whose checkpoint data has to go with them; this
+// one retracts a branch on a failed trail create, so there is nothing to
+// publish, and running Entire's checkpoint sync (or the repo's own hooks) while
+// unwinding is work in the wrong direction on a path that is already handling
+// an error.
 func deleteBranchFromRemote(ctx context.Context, remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
