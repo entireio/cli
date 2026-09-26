@@ -1,0 +1,428 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+)
+
+// TestClaimCommandParsesAsACheckpointRemoteFlag is the pin between the remedy
+// and the flag it tells the user to run. ClaimCheckpointRemoteCommand lives in
+// the remote package, which cannot import the flag parser without a cycle, so
+// it re-derives what a valid provider and repo look like; this test is what
+// stops the two drifting into a remedy that errors when pasted.
+func TestClaimCommandParsesAsACheckpointRemoteFlag(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		config   settings.CheckpointRemoteConfig
+		wantFlag string // "" means no command should be offered at all
+	}{
+		{"ordinary", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/checkpoints"}, "github:acme/checkpoints"},
+		{"dotted repo name", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/checkpoints.store"}, "github:acme/checkpoints.store"},
+		{"no owner", settings.CheckpointRemoteConfig{Provider: "github", Repo: "checkpoints"}, ""},
+		{"empty repo", settings.CheckpointRemoteConfig{Provider: "github", Repo: ""}, ""},
+		{"empty provider", settings.CheckpointRemoteConfig{Provider: "", Repo: "acme/checkpoints"}, ""},
+		{"provider carrying the separator", settings.CheckpointRemoteConfig{Provider: "git:hub", Repo: "acme/checkpoints"}, ""},
+		// The resolver maps gitlab (providerHost) but the flag rejects it, so a
+		// command naming it would fail when pasted. Offer none until the flag
+		// is widened.
+		{"provider the flag rejects", settings.CheckpointRemoteConfig{Provider: "gitlab", Repo: "acme/checkpoints"}, ""},
+		// The repo field is read from the COMMITTED settings.json — the
+		// inherited-from-upstream case this feature is about — and the output
+		// is a command a human is told to run. A hostile repository must not be
+		// able to put anything executable in it.
+		{"shell separator", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo;id"}, ""},
+		{"backticks", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo`id`"}, ""},
+		{"command substitution", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo$(id)"}, ""},
+		{"pipe", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo|id"}, ""},
+		{"and-and", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo&&id"}, ""},
+		{"newline", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo\nid"}, ""},
+		{"quote", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/fo\"o"}, ""},
+		{"redirect", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo>out"}, ""},
+		{"three segments", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/foo/bar"}, ""},
+		// Surrounding whitespace is tolerated because the validation trims —
+		// but then the value WRITTEN must be the trimmed one too. Building the
+		// command and the write separately let this pass the check and fail the
+		// write, prompting the user and then erroring.
+		{"padded fields", settings.CheckpointRemoteConfig{Provider: " github ", Repo: " acme/checkpoints "}, "github:acme/checkpoints"},
+		{"repo with a space", settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/check points"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := checkpointremote.ClaimCheckpointRemoteCommand(&tc.config)
+			if tc.wantFlag == "" {
+				assert.Empty(t, got, "a config the flag would reject must offer no command")
+				return
+			}
+			require.Equal(t, "entire enable --local --checkpoint-remote "+tc.wantFlag, got)
+
+			// The value written on the user's behalf must be the same one the
+			// printed command carries, or the prompt accepts a claim the write
+			// then rejects.
+			assert.Equal(t, tc.wantFlag, checkpointremote.ClaimCheckpointRemoteFlagValue(&tc.config),
+				"the written value must match the printed command")
+
+			provider, repo, err := parseCheckpointRemoteFlag(tc.wantFlag)
+			require.NoError(t, err, "the offered command must parse")
+			// Trimmed, because that is what the value carries and what gets
+			// written — the padded case exists to pin exactly that.
+			assert.Equal(t, strings.TrimSpace(tc.config.Provider), provider)
+			assert.Equal(t, strings.TrimSpace(tc.config.Repo), repo)
+		})
+	}
+
+	assert.Empty(t, checkpointremote.ClaimCheckpointRemoteCommand(nil))
+}
+
+// TestEnableReportsAnIgnoredCheckpointRemote fills the enable gap: `entire
+// enable` is where checkpoint configuration is fixed, and a checkpoint_remote
+// the ownership check refused used to leave it saying nothing at all — the
+// rejection reached the user only through .entire/logs.
+func TestEnableReportsAnIgnoredCheckpointRemote(t *testing.T) {
+	dir := setupTestRepo(t)
+	// origin belongs to alice, the configured store to acme: inherited by
+	// cloning as far as local git config can tell.
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	reportIgnoredCheckpointRemote(ctx, &out, s, "origin", false)
+
+	got := out.String()
+	assert.Contains(t, got, "Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints")
+	assert.Contains(t, got, "entire enable --local --checkpoint-remote github:acme/checkpoints")
+}
+
+// TestEnableSaysNothingAboutACheckpointRemoteInUse is the control: the report
+// is above the `touched` gate, so it prints on every `entire enable`, and a
+// false positive would tell a correctly configured repo to fix itself.
+func TestEnableSaysNothingAboutACheckpointRemoteInUse(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	reportIgnoredCheckpointRemote(ctx, &out, s, "origin", false)
+	assert.Empty(t, out.String(), "a store whose owner matches every remote is the developer's own")
+}
+
+// TestEnableCommandSurfacesAnIgnoredCheckpointRemote proves the report is
+// reached by `entire enable` itself, and not just callable. The report sits
+// above the flow's `touched` gate precisely so a bare re-enable — the
+// invocation someone reaches for when checkpoints are not where they expected —
+// still names the fix.
+func TestEnableCommandSurfacesAnIgnoredCheckpointRemote(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	cmd := newEnableCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs(nil)
+	require.NoError(t, cmd.Execute())
+
+	assert.Contains(t, output.String(), "Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints")
+	assert.Contains(t, output.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
+}
+
+// TestEnableDoesNotOfferAStoreAnotherOwnerHolds is the guard on the offer: it
+// exists for ownership that is UNPROVABLE, never for ownership that is
+// DISPROVED. Origin here names a different owner, which is the fork case the
+// check was built for — offering to adopt would walk a contributor into
+// publishing their transcripts to the upstream's store one keystroke deep.
+//
+// Asserted through the verdict rather than the prompt, because the prompt is
+// suppressed under test anyway and the verdict is what gates it.
+func TestEnableDoesNotOfferAStoreAnotherOwnerHolds(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, "origin")
+	require.True(t, verdict.Refused(), "a differently-owned store must be refused")
+	assert.Equal(t, checkpointremote.OwnershipDisproved, verdict,
+		"a readable, mismatched owner is disproof, not absence of evidence: %s", reason)
+}
+
+// TestEnableOffersOnlyWhenOwnershipCannotBeEstablished is the other side: a
+// single-segment origin yields no owner to compare, which is ordinary on
+// self-hosted git and is the case a human can settle.
+func TestEnableOffersOnlyWhenOwnershipCannotBeEstablished(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := context.Background()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	verdict, _ := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, "origin")
+	require.True(t, verdict.Refused(), "an unprovable store is still refused non-interactively")
+	assert.Equal(t, checkpointremote.OwnershipUnprovable, verdict)
+}
+
+// TestEnableDoesNotOfferWhenAnyRemoteDisprovesOwnership: an origin with no
+// readable owner must not hide a push remote whose owner is someone else,
+// which is the fork case the offer must never reach.
+//
+// Not parallel: repository CWD and scripted prompt input are process-global.
+func TestEnableDoesNotOfferWhenAnyRemoteDisprovesOwnership(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@mirror.example:app.git")
+	testutil.RunGit(t, dir, "remote", "set-url", "--push", "origin", "git@github.com:contributor/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	ctx := t.Context()
+	s, err := settings.Load(ctx)
+	require.NoError(t, err)
+
+	verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(ctx, s, "origin")
+	assert.Equal(t, checkpointremote.OwnershipDisproved, verdict, reason)
+	assert.Contains(t, reason, `"contributor"`)
+
+	withInteractivePromptStdin(t, "y\n")
+	var out bytes.Buffer
+	assert.False(t, reportIgnoredCheckpointRemote(ctx, &out, s, "origin", true))
+	assert.False(t, settings.CheckpointRemoteIsLocalOnly(ctx), "no claim may be written: %s", out.String())
+}
+
+// TestEnableStillOffersWhenNoRemoteDisprovesOwnership is the control: an
+// unreadable origin next to a push remote whose owner matches stays Unprovable.
+func TestEnableStillOffersWhenNoRemoteDisprovesOwnership(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@mirror.example:app.git")
+	testutil.RunGit(t, dir, "remote", "set-url", "--push", "origin", "git@github.com:acme/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	verdict, reason := checkpointremote.InheritedCheckpointRemoteVerdict(t.Context(), s, "origin")
+	assert.Equal(t, checkpointremote.OwnershipUnprovable, verdict)
+	assert.Equal(t, "origin URL owner could not be determined", reason)
+}
+
+// Not parallel: repository CWD and scripted prompt input are process-global.
+func TestCheckpointClaimReport(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		args             []string
+		yes              bool
+		localState       string
+		wantClaim        bool
+		invalidTransport bool
+	}{
+		{name: "confirmed", wantClaim: true},
+		{name: "confirmed but transport cannot resolve", wantClaim: true, invalidTransport: true},
+		{name: "yes skips claim", args: []string{"--yes"}, yes: true},
+		{name: "agent skips claim", args: []string{"--agent", "claude-code"}},
+		{name: "tracked local", localState: "tracked"},
+		{name: "removed from index only", localState: "head"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestRepo(t)
+			testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+			writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+			if !tc.invalidTransport {
+				testutil.RunGit(t, dir, "remote", "set-url", "--push", "origin", "git@github.com:acme/app.git")
+			}
+			if tc.localState != "" {
+				testutil.WriteFile(t, dir, settings.EntireSettingsLocalFile, `{}`)
+				testutil.RunGit(t, dir, "add", "-f", settings.EntireSettingsLocalFile)
+				testutil.GitCommit(t, dir, "track local settings")
+				if tc.localState == "head" {
+					testutil.RunGit(t, dir, "rm", "--cached", settings.EntireSettingsLocalFile)
+				}
+			}
+			withInteractivePromptStdin(t, "y\n")
+			cmd := newEnableCmd()
+			cmd.SetContext(t.Context())
+			require.NoError(t, cmd.ParseFlags(tc.args))
+			opts := EnableOptions{Yes: tc.yes}
+			require.NoError(t, prepareEnableCheckpointRemoteCommand(cmd, &opts))
+			opts.checkpointRemoteChoice.name = "origin"
+			var out bytes.Buffer
+			opts.checkpointRemoteChoice.report(t.Context(), &out, nil)
+			assert.Equal(t, tc.wantClaim, settings.CheckpointRemoteIsLocalOnly(t.Context()), out.String())
+			switch {
+			case tc.wantClaim && tc.invalidTransport:
+				assert.Contains(t, out.String(), "uploaded when you push to origin")
+				assert.NotContains(t, out.String(), "Checkpoints will use acme/checkpoints")
+			case tc.wantClaim:
+				assert.NotContains(t, out.String(), "No checkpoint destination settings changed")
+				assert.Contains(t, out.String(), "Checkpoint uploads use the dedicated destination:")
+				assert.NotContains(t, out.String(), "Keeping checkpoint destination: origin")
+				assert.NotContains(t, out.String(), "uploaded when you push to origin")
+			case tc.localState != "":
+				// Same command as everyone else; running it explains why it
+				// cannot take effect.
+				assert.Contains(t, out.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
+				err := updateStrategyOptions(t.Context(), &out, EnableOptions{UseLocalSettings: true, CheckpointRemote: "github:acme/checkpoints"})
+				require.ErrorContains(t, err, "Untrack it, commit its removal")
+			default:
+				assert.Contains(t, out.String(), "entire enable --local --checkpoint-remote github:acme/checkpoints")
+			}
+		})
+	}
+}
+
+func TestStatusUnprovableCheckpointClaim(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+	info := computeCheckpointSyncInfo(t.Context(), s)
+	assert.Equal(t, "entire enable --local --checkpoint-remote github:acme/checkpoints", info.IgnoredRemedy)
+	assert.Equal(t, "origin URL owner could not be determined", info.IgnoredReason)
+}
+
+func TestStatusTrackedLocalCheckpointClaim(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	testutil.WriteFile(t, dir, settings.EntireSettingsLocalFile, `{}`)
+	testutil.RunGit(t, dir, "add", "-f", settings.EntireSettingsLocalFile)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+	info := computeCheckpointSyncInfo(t.Context(), s)
+	assert.Equal(t, "entire enable --local --checkpoint-remote github:acme/checkpoints", info.IgnoredRemedy)
+	err = updateStrategyOptions(t.Context(), io.Discard, EnableOptions{UseLocalSettings: true, CheckpointRemote: "github:acme/checkpoints"})
+	require.ErrorContains(t, err, "Untrack it, commit its removal")
+}
+
+// Not parallel: repository CWD is process-global.
+func TestIgnoredCheckpointRemoteStripsTerminalEscapes(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@github.com:alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/store\u001b[2J\u001b]0;pwned\u0007"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	var enableOut bytes.Buffer
+	reportIgnoredCheckpointRemote(t.Context(), &enableOut, s, "origin", false)
+	assert.Contains(t, enableOut.String(), "acme/store")
+	assert.NotContains(t, enableOut.String(), "\x1b")
+	assert.NotContains(t, enableOut.String(), "\a")
+
+	var statusOut bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+	assert.Contains(t, statusOut.String(), "acme/store")
+	assert.NotContains(t, statusOut.String(), "\x1b]0;")
+	assert.NotContains(t, statusOut.String(), "\x1b[2J")
+}
+
+// TestEnableAndStatusAgreeWhenCheckpointsSyncToAFork is the clone-upstream,
+// push-to-your-fork flow: origin's owner matches the store, so origin alone
+// would reach it, but checkpoints sync to the fork, whose owner disproves it.
+// enable used to stay silent here because SOME remote reached the store while
+// status reported the elected one; both now describe the elected remote, in
+// the same words.
+//
+// Not parallel: repository CWD is process-global.
+func TestEnableAndStatusAgreeWhenCheckpointsSyncToAFork(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@github.com:acme/app.git")
+	testutil.RunGit(t, dir, "remote", "add", "fork", "git@github.com:alice/app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"fork","checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	const want = `Checkpoints sync to fork, not to the configured checkpoint_remote acme/checkpoints: push remote owner "alice" differs from checkpoint owner "acme".`
+
+	var enableOut bytes.Buffer
+	reportIgnoredCheckpointRemote(t.Context(), &enableOut, s, "fork", false)
+	assert.Contains(t, enableOut.String(), want)
+
+	var statusOut bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+	assert.Contains(t, statusOut.String(), want)
+	assert.NotContains(t, statusOut.String(), "! "+want,
+		"another owner's store is the fork outcome working as intended, not a fault")
+	assert.Equal(t, "disproved", computeCheckpointSyncInfo(t.Context(), s).IgnoredVerdict())
+}
+
+// TestStatusWarnsOnlyWhenOwnershipIsUnprovable: an owner that cannot be read is
+// the one refusal only the user can settle, so it keeps the warning marker the
+// disproved case drops.
+//
+// Not parallel: repository CWD is process-global.
+func TestStatusWarnsOnlyWhenOwnershipIsUnprovable(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "git@selfhosted.example:app.git")
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+
+	var statusOut bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+	assert.Contains(t, statusOut.String(),
+		"! Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints: origin URL owner could not be determined.")
+	assert.Equal(t, "unprovable", computeCheckpointSyncInfo(t.Context(), s).IgnoredVerdict())
+}
+
+// TestEnableAndStatusAgreeWithPushingDisabled: with push_sessions=false the
+// store is in use only if checkpoint reads resolve to it, and enable used to
+// return before judging it at all while status reported it. Both refusal kinds
+// are covered: ownership, and a store the fetch side declines for another
+// reason (here a checkpoint token with a provider it has no host for).
+//
+// Not parallel: repository CWD and the token env var are process-global.
+func TestEnableAndStatusAgreeWithPushingDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, origin, token, want string
+	}{
+		{
+			name: "ownership", provider: "github", origin: "https://github.com/alice/app.git",
+			want: `Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints: origin owner "alice" differs from checkpoint owner "acme".`,
+		},
+		{
+			name: "read_side", provider: "bitbucket", origin: "https://bitbucket.org/acme/app.git", token: "token",
+			want: "Checkpoints sync to origin, not to the configured checkpoint_remote acme/checkpoints: checkpoint reads do not resolve to it (see .entire/logs for the reason).",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(checkpointremote.CheckpointTokenEnvVar, tc.token)
+			dir := setupTestRepo(t)
+			testutil.RunGit(t, dir, "remote", "add", "origin", tc.origin)
+			writeSettings(t, `{"enabled":true,"strategy_options":{"push_sessions":false,"checkpoint_remote":{"provider":"`+tc.provider+`","repo":"acme/checkpoints"}}}`)
+
+			cmd := newEnableCmd()
+			var enableOut bytes.Buffer
+			cmd.SetOut(&enableOut)
+			cmd.SetErr(&enableOut)
+			cmd.SetArgs(nil)
+			require.NoError(t, cmd.Execute())
+			assert.Contains(t, enableOut.String(), tc.want)
+
+			var statusOut bytes.Buffer
+			require.NoError(t, runStatus(t.Context(), &statusOut, false, false))
+			assert.Contains(t, statusOut.String(), tc.want)
+		})
+	}
+}

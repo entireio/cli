@@ -215,6 +215,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
 		commitCapturedSyncRemote(ctx, pendingCapture)
 	}
+	// Only a push that carried checkpoints can say "they are going somewhere
+	// other than where you said"; the gate and every early return above carry
+	// none, and hintGatedCheckpointSync speaks for the gated case.
+	if deliveredCount > 0 {
+		warnIgnoredCheckpointRemote(ctx, ps)
+	}
 
 	cleanupPushedShadowBranches(ctx)
 	return nil
@@ -422,6 +428,11 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		// nothing, so it must not move the election or announce that it had.
 		if pendingCapture != "" && flushed > 0 {
 			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+		// An empty queue carried no checkpoints, so there is nothing to warn
+		// was misdirected — see warnIgnoredCheckpointRemote.
+		if flushed > 0 {
+			warnIgnoredCheckpointRemote(ctx, ps)
 		}
 	} else {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's

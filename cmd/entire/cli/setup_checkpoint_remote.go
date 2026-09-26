@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 const flagCheckpointPushRemote = "checkpoint-push-remote"
@@ -29,6 +30,7 @@ type enableCheckpointRemoteChoice struct {
 	changed            bool
 	saved              bool
 	dedicatedRequested bool
+	suppressClaim      bool
 	// pending marks a fresh setup, the only path that opens the picker: it
 	// asks after agent selection, before installing hooks. A bare re-enable in
 	// a configured repo never prompts — "Keep current destination" writes
@@ -56,6 +58,7 @@ func prepareEnableCheckpointRemoteCommand(cmd *cobra.Command, opts *EnableOption
 		return err
 	}
 	choice.pending = pending
+	choice.suppressClaim = opts.Yes || cmd.Flags().Changed(agentFlagName)
 	opts.checkpointRemoteChoice = choice
 	cmd.SetContext(context.WithValue(cmd.Context(), enableCheckpointRemoteKey{}, choice))
 	return nil
@@ -70,6 +73,7 @@ func (c *enableCheckpointRemoteChoice) selectAfterAgents(ctx context.Context, op
 		return err
 	}
 	// Keep the pointer shared with the command's deferred destination report.
+	choice.suppressClaim = c.suppressClaim
 	*c = *choice
 	return nil
 }
@@ -304,6 +308,15 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		return
 	}
 	if s.IsPushSessionsDisabled() {
+		// Reads still resolve through the elected remote, so a store they do
+		// not use is reported here as `entire status` reports it. A failed or
+		// empty election has no read candidate to judge against; status stays
+		// silent about the store there too.
+		if elected, electErr := strategy.ResolveCheckpointSyncRemote(ctx); electErr == nil && elected.Name != "" &&
+			reportIgnoredCheckpointRemote(ctx, w, s, elected.Name, !c.suppressClaim) {
+			c.changed = true
+			touched = true
+		}
 		if touched {
 			c.reportUnchangedDestination(w)
 			fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
@@ -340,6 +353,11 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 		return
 	}
+	// Resolve a possible local claim before computing the destination summary.
+	if reportIgnoredCheckpointRemote(ctx, w, s, resolved.Name, !c.suppressClaim) {
+		c.changed = true
+		touched = true
+	}
 	destination := resolved.Name
 	url, dedicated, err := remote.PushURL(ctx, resolved.Name)
 	if err != nil {
@@ -362,6 +380,7 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			return
 		}
 	}
+
 	if !touched {
 		return
 	}
@@ -415,4 +434,202 @@ func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
 		return
 	}
 	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+}
+
+// ignoredCheckpointRemoteSentence is the one wording `entire status` and
+// `entire enable` share for a refused checkpoint_remote, so the two cannot
+// describe the same clone differently. It matches the pre-push warning's form
+// and leads with where checkpoints DO go: for a fork contributor that
+// destination is the correct outcome, and a bare "not in use" read as a fault
+// in a setup working as intended.
+//
+// It speaks only for the elected remote. Another remote may still reach the
+// store (pushing to it uploads there), so an unscoped "not in use" would be
+// false for such a repo, while "checkpoints sync to <elected>, not to it" is
+// true either way. destination may be empty when no remote is elected; repo
+// must already be sanitized for the terminal.
+func ignoredCheckpointRemoteSentence(repo, reason, destination string) string {
+	if destination == "" {
+		return "The configured checkpoint_remote " + repo + " is not in use: " + reason + "."
+	}
+	return "Checkpoints sync to " + destination + ", not to the configured checkpoint_remote " + repo + ": " + reason + "."
+}
+
+// ignoredCheckpointRemoteFix is the claim hint that follows the sentence above,
+// shared for the same reason. claim is the command from
+// ClaimCheckpointRemoteCommand, empty when the entry cannot be expressed as one.
+func ignoredCheckpointRemoteFix(repo, claim string) string {
+	if claim == "" {
+		return "If " + repo + " is yours, declare checkpoint_remote in .entire/settings.local.json."
+	}
+	return "If " + repo + " is yours, run `" + claim + "` to use it from this clone."
+}
+
+// ignoredCheckpointRemoteReport describes a configured checkpoint_remote that
+// is not in use. It is the one verdict both `entire status` and `entire enable`
+// render, so the two cannot report the same clone differently.
+type ignoredCheckpointRemoteReport struct {
+	Repo   string
+	Reason string
+	// Remedy is the claim command, empty when the entry is too malformed to
+	// name one or when the refusal was not an ownership verdict.
+	Remedy string
+	// Verdict is the ownership verdict behind the refusal, OwnershipOurs when
+	// ReadSide is set.
+	Verdict remote.OwnershipVerdict
+	// ReadSide marks a refusal that came from the fetch side's verdict rather
+	// than ownership.
+	ReadSide bool
+}
+
+// ignoredCheckpointRemote decides whether the configured checkpoint_remote is
+// being ignored when checkpoints resolve to electedRemote. readsDeclined says
+// the fetch side has already declined the store; callers pass it only with
+// pushing disabled, where the fetch side is what decides the store's use.
+func ignoredCheckpointRemote(ctx context.Context, s *settings.EntireSettings, electedRemote string, readsDeclined bool) (ignoredCheckpointRemoteReport, bool) {
+	cr := s.GetCheckpointRemote()
+	if cr == nil {
+		return ignoredCheckpointRemoteReport{}, false
+	}
+	if verdict, reason := remote.InheritedCheckpointRemoteVerdict(ctx, s, electedRemote); verdict.Refused() {
+		return ignoredCheckpointRemoteReport{
+			Repo:    cr.Repo,
+			Reason:  reason,
+			Remedy:  remote.ClaimCheckpointRemoteCommand(cr),
+			Verdict: verdict,
+		}, true
+	}
+	if !readsDeclined {
+		return ignoredCheckpointRemoteReport{}, false
+	}
+	// The verdict above is ownership only, so it accepts a store the fetch
+	// side declined for another reason (an unparseable origin URL, an
+	// unmappable protocol). Without this the configured store is reported by
+	// nothing at all, which is the silent-ignore the report exists to prevent.
+	// Ownership itself cannot split the two: both vote over origin plus the
+	// candidate's push urls.
+	//
+	// No reason is given: the fetch side returns a verdict and not a cause, so
+	// naming one would be a guess. The causes are logged where they are
+	// decided.
+	return ignoredCheckpointRemoteReport{
+		Repo:     cr.Repo,
+		Reason:   "checkpoint reads do not resolve to it (see .entire/logs for the reason)",
+		ReadSide: true,
+	}, true
+}
+
+// reportIgnoredCheckpointRemote explains a refused checkpoint_remote and offers
+// a local claim only when it can safely confirm ownership. Reports whether it
+// saved a claim, so the caller can describe the resulting destination.
+//
+// The rejection is deliberate — checkpointRemoteIsInherited refuses a committed
+// checkpoint_remote whose owner does not match every remote identifying this
+// repo, so a fork contributor's transcripts never land in the upstream's
+// checkpoint store. What was missing is the other half: when the store really
+// is the developer's own, nothing told them how to say so, and the symptom
+// (checkpoints arriving in the code repository) looks like a working setup.
+func reportIgnoredCheckpointRemote(ctx context.Context, w io.Writer, s *settings.EntireSettings, electedRemote string, allowPrompt bool) bool {
+	cr := s.GetCheckpointRemote()
+	if cr == nil {
+		return false
+	}
+	// With pushing disabled the store is in use only if reads resolve to it,
+	// exactly as `entire status` decides. A failed probe knows nothing, so it
+	// reports nothing rather than guessing.
+	readsDeclined := false
+	if s.IsPushSessionsDisabled() {
+		reads, err := remote.ReadsDedicatedStore(ctx, electedRemote)
+		readsDeclined = err == nil && !reads
+	}
+	r, ok := ignoredCheckpointRemote(ctx, s, electedRemote, readsDeclined)
+	if !ok {
+		return false
+	}
+	// The repo comes from the committed settings file, so it is stripped of
+	// escape sequences before it reaches the terminal.
+	repo := tuiutil.SanitizeDisplayText(r.Repo)
+	// Votes with the elected remote only, exactly as `entire status` does, so
+	// the two report the same clone the same way. Another remote that would
+	// reach the store does not silence it: checkpoints go to the elected one.
+	fmt.Fprintln(w, ignoredCheckpointRemoteSentence(repo, r.Reason, tuiutil.SanitizeDisplayText(electedRemote)))
+
+	// Ownership merely UNPROVABLE is the one case a human can settle that local
+	// git config cannot: a single-segment or non-forge origin
+	// (git@host:repo.git, https://host/repo.git, a filesystem path) yields no
+	// owner to compare, which is ordinary on self-hosted git. Refusing stays
+	// right non-interactively — absence of evidence is not proof the store is
+	// ours — but the person running `entire enable` knows.
+	//
+	// Never offered for OwnershipDisproved: a remote named an owner and it was
+	// somebody else, which is the fork case the check exists for. Offering to
+	// adopt there would walk a contributor into publishing their transcripts to
+	// the upstream's store, one keystroke deep.
+	//
+	// This is not a new trust boundary. `entire enable --local
+	// --checkpoint-remote <provider>:<owner>/<repo>` already performs exactly
+	// this write in one command; the prompt makes the existing remedy
+	// discoverable to someone who does not know it exists.
+	if allowPrompt && r.Verdict == remote.OwnershipUnprovable &&
+		settings.CheckpointRemoteLocalClaimRejection(ctx) == "" &&
+		offerToClaimCheckpointRemote(ctx, w, remote.ClaimCheckpointRemoteFlagValue(cr), repo) {
+		return true
+	}
+
+	fmt.Fprintln(w, ignoredCheckpointRemoteFix(repo, r.Remedy))
+	return false
+}
+
+// offerToClaimCheckpointRemote asks whether the configured store belongs to this
+// developer and, on yes, declares it in .entire/settings.local.json — the
+// per-clone, gitignored layer whose presence CheckpointRemoteIsLocalOnly takes
+// as proof the developer chose it. Reports whether it wrote.
+//
+// Interactive only. A non-TTY run gets the printed command instead, because a
+// prompt nobody can answer must not become an implicit yes — and because an
+// agent reading the output should be handed the command rather than have the
+// decision made for the human it works for.
+// Takes the already-validated claimValue rather than the config it came from,
+// so the value written can never diverge from the one validated and printed —
+// reconstructing it here from raw fields let surrounding whitespace pass the
+// check and fail the write.
+func offerToClaimCheckpointRemote(ctx context.Context, w io.Writer, claimValue, repo string) bool {
+	if !interactive.CanPromptInteractively() {
+		return false
+	}
+	// A provider the flag cannot express has no value and no write path; fall
+	// through to the settings-file message rather than prompting for something
+	// that cannot be carried out.
+	if claimValue == "" {
+		return false
+	}
+
+	var claim bool
+	form := NewAccessibleForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Use %s for this clone's checkpoints?", repo)).
+				Description("This repo's remotes cannot prove who owns that store, so it is being ignored.\nAnswer yes only if it is yours.").
+				Affirmative("Yes, it's mine").
+				Negative("No, leave it").
+				Value(&claim),
+		),
+	)
+	if err := form.Run(); err != nil || !claim {
+		return false
+	}
+
+	if err := updateStrategyOptions(ctx, w, EnableOptions{
+		UseLocalSettings: true,
+		CheckpointRemote: claimValue,
+	}); err != nil {
+		fmt.Fprintf(w, "Could not save the checkpoint destination: %v\n", err)
+		return false
+	}
+	if !settings.CheckpointRemoteIsLocalOnly(ctx) {
+		fmt.Fprintln(w, "The saved checkpoint destination could not be confirmed as your own untracked local setting; check `entire status` before pushing.")
+		return false
+	}
+	fmt.Fprintf(w, "Confirmed %s for this clone (saved to .entire/settings.local.json).\n", repo)
+	return true
 }

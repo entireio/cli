@@ -184,6 +184,11 @@ func updateStrategyOptions(ctx context.Context, w io.Writer, opts EnableOptions)
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	if opts.CheckpointRemote != "" && targetFile == settings.EntireSettingsLocalFile {
+		if rejection := settings.CheckpointRemoteLocalClaimRejection(ctx); rejection != "" {
+			return fmt.Errorf("cannot confirm checkpoint destination: %s", rejection)
+		}
+	}
 
 	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
 	if err != nil {

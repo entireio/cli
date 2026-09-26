@@ -2745,6 +2745,10 @@ func TestRunStatus_CheckpointPushDisabledDestinations(t *testing.T) {
 	}
 }
 
+// inheritedClaimCommand is the fix status must name for the fixture below: a
+// command to run, not a settings file to go and edit.
+const inheritedClaimCommand = "entire enable --local --checkpoint-remote github:org/checkpoints"
+
 // Not parallel: setupTestRepo changes CWD and isolates process environment.
 func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
@@ -2785,6 +2789,16 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_reason"]), "differs from checkpoint owner") {
 								t.Errorf("missing rejection reason: %s", out.String())
 							}
+							// An agent reading --json has to be able to ACT on
+							// the rejection, not only report it, which is the
+							// whole reason the remedy is carried rather than
+							// left for the reader to assemble.
+							if tc.name == "inherited" && string(result["checkpoint_remote_ignored_verdict"]) != `"disproved"` {
+								t.Errorf("an owner mismatch must be reported as disproved: %s", out.String())
+							}
+							if tc.name == "inherited" && !strings.Contains(string(result["checkpoint_remote_ignored_remedy"]), inheritedClaimCommand) {
+								t.Errorf("missing remedy: %s", out.String())
+							}
 							if disabled {
 								var pushDisabled bool
 								if err := json.Unmarshal(result["checkpoint_push_disabled"], &pushDisabled); err != nil || !pushDisabled {
@@ -2793,8 +2807,11 @@ func TestRunStatus_CheckpointDiagnosticsWithPushDisabled(t *testing.T) {
 							}
 							return
 						}
-						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "is not in use:")) {
+						if !strings.Contains(out.String(), tc.text) || (tc.name == "inherited" && !strings.Contains(out.String(), "not to the configured checkpoint_remote")) {
 							t.Errorf("missing remote diagnostic: %s", out.String())
+						}
+						if tc.name == "inherited" && !strings.Contains(out.String(), inheritedClaimCommand) {
+							t.Errorf("rejection named no command to fix it: %s", out.String())
 						}
 						if disabled && (!strings.Contains(out.String(), "Automatic checkpoint pushing: disabled") || strings.Contains(out.String(), "Checkpoints NOT syncing:")) {
 							t.Errorf("diagnostic must coexist with disabled pushing, not claim a push failure: %s", out.String())
