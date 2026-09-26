@@ -325,10 +325,14 @@ func wrapIndented(s, indent string, width int) string {
 // newAgentHelpCmd builds the `entire agent-help` command. It is visible in
 // `entire help` (so agents on transports without context injection can still
 // find it) and renders agent-facing usage live from rootCmd's command tree.
+// agentHelpCmdName is the command's name, and the verb it delegates to a
+// plugin under (see maybeDelegateAgentHelpToPlugin).
+const agentHelpCmdName = "agent-help"
+
 func newAgentHelpCmd(rootCmd *cobra.Command) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "agent-help [command...]",
+		Use:   agentHelpCmdName + " [command...]",
 		Short: "Machine-readable usage for coding agents (always matches the installed CLI)",
 		Long: `Prints agent-facing usage for the Entire CLI, generated live from the installed
 command tree so it always matches this binary. With no arguments it prints a
@@ -339,6 +343,11 @@ high-level map of when to use entire and which subcommand; pass a command path
 			// nothing here acts on the user's behalf, and this output is read by an
 			// agent — so resolve it without the "Using context 'x'." notice.
 			auth.SilenceContextNotice()
+			// Before anything touches the repo or auth: a name that is an
+			// installed external command is answered by that command.
+			if handled, err := maybeDelegateAgentHelpToPlugin(c.Context(), rootCmd, args, asJSON); handled {
+				return err
+			}
 			// Resolve the origin remote once and derive both the repo line and the
 			// trails-enablement check from it (avoids two git subprocesses per run).
 			repoLine, trailsEnabled := agentHelpRepoContext(c.Context())
@@ -463,6 +472,54 @@ func runAgentHelp(rootCmd *cobra.Command, args []string, repoLine string, asJSON
 	return renderAgentHelpCommand(target, repoLine, trailsEnabled), nil
 }
 
+// maybeDelegateAgentHelpToPlugin answers `agent-help <name> [args...]` for an
+// external command by running `entire-<name> agent-help [args...] [--json]`,
+// so plugins document themselves with the same drill-in agents already use for
+// built-ins. It reports handled=false — leaving runAgentHelp to produce its
+// usual "unknown command" — when name is a built-in (built-ins win, as in the
+// dispatcher) or no runnable entire-<name> exists.
+//
+// Resolution is the dispatcher's own resolvePlugin, not a bare LookPath, so the
+// reserved agent- prefix, name validation, and the not-executable launch error
+// all apply, and runPlugin gives the child the filtered plugin environment
+// rather than ours. Two deliberate differences from MaybeRunPlugin: a missing
+// on-demand plugin is not offered for installation (agents run this unprompted,
+// and a help lookup must not end in a download), and no invocation telemetry
+// or version notice fires, since nobody ran the plugin as a command.
+//
+// Only the CLI command delegates. The MCP agent_help tool calls runAgentHelp
+// directly, and runPlugin writes to the process's stdout — which, under
+// `entire mcp`, is the JSON-RPC stream.
+func maybeDelegateAgentHelpToPlugin(ctx context.Context, rootCmd *cobra.Command, args []string, asJSON bool) (handled bool, err error) {
+	if len(args) == 0 || agentHelpFindChild(rootCmd, args[0]) != nil {
+		return false, nil
+	}
+	binPath, rest, ok := resolvePlugin(rootCmd, args)
+	if !ok || binPath == "" {
+		// An empty path is resolvePlugin's on-demand install offer.
+		return false, nil
+	}
+	name := args[0]
+	if isManagedBinEntry(binPath) {
+		if err := managedEntryUnrunnable(name, binPath); err != nil {
+			return true, err
+		}
+	}
+	pluginArgs := append([]string{agentHelpCmdName}, rest...)
+	if asJSON {
+		pluginArgs = append(pluginArgs, "--json")
+	}
+	if code, _ := runPlugin(ctx, name, binPath, pluginArgs); code != 0 {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// A signal cancelled us; main re-raises it for a context.Canceled.
+			return true, fmt.Errorf("%s%s %s: %w", pluginBinaryPrefix, name, agentHelpCmdName, ctxErr)
+		}
+		// The plugin's own stderr is the message; runPlugin prints launch failures.
+		return true, NewSilentError(fmt.Errorf("%s%s %s exited with code %d", pluginBinaryPrefix, name, agentHelpCmdName, code))
+	}
+	return true, nil
+}
+
 // agentHelpFindChild finds a direct child of parent by name or alias. It
 // includes hidden commands so an annotated one like trail resolves; the caller
 // (runAgentHelp) then enforces isAgentHelpAdvertised, so the drillable surface
@@ -559,7 +616,7 @@ func renderAgentHelpJSON(rootCmd, target *cobra.Command, repoLine string, trails
 // plus hidden commands that opt in via agentHelpAnnotation, minus the help
 // command, deprecated commands, and (when trails are disabled) trail-gated ones.
 func isAgentHelpAdvertised(sub *cobra.Command, trailsEnabled bool) bool {
-	if sub.Name() == "help" || sub.Name() == "agent-help" || sub.Deprecated != "" {
+	if sub.Name() == "help" || sub.Name() == agentHelpCmdName || sub.Deprecated != "" {
 		return false
 	}
 	if sub.Hidden && sub.Annotations[agentHelpAnnotation] != agentHelpAnnotationEnabled {

@@ -242,6 +242,12 @@ External commands are arbitrary executables. No SDK, no protocol, no manifest. T
 - **Arguments after the command name pass through verbatim.** `entire pgr --help foo` invokes `entire-pgr` with argv `["--help", "foo"]`. Cobra's flag parsing does not run.
 - **Windows.** On Windows, `exec.LookPath` resolves `.exe`, `.bat`, and `.cmd` extensions automatically. The "found but not executable" path is Unix-only — Windows treats extension match as the only correctness signal.
 
+### Agent help
+
+`entire agent-help <name> [args...]` is answered by the plugin when `<name>` is not a built-in and `entire-<name>` resolves: the CLI runs `entire-<name> agent-help [args...]`, appending `--json` when it was given (Cobra consumed it as agent-help's own flag). A plugin that wants to be documented to agents implements an `agent-help` verb with that shape; stdout, stderr, and the filtered environment are exactly as for a dispatched run, and a non-zero exit fails `agent-help` with exit code 1 without a second message.
+
+Resolution is the dispatcher's own (`resolvePlugin`), so built-ins still win, `agent-` names are still refused, and a found-but-not-executable binary is still a launch error. Two things differ on purpose: a missing on-demand plugin is **not** offered for installation, because agents run `agent-help` unprompted and a help lookup must not end in a download; and no invocation telemetry or version notice fires, since the plugin was consulted, not run. Only the CLI command delegates. The MCP `agent_help` tool does not, because a plugin writes to the process's stdout, which under `entire mcp` is the JSON-RPC stream.
+
 ### Settings are not a plugin extension point
 
 `.entire/settings.json` is decoded with `DisallowUnknownFields`, so a key the CLI does not ship makes the whole settings load fail — and a settings-load failure disables the CLI in that repository, not just the feature that owns the key. A plugin therefore **cannot** put its configuration there: doing so would require the CLI to ship a field for every plugin, which is the coupling external commands exist to avoid.
@@ -318,6 +324,7 @@ Key files:
 - `cmd/entire/cli/plugin_install_remote.go` — remote install/upgrade orchestration
 - `cmd/entire/cli/plugin_index.go` — git-synced index cache, URL precedence
 - `cmd/entire/cli/plugin_deps.go` — dependency planning, remove guard, `plugin doctor`
+- `cmd/entire/cli/agent_help_cmd.go` — `maybeDelegateAgentHelpToPlugin`, the `agent-help <plugin>` hand-off
 - `cmd/entire/cli/plugin_group.go` — `entire plugin install/list/remove/upgrade/search/info/browse/doctor/index` Cobra commands
 - `cmd/entire/cli/telemetry/detached.go` — `BuildPluginEventPayload`, `TrackPluginDetached`
 - `cmd/entire/cli/integration_test/external_command_test.go` — end-to-end coverage of the resolution path
