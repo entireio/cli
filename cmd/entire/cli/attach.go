@@ -12,7 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -43,7 +42,7 @@ type attachOptions struct {
 	// resolved inside runAttach after the real agent is known (via session
 	// state or transcript auto-detection), not at the cobra layer — the
 	// --agent flag's default points at claude-code, which would otherwise
-	// make a Gemini session incorrectly look up review.claude-code config.
+	// make a Codex session incorrectly look up review.claude-code config.
 	Review bool
 	// ReviewSkillsOverride, when non-empty, declares which review skills were
 	// run. Empty is valid: the session is still tagged as a review, with no
@@ -271,16 +270,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
 
-	// Normalize Gemini transcripts for storage.
-	storedTranscript := transcriptData
-	if ag.Type() == agent.AgentTypeGemini {
-		if normalized, normErr := geminicli.NormalizeTranscript(transcriptData); normErr == nil {
-			storedTranscript = normalized
-		} else {
-			logging.Warn(logCtx, "failed to normalize Gemini transcript, storing raw", "error", normErr)
-		}
-	}
-
 	meta := extractTranscriptMetadataForAgent(ag, transcriptPath, transcriptData)
 	warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
 
@@ -345,7 +334,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	_, redactSpan := perf.Start(ctx, "redact_transcript")
-	redactedTranscript, redactErr := redact.JSONLBytes(storedTranscript)
+	redactedTranscript, redactErr := redact.JSONLBytes(transcriptData)
 	redactSpan.End()
 	if redactErr != nil {
 		return fmt.Errorf("failed to redact transcript: %w", redactErr)
@@ -412,7 +401,7 @@ func amendOrPrintTrailer(logCtx context.Context, w, errW io.Writer, headCommit *
 // warnEmptyTranscriptMetadata warns (without failing) when nothing parsed out
 // of the transcript: the checkpoint is still written and useful (code + token
 // usage), but it carries no prompt or title. extractTranscriptMetadata only
-// understands generic JSONL + Gemini JSON, so agents with other user-content
+// understands generic JSONL, so agents with other user-content
 // shapes (codex/copilot/pi/factory) can legitimately yield empty meta from a
 // valid transcript — a hard error would regress attach for them.
 func warnEmptyTranscriptMetadata(errW io.Writer, agentName types.AgentName, meta transcriptMetadata, opts attachOptions) {

@@ -1,0 +1,10 @@
+{
+  "executionNum": 1,
+  "terminationReason": "model_stop",
+  "error": "",
+  "fullyIdle": true,
+  "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+  "workspacePaths": ["/workspace/project"],
+  "transcriptPath": "/workspace/project/.gemini/jetski/transcript.jsonl",
+  "artifactDirectoryPath": "/workspace/project/.gemini/jetski/artifacts"
+}

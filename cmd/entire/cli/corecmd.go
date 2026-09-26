@@ -172,9 +172,13 @@ func runCoreList[T any](cmd *cobra.Command, empty string, headers []string, row 
 // listView is how a list renders once its items are known, for the command
 // whose output depends on what came back. table is required and picks the
 // headers and row function; toJSON is optional and, when set, replaces the
-// raw wire model on --json — it must be additive-only, merging synthesized
-// fields into the marshalled objects (see mergeSynthesizedField) and never
-// dropping or overriding a server field.
+// raw wire model on --json — it merges synthesized fields into the marshalled
+// objects (see mergeSynthesizedField) and never overrides a server value. It
+// may drop a server key only by renaming it: where a synthesized key carries
+// the very string the server sent under another name, printing both says one
+// value twice (see mirrorCollaboratorJSON, which renames `accountId` to the
+// `granteeId` its sibling listing uses). Dropping a value outright is not the
+// same thing, and is not allowed.
 type listView[T any] struct {
 	table  func(items []T) (headers []string, row func(T) []string)
 	toJSON func(items []T) (any, error)
@@ -187,17 +191,16 @@ func runCoreListShaped[T any](cmd *cobra.Command, empty string, view listView[T]
 	return runCore(cmd, renderCoreListShaped(cmd, empty, view, fn))
 }
 
-// runCoreListForCluster is runCoreList for a resource-provider command (see
-// runCoreForCluster): identical table/JSON/empty-state rendering, but dialing
-// the core that fronts clusterHost rather than the active context.
-func runCoreListForCluster[T any](cmd *cobra.Command, clusterHost, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
-	return runCoreForCluster(cmd, clusterHost, renderCoreList(cmd, empty, headers, row, fn))
+// runCoreListShapedForCluster is runCoreListShaped for a resource-provider
+// command (see runCoreForCluster): the same rendering decided after the fetch,
+// dialing the core that fronts clusterHost rather than the active context.
+func runCoreListShapedForCluster[T any](cmd *cobra.Command, clusterHost, empty string, view listView[T], fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) error {
+	return runCoreForCluster(cmd, clusterHost, renderCoreListShaped(cmd, empty, view, fn))
 }
 
-// renderCoreList builds the run-function shared by runCoreList and
-// runCoreListForCluster for a table with fixed columns. Kept separate from the
-// client-selection so the two list variants differ only in which core they
-// dial.
+// renderCoreList builds the run-function runCoreList uses for a table with
+// fixed columns. Kept separate from the client-selection so a list variant
+// differs from another only in which core it dials.
 func renderCoreList[T any](cmd *cobra.Command, empty string, headers []string, row func(T) []string, fn func(ctx context.Context, c *coreapi.Client) ([]T, error)) func(context.Context, *coreapi.Client) error {
 	view := listView[T]{table: func([]T) ([]string, func(T) []string) { return headers, row }}
 	return renderCoreListShaped(cmd, empty, view, fn)
@@ -647,7 +650,7 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 }
 
 // runCoreForCluster is runCore for resource-provider commands addressed at a
-// specific cluster (mirror add/remove, access list):
+// specific cluster (mirror add/remove, `repo grant list` of a mirror ref):
 // it dials the core that fronts clusterHost — discovered from the cluster's
 // /.well-known/entire-cluster.json, authenticating with the matching local
 // context — instead of the active context. So the command works on a cluster in

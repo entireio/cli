@@ -486,7 +486,7 @@ func (c *CopilotCLIAgent) GetTranscriptPosition(path string) (int, error) {
 //   - files: list of file paths modified by Copilot (from tool.execution_complete events)
 //   - currentPosition: total number of lines in the file
 //   - error: any error encountered during reading
-func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}

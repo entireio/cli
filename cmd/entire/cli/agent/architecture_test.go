@@ -6,13 +6,14 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
 
 // TestAgentPackages_NoForbiddenImports verifies that agent implementation packages
-// (claudecode, geminicli, opencode, cursor, etc.) only import from allowed packages.
+// (claudecode, codex, opencode, cursor, etc.) only import from allowed packages.
 //
 // This prevents agent implementations from coupling to framework internals
 // (strategy, checkpoint, session, commands, hook_registry, lifecycle) which
@@ -61,6 +62,20 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 		repoPrefix + "testutil",   // canonical isolated repository fixtures for agent tests
 	}
 
+	// Imports allowed in ONE agent package, keyed by its directory name.
+	// Unlike allowedPrefixes, an entry here does not widen the contract for
+	// every agent: it is one agent's answer to one agent's problem, and a
+	// second agent that wants it has to say so here first.
+	scopedPrefixes := map[string][]string{
+		"antigravity": {
+			// Cross-process advisory locks. agy fires its title command on
+			// every state change without serializing, so the title-tee takes
+			// a per-conversation flock around its dedup-and-append. No other
+			// agent's transport has that shape.
+			repoPrefix + "internal/flock",
+		},
+	}
+
 	agentDir := findAgentDir(t)
 	agentPkgs := discoverAgentPackages(t, agentDir)
 
@@ -72,6 +87,13 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 		pkgName := filepath.Base(pkgDir)
 		t.Run(pkgName, func(t *testing.T) {
 			t.Parallel()
+			// Clone, don't append onto allowedPrefixes: appending would write
+			// this package's scoped entries into that slice's backing array
+			// whenever it has spare capacity, handing every package checked
+			// afterwards the exception scopedPrefixes exists to contain. It
+			// holds today only because allowedPrefixes is a literal whose cap
+			// equals its len; that is not a property to depend on.
+			allowedHere := append(slices.Clone(allowedPrefixes), scopedPrefixes[pkgName]...)
 			imports := extractImports(t, pkgDir)
 			for _, imp := range imports {
 				if !strings.HasPrefix(imp, repoPrefix) && imp != forbiddenCLIPackage {
@@ -97,16 +119,17 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 					continue
 				}
 
-				// Check it's in the allowed list
+				// Check it's in the allowed list, or scoped to this package
 				allowed := false
-				for _, prefix := range allowedPrefixes {
+				for _, prefix := range allowedHere {
 					if imp == prefix || strings.HasPrefix(imp, prefix+"/") {
 						allowed = true
 						break
 					}
 				}
 				if !allowed {
-					t.Errorf("unexpected internal import %q — if this is intentional, add it to allowedPrefixes in architecture_test.go", imp)
+					t.Errorf("unexpected internal import %q — if every agent may use it, add it to allowedPrefixes in architecture_test.go; "+
+						"if it answers this agent's problem alone, add it to scopedPrefixes[%q] with the reason", imp, pkgName)
 				}
 			}
 		})

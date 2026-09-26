@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -304,9 +305,9 @@ func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
 // ValidateBranchName replaces a leading-dash check that was the narrowest part
 // of the problem: the ref arrives from `entire resume <branch>` and from a
 // trail's branch field, and `git checkout` also reads `@{-1}` and a name
-// carrying a newline. It still admits an object id, since `check-ref-format
-// --branch` accepts a hex string, so the "or commit" half of the old contract
-// survives even though no caller uses it.
+// carrying a newline. It still admits an object id, since Git's branch-name
+// rules accept a hex string, so the "or commit" half of the old contract survives
+// even though no caller uses it.
 //
 // The trailing `--` covers what validation cannot, and validation cannot cover
 // it in principle: `git checkout <name>` falls back to treating <name> as a
@@ -328,14 +329,28 @@ func CheckoutBranch(ctx context.Context, ref string) error {
 	return nil
 }
 
-// ValidateBranchName checks if a branch name is valid using git check-ref-format.
-// Returns an error if the name is invalid or contains unsafe characters.
+// ValidateBranchName validates literal branch names without starting Git.
+// Reflog expressions retain native --branch interpretation (notably @{-1}),
+// which depends on repository state and is not part of go-git's name validator.
 func ValidateBranchName(ctx context.Context, branchName string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("validate branch name: %w", err)
+	}
 	if strings.HasPrefix(branchName, "-") {
 		return fmt.Errorf("invalid branch name %q", branchName)
 	}
-	cmd := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branchName)
-	if err := cmd.Run(); err != nil {
+	var err error
+	if strings.Contains(branchName, "@{") {
+		err = exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branchName).Run()
+	} else {
+		err = plumbing.ValidateBranchName(branchName)
+	}
+	// CommandContext can return a killed-process error when cancellation arrives
+	// during native interpretation. Preserve the context cause, not invalidity.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("validate branch name: %w", ctxErr)
+	}
+	if err != nil {
 		return fmt.Errorf("invalid branch name %q", branchName)
 	}
 	return nil
@@ -345,7 +360,7 @@ func ValidateBranchName(ctx context.Context, branchName string) error {
 // Uses git CLI instead of go-git for fetch because go-git doesn't use credential helpers,
 // which breaks HTTPS URLs that require authentication.
 func FetchAndCheckoutRemoteBranch(ctx context.Context, branchName string) error {
-	// Validate branch name before using in shell command (branchName comes from user CLI input)
+	// Validate the user-supplied branch name before constructing the fetch refspec.
 	if err := ValidateBranchName(ctx, branchName); err != nil {
 		return err
 	}
@@ -502,8 +517,28 @@ func metadataTrackingRefExists(ctx context.Context, remoteName string) bool {
 	if !refs.Primary.IsBranch() {
 		return false
 	}
-	trackingRef := fmt.Sprintf("refs/remotes/%s/%s", remoteName, refs.Primary.Short())
-	return exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", trackingRef+"^{commit}").Run() == nil
+	if ctx.Err() != nil {
+		return false
+	}
+	trackingRef := plumbing.NewRemoteReferenceName(remoteName, refs.Primary.Short())
+	if !gitrepo.ReadsNeedNativeGit(ctx) {
+		repo, err := openRepository(ctx)
+		if err == nil {
+			defer repo.Close()
+			_, err = gitrepo.CommitAtReference(ctx, repo, trackingRef)
+			if err == nil {
+				return true
+			}
+			if errors.Is(err, plumbing.ErrReferenceNotFound) || ctx.Err() != nil {
+				return false
+			}
+		}
+		logging.Debug(ctx, "metadata tracking ref: go-git open or read failed, using native Git",
+			slog.String("ref", trackingRef.String()), slog.String("error", err.Error()))
+	}
+	// Preserve native selection and object backfill for stores go-git cannot
+	// read. This also retains support for bare repositories.
+	return exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", trackingRef.String()+"^{commit}").Run() == nil
 }
 
 // fetchMetadataFromRemote fetches the metadata branch from one remote into

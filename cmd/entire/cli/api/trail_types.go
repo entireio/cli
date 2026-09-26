@@ -44,6 +44,15 @@ type TrailResource struct {
 	CheckpointCount    int                `json:"checkpoint_count,omitempty"`
 	CommitsAhead       int                `json:"commits_ahead,omitempty"`
 	BodyDocument       *TrailBodyDocument `json:"body_document,omitempty"`
+	// Mergeability is served on the detail resource only; list items omit it.
+	// It stays raw so that every detail-route decode (approve, update, resume,
+	// review-target resolution, ...) does not depend on the snapshot's shape;
+	// only `trail show` reads it, through DecodeMergeability.
+	Mergeability json.RawMessage `json:"mergeability,omitempty"`
+	// FromDetail reports that the resource was decoded from the detail route
+	// rather than a list page. It is the reliable marker: body_document can be
+	// absent from a valid detail response.
+	FromDetail bool `json:"-"`
 }
 
 // TrailBodyDocument is the trail's description editor document. TextSnapshot
@@ -56,6 +65,19 @@ type TrailResource struct {
 type TrailBodyDocument struct {
 	TextSnapshot string `json:"text_snapshot"`
 	ETag         string `json:"etag,omitempty"`
+}
+
+// DecodeMergeability decodes the detail resource's mergeability snapshot. It
+// returns nil, nil when the snapshot is absent or null.
+func (r *TrailResource) DecodeMergeability() (*TrailMergeability, error) {
+	if len(r.Mergeability) == 0 || string(r.Mergeability) == "null" {
+		return nil, nil //nolint:nilnil // nil, nil means "no snapshot served"
+	}
+	var m TrailMergeability
+	if err := json.Unmarshal(r.Mergeability, &m); err != nil {
+		return nil, fmt.Errorf("decode trail mergeability: %w", err)
+	}
+	return &m, nil
 }
 
 // ToMetadata converts a TrailResource to display metadata.

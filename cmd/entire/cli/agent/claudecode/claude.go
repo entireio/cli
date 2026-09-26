@@ -236,7 +236,7 @@ func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 //   - files: list of file paths modified by Claude (from Write/Edit tools)
 //   - currentPosition: total number of lines in the file
 //   - error: any error encountered during reading
-func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (files []string, currentPosition int, err error) {
+func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}

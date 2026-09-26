@@ -341,7 +341,7 @@ func (e *Agent) GetTranscriptPosition(path string) (int, error) {
 	return resp.Position, nil
 }
 
-func (e *Agent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+func (e *Agent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) ([]string, int, error) {
 	stdout, err := e.run(context.Background(), nil, "extract-modified-files",
 		"--path", path, "--offset", strconv.Itoa(startOffset))
 	if err != nil {

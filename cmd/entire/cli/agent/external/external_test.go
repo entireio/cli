@@ -599,7 +599,7 @@ func TestExternalAgent_TranscriptAnalyzer(t *testing.T) {
 		t.Errorf("GetTranscriptPosition() = %d, want 42", pos)
 	}
 
-	files, curPos, err := ea.ExtractModifiedFilesFromOffset("/path", 0)
+	files, curPos, err := ea.ExtractModifiedFilesFromOffset(context.Background(), "/path", 0)
 	if err != nil {
 		t.Fatalf("ExtractModifiedFilesFromOffset: %v", err)
 	}

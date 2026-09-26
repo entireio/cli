@@ -167,6 +167,24 @@ func WrapWindowsProductionSilentHookCommand(command string) string {
 	)
 }
 
+// WrapWindowsProductionSilentHookCommandDirect is the silent wrapper for a host
+// that already runs every hook command through cmd.exe /C on Windows (agy does;
+// see HookHostIsWindows): the bare `where … & if errorlevel 1 (ver>nul) else
+// (<command>)` line, with no cmd.exe prefix and no quoted block. Handing such a
+// host WrapWindowsProductionSilentHookCommand's nested form fails outright —
+// cmd.exe /C takes the quoted block as one program name ('"where.exe entire
+// >nul 2>nul & …"' is not recognized as an internal or external command) — and
+// the sh wrapper fails too, because cmd.exe reads its `>/dev/null` as a redirect
+// to a nonexistent path. Both were observed on Windows 11 with agy 1.2.7; only
+// this shape produced a tracked session. Same distinction
+// WrapWindowsProductionJSONWarningHookCommand draws for Codex.
+func WrapWindowsProductionSilentHookCommandDirect(command string) string {
+	return fmt.Sprintf(
+		`where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (%s)`,
+		command,
+	)
+}
+
 // WrapWindowsProductionJSONWarningHookCommand emits a JSON hook response with a
 // systemMessage field on stdout when the Entire CLI is missing from PATH. It
 // avoids sh so Codex hooks still work from native Windows shells. Codex already

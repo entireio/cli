@@ -151,15 +151,16 @@ func resolveAccountRef(ctx context.Context, c *coreapi.Client, ref string) (stri
 // --provider-user-id was the COR-699 footgun ("provider identity not found") —
 // so the CLI always resolves it first. A bare account ULID is rejected here:
 // the by-provider routes can't be addressed by ULID, and there is no reverse
-// account→provider-id lookup; callers that accept a ULID grantee (project/repo
-// remove) handle it via the typed-id route before reaching this helper.
+// account→provider-id lookup. No caller takes one either — the grant commands
+// refuse a typed ULID outright, and the one path that revokes by ULID reads it
+// off a listing row and goes straight to the typed-id route.
 func resolveGranteeProvider(ctx context.Context, c *coreapi.Client, ref string) (provider, providerUserID string, err error) {
 	// A ULID is a tempting paste from `grant … list` (which prints the grantee
 	// ID), but the by-provider routes can't be addressed by ULID. Reject it with
 	// a message that points at the form this command actually wants, rather than
 	// letting parseQualifiedHandle dangle a "(or a ULID)" hint that doesn't apply.
-	if looksLikeULID(ref) {
-		return "", "", fmt.Errorf("grantee %q is an account ULID; this command needs a provider-qualified handle like \"github:alice\"", ref)
+	if err := ensureGranteeIsHandle(ref); err != nil {
+		return "", "", err
 	}
 	p, handle, err := parseQualifiedHandle(ref)
 	if err != nil {
@@ -183,6 +184,25 @@ func resolveGranteeProvider(ctx context.Context, c *coreapi.Client, ref string) 
 	return p, id.ProviderUserId, nil
 }
 
+// ensureGranteeIsHandle rejects an account ULID as a grantee. A grantee is a
+// provider-qualified handle and nothing else: the by-provider routes cannot be
+// addressed by ULID, there is no reverse account→provider-id lookup, and a
+// listing's grantee id is an internal identifier the interface does not ask
+// anyone to copy. Commands call it before resolving their target, so a grantee
+// that cannot work costs no lookup.
+func ensureGranteeIsHandle(ref string) error {
+	if looksLikeULID(ref) {
+		return fmt.Errorf("grantee %q is an account ULID; this command needs a provider-qualified handle like \"github:alice\"", ref)
+	}
+	// Reuse the split rule, not its message: parseQualifiedHandle also serves
+	// `project create --owner`, where a ULID IS accepted and its "(or a ULID)"
+	// is true. On a grantee that would offer a form this command refuses.
+	if _, _, err := parseQualifiedHandle(ref); err != nil {
+		return fmt.Errorf("grantee %q must be a provider-qualified handle like \"github:alice\"", ref)
+	}
+	return nil
+}
+
 // parseQualifiedHandle splits a provider-qualified handle like "github:alice"
 // into its provider ("github") and handle ("alice"). Accounts are addressed by
 // this friendly form; a value with no "provider:" prefix is rejected so the
@@ -193,6 +213,20 @@ func parseQualifiedHandle(ref string) (provider, handle string, err error) {
 		return "", "", fmt.Errorf("account %q must be a qualified handle like \"github:alice\" (or a ULID)", ref)
 	}
 	return provider, handle, nil
+}
+
+// formatQualifiedHandle renders a provider and handle in the form every grant
+// command accepts as a grantee ("github:alice"). Inverse of
+// parseQualifiedHandle, and deliberately adjacent to it so the two spellings
+// cannot drift.
+//
+// An empty provider yields the bare handle rather than ":alice", which parses
+// as nothing and would be a grantee string no command accepts.
+func formatQualifiedHandle(provider, handle string) string {
+	if provider == "" {
+		return handle
+	}
+	return provider + ":" + handle
 }
 
 // resolveProjectRefResolved is resolveProjectRef plus the server's name.
@@ -446,7 +480,15 @@ func resolveRepoInProject(ctx context.Context, c repoRefClient, name, projID str
 }
 
 func noOrgNamedErr(name string) error {
-	return fmt.Errorf("no org named %q (run `entire org list` to see names, or pass a ULID)", name)
+	return &orgNotFoundError{name: name}
+}
+
+// orgNotFoundError is a by-name org lookup miss. It is typed so a command that
+// addresses orgs by name only can word the hint without the ULID alternative.
+type orgNotFoundError struct{ name string }
+
+func (e *orgNotFoundError) Error() string {
+	return fmt.Sprintf("no org named %q (run `entire org list` to see names, or pass a ULID)", e.name)
 }
 
 var errNamedRefNotFound = errors.New("named reference not found")

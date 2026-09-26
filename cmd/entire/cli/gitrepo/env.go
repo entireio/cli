@@ -2,17 +2,38 @@ package gitrepo
 
 import (
 	"os"
+	"slices"
 	"strings"
 )
 
-// Inherited repository selectors can redirect Git even when cmd.Dir is explicit.
-// GIT_COMMON_DIR redirects shared repository data, including configuration;
-// GIT_INDEX_FILE redirects index reads and writes.
-var repoOverrideEnvVars = []string{
-	"GIT_DIR=",
-	"GIT_COMMON_DIR=",
-	"GIT_WORK_TREE=",
-	"GIT_INDEX_FILE=",
+// repoSelectorEnvVars choose which repository Git operates on, even when
+// cmd.Dir is explicit. GIT_COMMON_DIR redirects shared repository data,
+// including configuration.
+var repoSelectorEnvVars = []string{"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"}
+
+// storeSelectorEnvVars keep the repository but change which objects or
+// references a read of it sees.
+var storeSelectorEnvVars = []string{
+	"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_NAMESPACE", "GIT_REPLACE_REF_BASE",
+}
+
+// repoOverrideEnvVars are the prefixes EnvWithoutRepoOverrides strips: the
+// repository selectors plus GIT_INDEX_FILE, which redirects index reads and
+// writes.
+var repoOverrideEnvVars = func() []string {
+	prefixes := make([]string, 0, len(repoSelectorEnvVars)+1)
+	for _, key := range append(slices.Clone(repoSelectorEnvVars), "GIT_INDEX_FILE") {
+		prefixes = append(prefixes, key+"=")
+	}
+	return prefixes
+}()
+
+// NativeReadSelectorEnvVars returns every variable ReadsNeedNativeGit treats
+// as selecting a store go-git would not open. It is the single source for that
+// list; test isolation derives its own list from it rather than copying it.
+func NativeReadSelectorEnvVars() []string {
+	return append(slices.Clone(repoSelectorEnvVars), storeSelectorEnvVars...)
 }
 
 // EnvWithoutRepoOverrides returns the current environment minus git's

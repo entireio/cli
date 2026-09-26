@@ -772,7 +772,7 @@ func TestFilesWithRemainingAgentChanges_CacheEquivalence(t *testing.T) {
 // filesTouched but not present in the shadow branch tree are skipped. This
 // happens when an agent's transcript references a file path (e.g. via a
 // write_file tool call) that was never actually created on disk — for example
-// when Gemini tries to write src/types.go but creates src/types/types.go
+// when an agent tries to write src/types.go but creates src/types/types.go
 // instead. Without this check, phantom files cause infinite carry-forward.
 func TestFilesWithRemainingAgentChanges_PhantomFile(t *testing.T) {
 	t.Parallel()

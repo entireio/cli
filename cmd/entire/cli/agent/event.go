@@ -39,8 +39,8 @@ const (
 	SubagentEnd
 
 	// ModelUpdate indicates the agent reported the LLM model being used.
-	// This fires on hooks that carry model info but have no other lifecycle action
-	// (e.g., Gemini CLI's BeforeModel). The framework stores the model as a hint
+	// This fires on hooks that carry model info but have no other lifecycle action.
+	// No built-in agent emits it today; external agents can. The framework stores the model as a hint
 	// for subsequent TurnStart/TurnEnd events in the same session.
 	ModelUpdate
 
@@ -98,7 +98,7 @@ type Event struct {
 	Prompt string
 
 	// Model is the LLM model identifier (e.g., "claude-sonnet-4-20250514").
-	// Populated on SessionStart (Claude Code), ModelUpdate (Gemini CLI BeforeModel),
+	// Populated on SessionStart (Claude Code), ModelUpdate,
 	// and TurnStart/TurnEnd events when the agent provides model info.
 	Model string
 
@@ -202,6 +202,15 @@ type Event struct {
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string
+
+	// SuppressIfSessionActive marks a TurnStart the dispatcher should drop when
+	// an active (mid-turn) session already exists for SessionID. It exists for
+	// agents whose per-invocation hooks can't distinguish a follow-up model call
+	// from the first call of a resumed turn (e.g. Antigravity's PreInvocation,
+	// which fires per model invocation): the parser emits a conditional TurnStart
+	// and the dispatcher resolves it against session state (which agent packages
+	// may not read directly).
+	SuppressIfSessionActive bool
 }
 
 // ReadAndParseHookInput decodes a single JSON hook payload from stdin into the
@@ -212,7 +221,7 @@ type Event struct {
 // keep the write end of that pipe open for the hook's lifetime rather than
 // closing it after writing — notably on Windows/Git Bash, where a full payload
 // arrives but EOF never does. io.ReadAll then blocked indefinitely and the hook
-// (e.g. gemini session-start) hung forever (issue #1398). A streaming
+// hung forever (issue #1398). A streaming
 // json.Decoder returns as soon as one complete JSON value has been read,
 // independent of when — or whether — stdin is closed.
 func ReadAndParseHookInput[T any](stdin io.Reader) (*T, error) {
