@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -1002,6 +1003,40 @@ func TestDeriveCheckpointURLFromInfo(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("deriveCheckpointURLFromInfo(%q) = %q, want %q", tt.pushRemoteURL, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckpointRemoteIsInherited_NoReadableOwnerIsUnprovable pins that absence
+// of evidence never adopts the store: when every identity is present but none
+// yields an owner, the vote is Unprovable, not Ours. Only an identity that
+// parsed and matched may leave the loop without a verdict.
+//
+// Not parallel: CheckpointRemoteIsLocalOnly resolves settings from CWD.
+func TestCheckpointRemoteIsInherited_NoReadableOwnerIsUnprovable(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	writeSettings(t, repoDir, `{"enabled":true}`)
+	t.Chdir(repoDir)
+
+	config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/checkpoints"}
+	for _, tc := range []struct {
+		name   string
+		origin string
+		push   []string
+	}{
+		{"origin_only", "git@selfhosted.example:app.git", nil},
+		{"origin_and_push_remotes", "git@selfhosted.example:app.git", []string{"https://selfhosted.example/app.git", "/srv/git/app.git"}},
+		{"push_remotes_only", "", []string{"git@selfhosted.example:app.git", "https://selfhosted.example/app.git"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verdict, reason := checkpointRemoteIsInherited(context.Background(), config, tc.origin, tc.push)
+			if verdict != OwnershipUnprovable {
+				t.Fatalf("verdict = %v (%q), want OwnershipUnprovable", verdict, reason)
+			}
+			if !strings.Contains(reason, "could not be determined") {
+				t.Fatalf("reason = %q, want an undetermined-owner reason", reason)
 			}
 		})
 	}
