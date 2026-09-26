@@ -113,7 +113,12 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			}
 			switch env.Type {
 			case envelopeTypeAssistant:
-				for _, block := range env.Message.Content {
+				var message claudeMessage
+				if err := json.Unmarshal(env.Message, &message); err != nil {
+					out <- reviewtypes.RunError{Err: fmt.Errorf("claude stream-json: %w", err)}
+					continue
+				}
+				for _, block := range message.Content {
 					switch block.Type {
 					case "text":
 						if block.Text != "" {
@@ -133,12 +138,12 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				// (see the parser doc). Emitting the running sum keeps
 				// mid-run values on the cumulative Tokens contract; the
 				// true {In, Out} tally comes from `result` below.
-				in := env.Message.Usage.InputTokens +
-					env.Message.Usage.CacheReadInputTokens +
-					env.Message.Usage.CacheCreationInputTokens
-				if in > 0 && env.Message.ID != "" {
-					if _, seen := seenMsgIDs[env.Message.ID]; !seen {
-						seenMsgIDs[env.Message.ID] = struct{}{}
+				in := message.Usage.InputTokens +
+					message.Usage.CacheReadInputTokens +
+					message.Usage.CacheCreationInputTokens
+				if in > 0 && message.ID != "" {
+					if _, seen := seenMsgIDs[message.ID]; !seen {
+						seenMsgIDs[message.ID] = struct{}{}
 						cumInputTokens += in
 						out <- reviewtypes.Tokens{In: cumInputTokens, Out: 0}
 					}
@@ -172,9 +177,10 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 }
 
 type claudeEnvelope struct {
-	Type    string        `json:"type"`
-	Message claudeMessage `json:"message"`
-	IsError bool          `json:"is_error"`
+	Type string `json:"type"`
+	// Message has an event-specific shape; only assistant events carry claudeMessage.
+	Message json.RawMessage `json:"message"`
+	IsError bool            `json:"is_error"`
 	// Usage reuses the package-local messageUsage type (declared in types.go)
 	// rather than a duplicate ad-hoc struct, so the two consumers of the
 	// Claude API usage shape (transcript parsing + stream-json review parser)

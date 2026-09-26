@@ -390,6 +390,58 @@ func TestParseClaudeOutput_GarbledLineEmitsRunErrorAndContinues(t *testing.T) {
 	}
 }
 
+func TestParseClaudeOutput_PermissionDeniedEventDoesNotFailRun(t *testing.T) {
+	t.Parallel()
+	// Claude Code 2.1.278 emits permission_denied system events with a
+	// string-valued message. That is a valid envelope, not malformed output,
+	// so it must not turn an otherwise-successful review into a failed run.
+	input := `{"type":"system","subtype":"permission_denied","tool_name":"Read","tool_use_id":"toolu_1","message":"Permission denied","uuid":"u1","session_id":"s1"}` + "\n" +
+		`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"finding survived"}]}}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"usage":{"output_tokens":1}}` + "\n"
+	events := collectEvents(parseClaudeOutput(strings.NewReader(input)))
+
+	var sawText, sawSuccess bool
+	for _, ev := range events {
+		switch event := ev.(type) {
+		case reviewtypes.RunError:
+			t.Errorf("valid permission_denied event emitted RunError: %v", event.Err)
+		case reviewtypes.AssistantText:
+			sawText = sawText || event.Text == "finding survived"
+		case reviewtypes.Finished:
+			sawSuccess = event.Success
+		}
+	}
+	if !sawText {
+		t.Error("assistant text after permission_denied event was lost")
+	}
+	if !sawSuccess {
+		t.Error("expected Finished{Success:true}")
+	}
+}
+
+func TestParseClaudeOutput_MalformedAssistantMessageEmitsRunError(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"assistant","message":"not an assistant message object"}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"usage":{"output_tokens":1}}` + "\n"
+	events := collectEvents(parseClaudeOutput(strings.NewReader(input)))
+
+	var sawRunError, sawSuccess bool
+	for _, ev := range events {
+		if _, ok := ev.(reviewtypes.RunError); ok {
+			sawRunError = true
+		}
+		if fin, ok := ev.(reviewtypes.Finished); ok && fin.Success {
+			sawSuccess = true
+		}
+	}
+	if !sawRunError {
+		t.Error("expected RunError for malformed assistant message")
+	}
+	if !sawSuccess {
+		t.Error("expected parser to continue through the successful result")
+	}
+}
+
 // TestParseClaudeOutput_EmitsCumulativeInputDuringRun captures the live-token
 // contract for Claude. The `Tokens` type is documented as cumulative running
 // totals (each emission replaces the previous), so mid-run emissions must be
