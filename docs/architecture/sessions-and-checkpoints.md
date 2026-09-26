@@ -202,6 +202,11 @@ matched outside its home worktree is **guest-linked**, whether it came from
 identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
 shadow-branch realignment) — those follow only the session's own worktree HEAD.
+When identity names the committing agent, the fallback is not consulted at all:
+only sessions actually homed in the commit's worktree join it. Several agents
+launched from one checkout, each working in its own worktree, are all still
+homed in that checkout until their first turn ends, and the fallback would give
+one agent's mid-turn commit to all of them.
 
 **The session follows its agent** (`rehomeSessionAfterOwnCommit`). A session
 is homed where its first turn-start hook ran, and agent hooks run where the

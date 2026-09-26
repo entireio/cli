@@ -386,6 +386,29 @@ func TestFindSessionsForWorktree_AmbiguityResolvedByLiveness(t *testing.T) {
 		assert.Empty(t, buf.String(), "a rescued commit must not tell the user nothing was linked")
 	})
 
+	t.Run("an identified agent's commit does not sweep in agents still homed in the launch checkout", func(t *testing.T) {
+		// Three agents launched from one checkout each work in their own
+		// worktree; until their first turn ends all three are homed in the
+		// checkout. Agent Y's mid-turn commit in its worktree must link Y
+		// alone, not everyone the other-worktree fallback would offer.
+		dir := identityTestRepo(t)
+		wtY := addSiblingWorktree(t, dir, "agent-y")
+		anc := selfAncestorOwner(t)
+		for _, sid := range []string{"sess-agent-x", "sess-agent-y", "sess-agent-z"} {
+			saveIdentitySession(t, sid, func(st *SessionState) {
+				st.WorktreePath = dir
+				if sid == "sess-agent-y" {
+					st.Owner = anc
+				}
+			})
+		}
+
+		got, err := NewManualCommitStrategy().findSessionsForCommitLinking(ctx, wtY)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "sess-agent-y", got[0].SessionID)
+	})
+
 	t.Run("git sequence operation suppresses the decline hint", func(t *testing.T) {
 		dir := identityTestRepo(t)
 		wtA := addSiblingWorktree(t, dir, "rebase-a")

@@ -19,11 +19,11 @@ import (
 )
 
 // findSessionsForCommitLinking resolves which sessions a commit belongs to:
-// the union of the worktree-matched set (a commit captures the worktree's
-// content, so every session with pending content here belongs in it —
-// concurrent sessions interleave by design) and the identity-matched session
-// when the committing process's ancestry names one that worktree matching
-// missed. There is no precedence between the two — an identity hit must
+// the union of the sessions homed in this worktree (a commit captures the
+// worktree's content, so every session with pending content here belongs in
+// it — concurrent sessions interleave by design) and the identity-matched
+// session when the committing process's ancestry names one. Without an
+// identity match, the other-worktree fallback stands in for the homed set. There is no precedence between the two — an identity hit must
 // never suppress worktree matches, or concurrent same-worktree sessions
 // would drop out of the commit. The identity union is what makes an
 // agent-made commit immune to worktree bookkeeping drift: an agent
@@ -81,13 +81,21 @@ func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktre
 		// rescue this; report it to the caller (hooks log and skip).
 		return commitLinkingSet{}, err
 	}
-	sessions, declined := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	var sessions, declined []*SessionState
 	var ancestryGuest string
 	if guest := s.findSessionByCommitAncestry(ctx, allStates); guest != nil {
+		// The committing agent is known, so the fallback that guesses from
+		// other worktrees has nothing to add: agents launched together from
+		// one checkout are all still homed there until their first turn ends,
+		// and the fallback would hand every one of them this commit. Only
+		// sessions actually homed in this worktree join the identified one.
 		ancestryGuest = guest.SessionID
+		sessions = exactWorktreeMatches(allStates, worktreePath)
 		if !linkingSetContains(sessions, guest.SessionID) {
 			sessions = append(sessions, guest)
 		}
+	} else {
+		sessions, declined = s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
 	}
 	linking := commitLinkingSet{sessions: sessions, ancestryGuest: ancestryGuest, all: allStates}
 	if stampedTrailer != id.EmptyCheckpointID {
