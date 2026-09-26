@@ -131,6 +131,7 @@ func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Model:      raw.Model,
+		CWD:        raw.Cwd,
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -148,6 +149,7 @@ func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) 
 		// extension) so the session/checkpoint title and prompt show what the
 		// user actually typed, not the injected block.
 		Prompt:    textutil.StripIDEContextTags(raw.Prompt),
+		CWD:       raw.Cwd,
 		Timestamp: time.Now(),
 	}, nil
 }
@@ -163,6 +165,7 @@ func (c *ClaudeCodeAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, err
 		SessionRef: raw.TranscriptPath,
 		ToolUseID:  raw.ToolUseID,
 		ToolInput:  raw.ToolInput,
+		CWD:        raw.Cwd,
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -178,6 +181,7 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 		SessionRef: raw.TranscriptPath,
 		ToolUseID:  raw.ToolUseID,
 		ToolInput:  raw.ToolInput,
+		CWD:        raw.Cwd,
 		Timestamp:  time.Now(),
 		// Final stays false: PostToolUse fires at the background launch stub,
 		// seconds after launch, not at true completion. SubagentStop
@@ -244,6 +248,7 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 		ToolUseID:              raw.ToolUseID,
 		SubagentID:             raw.AgentID,
 		SubagentTranscriptPath: raw.AgentTranscriptPath,
+		CWD:                    raw.Cwd,
 		Final:                  true,
 		Timestamp:              time.Now(),
 	}, nil

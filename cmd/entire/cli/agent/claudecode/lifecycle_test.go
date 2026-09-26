@@ -332,6 +332,9 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	if event.SubagentTranscriptPath != "/tmp/parent/subagents/agent-a123.jsonl" {
 		t.Errorf("expected subagent_transcript '/tmp/parent/subagents/agent-a123.jsonl', got %q", event.SubagentTranscriptPath)
 	}
+	if event.CWD != "/repo" {
+		t.Errorf("expected cwd '/repo', got %q", event.CWD)
+	}
 	if !event.Final {
 		t.Error("expected Final to be true for SubagentStop (true-completion) event")
 	}

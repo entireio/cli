@@ -179,6 +179,7 @@ func (f *FactoryAIDroidAgent) parseSessionInfoEvent(stdin io.Reader, eventType a
 		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		Timestamp:  time.Now(),
 	}, nil
 }
@@ -192,6 +193,7 @@ func (f *FactoryAIDroidAgent) parseTurnStart(stdin io.Reader) (*agent.Event, err
 		Type:       agent.TurnStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		Prompt:     raw.Prompt,
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
@@ -214,6 +216,7 @@ func (f *FactoryAIDroidAgent) parseTurnEnd(ctx context.Context, stdin io.Reader)
 		Type:       agent.TurnEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		Model:      model,
 		Timestamp:  time.Now(),
 	}, nil
@@ -235,6 +238,7 @@ func (f *FactoryAIDroidAgent) parseSubagentStart(ctx context.Context, stdin io.R
 		Type:       agent.SubagentStart,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		ToolUseID:  toolUseID,
 		ToolInput:  raw.ToolInput,
 		Timestamp:  time.Now(),
@@ -257,6 +261,7 @@ func (f *FactoryAIDroidAgent) parseSubagentEnd(ctx context.Context, stdin io.Rea
 		Type:       agent.SubagentEnd,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
+		CWD:        raw.Cwd,
 		ToolUseID:  toolUseID,
 		ToolInput:  raw.ToolInput,
 		Timestamp:  time.Now(),

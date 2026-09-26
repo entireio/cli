@@ -74,11 +74,13 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 	// baseline, and the nil baseline above classifies EVERY untracked file as
 	// New — so pre-existing untracked files would be claimed by this
 	// incremental checkpoint.
-	if preState, preErr := LoadPreTaskState(ctx, taskToolUseID); preErr != nil {
+	preState, preErr := LoadPreTaskState(ctx, taskToolUseID)
+	if preErr != nil {
 		logging.Warn(logCtx, "failed to load pre-task state",
 			slog.String("error", preErr.Error()))
-	} else if preState != nil && preState.UntrackedScanSkipped {
-		logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+	}
+	if preState.NewFilesUndetectable() {
+		logging.Warn(logCtx, "skipping new-file detection: no readable pre-task untracked baseline")
 		changes.New = nil
 	}
 

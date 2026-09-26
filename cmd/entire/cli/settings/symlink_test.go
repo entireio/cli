@@ -181,6 +181,25 @@ func TestLoadClonePreferences_RejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestClonePreferencesPathForWorktreeRoot_IgnoresHookRepoOverrides(t *testing.T) {
+	target := t.TempDir()
+	testutil.InitRepo(t, target)
+	hostile := t.TempDir()
+	testutil.InitRepo(t, hostile)
+
+	t.Setenv("GIT_DIR", filepath.Join(hostile, ".git"))
+	t.Setenv("GIT_WORK_TREE", hostile)
+
+	got, err := clonePreferencesPathForWorktreeRoot(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(target, ".git", ClonePreferencesFile)
+	if got != want {
+		t.Errorf("clone preferences path = %q, want %q", got, want)
+	}
+}
+
 // Real files must keep loading. Without this the check is one mistake away from
 // refusing every settings read in every repo.
 func TestLoad_RealSettingsFilesStillLoad(t *testing.T) {

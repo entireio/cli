@@ -37,6 +37,7 @@ type ClaudeHookEntry struct {
 // SessionStart includes a "model" field with the LLM model identifier.
 type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
+	Cwd            string `json:"cwd,omitempty"`
 	TranscriptPath string `json:"transcript_path"`
 	Model          string `json:"model,omitempty"`
 }
@@ -45,6 +46,7 @@ type sessionInfoRaw struct {
 // Unlike other session hooks, this includes the user's prompt text.
 type userPromptSubmitRaw struct {
 	SessionID      string `json:"session_id"`
+	Cwd            string `json:"cwd,omitempty"`
 	TranscriptPath string `json:"transcript_path"`
 	Prompt         string `json:"prompt"`
 }
@@ -52,6 +54,7 @@ type userPromptSubmitRaw struct {
 // taskHookInputRaw is the JSON structure from PreToolUse[Task] hook
 type taskHookInputRaw struct {
 	SessionID      string          `json:"session_id"`
+	Cwd            string          `json:"cwd,omitempty"`
 	TranscriptPath string          `json:"transcript_path"`
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolInput      json.RawMessage `json:"tool_input"`
@@ -60,6 +63,7 @@ type taskHookInputRaw struct {
 // postToolHookInputRaw is the JSON structure from PostToolUse hooks
 type postToolHookInputRaw struct {
 	SessionID      string          `json:"session_id"`
+	Cwd            string          `json:"cwd,omitempty"`
 	TranscriptPath string          `json:"transcript_path"`
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolInput      json.RawMessage `json:"tool_input"`
@@ -69,13 +73,13 @@ type postToolHookInputRaw struct {
 }
 
 // subagentStopHookInputRaw is the JSON structure from the SubagentStop hook.
-// Per the Agent SDK docs this also carries hook_event_name and cwd, which
-// entire has no use for and so doesn't parse. agent_transcript_path is
-// parsed defensively: an absent field just leaves AgentTranscriptPath empty
-// rather than erroring, and the lifecycle layer then falls back to resolving
-// the subagent transcript from AgentID.
+// Per the Agent SDK docs this also carries hook_event_name, which Entire does
+// not use. agent_transcript_path is parsed defensively: an absent field just
+// leaves AgentTranscriptPath empty rather than erroring, and the lifecycle
+// layer then falls back to resolving the subagent transcript from AgentID.
 type subagentStopHookInputRaw struct {
 	SessionID           string `json:"session_id"`
+	Cwd                 string `json:"cwd,omitempty"`
 	TranscriptPath      string `json:"transcript_path"`
 	AgentID             string `json:"agent_id"`
 	AgentTranscriptPath string `json:"agent_transcript_path"`

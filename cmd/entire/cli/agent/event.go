@@ -175,9 +175,10 @@ type Event struct {
 	NewFiles     []string
 	DeletedFiles []string
 
-	// CWD is the working directory the agent was running in when the event fired.
-	// Set on ToolUse so cwd-relative payload paths can be resolved before
-	// repo-root normalization.
+	// CWD is the working directory the agent was running in when the event
+	// fired. On ToolUse it resolves cwd-relative payload paths; on lifecycle
+	// events it lets the hook follow the agent into the worktree it moved to
+	// (followAgentWorkingDirectory), since hooks run where the agent launched.
 	CWD string
 
 	// ResponseMessage is an optional message to display to the user via the agent.

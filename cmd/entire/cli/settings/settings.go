@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -674,18 +674,12 @@ func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSetti
 	return loadMergedSettings(ctx, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
-func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreeRoot, "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
+func clonePreferencesPathForWorktreeRoot(_ context.Context, worktreeRoot string) (string, error) {
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-
-	commonDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreeRoot, commonDir)
-	}
-	return filepath.Join(filepath.Clean(commonDir), ClonePreferencesFile), nil
+	return filepath.Join(metadata.CommonDir, ClonePreferencesFile), nil
 }
 
 // worktreeRootOfSettingsFile recovers the worktree root a settings path was
@@ -1810,6 +1804,25 @@ func IsSetUpAndEnabled(ctx context.Context) bool {
 		return false
 	}
 	s, err := Load(ctx)
+	if err != nil {
+		return false
+	}
+	return s.Enabled
+}
+
+// IsSetUpAndEnabledAt is IsSetUpAndEnabled for an explicit worktree root, for
+// a hook deciding whether to move into another worktree before it has moved.
+func IsSetUpAndEnabledAt(ctx context.Context, worktreeRoot string) bool {
+	root, err := entiredir.OpenAtForRead(worktreeRoot)
+	if err != nil {
+		return false
+	}
+	_, baseErr := root.Lstat(SettingsName)
+	_, localErr := root.Lstat(SettingsLocalName)
+	if baseErr != nil && localErr != nil {
+		return false
+	}
+	s, err := loadForWorktreeRoot(ctx, worktreeRoot)
 	if err != nil {
 		return false
 	}

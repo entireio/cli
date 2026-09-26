@@ -202,6 +202,65 @@ matched outside its home worktree is **guest-linked**, whether it came from
 identity matching or the pre-existing single-worktree fallback below: it
 condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
 shadow-branch realignment) — those follow only the session's own worktree HEAD.
+When identity names the committing agent, the fallback is not consulted at all:
+only sessions actually homed in the commit's worktree join it. Several agents
+launched from one checkout, each working in its own worktree, are all still
+homed in that checkout until their first turn ends, and the fallback would give
+one agent's mid-turn commit to all of them.
+
+**The session follows its agent** (`rehomeSessionAfterOwnCommit`). A session
+is homed where its first turn-start hook ran, and agent hooks run where the
+agent was launched, so an agent started in the main checkout that then works
+in a worktree — created during the session and entered with the agent's
+worktree tool or a plain `cd` — stays homed in the parent while every edit and
+commit lands elsewhere. Once such a commit has condensed, the session
+identified by **ancestry** (never one that merely fell into the set through
+the path fallback) is re-homed to the committing worktree: `WorktreePath`,
+`WorktreeID`, `BaseCommit`, the attribution base, the untracked-at-start
+baseline and the branch are re-derived together. The move is skipped when the
+old home still holds pending content (tracked files, shadow-branch steps, or
+task records): that session genuinely works in two trees and stays
+guest-linked. From then on the worktree's own commits — including ones from a
+process that is not the agent's descendant — link by exact match instead of
+depending on the rescue or falling into the ambiguity refusal below.
+
+The hook itself follows first (`followAgentWorkingDirectory`): agents report
+the directory they work in on every hook payload (`Event.CWD`; Claude Code's
+`cwd` follows `EnterWorktree` and `cd`), and when that is another worktree of
+the same repository, and Entire is enabled there, the hook process moves there
+before anything is resolved, and its log sink moves with it, so the rest of the hook logs in the worktree
+where the work happens. Subagent-start, subagent-end and tool-use events
+follow too, so a subagent's work is detected and normalized in the worktree it
+ran in, but they do not confirm that the parent session moved; only turn-start
+and turn-end payloads provide that signal.
+
+A start hook and its end hook can therefore run in different worktrees. The
+pre-prompt and pre-task baselines live in the `.entire/tmp` of the tree whose
+hook captured them, so the end hook looks for them where the turn started
+(`SessionState.TurnWorktreePath`, recorded at turn start) and at the session's
+home, consumes them there, and carries the turn's `prompt.txt` over. A baseline
+from another tree cannot tell this tree's pre-existing untracked files from new
+ones, so new-file detection then falls back to the transcript, exactly as when
+the untracked scan was skipped: shell-created files the transcript never names
+are missed rather than claiming files that were already there.
+
+At turn-start and turn-end `rehomeSessionToCurrentWorktree` then applies the
+same re-home — at a turn end that saved no step as well, such as one whose only
+work was a subagent's — under the same pending-content guard. The guard knows
+where pending content came from: every `MutateSessionState` that adds files or
+task records stamps `SessionState.PendingContentWorktree` with the hook's tree
+(or marks content from several trees). Files and task records recorded in the
+tree the session moves to do not pin it to its old home; shadow-branch steps,
+which are keyed to the home worktree, always do. So the first commit after
+the move already finds a correctly homed session with no process ancestry
+involved — which is what covers Windows, where ancestry cannot be read. A hook
+re-homes only on a strong signal: the payload named the tree it now runs in
+(`strategy.WithAgentWorkingTree`, set by the dispatcher) or the turn-end
+capture found edits there. A hook that merely runs in the launch directory
+never moves a session, so agents whose payloads carry no working directory
+(Cursor, OpenCode, external agents) keep the home their own
+commit chose instead of oscillating between the launch directory and the
+worktree; for them the own-commit and captured-edit signals are what re-home.
 
 **Squashes inherit their trailers** (`inheritSquashedCheckpointTrailers`). A
 commit made while `git merge --squash` is in progress (SQUASH_MSG present in
@@ -231,9 +290,13 @@ no recorded agent in their ancestry — human commits, detached runners): exact
 repo, provided they resolve to a single worktree. Imported sessions (`Kind=imported`) never link —
 they are historical records. When candidates span several worktrees, sessions
 that interacted within the last 15 minutes are preferred; if a single live
-worktree remains it links, otherwise the hook declines with a stderr hint
-naming `entire session adopt` (two genuinely live sessions in different
-worktrees are never guessed between). This liveness filter intentionally turns
+worktree remains it links, otherwise the hook declines and names the
+candidate sessions and their worktrees on the controlling terminal (and
+stderr), with `entire session attach <session-id>` as the after-the-fact
+remedy (`announceUnlinkedCommit`; two genuinely live sessions in different
+worktrees are never guessed between). It writes to the terminal because the
+installed hook wrappers discard hook stderr, and it no longer suggests
+`session adopt`, which would move a live session out of its agent's worktree. This liveness filter intentionally turns
 some cases the old code declined outright into a best-candidate link. The
 15-minute `recentSessionWindow` is therefore a correctness tradeoff: a session
 in a long-running build or tool call can age out, allowing the remaining recent

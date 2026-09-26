@@ -539,6 +539,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	}
 	writeCommitMessageSpan.End()
 
+	// Reserve only once the trailer reached the message.
+	reserveCheckpointForStampedSessions(ctx, sessionsWithContent, checkpointID)
 	return nil
 }
 
@@ -1117,7 +1119,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// Union of worktree and identity matching — must resolve the same way
 	// PrepareCommitMsg did, or the stamped trailer and the condensed session
 	// diverge (a dangling trailer).
-	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
+	linking, err := s.findCommitLinkingSet(ctx, worktreePath, checkpointID)
+	sessions := linking.sessions
 	findSessionsSpan.RecordError(err)
 	findSessionsSpan.End()
 
@@ -1153,18 +1156,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// per-session functions (filesOverlapWithContent, filesWithRemainingAgentChanges,
 	// calculateSessionAttributions).
 	_, resolveTreesSpan := perf.Start(ctx, "resolve_commit_trees")
-	var headTree *object.Tree
-	if t, err := commit.Tree(); err == nil {
-		headTree = t
-	}
-	var parentTree *object.Tree
-	if commit.NumParents() > 0 {
-		if parent, err := commit.Parent(0); err == nil {
-			if t, err := parent.Tree(); err == nil {
-				parentTree = t
-			}
-		}
-	}
+	headTree, parentTree := commitAndParentTrees(commit)
 
 	committedFileSet := filesChangedInCommit(ctx, worktreePath, commit, headTree, parentTree)
 	resolveTreesSpan.End()
@@ -1211,6 +1203,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
 				sessionsWithCommittedFiles, condensedTelemetry)
 			trailerOwned = trailerOwned || condensed
+			s.rehomeSessionAfterOwnCommit(iterCtx, repo, state, worktreePath, newHead, condensed, linking.ancestryGuest)
 			return nil
 		}, func() {
 			EmitSkillInvocationTelemetry(iterCtx, newSkillEvents)
@@ -1261,6 +1254,22 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// commitAndParentTrees resolves commit's tree and its first parent's; either is
+// nil when it cannot be read (a root commit has no parent tree).
+func commitAndParentTrees(commit *object.Commit) (headTree, parentTree *object.Tree) {
+	if t, err := commit.Tree(); err == nil {
+		headTree = t
+	}
+	if commit.NumParents() > 0 {
+		if parent, err := commit.Parent(0); err == nil {
+			if t, err := parent.Tree(); err == nil {
+				parentTree = t
+			}
+		}
+	}
+	return headTree, parentTree
 }
 
 // anySessionOwnsCheckpoint reports whether any session already recorded cpID as
@@ -2675,7 +2684,32 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
 		return nil //nolint:nilerr // Hook must be silent on failure
 	}
+	reserveCheckpointForStampedSessions(logCtx, []*SessionState{state}, cpID)
 	return nil
+}
+
+// reserveCheckpointForStampedSessions records the stamped checkpoint ID as each
+// session's pending condensation so post-commit can resolve the session from the
+// trailer alone. An existing different reservation is kept. If the commit is
+// aborted after stamping the reservation stays, and the session's next commit
+// reuses the ID (checkpointIDForSessions) — the same reuse an interrupted
+// condensation relies on; nothing was written under it. Best-effort.
+func reserveCheckpointForStampedSessions(ctx context.Context, states []*SessionState, checkpointID id.CheckpointID) {
+	for _, stamped := range states {
+		err := MutateSessionState(ctx, stamped.SessionID, func(state *SessionState) error {
+			if state.PendingCondensationID() != id.EmptyCheckpointID {
+				return ErrMutationSkip
+			}
+			state.BeginCondensationAttempt(checkpointID)
+			return nil
+		})
+		if err != nil && !errors.Is(err, ErrStateNotFound) && !errors.Is(err, ErrMutationSkip) {
+			logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: could not reserve the stamped checkpoint on the session",
+				slog.String("session_id", stamped.SessionID),
+				slog.String("checkpoint_id", checkpointID.String()),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.CheckpointID, error) {
@@ -2948,6 +2982,8 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
+		s.rehomeSessionToCurrentWorktree(ctx, repo, state, false)
+		recordTurnWorktree(ctx, state)
 
 		// ORDERING: attribution runs BEFORE migrate to use the pre-migration
 		// BaseCommit as the base tree (preserving correct agent-line counts
@@ -3331,6 +3367,7 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 		advanceCheckpointTranscriptStartToTurnEnd(ctx, state)
 	}
 
+	s.rehomeSessionAtTurnEnd(ctx, state)
 	return nil
 }
 

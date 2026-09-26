@@ -63,12 +63,31 @@ type PrePromptState struct {
 	// Migrated to TranscriptOffset on load.
 	LastTranscriptLineCount int `json:"last_transcript_line_count,omitempty"`
 
+	// PromptOffset is the size of the session's prompt.txt when the turn began,
+	// so an end hook in another worktree carries only this turn's prompt.
+	PromptOffset int `json:"prompt_offset,omitempty"`
+
+	// capturedIn is the other worktree this baseline was loaded from, or "" when
+	// it describes the hook's own tree.
+	capturedIn string
+
+	// unreadable marks a baseline that exists but could not be read.
+	unreadable bool
+
 	// TokenBaseline is an opaque, agent-defined token position captured at turn
 	// start for OutOfBandTokenSource agents (currently Antigravity). At TurnEnd
 	// the lifecycle passes it back to CalculateTokenUsageSince to compute the
 	// checkpoint-scoped token delta. Empty for agents with transcript-embedded
 	// token data.
 	TokenBaseline json.RawMessage `json:"token_baseline,omitempty"`
+}
+
+// NewFilesUndetectable reports that this baseline cannot tell the hook's tree's
+// pre-existing untracked files from new ones: the scan was skipped, the
+// baseline could not be read, or it describes the worktree the agent has since
+// moved away from.
+func (s *PrePromptState) NewFilesUndetectable() bool {
+	return s != nil && (s.UntrackedScanSkipped || s.unreadable || s.capturedIn != "")
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -158,6 +177,9 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		UntrackedScanSkipped: scanSkipped,
 		TranscriptOffset:     transcriptOffset,
 	}
+	if existing, readErr := entiredir.ReadFile(root, sessionMetadataName(sessionID)+"/"+paths.PromptFileName); readErr == nil {
+		state.PromptOffset = len(existing)
+	}
 
 	// Out-of-band token baseline: agents whose token usage lives outside the
 	// transcript (Antigravity) snapshot their cumulative token position now so
@@ -193,27 +215,23 @@ func LoadPrePromptState(ctx context.Context, sessionID string) (*PrePromptState,
 		return nil, fmt.Errorf("invalid session ID for pre-prompt state: %w", err)
 	}
 
-	root, err := entiredir.OpenForRead(ctx)
+	// A baseline that exists but cannot be read still means "not this turn's
+	// work": callers get an unreadable state alongside the error, so new-file
+	// detection degrades instead of claiming every untracked file.
+	unreadable := &PrePromptState{SessionID: sessionID, unreadable: true}
+	data, capturedIn, err := turnBaselineSearch(ctx, sessionID).read(ctx, prePromptStateName(sessionID))
 	if err != nil {
-		// .entire doesn't exist yet — no state file
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil //nolint:nilnil // already present in codebase
-		}
-		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
+		return unreadable, fmt.Errorf("failed to read state file: %w", err)
 	}
-
-	data, err := entiredir.ReadFile(root, tmpFile("pre-prompt-%s.json", sessionID))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil //nolint:nilnil // already present in codebase
-		}
-		return nil, fmt.Errorf("failed to read state file: %w", err)
+	if data == nil {
+		return nil, nil //nolint:nilnil // already present in codebase
 	}
 
 	var state PrePromptState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+		return unreadable, fmt.Errorf("failed to unmarshal state: %w", err)
 	}
+	state.capturedIn = capturedIn
 
 	state.normalizePrePromptState()
 
@@ -225,7 +243,15 @@ func CleanupPrePromptState(ctx context.Context, sessionID string) error {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID for pre-prompt state cleanup: %w", err)
 	}
-	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-prompt-%s.json", sessionID))
+	return turnBaselineSearch(ctx, sessionID).remove(ctx, prePromptStateName(sessionID))
+}
+
+func prePromptStateName(sessionID string) string {
+	return fmt.Sprintf("pre-prompt-%s.json", sessionID)
+}
+
+func preTaskStateName(toolUseID string) string {
+	return fmt.Sprintf("pre-task-%s.json", toolUseID)
 }
 
 // cleanupTmpStateFile removes one state file from .entire/tmp, treating a
@@ -612,6 +638,18 @@ type PreTaskState struct {
 	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
 	// subagent path: when set, subagent-end must skip new-file detection.
 	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
+
+	// capturedIn is the other worktree this baseline was loaded from, or "" when
+	// it describes the hook's own tree.
+	capturedIn string
+
+	// unreadable marks a baseline that exists but could not be read.
+	unreadable bool
+}
+
+// NewFilesUndetectable is PrePromptState.NewFilesUndetectable for a task.
+func (s *PreTaskState) NewFilesUndetectable() bool {
+	return s != nil && (s.UntrackedScanSkipped || s.unreadable || s.capturedIn != "")
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -673,40 +711,47 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 // LoadPreTaskState loads previously captured task state.
 // Returns nil if no state file exists.
 func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, error) {
+	return LoadSessionPreTaskState(ctx, "", toolUseID)
+}
+
+// LoadSessionPreTaskState is LoadPreTaskState for a task of sessionID, which
+// also finds a baseline captured in the session's turn or home worktree before
+// the agent moved into this one.
+func LoadSessionPreTaskState(ctx context.Context, sessionID, toolUseID string) (*PreTaskState, error) {
 	if err := validation.ValidateToolUseID(toolUseID); err != nil {
 		return nil, fmt.Errorf("invalid tool use ID for pre-task state: %w", err)
 	}
 
-	root, err := entiredir.OpenForRead(ctx)
+	// See LoadPrePromptState: an unreadable baseline degrades detection.
+	unreadable := &PreTaskState{ToolUseID: toolUseID, unreadable: true}
+	data, capturedIn, err := taskBaselineSearch(ctx, sessionID).read(ctx, preTaskStateName(toolUseID))
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil //nolint:nilnil // already present in codebase
-		}
-		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
+		return unreadable, fmt.Errorf("failed to read state file: %w", err)
 	}
-
-	data, err := entiredir.ReadFile(root, tmpFile("pre-task-%s.json", toolUseID))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil //nolint:nilnil // already present in codebase
-		}
-		return nil, fmt.Errorf("failed to read state file: %w", err)
+	if data == nil {
+		return nil, nil //nolint:nilnil // already present in codebase
 	}
 
 	var state PreTaskState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+		return unreadable, fmt.Errorf("failed to unmarshal state: %w", err)
 	}
+	state.capturedIn = capturedIn
 
 	return &state, nil
 }
 
 // CleanupPreTaskState removes the task state file after use
 func CleanupPreTaskState(ctx context.Context, toolUseID string) error {
+	return CleanupSessionPreTaskState(ctx, "", toolUseID)
+}
+
+// CleanupSessionPreTaskState removes every copy LoadSessionPreTaskState could find.
+func CleanupSessionPreTaskState(ctx context.Context, sessionID, toolUseID string) error {
 	if err := validation.ValidateToolUseID(toolUseID); err != nil {
 		return fmt.Errorf("invalid tool use ID for pre-task state cleanup: %w", err)
 	}
-	return cleanupTmpStateFile(ctx, fmt.Sprintf("pre-task-%s.json", toolUseID))
+	return taskBaselineSearch(ctx, sessionID).remove(ctx, preTaskStateName(toolUseID))
 }
 
 // preTaskFilePrefix is the prefix for pre-task state files

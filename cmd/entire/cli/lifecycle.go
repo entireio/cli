@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -31,6 +32,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
@@ -98,6 +100,8 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		}
 	}
 
+	ctx = followAgentWorkingDirectory(ctx, ag, event)
+
 	// Conditional TurnStart (e.g. Antigravity's per-invocation PreInvocation):
 	// drop it when a turn is already active so a mid-turn follow-up model call
 	// doesn't clobber the pre-prompt baseline. A resumed turn (session idle,
@@ -145,6 +149,129 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 // concurrent-session count.
 const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this repo is causing repeated" +
 	"\n  approval prompts. Run 'entire doctor' to remove it."
+
+// followAgentWorkingDirectory moves this hook process into the worktree the
+// agent reports it is working in, when that is another worktree of the same
+// repository. Hooks run where the agent was launched while the payload's cwd
+// follows the agent (Claude Code: EnterWorktree and cd), so without this a
+// session stays homed in the launch directory while its work lands elsewhere.
+// Everything resolved from the process directory follows the move; the state
+// itself is re-homed by the strategy (rehomeSessionToCurrentWorktree). Only a
+// turn boundary confirms the target as the parent session's working tree;
+// task-scoped events still follow their subagent so their baselines and paths
+// are resolved in the tree where that task actually runs.
+func followAgentWorkingDirectory(ctx context.Context, ag agent.Agent, event *agent.Event) context.Context {
+	if event.CWD == "" {
+		return ctx
+	}
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	target, targetMeta, err := worktreeRootOf(event.CWD)
+	if err != nil {
+		logging.Debug(logCtx, "payload cwd is not a worktree; staying put",
+			slog.String("cwd", event.CWD), slog.String("error", err.Error()))
+		return ctx
+	}
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return ctx
+	}
+	if filepath.Clean(current) == filepath.Clean(target) {
+		return confirmSessionWorkingTree(ctx, event.Type)
+	}
+	currentMeta, err := gitrepo.ResolveWorktreeMetadata(current)
+	if err != nil || !sameDir(currentMeta.CommonDir, targetMeta.CommonDir) {
+		logging.Debug(logCtx, "payload cwd belongs to another repository; staying put",
+			slog.String("cwd", event.CWD))
+		return ctx
+	}
+	// The launch worktree passed the enablement gate; the target must too, or
+	// the hook would set Entire up in a worktree the user never enabled.
+	// Checked before moving, so there is nothing to roll back.
+	if !settings.IsSetUpAndEnabledAt(ctx, target) {
+		logging.Debug(logCtx, "payload cwd is a worktree where entire is not enabled; staying put",
+			slog.String("cwd", target))
+		return ctx
+	}
+	// A process-wide chdir is safe here: each hook is its own process, and
+	// nothing has resolved or cached a path yet besides what
+	// clearWorktreeCaches drops right after.
+	if err := os.Chdir(target); err != nil {
+		logging.Warn(logCtx, "could not follow the agent's working directory",
+			slog.String("cwd", target), slog.String("error", err.Error()))
+		return ctx
+	}
+	clearWorktreeCaches()
+	logging.Info(logCtx, "hook follows the agent's working directory",
+		slog.String("event", event.Type.String()),
+		slog.String("from", current),
+		slog.String("to", target))
+	// The log sink was bound to the launch worktree; rebind it so the rest of
+	// this hook logs where the work happens.
+	if logging.LoggerFromContext(ctx) != nil {
+		if l, err := newLogger(ctx); err == nil {
+			ctx = logging.WithLogger(ctx, l)
+			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
+				"hook arrived from another worktree",
+				slog.String("event", event.Type.String()),
+				slog.String("from", current))
+		}
+	}
+	return confirmSessionWorkingTree(ctx, event.Type)
+}
+
+// confirmSessionWorkingTree distinguishes a session boundary from a task
+// event emitted by one of that session's subagents. Both need to run in the
+// payload worktree, but only the former is evidence that the parent session
+// itself should be re-homed there.
+func confirmSessionWorkingTree(ctx context.Context, eventType agent.EventType) context.Context {
+	if eventType == agent.TurnStart || eventType == agent.TurnEnd {
+		return strategy.WithAgentWorkingTree(ctx)
+	}
+	return ctx
+}
+
+// sameDir compares two directory paths with symlinks resolved.
+func sameDir(a, b string) bool {
+	if ra, err := filepath.EvalSymlinks(a); err == nil {
+		a = ra
+	}
+	if rb, err := filepath.EvalSymlinks(b); err == nil {
+		b = rb
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// clearWorktreeCaches drops everything resolved from the process directory.
+func clearWorktreeCaches() {
+	paths.ClearWorktreeRootCache()
+	gitdir.ClearCache()
+	session.ClearGitCommonDirCache()
+}
+
+// worktreeRootOf finds the worktree containing dir — nearest root first, so a
+// cwd inside a subdirectory still resolves — through the canonical metadata
+// resolver rather than a git query.
+func worktreeRootOf(dir string) (string, gitrepo.WorktreeMetadata, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
+		return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("%s is not a directory", dir)
+	}
+	for cur := abs; ; cur = filepath.Dir(cur) {
+		if meta, err := gitrepo.ResolveWorktreeMetadata(cur); err == nil {
+			return cur, meta, nil
+		}
+		if filepath.Dir(cur) == cur {
+			return "", gitrepo.WorktreeMetadata{}, fmt.Errorf("%s is not inside a git worktree", dir)
+		}
+	}
+}
 
 // handleLifecycleSessionStart handles session start: shows banner, checks concurrent sessions,
 // fires state machine transition.
@@ -638,7 +765,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 				existing, readErr := entiredir.ReadFile(root, promptName)
 				var content string
 				if readErr == nil && len(existing) > 0 {
-					content = string(existing) + "\n\n---\n\n" + event.Prompt
+					content = string(existing) + promptSeparator + event.Prompt
 				} else {
 					content = event.Prompt
 				}
@@ -832,6 +959,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		logging.Warn(logCtx, "failed to load pre-prompt state",
 			slog.String("error", err.Error()))
 	}
+	if preState != nil && preState.capturedIn != "" {
+		if carryErr := carryTurnPrompt(ctx, preState.capturedIn, sessionID, preState.PromptOffset); carryErr != nil {
+			logging.Warn(logCtx, "failed to carry the turn's prompt from the worktree it started in",
+				slog.String("worktree", preState.capturedIn),
+				slog.String("error", carryErr.Error()))
+		}
+	}
 
 	// Determine transcript offset
 	transcriptOffset := resolveTranscriptOffset(ctx, preState, sessionID)
@@ -950,11 +1084,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
 		logStatusDegrade(logCtx, "failed to compute file changes", err)
 	}
-	if changes != nil && preState != nil && preState.UntrackedScanSkipped {
+	if changes != nil && preState.NewFilesUndetectable() {
 		// The turn-start untracked scan was skipped (e.g. status-walk budget
-		// breach), so there is no baseline: every untracked file in the
-		// worktree would be misreported as created by this turn.
-		logging.Warn(logCtx, "skipping new-file detection: pre-prompt untracked scan was skipped")
+		// breach) or scanned the worktree the agent has since left, so there is
+		// no baseline here: every untracked file in the worktree would be
+		// misreported as created by this turn.
+		logging.Warn(logCtx, "skipping new-file detection: no pre-prompt untracked baseline for this worktree")
 		changes.New = nil
 	}
 	detectSpan.End()
@@ -1913,7 +2048,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// which is worse and harder to notice.
 	var changes *FileChanges
 	if !opts.analyzerFilesOnly {
-		preState, preErr := LoadPreTaskState(logCtx, event.ToolUseID)
+		preState, preErr := LoadSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID)
 		if preErr != nil {
 			logging.Warn(logCtx, "failed to load pre-task state",
 				slog.String("error", preErr.Error()))
@@ -1927,10 +2062,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		if changesErr != nil {
 			logStatusDegrade(logCtx, "failed to compute file changes", changesErr)
 		}
-		if changes != nil && preState != nil && preState.UntrackedScanSkipped {
-			// Same degradation as turn-end: without a pre-task baseline, every
-			// untracked file would be misreported as created by this task.
-			logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+		if changes != nil && preState.NewFilesUndetectable() {
+			// Same degradation as turn-end: without a pre-task baseline for this
+			// tree, every untracked file would be misreported as created by this task.
+			logging.Warn(logCtx, "skipping new-file detection: no pre-task untracked baseline for this worktree")
 			changes.New = nil
 		}
 	}
@@ -1970,7 +2105,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		if !opts.bypassNoChangesSkip {
 			logging.Info(logCtx, "no file changes detected, skipping task record")
-			_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+			_ = CleanupSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 			return nil
 		}
 		logging.Info(logCtx, "no file changes detected but completing record anyway (final subagent-stop capture)")
@@ -1994,16 +2129,18 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		Files:                  files,
 		TokenUsage:             event.TokenUsage,
 	}
-	// Exactly-once needs an identity to be "once" about. Copilot CLI's
-	// SubagentEnd carries no correlation ID at all, so every one of its
-	// subagents keys on "" — the claim would match the first one's completed
-	// record and silently drop each later subagent's files. Merge instead, the
-	// same shape multi-turn Droid Workers use.
+	// Exactly-once needs an identity to be "once" about. A SubagentEnd with no
+	// correlation ID (an external agent that sends none) keys every subagent on
+	// "" — the claim would match the first one's completed record and silently
+	// drop each later subagent's files. Merge instead, the same shape
+	// multi-turn Droid Workers use. Copilot CLI no longer lands here: it joins
+	// its stop to the launch in the parent transcript and drops the event
+	// when that fails.
 	if event.ToolUseID == "" && event.SubagentID == "" {
 		if err := strategy.UpsertCompletedTaskRecord(logCtx, event.SessionID, rec); err != nil {
 			return fmt.Errorf("failed to record uncorrelated task: %w", err)
 		}
-		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+		_ = CleanupSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
 	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
@@ -2018,7 +2155,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			slog.String("tool_use_id", event.ToolUseID))
 	}
 
-	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+	_ = CleanupSessionPreTaskState(logCtx, event.SessionID, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
 }
 
