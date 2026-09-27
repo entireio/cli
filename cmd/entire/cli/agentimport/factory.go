@@ -42,7 +42,7 @@ func (factoryImporter) Discover(repoRoot, overridePath string, now time.Time, se
 // from the session's adjacent settings file. Droid
 // envelopes carry no per-message timestamp (the agent stamps events with
 // time.Now() at hook time), so every turn falls back to the transcript file's
-// modtime — the same fallback the Gemini importer uses.
+// modtime — the same fallback the Cursor importer uses.
 func (factoryImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 	subagentsDir := paths.SubagentsDir(filepath.Dir(sf.Path), sf.SessionID)
 	model := factoryaidroid.ExtractModelFromTranscript(context.Background(), sf.Path)

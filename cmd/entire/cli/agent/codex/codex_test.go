@@ -40,12 +40,6 @@ func TestCodexAgent_Description(t *testing.T) {
 	require.Contains(t, ag.Description(), "Codex")
 }
 
-func TestCodexAgent_IsPreview(t *testing.T) {
-	t.Parallel()
-	ag := &CodexAgent{}
-	require.True(t, ag.IsPreview())
-}
-
 func TestCodexAgent_ProtectedDirs(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}

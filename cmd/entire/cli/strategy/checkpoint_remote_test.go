@@ -485,11 +485,14 @@ func TestConfigured_NoCheckpointRemote(t *testing.T) {
 }
 
 // Not parallel: uses t.Chdir()
-// This is the key correctness test: FetchURL must NOT apply push-side owner
-// mismatch checks. A clone whose origin owner differs from the checkpoint repo
-// owner should still be able to read checkpoints. That owner check is only for
-// push (resolvePushSettings).
-func TestFetchURL_IgnoresOwnerMismatchCheck(t *testing.T) {
+// Both directions share one ownership rule: a committed checkpoint_remote whose
+// owner does not match the repo's own remotes arrived with the clone, and it
+// must select neither where checkpoints are pushed nor where local checkpoint
+// refs are populated from. FetchURL previously skipped the check on the
+// reasoning that reading is always safe, which left an inherited setting in
+// control of the fetch source; .entire/settings.local.json is the escape hatch
+// for a checkpoint repo that is genuinely ours under a different owner.
+func TestFetchURL_AppliesOwnerMismatchCheck(t *testing.T) {
 	ctx := context.Background()
 
 	localDir := t.TempDir()
@@ -514,13 +517,13 @@ func TestFetchURL_IgnoresOwnerMismatchCheck(t *testing.T) {
 	configured := remote.Configured(ctx)
 	assert.True(t, configured)
 
-	// resolvePushSettings would reject this owner mismatch, but FetchURL
-	// must return the URL — reading checkpoints is always allowed.
+	// FetchURL rejects the owner mismatch the same way resolvePushSettings
+	// does, falling back to origin instead of the inherited checkpoint repo.
 	url, err := remote.FetchURL(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, "git@github.com:org/checkpoints.git", url)
+	assert.Equal(t, "git@github.com:alice/main-repo.git", url)
 
-	// Contrast: push settings should reject the same config
+	// The push side rejects the same config.
 	ps := resolvePushSettings(ctx, "origin")
 	assert.False(t, ps.hasCheckpointURL(), "resolvePushSettings should reject an origin with a different owner")
 }

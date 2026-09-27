@@ -48,13 +48,13 @@ func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg
 
 // searchTranscriptInProjectDirs searches for a session transcript across an agent's
 // project directories that could plausibly belong to the current repository.
-// Agents like Claude Code and Gemini CLI derive the project directory from the cwd,
+// Agents like Claude Code derive the project directory from the cwd,
 // so the transcript may be stored under a different project directory if the session
 // was started from a different working directory.
 //
 // The search is scoped to the agent's base directory (e.g., ~/.claude/projects) and only
-// walks immediate subdirectories (plus one extra level for agents like Gemini that nest
-// chats under <project>/chats/).
+// walks immediate subdirectories (plus a few extra levels for agents that nest
+// transcripts under a project subdirectory).
 // Only agents implementing SessionBaseDirProvider support this fallback search.
 func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string, error) {
 	provider, ok := agentpkg.AsSessionBaseDirProvider(ag)

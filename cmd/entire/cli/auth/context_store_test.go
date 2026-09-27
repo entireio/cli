@@ -130,23 +130,6 @@ func TestRemoveContext_LeavesOtherAccountsJurisdictionTokens(t *testing.T) {
 	}
 }
 
-// TestRemoveCurrentContext_DeletesJurisdictionTokens covers the default
-// `entire logout` path (active context, not selected by name).
-func TestRemoveCurrentContext_DeletesJurisdictionTokens(t *testing.T) {
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
-
-	const audience = "https://eu.example.io"
-	seedLoginWithJurisdictionTokens(t, audience)
-
-	if err := RemoveCurrentContext(); err != nil {
-		t.Fatalf("RemoveCurrentContext: %v", err)
-	}
-	if v, err := tokenstore.Get(tokenstore.JurisdictionService(audience), "alice"); !errors.Is(err, tokenstore.ErrNotFound) {
-		t.Fatalf("jurisdiction token survived logout: value=%q err=%v", v, err)
-	}
-}
-
 // TestRemoveContext_SkipsBlankRecordedAudience covers a hand-edited or
 // corrupted contexts.json: a blank audience would resolve to the bare service
 // prefix, so it must be skipped rather than looked up, and it must not stop the
@@ -299,11 +282,8 @@ func TestRecordLoginContext_ReloginKeepsJurisdictionAudiences(t *testing.T) {
 }
 
 // Contexts reports the ACTING identity (honouring --context/$ENTIRE_CONTEXT) while
-// StoredContexts reports the PERSISTED default. Conflating them made
-// `entire logout --context X` and a plain `entire logout` leave different state
-// for the same target: promoteNextLogin asked for the acting identity, which by
-// then named the just-deleted context, so Active failed and the promotion was
-// silently skipped.
+// StoredContexts reports the PERSISTED default. `logout` sweeps StoredContexts,
+// so an override naming a missing context must not fail it.
 //
 // Mutates the process-wide override and env, so no t.Parallel.
 func TestContextsVsStoredContexts_OverrideScope(t *testing.T) {
@@ -335,7 +315,6 @@ func TestContextsVsStoredContexts_OverrideScope(t *testing.T) {
 	if err != nil || stored != defaultCtx {
 		t.Fatalf("StoredContexts() stored = %q, %v; want prod (the persisted default)", stored, err)
 	}
-	// promoteNextLogin picks all[0] as the next default, so the list matters too.
 	if len(all) != 2 || all[0].Name != defaultCtx {
 		t.Fatalf("StoredContexts() list = %v, want the saved contexts in on-disk order", all)
 	}

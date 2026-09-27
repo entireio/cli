@@ -97,7 +97,7 @@ func TestRun_WritesSessionStateExceptDryRun(t *testing.T) {
 				files: []SessionFile{{Path: transcript, SessionID: sid}},
 				turns: []Turn{{UUID: "a", Prompt: "hello", CreatedAt: time.Now().Add(-time.Hour)}},
 			}
-			if _, err := Run(ctx, repo, imp, Options{RepoRoot: dir, Now: time.Now(), DryRun: tc.dryRun}); err != nil {
+			if _, err := Run(ctx, repo, imp, Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: dir, Now: time.Now(), DryRun: tc.dryRun}); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 

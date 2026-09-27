@@ -152,7 +152,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	path := writeTestTranscript(t, testExportJSON)
 
 	// From offset 0 — should get both main.go and util.go
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestExtractModifiedFilesFromOffset(t *testing.T) {
 	}
 
 	// From offset 2 — should only get util.go (messages 3 and 4)
-	files, pos, err = ag.ExtractModifiedFilesFromOffset(path, 2)
+	files, pos, err = ag.ExtractModifiedFilesFromOffset(context.Background(), path, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestExtractModifiedFilesFromOffset_ApplyPatch(t *testing.T) {
 	path := writeTestTranscript(t, testApplyPatchExportJSON)
 
 	// From offset 0 — should find layout.py and resize.py (deduplicated)
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestExtractModifiedFilesFromOffset_ApplyPatch(t *testing.T) {
 	}
 
 	// From offset 2 — should find layout.py and resize.py from msg-4
-	files, _, err = ag.ExtractModifiedFilesFromOffset(path, 2)
+	files, _, err = ag.ExtractModifiedFilesFromOffset(context.Background(), path, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestExtractModifiedFilesFromOffset_CamelCaseFilePath(t *testing.T) {
 	ag := &OpenCodeAgent{}
 	path := writeTestTranscript(t, testCamelCaseExportJSON)
 
-	files, pos, err := ag.ExtractModifiedFilesFromOffset(path, 0)
+	files, pos, err := ag.ExtractModifiedFilesFromOffset(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -473,7 +473,7 @@ func TestExtractModifiedFilesFromOffset_CamelCaseFilePath(t *testing.T) {
 	}
 
 	// From offset 2 — should still find the edit in msg-4
-	files, _, err = ag.ExtractModifiedFilesFromOffset(path, 2)
+	files, _, err = ag.ExtractModifiedFilesFromOffset(context.Background(), path, 2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -797,5 +798,33 @@ func TestOpenNoFollow_MissingStaysNotExist(t *testing.T) {
 	}
 	if errors.Is(err, osroot.ErrNotRegularFile) {
 		t.Error("an absent file must not report ErrNotRegularFile")
+	}
+}
+
+// A backslash-joined name is one component to os.Root and to this function's
+// "/" split; on Windows that is exactly what filepath.Join produces, and it
+// surfaced as a status store that was never created. Refuse it up front.
+func TestMkdirAllNoSymlink_RejectsBackslashSeparatedName(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	err = osroot.MkdirAllNoSymlink(root, `antigravity\status`, 0o750)
+	if err == nil {
+		t.Fatal("expected a backslash-separated name to be refused")
+	}
+	if !strings.Contains(err.Error(), "slash-separated") {
+		t.Fatalf("error should explain the separator rule, got %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("nothing may be created for a refused name, found %v", entries)
 	}
 }

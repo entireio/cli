@@ -5,6 +5,12 @@ on:
   push:
     branches:
       - main
+
+# Least privilege: every job here only reads the repository. The `test` gate job
+# below needs nothing at all and drops even this.
+permissions:
+  contents: read
+
 jobs:
   test-core:
     runs-on: ubuntu-latest
@@ -87,6 +93,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions: {}
     needs:
       - test-core
       - test-integration

@@ -288,7 +288,12 @@ func resolveCheckpointFetchURL(ctx context.Context, worktreeRoot string) (string
 	if config == nil {
 		return "", false
 	}
-	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
+	url, err := remote.FetchURL(ctx, remote.FetchURLOptions{
+		WorktreeRoot: worktreeRoot,
+		// The elected remote joins the ownership vote so the fork-shaped
+		// topology that only the push destination exposes is refused here too.
+		LeadReadRemote: LeadCheckpointReadRemote(ctx),
+	})
 	if err != nil || strings.TrimSpace(url) == "" {
 		logging.Debug(ctx, "checkpoint-remote: could not resolve fetch URL for metadata bootstrap",
 			slog.Any("error", err))

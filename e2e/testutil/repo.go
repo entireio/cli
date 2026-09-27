@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,25 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "config", "core.autocrlf", "true")
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
+	// Copilot prompt mode requires repository instructions. Commit the custom
+	// agent fixture before Entire starts capture so setup files cannot be
+	// attributed to the child under test.
+	if agent.Name() == "copilot-cli" {
+		agentsDir := filepath.Join(dir, ".github", "agents")
+		if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+			t.Fatalf("create Copilot agent directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".github", "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
+			t.Fatalf("write copilot-instructions.md: %v", err)
+		}
+		agentFile := "---\nname: entire-e2e-subagent\ndescription: Creates the single file delegated by the parent.\ntools: [\"*\"]\n---\nCreate only the requested file and do not delegate further.\n"
+		if err := os.WriteFile(filepath.Join(agentsDir, "entire-e2e-subagent.agent.md"), []byte(agentFile), 0o644); err != nil {
+			t.Fatalf("write Copilot custom agent: %v", err)
+		}
+		Git(t, dir, "add", ".github")
+		Git(t, dir, "commit", "-m", "Add Copilot E2E agent fixture")
+	}
+
 	// External agents need external_agents enabled in settings before enable,
 	// so the CLI can discover the agent binary via PATH during DiscoverAndRegister.
 	//
@@ -119,8 +139,20 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	}
 
 	entire.Enable(t, dir, agent.EntireAgent())
-	if agent.Name() == "gemini-cli" {
-		setupGeminiTestHome(t, dir)
+	if preparer, ok := agent.(agents.RepoPreparer); ok {
+		if err := preparer.PrepareRepo(dir); err != nil {
+			t.Fatalf("prepare repo for %s: %v", agent.Name(), err)
+		}
+	}
+	// Registered after the repo's own RemoveAll and before artifact capture
+	// (t.Cleanup runs last-in first-out), so agent state beside the repo is
+	// still there when artifacts are collected and gone when the test ends.
+	if cleaner, ok := agent.(agents.RepoCleaner); ok && !keepRepos {
+		t.Cleanup(func() {
+			if err := cleaner.CleanupRepo(dir); err != nil {
+				t.Logf("cleanup agent state for %s: %v", agent.Name(), err)
+			}
+		})
 	}
 	if agent.Name() == "factoryai-droid" {
 		if err := configureDroidRepoSettings(dir); err != nil {
@@ -135,19 +167,6 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// exercise the !CanPromptInteractively() fast path since they have no TTY
 	// regardless of this setting.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
-
-	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
-	// repos that lack .github/copilot-instructions.md, preventing the interactive
-	// prompt from appearing.
-	if agent.Name() == "copilot-cli" {
-		ghDir := filepath.Join(dir, ".github")
-		if err := os.MkdirAll(ghDir, 0o755); err != nil {
-			t.Fatalf("create .github dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(ghDir, "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
-			t.Fatalf("write copilot-instructions.md: %v", err)
-		}
-	}
 
 	// Agents that need files planted before their first run in a repo get them
 	// here — after `entire enable` has written the agent's own config, so a
@@ -214,31 +233,6 @@ func PushCheckpointRefs(t *testing.T, dir string) {
 		return
 	}
 	Git(t, dir, "push", "origin", checkpointRefV1+":"+checkpointRefV1)
-}
-
-func setupGeminiTestHome(t *testing.T, repoDir string) {
-	t.Helper()
-
-	homeDir := geminiTestHomeDir(repoDir)
-	t.Cleanup(func() {
-		if err := os.RemoveAll(homeDir); err != nil {
-			t.Errorf("remove gemini test home: %v", err)
-		}
-	})
-
-	geminiDir := filepath.Join(homeDir, ".gemini")
-	if err := os.MkdirAll(filepath.Join(geminiDir, "acknowledgments"), 0o755); err != nil {
-		t.Fatalf("create gemini test home: %v", err)
-	}
-
-	config := `{"security":{"auth":{"selectedType":"gemini-api-key"}}}`
-	if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(config), 0o644); err != nil {
-		t.Fatalf("write gemini settings: %v", err)
-	}
-}
-
-func geminiTestHomeDir(repoDir string) string {
-	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-gemini-home")
 }
 
 func configureDroidRepoSettings(repoDir string) error {
@@ -425,7 +419,7 @@ func runForAgents(t *testing.T, all []agents.Agent, timeout time.Duration, fn fu
 			defer agents.ReleaseSlot(agent)
 
 			// Per-test timeout starts after slot is acquired, scaled
-			// by the agent's multiplier (e.g. 2.5× for gemini).
+			// by the agent's multiplier.
 			scaled := time.Duration(float64(timeout) * agent.TimeoutMultiplier())
 
 			var prevState *RepoState
@@ -493,7 +487,7 @@ func (s *RepoState) RunPrompt(t *testing.T, ctx context.Context, prompt string, 
 	s.logPromptResult(out)
 
 	if err != nil && s.Agent.IsTransientError(out, err) {
-		errMsg := fmt.Sprintf("transient API error (stderr: %s)", strings.TrimSpace(out.Stderr))
+		errMsg := fmt.Sprintf("transient API error: %v (stderr: %s)", err, strings.TrimSpace(out.Stderr))
 		t.Logf("%s — restarting scenario", errMsg)
 		fmt.Fprintf(s.ConsoleLog, "> [transient] %s — restarting scenario\n", errMsg)
 		panic(errScenarioRestart{msg: errMsg})
@@ -520,6 +514,20 @@ func (s *RepoState) Git(t *testing.T, args ...string) {
 // mode. The session is closed automatically during test cleanup.
 func (s *RepoState) StartSession(t *testing.T, ctx context.Context) agents.Session {
 	t.Helper()
+	// Every agent's interactive driver is tmux-backed (agents/tmux.go), and
+	// Windows has no tmux. main_test.go's preflight already states that
+	// interactive tests are skipped there -- which is why it does not require
+	// the tmux binary on Windows -- but nothing enforced it, so the tests ran
+	// and every one failed with `exec: "tmux": executable file not found in
+	// %PATH%`. Only claude carried a guard of its own, so antigravity and
+	// droid, the other two agents on the Windows matrix, hit it.
+	//
+	// The guard belongs here rather than in each agent: the reason is the
+	// platform, not the agent, and one place means the next tmux-driven agent
+	// inherits it instead of having to remember.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	session, err := s.Agent.StartSession(ctx, s.Dir)
 	if err != nil {
 		t.Fatalf("start session: %v", err)

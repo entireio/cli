@@ -132,16 +132,6 @@ func assertNoWindowsInstallerNames(t *testing.T, cmd string) {
 	}
 }
 
-// brew, mise, and the curl|bash one-liner all run in any POSIX shell, so
-// messages that print an update command name no shell here.
-func TestUpdateCommandShell_Unix(t *testing.T) {
-	t.Parallel()
-
-	if got := UpdateCommandShell(); got != "" {
-		t.Errorf("UpdateCommandShell() = %q, want %q", got, "")
-	}
-}
-
 func TestCheckAndNotify_BrewSkipUntilNextVersionCachesLatest(t *testing.T) {
 	server := newVersionServer(t, "v2.0.0")
 	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
@@ -258,5 +248,65 @@ func TestUnixBrewBeatsAMiseRootCoveringTheSamePath(t *testing.T) {
 	if got := UpdateCommandForCurrentBinary("1.0.0"); got != brewUpgradeCmd {
 		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q; brew must be probed before mise",
 			got, brewUpgradeCmd)
+	}
+}
+
+// knownUpdateCommands is every string UpdateCommandForCurrentBinary may return
+// on unix. It is a closed set on purpose: realRunInstaller hands the result to
+// `sh -c`, and that is only defensible while nothing runtime-derived reaches
+// the string. Windows has no equivalent guard because it has no equivalent
+// exception: realRunInstaller is unimplemented there, so its commands are only
+// ever printed, and its fallback deliberately names the install directory.
+var knownUpdateCommands = map[string]struct{}{
+	brewUpgradeCmd:                      {},
+	"brew upgrade --yes entire@nightly": {},
+	miseUpgradeCmd:                      {},
+	"curl -fsSL https://entire.io/install.sh | bash":                         {},
+	"curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly": {},
+}
+
+// TestUpdateCommandIsAlwaysALiteral is the guard behind realRunInstaller's
+// decision to keep `sh -c`.
+//
+// The version string and the executable path are the only inputs, and today
+// they only select among fixed commands. Interpolating either into the command
+// — the channel into a URL, a package name into a spec — is the change that
+// turns a shell invocation of a constant into a shell invocation of a runtime
+// value, and it would look entirely reasonable in review. The adversarial cases
+// below are not a claim that an attacker controls these inputs; they are there
+// so that a future interpolation shows up as a failing test rather than as a
+// quoting question nobody asks.
+func TestUpdateCommandIsAlwaysALiteral(t *testing.T) {
+	versions := []string{
+		"1.0.0",
+		"1.0.1-nightly.202604101200.abc1234",
+		"",
+		"1.0.0; touch /tmp/pwned",
+		"$(touch /tmp/pwned)",
+		"1.0.0-nightly.`id`",
+	}
+	execPaths := []string{
+		"/opt/homebrew/bin/entire",
+		"/home/linuxbrew/.linuxbrew/bin/entire",
+		"/home/user/.local/share/mise/installs/entire/1.0.0/bin/entire",
+		plainBinPath,
+		"/opt/homebrew/bin/entire; touch /tmp/pwned",
+		"/home/user/.local/share/mise/installs/$(id)/bin/entire",
+	}
+
+	for _, version := range versions {
+		for _, path := range execPaths {
+			original := executablePath
+			executablePath = func() (string, error) { return path, nil }
+			got := UpdateCommandForCurrentBinary(version)
+			executablePath = original
+
+			if _, known := knownUpdateCommands[got]; !known {
+				t.Errorf("UpdateCommandForCurrentBinary(%q) with exec path %q = %q, which is not one of the known literals.\n"+
+					"realRunInstaller passes this to `sh -c`, which is only safe while the command is a "+
+					"compile-time constant. A command that needs a runtime value must be built and run as "+
+					"argv instead of being added to knownUpdateCommands.", version, path, got)
+			}
+		}
 	}
 }

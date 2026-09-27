@@ -56,8 +56,8 @@ func AsContextInjector(ag Agent) (ContextInjector, bool) {
 //
 //	{"hookSpecificOutput":{"hookEventName":<event>,"additionalContext":<text>}}
 //
-// Claude Code, Codex (which hosts Claude-compatible hooks) and Gemini CLI all
-// consume this shape on their prompt-submit hook (UserPromptSubmit / BeforeAgent)
+// Claude Code and Codex (which hosts Claude-compatible hooks) both consume
+// this shape on their prompt-submit hook (UserPromptSubmit)
 // and merge additionalContext into the model context. Returns (nil, nil) for
 // empty text so callers can write nothing.
 func RenderAdditionalContextHookOutput(hookEventName, text string) ([]byte, error) {

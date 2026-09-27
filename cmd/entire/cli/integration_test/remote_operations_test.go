@@ -738,7 +738,8 @@ func TestResume_FetchesPrimaryBranchFullyWithFilteredFetches(t *testing.T) {
 // listCheckpointsInDir reads checkpoint IDs from the metadata branch tree.
 // This intentionally uses a separate implementation (git ls-tree) rather than
 // the production ListCheckpoints() to avoid testing the code with itself.
-// The sharded directory structure is documented in CLAUDE.md.
+// The sharded directory structure is documented in
+// docs/architecture/sessions-and-checkpoints.md.
 func listCheckpointsInDir(t *testing.T, repoDir string) []string {
 	t.Helper()
 

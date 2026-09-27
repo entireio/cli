@@ -12,7 +12,12 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/recap"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
+	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 const recapTestAgentCodex = "codex"
@@ -159,6 +164,59 @@ func TestRunRecap_PrerequisiteErrorsUseErrorWriter(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "Not a git repository") {
 		t.Fatalf("stderr missing git prerequisite message: %q", errOut.String())
+	}
+}
+
+// An http:// override is rejected before any discovery runs against it, so
+// runRecap's ErrInsecureHTTP guidance fires instead of a discovery failure.
+//
+// Not parallel: it sets ENTIRE_API_BASE_URL and swaps the discovery seam.
+func TestNewRecapClient_RejectsInsecureOverrideBeforeDiscovery(t *testing.T) {
+	unsetEnv(t, auth.EnvTokenVar)
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
+	t.Setenv(api.BaseURLEnvVar, "http://recap.invalid")
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+			t.Fatal("discovery ran against an insecure override")
+			return nil, errors.New("unreachable")
+		}))
+
+	_, _, _, err := newRecapClient(t.Context(), false)
+	if !errors.Is(err, api.ErrInsecureHTTP) {
+		t.Fatalf("error = %v, want ErrInsecureHTTP", err)
+	}
+}
+
+// The rendered guidance must name the variable that is wrong and the value it
+// holds. "refusing to use insecure http:// base URL" alone does not tell a
+// reader which of their settings to go and fix.
+//
+// Not parallel: it sets ENTIRE_API_BASE_URL and chdirs into a scratch repo.
+func TestRunRecap_InsecureOverrideMessageNamesTheVariable(t *testing.T) {
+	unsetEnv(t, auth.EnvTokenVar)
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+	t.Setenv(userdirs.EnvConfigDir, t.TempDir())
+	t.Setenv(userdirs.EnvCacheHome, t.TempDir())
+	t.Setenv(api.BaseURLEnvVar, "http://recap.invalid")
+	t.Cleanup(auth.SetResolveContextForAPIForTest(t,
+		func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+			t.Fatal("discovery ran against an insecure override")
+			return nil, errors.New("unreachable")
+		}))
+
+	var out, errOut bytes.Buffer
+	err := runRecap(t.Context(), &out, &errOut, &recapFlags{})
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("error = %T %v, want SilentError", err, err)
+	}
+	for _, want := range []string{api.BaseURLEnvVar, "http://recap.invalid", "--insecure-http-auth"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr missing %q: %s", want, errOut.String())
+		}
 	}
 }
 

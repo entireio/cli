@@ -705,8 +705,17 @@ func appendTranscriptEntry(path string, entry transcriptEntry) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
-	f.Write(data)
+	// The canary asserts on this transcript, so a partial one invalidates the
+	// run rather than degrading it: every downstream assertion fails with a
+	// message about the wrong thing. Report the real cause instead. Close is
+	// checked because it is where a failed flush surfaces.
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		fatal("writing transcript %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		fatal("closing transcript %s: %v", path, err)
+	}
 }
 
 func fatal(format string, args ...any) {

@@ -12,10 +12,15 @@ import (
 const flagGroupAnnotation = "entire_flag_group"
 
 // Shared flag-group names, so every list command presents the same taxonomy:
-// how much is fetched and which page (navigation), what the client narrows or
-// orders after the fetch (filtering & sorting), and how output is rendered
-// (formatting).
+// which records the command acts on at all (scope), how much is fetched and
+// which page (navigation), what the client narrows or orders after the fetch
+// (filtering & sorting), and how output is rendered (formatting).
+//
+// Scope comes first wherever it appears: an ungrouped flag renders after every
+// group and after --help, which is the wrong place for one the command cannot
+// run without.
 const (
+	flagGroupScope      = "Scope"
 	flagGroupNavigation = "Navigation"
 	flagGroupFiltering  = "Filtering & Sorting"
 	flagGroupFormatting = "Formatting"

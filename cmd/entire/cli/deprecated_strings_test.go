@@ -11,11 +11,11 @@ import (
 
 // TestNoDeprecatedCommandFormsInUserFacingStrings sweeps the CLI package
 // tree's production sources for strings that tell users or agents to run a
-// deprecated top-level shortcut (`entire explain`, `entire resume`, …).
-// Following such a hint prints a deprecation warning for advice the CLI
-// itself gave, so every hint, help example, and prompt must use the
-// canonical group form (`entire checkpoint explain`, `entire session
-// resume`, …).
+// command spelling that no longer exists: the deprecated top-level shortcuts
+// (`entire explain`, `entire resume`, …) and the control-plane verbs renamed
+// onto the unified `repo` surface (`entire repo get`, `entire auth use`, …).
+// Following such a hint fails or warns for advice the CLI itself gave, so
+// every hint, help example, and prompt must use the current form.
 //
 // Scope: non-test .go files under this package and its subpackages.
 // Comment-only lines are skipped — code comments may legitimately discuss
@@ -32,6 +32,23 @@ func TestNoDeprecatedCommandFormsInUserFacingStrings(t *testing.T) {
 		"entire trace",   // → entire doctor trace
 		"entire rewind",  // → removed (no replacement); never advertise
 		"entire reset",   // → entire clean
+		// Control-plane verbs renamed onto the unified `repo` surface.
+		"entire auth use",                  // → entire auth switch
+		"entire repo get",                  // → entire repo view
+		"entire repo mirror create",        // → entire repo mirror add
+		"entire repo mirror use",           // → entire repo remote add
+		"entire repo remote use",           // → entire repo remote add
+		"entire repo remote url",           // → removed; entire repo mirror get lists a URL per cluster
+		"entire repo mirror collaborators", // → entire repo grant list
+		"entire repo access",               // → entire repo grant list
+		"entire repo visibility set",       // → entire repo edit --visibility
+		// The grant family moved under its nouns; the old spelling is gone.
+		"entire grant org",     // → entire org grant
+		"entire grant project", // → entire project grant
+		"entire grant repo",    // → entire repo grant
+		// A repo's home cluster is its owning project's region, so there is
+		// nothing for a caller to choose.
+		"--cluster-host", // → removed; the owning project's region decides
 	}
 
 	var offenders []string

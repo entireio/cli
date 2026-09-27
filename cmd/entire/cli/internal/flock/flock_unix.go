@@ -78,7 +78,7 @@ func lockFile(ctx context.Context, open func() (*os.File, error), holdsCurrent f
 			if err != nil {
 				return nil, fmt.Errorf("open flock: %w", err)
 			}
-			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // file descriptors are non-negative; standard Go pattern for syscall.Flock
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 				_ = f.Close()
 				return nil, fmt.Errorf("flock: %w", err)
 			}
@@ -101,7 +101,7 @@ func lockFile(ctx context.Context, open func() (*os.File, error), holdsCurrent f
 		if err != nil {
 			return nil, fmt.Errorf("open flock: %w", err)
 		}
-		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // see above
+		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if lockErr == nil {
 			current, err := holdsCurrent(f)
 			if err != nil {

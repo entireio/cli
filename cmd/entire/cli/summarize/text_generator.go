@@ -34,7 +34,7 @@ func (g *TextGeneratorAdapter) Generate(ctx context.Context, input Input) (*chec
 	if g.TextGenerator == nil {
 		return nil, errors.New("text generator not configured")
 	}
-	transcriptText := FormatCondensedTranscript(input)
+	transcriptText := FormatCondensedTranscriptForPrompt(input)
 	prompt := buildSummarizationPrompt(transcriptText)
 
 	// Prefer streaming when the underlying agent supports it. TextGenerator

@@ -10,10 +10,12 @@ import (
 )
 
 // newOrgCmd is the `entire org` command group: create, list, get, and
-// delete organizations on the Entire control plane.
+// delete organizations on the Entire control plane, the `grant` subtree for
+// membership (see grant.go), and the `invite` subtree for inviting by email
+// (see org_invite.go).
 func newOrgCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "org",
+		Use:   cmdOrg,
 		Short: "Manage Entire organizations",
 	}
 	addControlPlaneFlags(cmd)
@@ -21,12 +23,14 @@ func newOrgCmd() *cobra.Command {
 	cmd.AddCommand(newOrgListCmd())
 	cmd.AddCommand(newOrgGetCmd())
 	cmd.AddCommand(newOrgDeleteCmd())
+	cmd.AddCommand(newOrgGrantCmd())
+	cmd.AddCommand(newOrgInviteCmd())
 	return cmd
 }
 
 // orgColumns is the human table/field view of an org, shared by list and
 // any future `org get`.
-var orgColumns = []string{"ID", "NAME", "REGION", "CREATED"}
+var orgColumns = []string{"ID", colHeaderName, colHeaderRegion, "CREATED"}
 
 func orgRow(o coreapi.Org) []string {
 	return []string{o.ID, o.Name, o.Region, o.CreatedAt.Format("2006-01-02")}
@@ -35,7 +39,7 @@ func orgRow(o coreapi.Org) []string {
 func newOrgCreateCmd() *cobra.Command {
 	var region string
 	cmd := &cobra.Command{
-		Use:   "create <name>",
+		Use:   cmdCreateName,
 		Short: "Create an organization",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -44,10 +48,11 @@ func newOrgCreateCmd() *cobra.Command {
 				if region != "" {
 					body.Region = coreapi.NewOptString(region)
 				}
-				org, err := c.CreateOrg(ctx, body)
+				created, err := c.CreateOrg(ctx, body)
 				if err != nil {
 					return "", nil, err
 				}
+				org := &created.Response
 				return fmt.Sprintf("✓ Created org %s (%s)", org.Name, org.ID), org, nil
 			})
 		},
@@ -59,7 +64,7 @@ func newOrgCreateCmd() *cobra.Command {
 
 func newOrgListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List organizations you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -108,11 +113,12 @@ func newOrgDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "org", args[0],
-				func(ctx context.Context, c *coreapi.Client) (string, error) {
-					return resolveOrgRef(ctx, c, args[0])
+				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
+					return resolveOrgRefResolved(ctx, c, args[0])
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
-					return c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+					_, err := c.DeleteOrg(ctx, coreapi.DeleteOrgParams{OrgId: id})
+					return err
 				})
 		},
 	}

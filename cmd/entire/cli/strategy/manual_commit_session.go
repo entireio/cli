@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -147,15 +148,17 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		}
 
 		// Skip and cleanup orphaned sessions whose shadow branch no longer exists.
-		// Keep active sessions (shadow branch may not be created yet) and sessions
-		// with LastCheckpointID (needed for checkpoint ID reuse on subsequent commits).
-		// Clean up everything else: stale pre-state-machine sessions (empty phase),
-		// IDLE/ENDED sessions that were never condensed, etc.
+		// Keep non-ended sessions (including legacy empty phases normalized to IDLE)
+		// and sessions with LastCheckpointID (needed for checkpoint ID reuse on
+		// subsequent commits). Ended states that were never condensed are cleared.
 		// Record-bearing sessions hold condensable content off the shadow branch — never orphaned.
 		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		refName := plumbing.NewBranchReferenceName(shadowBranch)
 		if _, err := repo.Reference(refName, true); err != nil {
-			if !state.Phase.IsActive() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent() {
+			if isOrphanedSessionState(state) {
+				logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state without a shadow branch",
+					slog.String("session_id", state.SessionID),
+					slog.String("phase", string(state.Phase)))
 				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
 				store.Clear(ctx, state.SessionID)
 				continue
@@ -165,6 +168,15 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		states = append(states, state)
 	}
 	return states, nil
+}
+
+// isOrphanedSessionState reports whether a state with no shadow branch may be
+// deleted: only a finalized session (State.IsEnded) that was never condensed
+// and carries no task records. IDLE states — including legacy empty phases,
+// which normalize to IDLE — are live sessions between turns or belong to the
+// exited-owner finalizer, so they age out through StaleSessionThreshold.
+func isOrphanedSessionState(state *SessionState) bool {
+	return state.IsEnded() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent()
 }
 
 // IsCondensableEndedSession reports whether an ENDED session still carries
@@ -682,6 +694,11 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		TranscriptPath:        transcriptPath,
 		LastPrompt:            truncatePromptForStorage(userPrompt),
 	}
+	if agentType == agent.AgentTypeCodex {
+		complete := true
+		state.SubagentInventoryComplete = &complete
+		state.SubagentTokensBaselineComplete = &complete
+	}
 
 	// Take the gate, then re-check under lock. Without this re-check a
 	// concurrent turn-start hook that wrote a richer state in the gap
@@ -699,6 +716,41 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 	}
 	if existing != nil && existing.BaseCommit != "" {
 		return nil
+	}
+	if existing != nil && agentType == agent.AgentTypeCodex {
+		// Repair the partial state in place. A child hook can have recorded task
+		// content and accounting before the parent session initializes, so a
+		// fresh replacement would silently discard durable child state.
+		state = existing
+		state.CLIVersion = versioninfo.Version
+		state.BaseCommit = headHash
+		state.AttributionBaseCommit = headHash
+		state.WorktreePath = worktreePath
+		state.WorktreeID = worktreeID
+		if state.StartedAt.IsZero() {
+			state.StartedAt = now
+		}
+		state.LastInteractionTime = &now
+		state.TurnID = turnID.String()
+		state.AgentType = agentType
+		if model != "" {
+			state.ModelName = model
+		}
+		if transcriptPath != "" {
+			state.TranscriptPath = transcriptPath
+		}
+		if userPrompt != "" {
+			state.LastPrompt = truncatePromptForStorage(userPrompt)
+		}
+		if state.UntrackedFilesAtStart == nil {
+			state.UntrackedFilesAtStart = untrackedFiles
+		}
+
+		// This is a repair, not an authoritative SessionStart inventory. Keep
+		// the ledger and token data but retain conservative coverage markers.
+		incomplete := false
+		state.SubagentInventoryComplete = &incomplete
+		state.SubagentTokensBaselineComplete = &incomplete
 	}
 	return s.saveSessionState(ctx, state)
 }

@@ -40,7 +40,6 @@ func makeInfoJSON(name string) string {
   "name": "` + name + `",
   "type": "` + name + ` Agent",
   "description": "Agent ` + name + `",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}
@@ -166,7 +165,6 @@ func TestDiscoverAndRegister_SkipsNameConflict(t *testing.T) {
   "name": "` + name + `",
   "type": "Different Type",
   "description": "Should be skipped",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}
@@ -572,7 +570,6 @@ type fakeBuiltInAgent struct {
 func (f *fakeBuiltInAgent) Name() types.AgentName                        { return f.name }
 func (f *fakeBuiltInAgent) Type() types.AgentType                        { return "fake" }
 func (f *fakeBuiltInAgent) Description() string                          { return "fake" }
-func (f *fakeBuiltInAgent) IsPreview() bool                              { return false }
 func (f *fakeBuiltInAgent) DetectPresence(context.Context) (bool, error) { return false, nil }
 func (f *fakeBuiltInAgent) ProtectedDirs() []string                      { return nil }
 func (f *fakeBuiltInAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
@@ -626,7 +623,7 @@ func TestDiscoverAndRegister_RegistersBatOnWindows(t *testing.T) {
 	ctx := enableExternalAgents(t)
 
 	name := "disc-bat"
-	infoJSON := `{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"Agent ` + name + `","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{}}`
+	infoJSON := `{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"Agent ` + name + `","protected_dirs":[],"hook_names":[],"capabilities":{}}`
 	script := "@echo off\r\nif not \"%1\"==\"info\" goto :notinfo\r\necho " + infoJSON + "\r\ngoto :eof\r\n:notinfo\r\necho unknown subcommand: %1 1>&2\r\nexit /b 1\r\n"
 
 	dir := t.TempDir()
@@ -656,7 +653,7 @@ func TestDiscoverAndRegisterNamedAlways_RegistersBatOnWindows(t *testing.T) {
 	}
 
 	name := types.AgentName("disc-named-bat")
-	infoJSON := `{"protocol_version":1,"name":"` + string(name) + `","type":"` + string(name) + ` Agent","description":"Named Windows agent","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{}}`
+	infoJSON := `{"protocol_version":1,"name":"` + string(name) + `","type":"` + string(name) + ` Agent","description":"Named Windows agent","protected_dirs":[],"hook_names":[],"capabilities":{}}`
 	script := "@echo off\r\nif not \"%1\"==\"info\" goto :notinfo\r\necho " + infoJSON + "\r\ngoto :eof\r\n:notinfo\r\necho unknown subcommand: %1 1>&2\r\nexit /b 1\r\n"
 
 	dir := t.TempDir()

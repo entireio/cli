@@ -37,7 +37,7 @@ type activityStyles struct {
 // used by other commands. Activity benefits from wide output for bar charts.
 func getFullTerminalWidth(w io.Writer) int {
 	if f, ok := w.(*os.File); ok {
-		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 { //nolint:gosec // G115: uintptr->int is safe for fd
+		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 {
 			return width
 		}
 	}
@@ -45,7 +45,7 @@ func getFullTerminalWidth(w io.Writer) int {
 		if f == nil {
 			continue
 		}
-		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 { //nolint:gosec // G115: uintptr->int is safe for fd
+		if width, _, err := term.GetSize(int(f.Fd())); err == nil && width > 0 {
 			return width
 		}
 	}
@@ -108,22 +108,22 @@ type agentDisplay struct {
 // recognizable; lipgloss resolves them to the best representation for the
 // terminal's color profile. The non-brand "unknown" fallback uses muted gray.
 var agentDisplayMap = map[string]agentDisplay{
-	"claude":   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
-	"gemini":   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
-	"amp":      {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
-	"codex":    {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
-	"opencode": {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
-	"copilot":  {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
-	"pi":       {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
-	"cursor":   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
-	"droid":    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
-	"kiro":     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
-	"unknown":  {Label: "Unknown", Color: palette.Muted, Char: '░'},
+	activityAgentClaude:   {Label: "Claude Code", Color: "#fb923c", Char: '▓'}, // orange-400
+	activityAgentGemini:   {Label: "Gemini", Color: "#60a5fa", Char: '▓'},      // blue-400
+	activityAgentAmp:      {Label: "Amp", Color: "#f87171", Char: '▓'},         // red-400
+	activityAgentCodex:    {Label: "Codex", Color: "#818cf8", Char: '▓'},       // indigo-400
+	activityAgentOpencode: {Label: "OpenCode", Color: "#22d3ee", Char: '▓'},    // cyan-400
+	activityAgentCopilot:  {Label: "Copilot", Color: "#a78bfa", Char: '▓'},     // violet-400
+	activityAgentPi:       {Label: "Pi", Color: "#fbbf24", Char: '▓'},          // amber-400
+	activityAgentCursor:   {Label: "Cursor", Color: "#38bdf8", Char: '▓'},      // sky-400
+	activityAgentDroid:    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
+	activityAgentKiro:     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
+	activityAgentUnknown:  {Label: "Unknown", Color: palette.Muted, Char: '░'},
 }
 
 var agentOrder = []string{
-	"claude", "codex", "gemini", "amp", "opencode",
-	"copilot", "pi", "cursor", "droid", "kiro", "unknown",
+	activityAgentClaude, activityAgentCodex, activityAgentGemini, activityAgentAmp, activityAgentOpencode,
+	activityAgentCopilot, activityAgentPi, activityAgentCursor, activityAgentDroid, activityAgentKiro, activityAgentUnknown,
 }
 
 // renderActivityHeader renders the stat cards, contribution heatmap, and repo
@@ -556,7 +556,7 @@ func renderSessionListN(w io.Writer, sty activityStyles, days []sessionDay, maxD
 
 	for _, day := range days[:maxDays] {
 		displayDate := formatCommitDate(day.Date)
-		sessionWord := "sessions"
+		sessionWord := nounSessions
 		if len(day.Sessions) == 1 {
 			sessionWord = strings.TrimSuffix(sessionWord, "s")
 		}

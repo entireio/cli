@@ -152,6 +152,9 @@ func emitGeminiUser(result *[]byte, base transcriptLine, msg geminiMessage, ts j
 // emitGeminiAssistant produces a single assistant line. The content array
 // contains text blocks (from content field) and tool_use blocks (from toolCalls).
 func emitGeminiAssistant(result *[]byte, base transcriptLine, msg geminiMessage, ts json.RawMessage) {
+	// Capacity hint only: the +1 is the optional text block. It cannot
+	// overflow — a []geminiToolCall (96B elements) can never reach MaxInt
+	// entries, so CodeQL's go/allocation-size-overflow here is unreachable.
 	content := make([]map[string]json.RawMessage, 0, 1+len(msg.ToolCalls))
 
 	if contentText := geminiContentText(msg.Content); contentText != "" {
@@ -250,9 +253,9 @@ func geminiToolResultCompact(tc geminiToolCall) json.RawMessage {
 
 	r := toolResultJSON{
 		Output: output,
-		Status: "success",
+		Status: toolResultStatusSuccess,
 	}
-	if tc.Status != "" && tc.Status != "success" {
+	if tc.Status != "" && tc.Status != toolResultStatusSuccess {
 		r.Status = toolResultStatusError
 	}
 	b, err := json.Marshal(r)

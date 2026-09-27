@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // Managed plugin storage. The kubectl-style dispatcher in plugin.go resolves
@@ -48,28 +49,6 @@ const (
 	pluginManagedSubDir = "plugins"
 )
 
-// requireAbsPluginParent rejects a non-absolute directory override.
-//
-// A relative value resolves against the process's working directory at
-// startup — typically inside the user's repository — which is the wrong place
-// for managed plugin storage, and it is storage whose bin subdirectory main.go
-// prepends to $PATH. Every override reaching pluginParentDir gets this check,
-// not just ENTIRE_PLUGIN_DIR: XDG_DATA_HOME and LOCALAPPDATA were joined
-// unchecked and left for osroot (which refuses the root open) and for main.go
-// (which restores $PATH) to notice. Those backstops hold today, but they state
-// the invariant two layers away from where it is decided, and each answers a
-// question of its own rather than this one.
-//
-// Rejecting is louder than falling through to the platform default: a
-// misconfigured override is a user error worth surfacing, not something to
-// paper over with a different directory than the one they asked for.
-func requireAbsPluginParent(name, value string) error {
-	if !filepath.IsAbs(value) {
-		return fmt.Errorf("%s must be an absolute path, got %q", name, value)
-	}
-	return nil
-}
-
 // pluginParentDir returns the per-user directory that holds the managed
 // plugin storage. Resolution, in order:
 //
@@ -86,15 +65,15 @@ func requireAbsPluginParent(name, value string) error {
 // still returns a usable path.
 func pluginParentDir() (string, error) {
 	if v := os.Getenv(pluginEnvPluginDir); v != "" {
-		if err := requireAbsPluginParent(pluginEnvPluginDir, v); err != nil {
-			return "", err
+		if err := userdirs.RequireAbsoluteOverride(pluginEnvPluginDir, v); err != nil {
+			return "", err //nolint:wrapcheck // the error already names the override and its value
 		}
 		return v, nil
 	}
 	if runtime.GOOS == windowsGOOS {
 		if appData := os.Getenv("LOCALAPPDATA"); appData != "" {
-			if err := requireAbsPluginParent("LOCALAPPDATA", appData); err != nil {
-				return "", err
+			if err := userdirs.RequireAbsoluteOverride("LOCALAPPDATA", appData); err != nil {
+				return "", err //nolint:wrapcheck // the error already names the override and its value
 			}
 			return filepath.Join(appData, pluginManagedTopDir, pluginManagedSubDir), nil
 		}
@@ -105,8 +84,8 @@ func pluginParentDir() (string, error) {
 		return filepath.Join(home, "AppData", "Local", pluginManagedTopDir, pluginManagedSubDir), nil
 	}
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
-		if err := requireAbsPluginParent("XDG_DATA_HOME", v); err != nil {
-			return "", err
+		if err := userdirs.RequireAbsoluteOverride("XDG_DATA_HOME", v); err != nil {
+			return "", err //nolint:wrapcheck // the error already names the override and its value
 		}
 		return filepath.Join(v, pluginManagedTopDir, pluginManagedSubDir), nil
 	}
@@ -393,15 +372,16 @@ type InstallPluginOptions struct {
 	Force bool
 }
 
-// InstallPluginFromPath symlinks SourcePath into the managed bin dir. The
-// caller is responsible for built-in conflict checks (resolvePlugin already
-// gates dispatch on rootCmd.Find — installing a name that shadows a built-in
-// is allowed but the built-in still wins at runtime).
+// InstallPluginFromPath links or copies SourcePath into the managed bin dir
+// (materializeManagedEntry). The caller is responsible for built-in conflict
+// checks (resolvePlugin already gates dispatch on rootCmd.Find — installing a
+// name that shadows a built-in is allowed but the built-in still wins at
+// runtime).
 //
 // Refuses names the dispatcher will never invoke (agent-protocol prefix,
 // flag-shaped, "."/"..", slashes), and refuses self-install when the source
 // is the same file as the would-be managed entry. The replace step is
-// atomic: a new symlink is created at <dest>.tmp and renamed onto <dest>,
+// atomic: the new entry is created under a temp name and renamed onto <dest>,
 // so a failed --force never leaves the previous install missing.
 func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) {
 	src, err := filepath.Abs(opts.SourcePath)
@@ -535,30 +515,32 @@ func makeInstallTmpName() (string, error) {
 	return pluginBinName(".install-" + hex.EncodeToString(b[:])), nil
 }
 
-// materializeManagedEntry creates dest as a reference to src, falling back
-// through symlink → hardlink → copy in that order.
-//
-// Symlink-first preserves the dev-loop property that rebuilding the source
-// is immediately reflected in the managed entry. The fallbacks exist for
-// Windows: os.Symlink there requires Developer Mode or admin, and silently
-// breaks `entire plugin install` for typical users without either. Mirrors
-// the pattern in setup_test.go's copyExecutable.
-//
-// On a successful copy the file mode of the source is preserved so the
-// executable bit survives.
-// destName is a name inside root; src stays an absolute path, because it is the
-// user's own file outside the managed tree and is the symlink/hardlink target.
+// materializeManagedEntry creates destName (a name inside root) as a reference
+// to src (an absolute path): symlink where the platform supports it
+// (symlinkManagedEntry), then hardlink when src is inside the managed tree,
+// then copy. os.Root.Link takes root-relative names, which is why the hardlink
+// needs managedTreeName and only applies to in-tree sources (every remote
+// install); a local-dev source outside the tree is copied.
 func materializeManagedEntry(root *os.Root, src, destName string, srcInfo os.FileInfo) error {
-	// Symlink and Link take src as the target, not as something to resolve
-	// inside the root — os.Root refuses to CREATE an absolute symlink but
-	// nothing here needs one created; the target is recorded verbatim.
-	if err := root.Symlink(src, destName); err == nil {
+	if symlinkManagedEntry(root, src, destName) {
 		return nil
 	}
-	if err := root.Link(src, destName); err == nil {
-		return nil
+	if srcName, ok := managedTreeName(root, src); ok {
+		if err := root.Link(srcName, destName); err == nil {
+			return nil
+		}
 	}
 	return copyFileStreaming(root, src, destName, srcInfo)
+}
+
+// managedTreeName returns src as a slash-separated name inside root, or false
+// when src is outside the tree (or is the tree itself).
+func managedTreeName(root *os.Root, src string) (string, bool) {
+	rel, err := filepath.Rel(root.Name(), src)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
 }
 
 // copyFileStreaming copies src to dest in fixed-size buffers, preserving the

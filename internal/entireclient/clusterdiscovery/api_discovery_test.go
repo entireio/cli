@@ -169,9 +169,10 @@ func TestResolveContextForAPI(t *testing.T) {
 	})
 
 	// The `ENTIRE_API_BASE_URL=https://partial.to entire activity` case: the
-	// active login is on a core this host doesn't trust, and exactly one saved
-	// login is, so that one acts.
-	t.Run("unrelated active context falls back to the sole eligible login", func(t *testing.T) {
+	// active login is on a core this host doesn't trust. The one saved login
+	// that would work is named, never used unasked — the data API never
+	// auto-selects.
+	t.Run("unrelated active context names the eligible login instead of using it", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to", "https://eu.auth.partial.to"))
 		defer srv.Close()
@@ -185,9 +186,11 @@ func TestResolveContextForAPI(t *testing.T) {
 			},
 		}))
 
-		c, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
-		require.NoError(t, err)
-		assert.Equal(t, "me@staging", c.Name)
+		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `API host partial.to does not accept your active login "me@prod"`)
+		assert.Contains(t, err.Error(), "These saved logins can authenticate it: me@staging")
+		assert.Contains(t, err.Error(), "entire auth switch")
 	})
 
 	t.Run("no eligible context → login hint naming the API host's servers", func(t *testing.T) {

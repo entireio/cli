@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
@@ -84,7 +85,7 @@ type agentHelpFacts struct {
 // side by side.
 //
 // Subcommands are classified wherever their audience differs from their
-// parent's. That is what lets a mixed group render as "read-only except: policy"
+// parent's. That is what lets a mixed group render as "read-only except: explain"
 // on ONE line: naming only the minority side keeps a group at one line however
 // many subcommands it grows, where breaking each one out cost a line apiece.
 //
@@ -101,11 +102,10 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"search": {agentHelpAudienceReadOnly, true},
 
 	"checkpoint":         {agentHelpAudienceTaskDriven, true},
-	"checkpoint explain": {agentHelpAudienceReadOnly, false},
+	"checkpoint explain": {agentHelpAudienceTaskDriven, false}, // --generate writes a summary
 	"checkpoint list":    {agentHelpAudienceReadOnly, false},
 	"checkpoint search":  {agentHelpAudienceReadOnly, false},
 	"checkpoint tokens":  {agentHelpAudienceReadOnly, false},
-	"checkpoint policy":  {agentHelpAudienceTaskDriven, false}, // "Inspect and update"
 
 	"session":         {agentHelpAudienceTaskDriven, true},
 	"session current": {agentHelpAudienceReadOnly, false},
@@ -159,23 +159,22 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"import":   {agentHelpAudienceTaskDriven, false},
 	"runner":   {agentHelpAudienceTaskDriven, false},
 
-	// The user's to start. review and investigate are not destructive but spawn
-	// paid multi-agent runs, so an uninvited one spends the user's money.
-	"agent":       {agentHelpAudienceUserOwned, false},
-	"auth":        {agentHelpAudienceUserOwned, false},
-	"clean":       {agentHelpAudienceUserOwned, false},
-	"configure":   {agentHelpAudienceUserOwned, false},
-	"disable":     {agentHelpAudienceUserOwned, false},
-	"enable":      {agentHelpAudienceUserOwned, false},
-	"grant":       {agentHelpAudienceUserOwned, false},
-	"investigate": {agentHelpAudienceUserOwned, false},
-	"login":       {agentHelpAudienceUserOwned, false},
-	"logout":      {agentHelpAudienceUserOwned, false},
-	"org":         {agentHelpAudienceUserOwned, false},
-	"plugin":      {agentHelpAudienceUserOwned, false},
-	"project":     {agentHelpAudienceUserOwned, false},
-	"repo":        {agentHelpAudienceUserOwned, false},
-	"review":      {agentHelpAudienceUserOwned, false},
+	// The user's to start. review is not destructive but spawns a paid
+	// multi-agent run, so an uninvited one spends the user's money.
+	"agent":     {agentHelpAudienceUserOwned, false},
+	"auth":      {agentHelpAudienceUserOwned, false},
+	"clean":     {agentHelpAudienceUserOwned, false},
+	"cluster":   {agentHelpAudienceUserOwned, false},
+	"configure": {agentHelpAudienceUserOwned, false},
+	"disable":   {agentHelpAudienceUserOwned, false},
+	"enable":    {agentHelpAudienceUserOwned, false},
+	"login":     {agentHelpAudienceUserOwned, false},
+	"logout":    {agentHelpAudienceUserOwned, false},
+	"org":       {agentHelpAudienceUserOwned, false},
+	"plugin":    {agentHelpAudienceUserOwned, false},
+	"project":   {agentHelpAudienceUserOwned, false},
+	"repo":      {agentHelpAudienceUserOwned, false},
+	"review":    {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,
@@ -198,6 +197,17 @@ var agentHelpGuidance = map[string]string{
 		"`entire agent-help` first; there is probably a command for it. When you do\n" +
 		"need it, use this rather than hand-rolling curl — it attaches the right\n" +
 		"bearer and dials the right host for you.",
+
+	// The audience axis is per-command, so a command whose only write sits
+	// behind an opt-in flag has to be classified for the worst invocation it
+	// offers. That lands `checkpoint explain` on task-driven and would otherwise
+	// tell an agent to stay away from the drill-down that `checkpoint list` and
+	// `checkpoint search` exist to feed. This is where the distinction fits.
+	"checkpoint explain": "Reading a checkpoint is free: with no flags, or with --json, --full,\n" +
+		"--transcript or --raw-transcript, this only reads and is safe to run\n" +
+		"whenever you need the context. --generate is the exception — it writes a\n" +
+		"summary onto the checkpoint and spends tokens with the summary provider,\n" +
+		"so pass it only when the user asked for a summary.",
 }
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
@@ -247,7 +257,7 @@ func agentHelpAudienceSlug(a agentHelpAudience) string {
 // agentHelpAudienceNote describes a command's audience in one clause.
 //
 // For a group whose classified subcommands disagree, it names only the SHORTER
-// side and leaves the rest implicit ("read-only except: policy", or
+// side and leaves the rest implicit ("read-only except: explain", or
 // "read-only: show, list, … — others write"). Naming the minority is what keeps
 // a mixed group to a single line however many subcommands it gains; naming both
 // sides is what made an earlier revision of this listing grow a line per
@@ -271,7 +281,19 @@ func agentHelpAudienceNote(cmd *cobra.Command, facts agentHelpFacts, trailsEnabl
 	}
 	switch {
 	case len(readOnly) == 0 || len(writes) == 0:
-		// Leaf, or every classified child agrees with the group.
+		// Leaf, or the classified children agree WITH EACH OTHER — which is not
+		// the same as agreeing with the GROUP, and that gap is how a group starts
+		// lying. Delete a group's last dissenting child and this branch answers
+		// with the group's own audience while every child now says the opposite.
+		// That is precisely what removing `checkpoint policy` did: it left four
+		// read-only children under a group still classified task-driven.
+		//
+		// The group's own audience is still the right answer to return, because
+		// it is a claim about the whole group — including children that are
+		// hidden (`checkpoint resume` switches branches) or unclassified, neither
+		// of which is counted above. So the disagreement is caught at build time
+		// rather than papered over here; see
+		// TestAgentHelpClassification_GroupAudienceMatchesUnanimousChildren.
 		return agentHelpAudienceSlug(facts.audience)
 	case len(writes) <= len(readOnly):
 		return "read-only except: " + strings.Join(writes, ", ")
@@ -313,6 +335,10 @@ command tree so it always matches this binary. With no arguments it prints a
 high-level map of when to use entire and which subcommand; pass a command path
 (e.g. "agent-help checkpoint") to see that command's exact, current flags.`,
 		RunE: func(c *cobra.Command, args []string) error {
+			// The enablement probe below authenticates as the selected login, but
+			// nothing here acts on the user's behalf, and this output is read by an
+			// agent — so resolve it without the "Using context 'x'." notice.
+			auth.SilenceContextNotice()
 			// Resolve the origin remote once and derive both the repo line and the
 			// trails-enablement check from it (avoids two git subprocesses per run).
 			repoLine, trailsEnabled := agentHelpRepoContext(c.Context())
@@ -385,10 +411,7 @@ func agentHelpRepoContextWithRefresh(
 		return repoLine, decision == trailEnablementCacheEnabled
 	}
 
-	// ResolveDataAPIToken performs data-host discovery before it can reject a
-	// missing login. The scope already carries the locally resolved auth identity,
-	// so avoid making an unauthenticated first run wait on a network request that
-	// cannot produce an enabled decision.
+	// No login means no enabled decision; skip the refresh.
 	if scope.AuthKey == "" {
 		return repoLine, false
 	}
@@ -692,9 +715,9 @@ func renderAgentHelpTop(rootCmd *cobra.Command, repoLine string, trailsEnabled b
 	}
 	// Use an example command that is actually advertised here (trail is gated on
 	// trails being enabled), so we never point at a command the agent can't use.
-	example := "checkpoint"
+	example := cmdCheckpoint
 	if trailsEnabled {
-		example = "trail"
+		example = cmdTrail
 	}
 	fmt.Fprintf(&b, "\nDrill in for exact, currently-installed flags:  entire agent-help <command>  (e.g. entire agent-help %s)\n", example)
 	b.WriteString("Add --json for structured output.\n")

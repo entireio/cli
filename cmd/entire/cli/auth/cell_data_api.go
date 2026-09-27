@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,30 +18,22 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
-	"github.com/entireio/cli/internal/entireclient/httputil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 const (
 	cellDataAPITimeout = 30 * time.Second
 
-	// JurisdictionIdentityScope is the scope jurisdiction identity tokens
-	// are minted with (also used by git-remote-entire's jurisdiction git
-	// auth). The receiving surface authorizes live per request, so the
-	// scope carries identity semantics only, not a permission grant.
-	JurisdictionIdentityScope = "openid"
-
 	// clustersAPIPath is entire-core's cluster catalog endpoint.
 	clustersAPIPath = "/api/v1/clusters"
 )
 
 // jurisdictionLabelPattern bounds a home_jurisdiction claim to a single DNS
-// label before it is substituted into a URL template. The claim rides on the
-// login JWT (which we decode without verifying the signature) and, for the
+// label before it selects a cell from the cluster catalog. The claim rides on
+// the login JWT (which we decode without verifying the signature) and, for the
 // home-jurisdiction fallback path, is attacker-influenceable if a token is ever
 // mis-minted; constraining it to [a-z0-9-] means it can only ever name a
-// sibling jurisdiction, never inject host/scheme syntax (e.g.
-// "us.auth.evil.tld") into jurisdictionAudience / jurisdictionCoreURL.
+// sibling jurisdiction, never inject host/scheme syntax.
 var jurisdictionLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
 
 // CellTarget pins the entire-api cell a repo-scoped call must reach and its
@@ -70,11 +62,11 @@ func SetResolveContextForCellAPIForTest(t interface{ Helper() }, fn resolveConte
 }
 
 // cellExchangeTransportForTest, when non-nil, is the HTTP transport used for
-// jurisdiction token exchange and cluster listing. Production leaves it nil.
+// login refresh and cluster listing. Production leaves it nil.
 var cellExchangeTransportForTest http.RoundTripper
 
-// SetCellExchangeTransportForTest overrides the transport used for jurisdiction
-// token exchange and cluster listing, returning a restore closure — the same
+// SetCellExchangeTransportForTest overrides the transport used for login
+// refresh and cluster listing, returning a restore closure — the same
 // set/restore convention the rest of the package uses for test seams.
 func SetCellExchangeTransportForTest(t interface{ Helper() }, rt http.RoundTripper) func() {
 	t.Helper()
@@ -86,14 +78,20 @@ func SetCellExchangeTransportForTest(t interface{ Helper() }, rt http.RoundTripp
 // NewEntireAPICellClient returns an authenticated client aimed at an entire-api
 // cell, carrying the caller's login JWT directly.
 //
+// The login is ENTIRE_TOKEN when set, else the selected context, unless
+// ENTIRE_API_BASE_URL names a data host (see resolveCellClientSubject) — the
+// same identity `--to core` acts as.
+//
 // Cell selection, in precedence order:
 //   - target != nil: dial target.BaseURL. This is the repo-scoped path — the
 //     caller (cli) resolved the repo's own cell and jurisdiction.
-//   - the configured data host already targets a cell (host contains ".api."):
-//     keep that origin.
-//   - a loopback data host (local dev): keep that origin.
-//   - otherwise the data host is a BFF/apex: resolve the caller's home-cell
-//     apiUrl from the cluster catalog (home-jurisdiction fallback).
+//   - an explicit data host that already targets a cell (host contains
+//     ".api.") or is loopback (local dev): keep it.
+//   - otherwise: resolve the apiUrl for the jurisdiction (target.Jurisdiction,
+//     else the caller's home_jurisdiction claim) from the login core's cluster
+//     catalog — so a staging login lists staging's catalog and lands on a
+//     staging cell, and a local-dev login lands on the cell its local core
+//     advertises rather than on the core itself.
 func NewEntireAPICellClient(ctx context.Context, insecureHTTP bool, target *CellTarget) (*api.Client, error) {
 	factory, err := NewEntireAPICellClientFactory(ctx, insecureHTTP)
 	if err != nil {
@@ -109,17 +107,16 @@ func NewEntireAPICellClient(ctx context.Context, insecureHTTP bool, target *Cell
 // NewEntireAPICellClient.
 //
 // A factory is safe for concurrent use, and holds credentials resolved at
-// construction time — build it per operation, don't store it long-term. Like
-// NewEntireAPICellClient it deliberately does NOT consult ENTIRE_TOKEN.
+// construction time — build it per operation, don't store it long-term.
 type CellClientFactory struct {
 	subject cellSubject
 }
 
-// NewEntireAPICellClientFactory resolves the active stored login credential
-// once, for building clients aimed at several cells. See
+// NewEntireAPICellClientFactory resolves the login credential once
+// (resolveCellClientSubject), for building clients aimed at several cells. See
 // NewEntireAPICellClient for the single-cell convenience wrapper.
 func NewEntireAPICellClientFactory(ctx context.Context, insecureHTTP bool) (*CellClientFactory, error) {
-	subject, err := resolveStoredCellSubject(ctx, insecureHTTP)
+	subject, err := resolveCellClientSubject(ctx, insecureHTTP)
 	if err != nil {
 		return nil, err
 	}
@@ -130,112 +127,58 @@ func NewEntireAPICellClientFactory(ctx context.Context, insecureHTTP bool) (*Cel
 // falls back to home-jurisdiction routing), using the resolved login JWT as its
 // bearer.
 func (f *CellClientFactory) ClientFor(ctx context.Context, target *CellTarget) (*api.Client, error) {
-	jurisdiction, err := targetJurisdiction(target, f.subject.loginJWT)
+	cellBaseURL, err := f.cellBaseURLFor(ctx, target)
 	if err != nil {
 		return nil, err
 	}
-
-	// The home-jurisdiction fallback lists the cluster catalog with loginJWT,
-	// which is signed by the discovered login core — so list there, not at the
-	// templated jurisdiction core, which in a multi-core setup could differ and
-	// reject the token.
-	cellBaseURL, err := resolveTargetCellBaseURL(ctx, target, f.subject.dataOrigin, jurisdiction, f.subject.discoveredCore, f.subject.loginJWT, f.subject.httpClient)
-	if err != nil {
-		return nil, err
-	}
-	if err := requireSafeExchangeURL("entire-api cell", cellBaseURL); err != nil {
-		return nil, err
-	}
-
 	return api.NewClientWithBaseURL(f.subject.loginJWT, cellBaseURL), nil
 }
 
-// JurisdictionToken mints and returns a jurisdictional identity token
-// (scope=openid, aud=jurisdiction host) for `jurisdiction`, for authenticating
-// against that jurisdiction's entire-api cells (e.g.
-// https://aws-us-east-2.api.entire.io/api/v1). Unlike NewEntireAPICellClient it
-// returns the raw token string (it skips the cell-base-URL resolution, which is
-// only needed to build a client) and it honours ENTIRE_TOKEN.
-//
-// Subject credential precedence:
-//   - ENTIRE_TOKEN set: the env token is the exchange subject_token, and its own
-//     aud core drives the environment family (so this works with only
-//     ENTIRE_TOKEN set, no ENTIRE_API_BASE_URL, in prod/staging/loopback).
-//     Presence is exclusive and fail-closed — a malformed/blank value errors
-//     rather than falling back to a stored login. The env token must be a login
-//     JWT (subject-capable); a rejected exchange surfaces the server error.
-//   - otherwise: the active stored context's refreshed login JWT.
-//
-// An empty `jurisdiction` falls back to the subject token's home_jurisdiction
-// claim.
-func JurisdictionToken(ctx context.Context, insecureHTTP bool, jurisdiction string) (string, error) {
-	subject, err := resolveCellSubject(ctx, insecureHTTP)
+// cellBaseURLFor resolves the cell origin ClientFor dials for target, checked
+// safe to send the login JWT to.
+func (f *CellClientFactory) cellBaseURLFor(ctx context.Context, target *CellTarget) (string, error) {
+	jurisdiction, err := targetJurisdiction(target, f.subject.loginJWT)
 	if err != nil {
 		return "", err
 	}
 
-	j, err := resolveJurisdiction(jurisdiction, subject.loginJWT)
+	// The catalog fallback lists clusters with loginJWT, which is signed by the
+	// subject's login core — so list there, not at the templated jurisdiction
+	// core, which in a multi-core setup could differ and reject the token.
+	cellBaseURL, err := resolveTargetCellBaseURL(ctx, target, f.subject.dataHost, jurisdiction, f.subject.discoveredCore, f.subject.loginJWT, f.subject.httpClient)
 	if err != nil {
 		return "", err
 	}
-
-	coreURL := jurisdictionCoreURL(j, subject.dataOrigin, subject.discoveredCore)
-	if err := requireSafeExchangeURL("entire-core", coreURL); err != nil {
+	if err := requireSafeExchangeURL("entire-api cell", cellBaseURL); err != nil {
 		return "", err
 	}
-
-	audience := jurisdictionAudience(j, subject.dataOrigin, subject.discoveredCore)
-	token, err := exchangeJurisdictionToken(ctx, coreURL, subject.loginJWT, audience, subject.httpClient)
-	if err != nil {
-		return "", fmt.Errorf("exchange jurisdictional identity token: %w", err)
-	}
-	return token, nil
+	return cellBaseURL, nil
 }
 
-// cellSubject carries the credential and routing signals a jurisdiction token
-// exchange needs: the subject login JWT, the core that issued it (drives the
-// environment family and loopback detection), the data origin the CLI is pointed
-// at (audience/cell fallback), and the HTTP client to use for the exchange (and
-// any cluster listing).
+// cellSubject carries the credential and routing signals cell routing needs.
 type cellSubject struct {
-	loginJWT       string
+	loginJWT string
+	// discoveredCore is the core that issued loginJWT: the core whose cluster
+	// catalog picks the cell when no data host says otherwise.
 	discoveredCore string
-	dataOrigin     string
-	httpClient     *http.Client
+	// dataHost is the origin ENTIRE_API_BASE_URL names, or "" when the CLI is
+	// not pointed at an explicit data host. Only an explicit host is ever
+	// dialed verbatim as a cell; "" means the cell is always resolved from
+	// discoveredCore's catalog, so a login core is never mistaken for the cell
+	// it fronts.
+	dataHost   string
+	httpClient *http.Client
 }
 
-// resolveCellSubject picks the jurisdiction-exchange subject for
-// JurisdictionToken (the `entire auth token --jurisdiction` scripting helper):
-// ENTIRE_TOKEN when set (exclusive, fail-closed), otherwise the ACTIVE stored
-// login context.
-//
-// It deliberately skips resolveStoredCellSubject's data-host discovery.
-// `--jurisdiction` mints a token for the caller's SELECTED environment, so with
-// (say) a partial.to context active it must mint a partial.to token even though
-// the data host defaults to entire.io. Discovery keys off api.BaseURL(), so it
-// would fail outright — clusterdiscovery.selectLoginContext validates the
-// selected context against *that* host's trusted issuers and errors when they
-// don't match, which for this command is the wrong question to ask: the target
-// jurisdiction comes from the flag, not from the default data host.
-// NewEntireAPICellClient is a different case — it dials the data plane — so it
-// keeps calling resolveStoredCellSubject.
-func resolveCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
-	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
-		return resolveEnvTokenCellSubject(raw, insecureHTTP)
-	}
-	return resolveActiveContextCellSubject(ctx, insecureHTTP)
-}
-
-// resolveActiveContextCellSubject builds the exchange subject from the active
-// stored login context: it refreshes that context's login JWT and uses the
-// context's own core as both the environment signal (dataOrigin) and the
-// exchange target. See resolveCellSubject for why `--jurisdiction` follows the
-// active context instead of discovering one against the data host.
+// resolveActiveContextCellSubject builds the subject from the selected stored
+// login context (--context / $ENTIRE_CONTEXT / current_context): it refreshes
+// that context's login JWT and lists clusters at the context's own core. Used
+// by resolveCellClientSubject.
 func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
 	if insecureHTTP {
 		EnableInsecureHTTP()
 	}
-	c, ok, err := activeContext()
+	c, ok, err := ActingContext()
 	if err != nil {
 		return cellSubject{}, err
 	}
@@ -252,16 +195,58 @@ func resolveActiveContextCellSubject(ctx context.Context, insecureHTTP bool) (ce
 	return cellSubject{
 		loginJWT:       loginJWT,
 		discoveredCore: origin,
-		dataOrigin:     origin,
 		httpClient:     cellExchangeHTTPClient(origin),
 	}, nil
 }
 
-// resolveStoredCellSubject resolves the exchange subject from the active stored
-// login context: it discovers the data host's trusted login servers and
-// mints/refreshes the context's login JWT.
-func resolveStoredCellSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
-	dataURL := api.BaseURL()
+// resolveCellClientSubject resolves the cell-client subject: ENTIRE_TOKEN when
+// set (exclusive, fail-closed — the precedence `--to core` and `auth status`
+// apply), else the SELECTED context (--context / $ENTIRE_CONTEXT /
+// current_context), unless ENTIRE_API_BASE_URL names a data host, in which
+// case the login is discovered against that host.
+//
+// Following the login makes the environment track it the way it does for
+// `--to core`. Discovering against api.BaseURL() here instead would, with no
+// override, mean the production apex: clusterdiscovery.selectLoginContext
+// checks the selected context against entire.io's trusted issuers and refuses
+// a staging (partial.to) login with "API host entire.io does not accept the
+// login selected by --context", leaving every staging cell unreachable through
+// the CLI (COR-1634) — and only failing closed because the environments share
+// no credentials. An explicit override is different: the user named a host the
+// request must reach, so its trusted-issuer document decides which saved login
+// may authenticate it rather than the selected context being trusted blindly.
+// An env token is used verbatim even under an override, as coreapi.New does —
+// but the override still names the host to dial: a direct cell or loopback
+// dev server stays verbatim, exactly as it does for a stored login, so a
+// pasted token plus a local ENTIRE_API_BASE_URL keeps the request on the
+// machine instead of sending it to the token's home cell.
+func resolveCellClientSubject(ctx context.Context, insecureHTTP bool) (cellSubject, error) {
+	dataURL, overridden := api.BaseURLOverride()
+	if raw, ok := os.LookupEnv(EnvTokenVar); ok {
+		subject, err := resolveEnvTokenCellSubject(raw, insecureHTTP)
+		if err != nil {
+			return cellSubject{}, err
+		}
+		if overridden {
+			if !insecureHTTP {
+				if err := api.RequireSecureURL(dataURL); err != nil {
+					return cellSubject{}, fmt.Errorf("base URL check: %w", err)
+				}
+			}
+			subject.dataHost = api.OriginOnly(dataURL)
+		}
+		return subject, nil
+	}
+	if !overridden {
+		return resolveActiveContextCellSubject(ctx, insecureHTTP)
+	}
+	return resolveDiscoveredCellSubject(ctx, insecureHTTP, dataURL)
+}
+
+// resolveDiscoveredCellSubject builds the subject for an explicitly configured
+// data host: it discovers the host's trusted login servers, picks the saved
+// login they accept, and refreshes that login's JWT.
+func resolveDiscoveredCellSubject(ctx context.Context, insecureHTTP bool, dataURL string) (cellSubject, error) {
 	if insecureHTTP {
 		EnableInsecureHTTP()
 	} else if err := api.RequireSecureURL(dataURL); err != nil {
@@ -285,6 +270,7 @@ func resolveStoredCellSubject(ctx context.Context, insecureHTTP bool) (cellSubje
 	if err != nil {
 		return cellSubject{}, err
 	}
+	announceLogin(selected)
 
 	loginJWT, err := refreshCellLoginJWT(ctx, selected)
 	if err != nil {
@@ -294,7 +280,7 @@ func resolveStoredCellSubject(ctx context.Context, insecureHTTP bool) (cellSubje
 	return cellSubject{
 		loginJWT:       loginJWT,
 		discoveredCore: selected.CoreURL,
-		dataOrigin:     dataOrigin,
+		dataHost:       dataOrigin,
 		httpClient:     httpClient,
 	}, nil
 }
@@ -323,11 +309,11 @@ func refreshCellLoginJWT(ctx context.Context, c *contexts.Context) (string, erro
 	return loginJWT, nil
 }
 
-// resolveEnvTokenCellSubject builds the exchange subject from ENTIRE_TOKEN: the
-// env token is the subject login JWT and its aud core is the environment signal
-// (passed as dataOrigin) so the audience/core templates follow prod/staging/
-// loopback without ENTIRE_API_BASE_URL. Discovery is skipped — the token is used
-// verbatim. Presence is fail-closed via ParseEnvToken.
+// resolveEnvTokenCellSubject builds the subject from ENTIRE_TOKEN: the env token
+// is the login JWT and clusters are listed at its aud core, so the cell
+// catalog follows prod/staging/loopback without ENTIRE_API_BASE_URL. Discovery
+// is skipped — the token is used verbatim. Presence is fail-closed via
+// ParseEnvToken.
 func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, error) {
 	if insecureHTTP {
 		EnableInsecureHTTP()
@@ -339,15 +325,13 @@ func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, err
 	return cellSubject{
 		loginJWT:       token,
 		discoveredCore: core,
-		dataOrigin:     core,
 		httpClient:     cellExchangeHTTPClient(core),
 	}, nil
 }
 
-// cellExchangeHTTPClient builds the HTTP client used for jurisdiction token
-// exchange (and the home-jurisdiction cluster listing). It honours the test
-// transport seam, then the plain-HTTP-discovery relaxation for a loopback
-// origin, else a plain timeout client.
+// cellExchangeHTTPClient builds the HTTP client used for the cluster listing.
+// It honours the test transport seam, then the plain-HTTP-discovery relaxation
+// for a loopback origin, else a plain timeout client.
 func cellExchangeHTTPClient(origin string) *http.Client {
 	switch {
 	case cellExchangeTransportForTest != nil:
@@ -361,7 +345,7 @@ func cellExchangeHTTPClient(origin string) *http.Client {
 	}
 }
 
-// targetJurisdiction picks the jurisdiction to mint for from a repo CellTarget:
+// targetJurisdiction picks the jurisdiction to route to from a repo CellTarget:
 // the target's explicit jurisdiction when present, otherwise the caller's home
 // jurisdiction from the login JWT.
 func targetJurisdiction(target *CellTarget, loginJWT string) (string, error) {
@@ -372,7 +356,7 @@ func targetJurisdiction(target *CellTarget, loginJWT string) (string, error) {
 	return resolveJurisdiction(override, loginJWT)
 }
 
-// resolveJurisdiction picks the jurisdiction to mint for: the explicit override
+// resolveJurisdiction picks the jurisdiction to route to: the explicit override
 // when non-empty, otherwise the subject token's home_jurisdiction claim. Either
 // source is normalised to a lowercase DNS label and validated before it is
 // templated into URLs — `--jurisdiction US`, `" us "` and `us` all resolve to
@@ -413,25 +397,30 @@ func NormalizeJurisdiction(value string) (string, error) {
 }
 
 // resolveTargetCellBaseURL decides which cell origin to dial. See
-// NewEntireAPICellClient's precedence doc. listCoreURL is the core the
-// home-jurisdiction fallback lists the cluster catalog against; it must be a
-// core that accepts loginJWT (i.e. the discovered login core).
-func resolveTargetCellBaseURL(ctx context.Context, target *CellTarget, dataOrigin, jurisdiction, listCoreURL, loginJWT string, httpClient *http.Client) (string, error) {
+// NewEntireAPICellClient's precedence doc. dataHost is the explicit
+// ENTIRE_API_BASE_URL origin or "" (cellSubject.dataHost); listCoreURL is the
+// login core whose cluster catalog is consulted, so it must accept loginJWT.
+func resolveTargetCellBaseURL(ctx context.Context, target *CellTarget, dataHost, jurisdiction, listCoreURL, loginJWT string, httpClient *http.Client) (string, error) {
 	if target != nil && strings.TrimSpace(target.BaseURL) != "" {
 		return strings.TrimRight(target.BaseURL, "/"), nil
 	}
-	// The configured origin is kept verbatim when it isn't a BFF/apex fronting
-	// multiple cells — i.e. it's already a direct cell or a loopback dev host —
-	// EXCEPT when a jurisdiction is explicitly pinned (target.Jurisdiction, e.g.
-	// `entire api --jurisdiction eu`) against a non-loopback origin. A pinned
-	// jurisdiction may name a DIFFERENT cell than the configured direct-cell
-	// origin, so dialing that origin verbatim would send an identity token minted
-	// for the pinned jurisdiction to the wrong cell; resolve the pinned
-	// jurisdiction's own cell from the catalog instead. A loopback dev host serves
-	// a single cell with no jurisdiction catalog, so it always stays verbatim.
-	explicitJurisdiction := target != nil && strings.TrimSpace(target.Jurisdiction) != ""
-	if !isBFFOrigin(dataOrigin) && (!explicitJurisdiction || isLoopbackOrigin(dataOrigin)) {
-		return strings.TrimRight(dataOrigin, "/"), nil
+	// Only an EXPLICIT data host is ever dialed verbatim: when it isn't a
+	// BFF/apex fronting multiple cells — i.e. it's already a direct cell or a
+	// loopback dev host — EXCEPT when a jurisdiction is explicitly pinned
+	// (target.Jurisdiction, e.g. `entire api --jurisdiction eu`) against a
+	// non-loopback origin. A pinned jurisdiction may name a DIFFERENT cell than
+	// the configured direct-cell origin, so dialing that origin verbatim would
+	// send the request to the wrong cell; resolve the pinned jurisdiction's
+	// own cell from the catalog instead.
+	// A loopback dev host serves a single cell with no jurisdiction catalog, so
+	// it always stays verbatim. With no data host the only origin known is the
+	// login core, which is not a cell (a loopback core would otherwise be dialed
+	// as one), so the catalog decides.
+	if dataHost != "" {
+		explicitJurisdiction := target != nil && strings.TrimSpace(target.Jurisdiction) != ""
+		if !isBFFOrigin(dataHost) && (!explicitJurisdiction || isLoopbackOrigin(dataHost)) {
+			return strings.TrimRight(dataHost, "/"), nil
+		}
 	}
 	return resolveCellAPIBaseURL(ctx, listCoreURL, loginJWT, jurisdiction, httpClient)
 }
@@ -475,11 +464,9 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// entireDomainFamily returns the registrable apex ("entire.io" / "partial.to")
-// derived from the discovered login core's host, or "" for loopback/custom
-// cores. It lets the audience/core templates follow the environment the user is
-// actually logged into (prod vs staging) instead of a hardcoded prod default.
-func entireDomainFamily(coreURL string) string {
+// EntireSite returns the Entire site ("entire.io" / "partial.to") a login
+// server or data host belongs to, or "" for loopback and custom hosts.
+func EntireSite(coreURL string) string {
 	u, err := url.Parse(coreURL)
 	if err != nil {
 		return ""
@@ -495,69 +482,9 @@ func entireDomainFamily(coreURL string) string {
 	}
 }
 
-// environmentFamily picks the registrable apex to template jurisdiction URLs
-// against. The configured data host (what the user pointed the CLI at) is the
-// most reliable signal for prod-vs-staging, so it wins; the discovered login
-// core is the fallback.
-func environmentFamily(dataOrigin, discoveredCore string) string {
-	if fam := entireDomainFamily(dataOrigin); fam != "" {
-		return fam
-	}
-	return entireDomainFamily(discoveredCore)
-}
-
-// jurisdictionAudience returns the aud the entire-api cell for `jurisdiction`
-// pins its identity tokens to (its jurisdiction host). Precedence:
-//   - ENTIRE_API_AUDIENCE_TEMPLATE (with {jurisdiction}) if set;
-//   - else https://{jurisdiction}.<family> for the environment family;
-//   - else (loopback/custom) the data origin, best-effort and overridable.
-//
-// This mirrors the BFF's buildAudience(template, jurisdiction) (repos-stream.ts).
-func jurisdictionAudience(jurisdiction, dataOrigin, discoveredCore string) string {
-	if tmpl := strings.TrimSpace(os.Getenv("ENTIRE_API_AUDIENCE_TEMPLATE")); tmpl != "" {
-		return applyJurisdictionTemplate(tmpl, jurisdiction)
-	}
-	if fam := environmentFamily(dataOrigin, discoveredCore); fam != "" {
-		return "https://" + jurisdiction + "." + fam
-	}
-	return strings.TrimRight(dataOrigin, "/")
-}
-
-// jurisdictionCoreURL returns the entire-core origin the identity-token exchange
-// is performed at for `jurisdiction`. Precedence:
-//   - a loopback discovered core (local dev): honour it verbatim — the local
-//     core signs the local login JWT, and the prod template would send the
-//     exchange to production, which rejects the local token;
-//   - ENTIRE_CORE_BASE_URL_TEMPLATE (with {jurisdiction}) if set;
-//   - else https://{jurisdiction}.auth.<family> for the environment family;
-//   - else the discovered core verbatim.
-//
-// This mirrors the BFF's buildCoreBaseUrl(template, jurisdiction, fallback),
-// which honours a fallback core when the template can't produce one.
-func jurisdictionCoreURL(jurisdiction, dataOrigin, discoveredCore string) string {
-	if isLoopbackHTTP(discoveredCore) {
-		return strings.TrimRight(discoveredCore, "/")
-	}
-	if tmpl := strings.TrimSpace(os.Getenv("ENTIRE_CORE_BASE_URL_TEMPLATE")); tmpl != "" {
-		// Apply unconditionally: applyJurisdictionTemplate is a no-op when the
-		// template has no {jurisdiction}, yielding the fixed core verbatim — the
-		// single-core case, matching the BFF's buildCoreBaseUrl and this file's
-		// own audience handling.
-		return applyJurisdictionTemplate(tmpl, jurisdiction)
-	}
-	if fam := environmentFamily(dataOrigin, discoveredCore); fam != "" {
-		return "https://" + jurisdiction + ".auth." + fam
-	}
-	return strings.TrimRight(discoveredCore, "/")
-}
-
-func applyJurisdictionTemplate(tmpl, jurisdiction string) string {
-	return strings.ReplaceAll(strings.TrimRight(tmpl, "/"), "{jurisdiction}", jurisdiction)
-}
-
-// requireSafeExchangeURL rejects a target the login JWT / identity token would
-// be sent to unless it is https (or an explicitly-allowed loopback/insecure
-// http). It affirmatively requires the https scheme — not merely "not http" —
+// requireSafeExchangeURL rejects a target the login JWT would be sent to
+// unless it is https (or an explicitly-allowed loopback/insecure http). It
+// affirmatively requires the https scheme — not merely "not http" —
 // so ftp/ws/scheme-relative/empty targets from a buggy core catalog can't
 // smuggle the login JWT off https. Mirrors the tokenmanager guard the sibling
 // data_api.go relies on.
@@ -582,20 +509,16 @@ func requireSafeExchangeURL(label, raw string) error {
 // Returns "" (no error) when the claim is absent so each caller can phrase
 // its own missing-claim error. Shared with git-remote-entire's jurisdiction
 // git auth.
+//
+// Unverified is not unchecked: decodeLoginJWTClaims refuses a token that is not
+// a well-formed JWT naming a real algorithm, so an alg:none token errors here
+// rather than routing. Every login token a core mints is signed.
 func HomeJurisdictionFromLoginJWT(loginJWT string) (string, error) {
-	parts := strings.Split(loginJWT, ".")
-	if len(parts) < 2 {
-		return "", errors.New("login token is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("decode login token payload: %w", err)
-	}
 	var claims struct {
 		HomeJurisdiction string `json:"home_jurisdiction"`
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("parse login token payload: %w", err)
+	if err := decodeLoginJWTClaims(loginJWT, &claims); err != nil {
+		return "", err
 	}
 	return NormalizeJurisdiction(claims.HomeJurisdiction)
 }
@@ -606,21 +529,24 @@ type clusterListingRow struct {
 	APIURL       string `json:"apiUrl"`
 }
 
-// ErrNoCellForJurisdiction signals that the caller's home jurisdiction has no
-// entire-api cell in the cluster catalog (or its row carries no apiUrl). It is
-// not fatal: callers that also have a data-API path (e.g. activity/recap) treat
-// it as "entire-api isn't serving this region yet" and fall back rather than
-// failing the command. errors.Is unwraps it from the contextual message.
+// ErrNoCellForJurisdiction signals that the requested jurisdiction — the
+// caller's home, or an explicit --jurisdiction — has no entire-api cell in the
+// login core's cluster catalog (or its row carries no apiUrl). It is not fatal:
+// callers that also have a data-API path (e.g. activity/recap) treat it as
+// "entire-api isn't serving this region yet" and fall back rather than failing
+// the command. errors.Is unwraps it from the contextual message, which names
+// the core consulted and the jurisdictions it does serve.
 var ErrNoCellForJurisdiction = errors.New("no entire-api cell configured for jurisdiction")
 
-// resolveCellAPIBaseURL is the home-jurisdiction fallback cell resolver: it
-// lists the caller's clusters and picks the apiUrl for `jurisdiction` (default
+// resolveCellAPIBaseURL is the catalog cell resolver: it lists the clusters of
+// the login core at coreURL and picks the apiUrl for `jurisdiction` (default
 // cluster first). It hand-parses GET /api/v1/clusters rather than reusing the
 // generated coreapi.ListClusters() because coreapi imports this (auth) package,
 // so auth cannot import coreapi without a cycle — the repo-scoped path avoids
 // this by resolving the cell in the cli layer (see resolveRepoCellTarget).
 func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction string, httpClient *http.Client) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(coreURL, "/")+clustersAPIPath, nil)
+	coreURL = strings.TrimRight(coreURL, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coreURL+clustersAPIPath, nil)
 	if err != nil {
 		return "", fmt.Errorf("build clusters request: %w", err)
 	}
@@ -662,9 +588,12 @@ func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction 
 		if sawJurisdiction {
 			// A cluster row exists for the jurisdiction but carries no apiUrl —
 			// a schema/deploy problem, distinct from "no cell for jurisdiction".
-			return "", fmt.Errorf("%w %q: cluster advertises no apiUrl (entire-api cell not configured?)", ErrNoCellForJurisdiction, jurisdiction)
+			return "", fmt.Errorf("%w %q at %s: cluster advertises no apiUrl (entire-api cell not configured?)", ErrNoCellForJurisdiction, jurisdiction, coreURL)
 		}
-		return "", fmt.Errorf("%w %q", ErrNoCellForJurisdiction, jurisdiction)
+		// Name the environment consulted and what it does serve: `-j eu` against
+		// a staging login that only has a us cell is fixed by picking another
+		// slug or another context, and the message should say which.
+		return "", fmt.Errorf("%w %q at %s (jurisdictions with a cell: %s)", ErrNoCellForJurisdiction, jurisdiction, coreURL, servedJurisdictions(listing.Clusters))
 	}
 	chosen := matches[0]
 	for _, row := range matches {
@@ -676,18 +605,21 @@ func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction 
 	return strings.TrimRight(chosen.APIURL, "/"), nil
 }
 
-func exchangeJurisdictionToken(ctx context.Context, coreURL, loginJWT, audience string, httpClient *http.Client) (string, error) {
-	if coreURL == "" {
-		return "", errors.New("no entire-core URL configured for jurisdiction token exchange")
+// servedJurisdictions renders the jurisdictions a cluster catalog has a cell
+// for — rows with an apiUrl whose label `-j` could accept — sorted and
+// deduplicated, or "none".
+func servedJurisdictions(rows []clusterListingRow) string {
+	var names []string
+	for _, row := range rows {
+		j, err := NormalizeJurisdiction(row.Jurisdiction)
+		if err != nil || j == "" || strings.TrimSpace(row.APIURL) == "" {
+			continue
+		}
+		names = append(names, j)
 	}
-	form := httputil.TokenExchangeForm(loginJWT, audience, JurisdictionIdentityScope)
-
-	token, _, err := httputil.PostOAuthToken(ctx, httpClient, coreURL, form)
-	if err != nil {
-		return "", fmt.Errorf("post token exchange: %w", err)
+	if len(names) == 0 {
+		return "none"
 	}
-	if strings.TrimSpace(token) == "" {
-		return "", errors.New("token exchange returned an empty access token")
-	}
-	return token, nil
+	slices.Sort(names)
+	return strings.Join(slices.Compact(names), ", ")
 }

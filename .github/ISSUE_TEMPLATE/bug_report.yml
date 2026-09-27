@@ -56,7 +56,7 @@ body:
     attributes:
       label: Agent
       description: Which AI coding agent were you using?
-      placeholder: "e.g., Claude Code, Gemini CLI"
+      placeholder: "e.g., Claude Code, Codex"
     validations:
       required: true
 

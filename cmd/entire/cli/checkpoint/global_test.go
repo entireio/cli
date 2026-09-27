@@ -7,6 +7,7 @@ import (
 
 	_ "unsafe"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/go-git/v6/x/plugin/config"
 )
@@ -33,10 +34,13 @@ const configLoaderKey plugin.Name = "config-loader"
 
 // useAutoConfigLoader swaps the registered ConfigLoader plugin to NewAuto (which
 // reads $HOME/.gitconfig) for the duration of t, then restores NewEmpty on cleanup.
-// Also sets GIT_CONFIG_NOSYSTEM=1 so NewAuto skips the host's /etc/gitconfig.
+// Also sets GIT_CONFIG_NOSYSTEM=1 so NewAuto skips the host's /etc/gitconfig, and
+// unsets GIT_CONFIG_GLOBAL so NewAuto resolves the caller's $HOME at all — see
+// gitenv.UnsetGlobalConfig. Matches pointHomeAt in configloader_test.go.
 func useAutoConfigLoader(t *testing.T) {
 	t.Helper()
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	gitenv.UnsetGlobalConfig(t)
 	registerConfigLoaderForTest(t, func() error {
 		return plugin.Register(plugin.ConfigLoader(), func() plugin.ConfigSource { return config.NewAuto() })
 	})

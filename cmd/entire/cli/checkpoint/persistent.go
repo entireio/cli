@@ -727,7 +727,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		TurnID:                      opts.TurnID,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
-		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
+		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: written so older CLIs can still read the metadata
 		CompactTranscriptStart:      compactTranscriptStart,
 		TokenUsage:                  opts.TokenUsage,
 		SkillEventsVersion:          skillEventsVersion(opts.SkillEvents),
@@ -739,9 +739,9 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		CLIVersion:                  versioninfo.Version,
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
-		ReviewPrompt:                opts.ReviewPrompt,
+		ReviewPrompt:                redact.String(opts.ReviewPrompt),
 		InvestigateRunID:            opts.InvestigateRunID,
-		InvestigateTopic:            opts.InvestigateTopic,
+		InvestigateTopic:            redact.String(opts.InvestigateTopic),
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(sessionMetadata, "", "  ")
@@ -2593,7 +2593,10 @@ func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePr
 		if err == nil {
 			return redacted.Bytes(), nil
 		}
-		if errors.Is(err, redact.ErrScannerDegraded) {
+		// ErrRedactionIncomplete is not a parse failure: the content parsed and
+		// redaction flagged a leaf it could not rewrite, so the plain-bytes
+		// fallback would ship exactly that leaf. Fail the write instead.
+		if errors.Is(err, redact.ErrScannerDegraded) || errors.Is(err, redact.ErrRedactionIncomplete) {
 			return nil, fmt.Errorf("redact %s: %w", treePath, err)
 		}
 		// JSONL parse failed — fall through to plain bytes.

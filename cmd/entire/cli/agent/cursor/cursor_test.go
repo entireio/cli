@@ -63,14 +63,6 @@ func TestCursorAgent_Description(t *testing.T) {
 	}
 }
 
-func TestCursorAgent_IsPreview(t *testing.T) {
-	t.Parallel()
-	ag := &CursorAgent{}
-	if !ag.IsPreview() {
-		t.Error("IsPreview() = false, want true")
-	}
-}
-
 func TestCursorAgent_ProtectedDirs(t *testing.T) {
 	t.Parallel()
 	ag := &CursorAgent{}

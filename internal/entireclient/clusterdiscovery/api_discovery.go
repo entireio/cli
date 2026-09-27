@@ -86,9 +86,10 @@ func resolveAPICores(ctx context.Context, cacheDir, apiHost string, httpClient *
 // ResolveContextForAPI picks the local login context to authenticate data-API
 // calls against apiHost.
 //
-// It mirrors ResolveContextForCluster, sharing selectLoginContext: the selected
-// context is used when its CoreURL is among the API's trusted issuers, else the
-// sole saved login that is. It sources those issuers from
+// It mirrors ResolveContextForCluster, sharing selectLoginContext, but never
+// auto-selects: the selected context is used when its CoreURL is among the
+// API's trusted issuers, and otherwise the error names the saved login that
+// would work. It sources those issuers from
 // /.well-known/entire-api.json (cached in api_discovery.json, long TTL,
 // re-fetched on expiry with stale fallback) instead of entire-cluster.json.
 // The caller exchanges the active context's token for the data host origin

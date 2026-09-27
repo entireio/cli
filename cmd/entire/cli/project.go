@@ -10,7 +10,8 @@ import (
 )
 
 // newProjectCmd is the `entire project` command group: create, list,
-// get, and delete projects on the Entire control plane.
+// get, and delete projects on the Entire control plane, plus the `grant`
+// subtree for project access (see grant.go).
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
@@ -21,11 +22,12 @@ func newProjectCmd() *cobra.Command {
 	cmd.AddCommand(newProjectListCmd())
 	cmd.AddCommand(newProjectGetCmd())
 	cmd.AddCommand(newProjectDeleteCmd())
+	cmd.AddCommand(newProjectGrantCmd())
 	return cmd
 }
 
 // projectColumns is the human table/field view of a project.
-var projectColumns = []string{"ID", "NAME", "OWNER-TYPE", "OWNER", "REGION"}
+var projectColumns = []string{"ID", colHeaderName, "OWNER-TYPE", "OWNER", colHeaderRegion}
 
 func projectRow(p coreapi.Project) []string {
 	return []string{p.ID, p.Name, string(p.OwnerType), p.OwnerId, p.Region}
@@ -38,7 +40,7 @@ func newProjectCreateCmd() *cobra.Command {
 		region    string
 	)
 	cmd := &cobra.Command{
-		Use:   "create <name>",
+		Use:   cmdCreateName,
 		Short: "Create a project under an org or account",
 		Long: "Creates a project owned by an org or an account. --owner is the " +
 			"owning org (name or ULID) or account (github:handle or ULID), and " +
@@ -75,10 +77,11 @@ func newProjectCreateCmd() *cobra.Command {
 				if region != "" {
 					body.Region = coreapi.NewOptString(region)
 				}
-				project, err := c.CreateProject(ctx, body)
+				created, err := c.CreateProject(ctx, body)
 				if err != nil {
 					return "", nil, err
 				}
+				project := &created.Response
 				return fmt.Sprintf("✓ Created project %s (%s)", project.Name, project.ID), project, nil
 			})
 		},
@@ -94,7 +97,7 @@ func newProjectCreateCmd() *cobra.Command {
 func newProjectListCmd() *cobra.Command {
 	var name, org string
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List projects you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -186,11 +189,12 @@ func newProjectDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "project", args[0],
-				func(ctx context.Context, c *coreapi.Client) (string, error) {
-					return resolveProjectRef(ctx, c, args[0])
+				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
+					return resolveProjectRefResolved(ctx, c, args[0])
 				},
 				func(ctx context.Context, c *coreapi.Client, id string) error {
-					return c.DeleteProject(ctx, coreapi.DeleteProjectParams{ProjectId: id})
+					_, err := c.DeleteProject(ctx, coreapi.DeleteProjectParams{ProjectId: id})
+					return err
 				})
 		},
 	}
@@ -198,14 +202,20 @@ func newProjectDeleteCmd() *cobra.Command {
 	return cmd
 }
 
+// The two owner kinds a project may have, as the --owner-type flag spells them.
+const (
+	ownerTypeOrg     = "org"
+	ownerTypeAccount = "account"
+)
+
 // parseProjectOwnerType maps the --owner-type flag to the generated enum,
 // rejecting anything but org/account at the CLI boundary so the user gets
 // a clear message instead of a server 422.
 func parseProjectOwnerType(s string) (coreapi.CreateProjectInputBodyOwnerType, error) {
 	switch s {
-	case "org":
+	case ownerTypeOrg:
 		return coreapi.CreateProjectInputBodyOwnerTypeOrg, nil
-	case "account":
+	case ownerTypeAccount:
 		return coreapi.CreateProjectInputBodyOwnerTypeAccount, nil
 	default:
 		// Plain error: the create RunE sets SilenceUsage, and main.go

@@ -165,6 +165,12 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 type loginTargets struct {
 	coreURLs []string
 	loginURL string
+	// autoSelect lets the sole eligible saved login act unasked. Cluster-
+	// addressed operations opt in — git remotes and the control-plane
+	// commands that name a cluster (repo mirror …) — because the cluster
+	// pins the host, so the login follows it. Every other API follows the
+	// selected login instead.
+	autoSelect bool
 }
 
 // renderLoginHint formats a fatal-ready "no auth context for <subject>"

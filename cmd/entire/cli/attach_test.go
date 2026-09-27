@@ -19,7 +19,6 @@ import (
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"         // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
 	piagent "github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -210,40 +209,6 @@ func TestResolveAgentAndTranscript_HidesFailedAutoDetectionAfterFetchFailure(t *
 	}
 	if strings.Contains(err.Error(), "also tried auto-detecting") {
 		t.Fatalf("error contains noisy auto-detection failure: %v", err)
-	}
-}
-
-func TestAttachBlocksWhenPolicyWriteUnsupported(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	repoRoot := mustGetwd(t)
-	repo, err := git.PlainOpen(repoRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = repo.Close() })
-	writeUnsupportedCheckpointPolicyForCLITest(t, repo)
-
-	sessionID := "test-attach-policy-unsupported"
-	setupClaudeTranscript(t, sessionID, `{"type":"user","message":{"role":"user","content":"create a file"},"uuid":"uuid-1"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]},"uuid":"uuid-2"}
-`)
-
-	var out bytes.Buffer
-	err = runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Force: true})
-	if err == nil || !strings.Contains(err.Error(), "checkpoint policy cannot be satisfied by this Entire CLI") {
-		t.Fatalf("runAttach error = %v, want unsupported checkpoint policy", err)
-	}
-	stateStore, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := stateStore.Load(context.Background(), sessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state != nil {
-		t.Fatalf("expected attach not to record checkpoint state, got %+v", state)
 	}
 }
 
@@ -808,11 +773,6 @@ func TestCountUserTurns(t *testing.T) {
 		want int
 	}{
 		{
-			name: "gemini format",
-			data: []byte(`{"messages":[{"type":"user","content":"first"},{"type":"gemini","content":"ok"},{"type":"user","content":"second"},{"type":"gemini","content":"done"}]}`),
-			want: 2,
-		},
-		{
 			name: "jsonl with tool_result should not double count",
 			data: []byte(`{"type":"user","message":{"role":"user","content":"hello"},"uuid":"u1"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{}}]},"uuid":"a1"}
@@ -856,11 +816,6 @@ func TestExtractModelFromTranscript(t *testing.T) {
 `),
 			want: "",
 		},
-		{
-			name: "gemini format (no model in transcript)",
-			data: []byte(`{"messages":[{"type":"user","content":"hi"},{"type":"gemini","content":"hello"}]}`),
-			want: "",
-		},
 	}
 
 	for _, tt := range tests {
@@ -871,16 +826,6 @@ func TestExtractModelFromTranscript(t *testing.T) {
 				t.Errorf("extractTranscriptMetadata().Model = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestExtractFirstPromptFromTranscript_GeminiFormat(t *testing.T) {
-	t.Parallel()
-
-	data := []byte(`{"messages":[{"type":"user","content":"fix the login bug"},{"type":"gemini","content":"I'll look at that"}]}`)
-	got := extractTranscriptMetadata(data).FirstPrompt
-	if got != "fix the login bug" {
-		t.Errorf("extractTranscriptMetadata(gemini).FirstPrompt = %q, want %q", got, "fix the login bug")
 	}
 }
 
@@ -1031,110 +976,6 @@ func TestExtractTranscriptMetadata_JSONLOnlyInjectedPreamble(t *testing.T) {
 	got := extractTranscriptMetadata(data)
 	if got.FirstPrompt != preamble {
 		t.Errorf("FirstPrompt = %q, want the raw preamble as fallback", got.FirstPrompt)
-	}
-}
-
-func TestAttach_GeminiSubdirectorySession(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	// Redirect HOME so searchTranscriptInProjectDirs searches our fake Gemini dir
-	fakeHome := t.TempDir()
-	t.Setenv("HOME", fakeHome)
-
-	// Create a Gemini transcript in a *different* project hash directory,
-	// simulating a session started from a subdirectory (different CWD hash).
-	differentProjectDir := filepath.Join(fakeHome, ".gemini", "tmp", "different-hash", "chats")
-	if err := os.MkdirAll(differentProjectDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	sessionID := "abcd1234-gemini-subdir-test"
-	transcriptContent := `{"messages":[{"type":"user","content":"hello"},{"type":"gemini","content":"hi"}]}`
-	// Gemini names files as session-<date>-<shortid>.json where shortid = sessionID[:8]
-	transcriptFile := filepath.Join(differentProjectDir, "session-2026-01-01T10-00-abcd1234.json")
-	if err := os.WriteFile(transcriptFile, []byte(transcriptContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Set the expected project dir to an empty directory so the primary lookup fails
-	// and the fallback search kicks in.
-	emptyProjectDir := t.TempDir()
-	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", emptyProjectDir)
-
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
-	if err != nil {
-		t.Fatalf("runAttach failed: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Attached session") {
-		t.Errorf("expected 'Attached session' in output, got: %s", output)
-	}
-
-	store, storeErr := session.NewStateStore(context.Background())
-	if storeErr != nil {
-		t.Fatal(storeErr)
-	}
-	state, loadErr := store.Load(context.Background(), sessionID)
-	if loadErr != nil {
-		t.Fatal(loadErr)
-	}
-	if state == nil {
-		t.Fatal("expected session state to be created")
-		return
-	}
-	if state.AgentType != agent.AgentTypeGemini {
-		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeGemini)
-	}
-	if state.LastCheckpointID.IsEmpty() {
-		t.Error("expected LastCheckpointID to be set after attach")
-	}
-}
-
-func TestAttach_GeminiSuccess(t *testing.T) {
-	setupAttachTestRepo(t)
-
-	// Create Gemini transcript in expected project dir
-	geminiDir := t.TempDir()
-	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", geminiDir)
-
-	sessionID := "abcd1234-gemini-success-test"
-	transcriptContent := `{"messages":[{"type":"user","content":"fix the login bug"},{"type":"gemini","content":"I will fix the login bug now."}]}`
-	transcriptFile := filepath.Join(geminiDir, "session-2026-01-01T10-00-abcd1234.json")
-	if err := os.WriteFile(transcriptFile, []byte(transcriptContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameGemini, attachOptions{Force: true})
-	if err != nil {
-		t.Fatalf("runAttach failed: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Attached session") {
-		t.Errorf("expected 'Attached session' in output, got: %s", output)
-	}
-
-	// Verify session state
-	store, storeErr := session.NewStateStore(context.Background())
-	if storeErr != nil {
-		t.Fatal(storeErr)
-	}
-	state, loadErr := store.Load(context.Background(), sessionID)
-	if loadErr != nil {
-		t.Fatal(loadErr)
-	}
-	if state == nil {
-		t.Fatal("expected session state to be created")
-		return
-	}
-	if state.AgentType != agent.AgentTypeGemini {
-		t.Errorf("AgentType = %q, want %q", state.AgentType, agent.AgentTypeGemini)
-	}
-	if state.SessionTurnCount != 1 {
-		t.Errorf("SessionTurnCount = %d, want 1", state.SessionTurnCount)
 	}
 }
 
@@ -1805,9 +1646,9 @@ func TestAttachCmd_ReviewWithoutSkillsOrConfigSucceeds(t *testing.T) {
 	}
 }
 
-// Regression: `entire attach --review <gemini-session-id>` without
+// Regression: `entire attach --review <cursor-session-id>` without
 // --agent must attach successfully. The plain attach flow already
-// auto-detects Gemini from the transcript; the review path must not
+// auto-detects Cursor from the transcript; the review path must not
 // add a blocking pre-check against the --agent flag's default
 // (claude-code), which would have failed when claude-code had no
 // matching transcript/config.
@@ -1818,18 +1659,21 @@ func TestAttachCmd_ReviewAutoDetectsAgent(t *testing.T) {
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 
-	// Create a valid Gemini transcript in the expected project dir.
-	geminiDir := t.TempDir()
-	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", geminiDir)
-	sessionID := "abcd1234-review-gemini-autodetect"
-	transcriptContent := `{"messages":[{"type":"user","content":"review this"},{"type":"gemini","content":"reviewing"}]}`
-	transcriptFile := filepath.Join(geminiDir, "session-2026-01-01T10-00-abcd1234.json")
+	// Create a valid Cursor transcript in the expected project dir
+	// (flat layout: <dir>/<id>.jsonl).
+	cursorDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CURSOR_PROJECT_DIR", cursorDir)
+	sessionID := "test-review-cursor-autodetect"
+	transcriptContent := `{"type":"user","message":{"role":"user","content":"review this"},"uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","content":"reviewing"},"uuid":"a1"}
+`
+	transcriptFile := filepath.Join(cursorDir, sessionID+".jsonl")
 	if err := os.WriteFile(transcriptFile, []byte(transcriptContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Invoke without --agent (flag falls through to DefaultAgentName =
-	// claude-code). runAttach's auto-detect should find Gemini.
+	// claude-code). runAttach's auto-detect should find Cursor.
 	rootCmd := NewRootCmd()
 	var errBuf, outBuf bytes.Buffer
 	rootCmd.SetErr(&errBuf)
@@ -1850,8 +1694,8 @@ func TestAttachCmd_ReviewAutoDetectsAgent(t *testing.T) {
 	if state == nil || state.Kind != session.KindAgentReview {
 		t.Fatalf("expected session tagged as review; got state=%+v", state)
 	}
-	if state.AgentType != agent.AgentTypeGemini {
-		t.Errorf("AgentType = %q, want %q (auto-detect should have found Gemini)", state.AgentType, agent.AgentTypeGemini)
+	if state.AgentType != agent.AgentTypeCursor {
+		t.Errorf("AgentType = %q, want %q (auto-detect should have found Cursor)", state.AgentType, agent.AgentTypeCursor)
 	}
 }
 
@@ -2109,7 +1953,6 @@ func TestAttach_DiscoversExternalAgents(t *testing.T) {
   "name": "` + string(agentName) + `",
   "type": "Attach Test Agent",
   "description": "Agent for attach discovery test",
-  "is_preview": false,
   "protected_dirs": [],
   "hook_names": [],
   "capabilities": {}

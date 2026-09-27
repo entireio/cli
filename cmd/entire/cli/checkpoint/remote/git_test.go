@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -68,6 +70,17 @@ func TestResolveTargetForTokenAuth(t *testing.T) {
 		t.Parallel()
 		got, proto := resolveTargetForTokenAuth(ctx, "ssh://git@git.example.com:2222/org/repo.git")
 		assert.Equal(t, "https://git.example.com/org/repo.git", got)
+		assert.Equal(t, ProtocolHTTPS, proto)
+	})
+
+	t.Run("git+ssh alias URL rewrites to HTTPS", func(t *testing.T) {
+		t.Parallel()
+		// This call site reaches deriveTokenOriginURL only through its own
+		// ProtocolSSH check, so an alias admitted in that helper's allow-list
+		// alone would still reach newCommand's default branch: no token, and
+		// not even the SSH path's warning.
+		got, proto := resolveTargetForTokenAuth(ctx, "git+ssh://git@github.com/org/repo.git")
+		assert.Equal(t, "https://github.com/org/repo.git", got)
 		assert.Equal(t, ProtocolHTTPS, proto)
 	})
 
@@ -1270,4 +1283,176 @@ func TestFormatGitCommandError_RedactsRemoteURL(t *testing.T) {
 	assert.NotContains(t, msg, "hunter2")
 	assert.NotContains(t, msg, "user:hunter2")
 	assert.Contains(t, msg, RedactURL(remote))
+}
+
+// The rejection reason lives in the combined output, not ExitError.Stderr, so a
+// bare "exit status 1" is all a caller used to get for a ref the remote refused.
+func TestFormatGitPushError_SurfacesRemoteRejection(t *testing.T) {
+	t.Parallel()
+
+	const reason = "push declined due to repository rule violations"
+	cmd := exec.CommandContext(context.Background(), "sh", "-c",
+		fmt.Sprintf(`printf '! [remote rejected] refs/entire/checkpoints/W1/X -> refs/entire/checkpoints/W1/X (%s)\n' >&2; exit 1`, reason))
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err)
+	// Precondition: CombinedOutput leaves Stderr empty, which is why
+	// formatGitCommandError cannot be reused here.
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	require.Empty(t, exitErr.Stderr)
+
+	formatted := formatGitPushError(context.Background(), err, output, "origin")
+	require.Error(t, formatted)
+	assert.Contains(t, formatted.Error(), reason)
+	assert.ErrorIs(t, formatted, err)
+}
+
+func TestFormatGitPushError_RedactsRemoteURL(t *testing.T) {
+	t.Parallel()
+
+	remote := "https://user:hunter2@github.com/org/repo.git"
+	output := []byte(fmt.Sprintf("fatal: could not read from '%s'\n", remote))
+	err := &exec.ExitError{ProcessState: nil}
+
+	formatted := formatGitPushError(context.Background(), err, output, remote)
+	require.Error(t, formatted)
+	msg := formatted.Error()
+	assert.NotContains(t, msg, "hunter2")
+	assert.Contains(t, msg, RedactURLOrPath(remote))
+}
+
+func TestFormatGitPushError_PreservesTerminalLayout(t *testing.T) {
+	t.Parallel()
+
+	const target = "https://user:password@github.com/example/checkpoints.git"
+	const unblockURL = "https://github.com/example/checkpoints/security/secret-scanning/unblock-secret/2mQ8vR5xL9nT3bW7kP4sH6jY0cF1dZ"
+	for _, longOutput := range []bool{false, true} {
+		name := "short"
+		if longOutput {
+			name = "elided"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := "remote: GITHUB PUSH PROTECTION\nremote:   locations:\nremote:     path: 0/full.jsonl:85\n"
+			if longOutput {
+				output += strings.Repeat("remote: additional policy detail —\n", 200)
+			}
+			output += "remote: " + unblockURL + "\n! [remote rejected] (repository rule violations)\nTo " + target
+			cause := errors.New("push exited")
+			err := fmt.Errorf("caller: %w", formatGitPushError(t.Context(), cause, []byte(output), target))
+			var pushErr *PushError
+			require.ErrorAs(t, err, &pushErr)
+			require.ErrorIs(t, err, cause)
+			assert.NotContains(t, err.Error(), "\n", "logs remain single-line")
+			assert.NotContains(t, err.Error(), "user:password")
+			terminal := pushErr.Output()
+			assert.NotContains(t, terminal, "user:password")
+			assert.Contains(t, terminal, RedactURLOrPath(target))
+			assert.Contains(t, terminal, unblockURL)
+			assert.Contains(t, terminal, "\nremote:   locations:\nremote:     path:")
+			assert.Contains(t, terminal, "repository rule violations")
+			assert.LessOrEqual(t, len([]rune(terminal)), maxPushErrorDetail)
+			assert.True(t, utf8.ValidString(terminal))
+			if longOutput {
+				assert.Contains(t, terminal, "[…]")
+			} else {
+				assert.Equal(t, strings.ReplaceAll(output, target, RedactURLOrPath(target)), terminal)
+			}
+		})
+	}
+}
+
+// Multi-line git output has to stay usable as a single log attribute.
+func TestFormatGitPushError_CollapsesAndCaps(t *testing.T) {
+	t.Parallel()
+
+	err := &exec.ExitError{ProcessState: nil}
+
+	formatted := formatGitPushError(context.Background(), err, []byte("line one\n\nline  two\n"), "origin")
+	require.Error(t, formatted)
+	assert.Contains(t, formatted.Error(), "line one line two")
+	assert.NotContains(t, formatted.Error(), "\n")
+
+	long := formatGitPushError(context.Background(), err, []byte(strings.Repeat("x", maxPushErrorDetail*2)), "origin")
+	require.Error(t, long)
+	assert.Less(t, len([]rune(long.Error())), maxPushErrorDetail+100)
+	assert.Contains(t, long.Error(), "[…]")
+}
+
+// git prints the remote's banner first and its own verdict last, so a long
+// rejection must not lose its tail — that is where the reason is. This is the
+// shape of a real GitHub push-protection refusal.
+func TestFormatGitPushError_KeepsTailOfLongOutput(t *testing.T) {
+	t.Parallel()
+
+	const reason = "push declined due to repository rule violations"
+	var b strings.Builder
+	for range 40 {
+		b.WriteString("remote: GITHUB PUSH PROTECTION blocked a secret; unblock at https://github.com/o/r/security/secret-scanning/unblock-secret/xxxxxxxxxxxxxxxxxxxx ")
+	}
+	b.WriteString("! [remote rejected] refs/entire/checkpoints/W1/X -> refs/entire/checkpoints/W1/X (" + reason + ")")
+	require.Greater(t, b.Len(), maxPushErrorDetail, "precondition: output must exceed the cap")
+
+	formatted := formatGitPushError(context.Background(), &exec.ExitError{ProcessState: nil}, []byte(b.String()), "origin")
+	require.Error(t, formatted)
+	msg := formatted.Error()
+	assert.Contains(t, msg, reason, "the verdict at the tail must survive truncation")
+	assert.Contains(t, msg, "remote rejected")
+	assert.Contains(t, msg, "GITHUB PUSH PROTECTION", "the head should survive too")
+	assert.Contains(t, msg, "[…]")
+}
+
+// A cut landing inside a multi-byte rune would put invalid UTF-8 into a log
+// record. git's own output carries em dashes and ellipses.
+func TestFormatGitPushError_TruncationIsRuneSafe(t *testing.T) {
+	t.Parallel()
+
+	output := strings.Repeat("—", maxPushErrorDetail*2)
+	formatted := formatGitPushError(context.Background(), &exec.ExitError{ProcessState: nil}, []byte(output), "origin")
+	require.Error(t, formatted)
+	assert.True(t, utf8.ValidString(formatted.Error()), "truncated detail must remain valid UTF-8")
+}
+
+// Empty output leaves the original error untouched rather than adding "()".
+func TestFormatGitPushError_NoOutputIsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	err := &exec.ExitError{ProcessState: nil}
+	assert.Equal(t, err, formatGitPushError(context.Background(), err, []byte("  \n"), "origin"))
+	assert.NoError(t, formatGitPushError(context.Background(), nil, []byte("x"), "origin"))
+}
+
+// PushWithOptions is where the reason was being dropped — the rejection lives in
+// the combined output, and folding it in is a single line at that call site.
+// Drive a real refused push so that line is covered too, not just
+// formatGitPushError in isolation.
+func TestPushWithOptions_ErrorCarriesRemoteRejectionReason(t *testing.T) {
+	t.Parallel()
+
+	const reason = "push declined due to repository rule violations"
+	const ref = "refs/entire/checkpoints/W1/X"
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	workDir := filepath.Join(tmpDir, "work")
+
+	runIsolatedGit(t, "", "init", "--bare", bareDir)
+	hook := filepath.Join(bareDir, "hooks", "pre-receive")
+	require.NoError(t, os.WriteFile(hook, []byte("#!/bin/sh\necho '"+reason+"' >&2\nexit 1\n"), 0o755))
+
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "f.txt", "seed")
+	testutil.GitAdd(t, workDir, "f.txt")
+	testutil.GitCommit(t, workDir, "seed")
+	runIsolatedGit(t, workDir, "update-ref", ref, "HEAD")
+
+	_, err := PushWithOptions(context.Background(), PushOptions{
+		Remote:   bareDir,
+		RefSpecs: []string{ref + ":" + ref},
+		Dir:      workDir,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), reason,
+		"the remote's reason must reach the caller, not just \"exit status 1\"")
+	assert.Contains(t, err.Error(), "remote rejected")
 }

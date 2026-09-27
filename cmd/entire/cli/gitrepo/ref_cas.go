@@ -47,10 +47,12 @@ func CompareAndSwapRef(
 		return errors.Join(err, tx.abort())
 	}
 	if symbolic {
-		return errors.Join(
-			fmt.Errorf("ref %s points to %s: %w", refName, target, ErrRefSymbolic),
-			tx.abort(),
-		)
+		symbolicErr := fmt.Errorf("ref %s points to %s: %w", refName, target, ErrRefSymbolic)
+		if abortErr := tx.abort(); abortErr != nil {
+			// Cleanup diagnostics must not make symbolic-ref rejection retryable.
+			return fmt.Errorf("%w (abort transaction: %s)", symbolicErr, abortErr.Error())
+		}
+		return symbolicErr
 	}
 	return tx.commit()
 }

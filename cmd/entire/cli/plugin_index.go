@@ -159,7 +159,16 @@ func resolvePluginIndexURL(flagValue string) string {
 // URL so switching indexes (or per-repo overrides) never serves one
 // catalog's cache for another.
 func pluginIndexCacheDir(indexURL string) (string, error) {
-	cache := userdirs.Cache()
+	// Checked, not the string form. SyncPluginIndex creates the parent directory
+	// and takes a flock beside it before osroot.Shared ever sees the path, so a
+	// relative XDG_CACHE_HOME landed both in the working directory on the way to
+	// reporting itself -- the "creates the thing while reporting the error"
+	// shape already fixed in contexts, discovery and the token store. This was
+	// the fourth instance.
+	cache, err := userdirs.CacheDirChecked()
+	if err != nil {
+		return "", err //nolint:wrapcheck // the error already names the variable and its value
+	}
 	if cache == "" {
 		return "", errors.New("cannot resolve user cache directory")
 	}

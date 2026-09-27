@@ -43,7 +43,7 @@ func BenchmarkHookSessionStart(b *testing.B) {
 }
 
 // benchSessions scales session state files in .git/entire-sessions/.
-// listAllSessionStates() is called twice: once in FindMostRecentSession (logging init),
+// listAllSessionStates() is called twice: once in ResolveCallerSession (logging init),
 // once in CountOtherActiveSessionsWithCheckpoints. Each call does
 // ReadDir + (ReadFile + JSON unmarshal + repo.Reference) per file.
 func benchSessions(b *testing.B) {

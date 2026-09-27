@@ -22,7 +22,6 @@ type InfoResponse struct {
 	Name            string             `json:"name"`
 	Type            string             `json:"type"`
 	Description     string             `json:"description"`
-	IsPreview       bool               `json:"is_preview"`
 	ProtectedDirs   []string           `json:"protected_dirs"`
 	ProtectedFiles  []string           `json:"protected_files"`
 	HookNames       []string           `json:"hook_names"`

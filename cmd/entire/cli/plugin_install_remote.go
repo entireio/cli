@@ -81,7 +81,9 @@ func InstallPluginFromRepo(ctx context.Context, repoURL, expectedName string, op
 		tags = []string{opts.Pin}
 	} else {
 		var err error
+		stopTags := startPluginStep(ctx, "Finding latest plugin release...")
 		tags, err = listRemoteSemverTags(ctx, repoURL)
+		stopTags()
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +111,9 @@ func InstallPluginFromRepo(ctx context.Context, repoURL, expectedName string, op
 }
 
 func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, opts RemoteInstallOptions) (*RemoteInstallResult, error) {
+	stopMetadata := startPluginStep(ctx, fmt.Sprintf("Fetching plugin metadata for %s...", tag))
 	meta, err := fetchPluginMetadataAtTag(ctx, repoURL, tag)
+	stopMetadata()
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +194,8 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 		return nil, err
 	}
 
+	stopInstall := startPluginStep(ctx, fmt.Sprintf("Installing entire-%s %s...", name, tag))
+	defer stopInstall()
 	binBase := pluginBinaryName(name)
 	stagedName := "extracted-" + binBase
 	if err := extractPluginBinary(asset.Path, name, stagingRoot, stagedName); err != nil {

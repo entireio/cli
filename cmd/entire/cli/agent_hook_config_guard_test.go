@@ -1,14 +1,13 @@
 package cli
 
 import (
-	"os/exec"
 	"path"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,23 +26,19 @@ import (
 func TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent(t *testing.T) {
 	t.Parallel()
 
-	// Both subprocesses run with git's repo selectors scrubbed. They inherit the
-	// environment, and GIT_DIR / GIT_WORK_TREE take precedence over both the
-	// working directory and grep.Dir — so a `go test` launched from anywhere
-	// that exports them (a `git rebase --exec`, a hook, this CLI's own test
-	// harnesses) resolved some other repository entirely. Measured against a
-	// decoy repo, the unscrubbed version fails with "no agent calls
-	// agent.OpenHookConfig", which is a guard failing for a reason that has
-	// nothing to do with what it guards; a decoy that happened to contain
-	// matching paths would instead have it pass having checked nothing.
-	topLevel := exec.Command("git", "rev-parse", "--show-toplevel") //nolint:noctx // guard test, no cancellation needed
-	topLevel.Env = gitrepo.EnvWithoutRepoOverrides()
-	repoRoot, err := topLevel.Output()
-	if err != nil {
-		t.Skipf("not in a git checkout: %v", err)
+	// Both subprocesses run through testutil.GitGrepGuard, which scrubs git's
+	// repo selectors (GIT_DIR / GIT_WORK_TREE take precedence over cmd.Dir, so a
+	// `go test` launched from a hook or a `git rebase --exec` resolved some other
+	// repository entirely) and passes --untracked and --no-color. The first of
+	// those matters more here than anywhere else: this guard compares two sets
+	// built from the same grep, so a NEW agent package that calls OpenHookConfig
+	// without declaring HookConfigRelPath was invisible on both sides and the
+	// comparison passed — with the file unstaged, which is exactly when someone
+	// is writing a new agent.
+	dir, ok := testutil.GitGrepGuardRepoRoot(t)
+	if !ok {
+		return
 	}
-
-	dir := strings.TrimSpace(string(repoRoot))
 	callers := agentPackagesMatching(t, dir, "agent.OpenHookConfig(")
 	locators := agentPackagesMatching(t, dir, ") HookConfigRelPath() string {")
 
@@ -67,8 +62,8 @@ func TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent(t *testing.T) {
 	// A count, deliberately, directly under the argument against counts above —
 	// and defeatable the same way, by dropping one agent from the registry while
 	// adding another locator. A set comparison would need to map a package
-	// directory to the rel path it declares, and nothing does: `geminicli`
-	// declares `.gemini/settings.json` and `copilotcli` declares
+	// directory to the rel path it declares, and nothing does: `factoryaidroid`
+	// declares `.factory/settings.json` and `copilotcli` declares
 	// `.github/hooks/entire.json`, so neither the package name nor the path's
 	// first component derives the other. The set comparison above is the guard
 	// that matters; this one only catches a locator the registry never sees.
@@ -83,19 +78,27 @@ func TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent(t *testing.T) {
 // guard into a comparison of two empty sets.
 func agentPackagesMatching(t *testing.T, repoRoot, needle string) []string {
 	t.Helper()
-	grep := exec.Command("git", "grep", "-l", "--fixed-strings", "--", //nolint:noctx // guard test, no cancellation needed
+	out := testutil.GitGrepGuard(t, repoRoot, "-l", "--fixed-strings", "--",
 		needle, "--", ":(glob)cmd/entire/cli/agent/**/*.go")
-	grep.Dir = repoRoot
-	// Set for the same reason every git subprocess naming its target with
-	// cmd.Dir does: git exports GIT_DIR/GIT_WORK_TREE to hooks, and those take
-	// precedence over cmd.Dir.
-	grep.Env = gitrepo.EnvWithoutRepoOverrides()
-	out, err := grep.Output()
-	require.NoError(t, err, "no agent source matches %q, which cannot be right", needle)
 
 	var pkgs []string
-	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
-		if line == "" || strings.HasSuffix(line, "_test.go") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		// A positive .go check, not just a _test.go skip. `git grep -l` emits
+		// nothing but filenames and still colorizes them, so an escape-wrapped
+		// path fails the _test.go suffix test, leaks test files into the set,
+		// and prefixes the package directory — all while the NotEmpty assertion
+		// below still passes and the two sets still compare. --no-color makes
+		// that unreachable; this makes it loud if it ever becomes reachable
+		// again.
+		if !strings.HasSuffix(line, ".go") {
+			t.Fatalf("cannot parse git grep -l output; expected a .go path, got:\n  %s\n"+
+				"The filename field is unusable, so this test can prove nothing. "+
+				"Check whether git is colorizing into a pipe (color.ui or color.grep set to `always`).", line)
+		}
+		if strings.HasSuffix(line, "_test.go") {
 			continue
 		}
 		if dir := path.Dir(line); !slices.Contains(pkgs, dir) {

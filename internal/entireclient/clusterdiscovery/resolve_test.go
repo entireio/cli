@@ -62,7 +62,7 @@ func TestResolve_ActiveContextWinsWhenEligible(t *testing.T) {
 // TestResolve_UnrelatedActiveContextUsesSoleEligibleLogin: the active context is
 // on an unrelated core while exactly one saved context is eligible, so that one
 // is used. Someone holding logins in two federations can clone from either
-// without first retargeting every shell on the machine with `auth use`.
+// without first retargeting every shell on the machine with `auth switch`.
 func TestResolve_UnrelatedActiveContextUsesSoleEligibleLogin(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
@@ -104,7 +104,12 @@ func TestResolve_SeveralEligibleLoginsAreAmbiguous(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "multiple login contexts can authenticate against cluster cluster1.entire.io")
 	assert.Contains(t, err.Error(), "admin@core-us, alice@core-us", "candidates must be listed in sorted order")
-	assert.Contains(t, err.Error(), "entire auth use")
+	assert.Contains(t, err.Error(), "entire auth switch")
+	// The per-command remedy must be named too: `auth switch` mutates the
+	// machine-wide default, and a user holding logins across jurisdictions
+	// should not have to retarget every shell to clone once (COR-1630).
+	assert.Contains(t, err.Error(), "--context <context>")
+	assert.Contains(t, err.Error(), "ENTIRE_CONTEXT=<context>")
 }
 
 // TestResolve_ActiveContextIneligibleAndNothingElseFits: an active context that
@@ -135,8 +140,8 @@ func TestResolve_ActiveContextIneligibleAndNothingElseFits(t *testing.T) {
 	// "no auth context for <cluster>", which reads as logged-out.
 	assert.NotContains(t, err.Error(), "no auth context for")
 	assert.Contains(t, err.Error(), "entire login --server")
-	// Nothing local to switch to, so offering `auth use` would be a dead end.
-	assert.NotContains(t, err.Error(), "entire auth use")
+	// Nothing local to switch to, so offering `auth switch` would be a dead end.
+	assert.NotContains(t, err.Error(), "entire auth switch")
 }
 
 // loginURLCoresHandler serves a discovery document that advertises a login
@@ -280,7 +285,7 @@ func TestResolve_ContextWithoutCoreURLIsNeverEligible(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "These saved logins can authenticate it",
 		"a context rejected by the accept check must not be offered as a candidate")
-	assert.NotContains(t, err.Error(), "entire auth use")
+	assert.NotContains(t, err.Error(), "entire auth switch")
 }
 
 // TestResolve_EligibilityIgnoresWhitespaceAndTrailingSlash: the accept check and
@@ -592,7 +597,7 @@ func TestResolve_503(t *testing.T) {
 
 // TestResolve_ContextOverrideSelectsWithoutMutatingState: --context acts as a
 // saved login for one invocation. This is what makes cross-federation work
-// possible without `entire auth use`, whose effect is global and sticky — it
+// possible without `entire auth switch`, whose effect is global and sticky — it
 // would retarget every other terminal, worktree, and background git hook on the
 // machine until switched back.
 //
@@ -621,7 +626,7 @@ func TestResolve_ContextOverrideSelectsWithoutMutatingState(t *testing.T) {
 	reloaded, err := contexts.Load(configDir)
 	require.NoError(t, err)
 	assert.Equal(t, "paul@unrelated", reloaded.CurrentContext,
-		"an override must not persist; that is what distinguishes it from `auth use`")
+		"an override must not persist; that is what distinguishes it from `auth switch`")
 }
 
 // TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault: an explicitly
@@ -629,7 +634,7 @@ func TestResolve_ContextOverrideSelectsWithoutMutatingState(t *testing.T) {
 // the sole eligible login — the user asked for that identity by name, so acting
 // as another behind their back is the failure the override exists to prevent.
 //
-// And telling them to run `auth use` sends them to change the wrong thing: the
+// And telling them to run `auth switch` sends them to change the wrong thing: the
 // flag would still override it on the next run.
 func TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault(t *testing.T) {
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
@@ -650,8 +655,8 @@ func TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault(t *testing.T
 	assert.Contains(t, err.Error(), "the login selected by --context")
 	assert.Contains(t, err.Error(), "prod-eu", "offer the login that would work")
 	assert.Contains(t, err.Error(), "--context <context>")
-	assert.NotContains(t, err.Error(), "entire auth use",
-		"`auth use` cannot fix a run whose identity comes from the flag")
+	assert.NotContains(t, err.Error(), "entire auth switch",
+		"`auth switch` cannot fix a run whose identity comes from the flag")
 }
 
 // TestResolve_UnknownOverrideFailsBeforeEligibility: "that context doesn't exist"
@@ -701,7 +706,7 @@ func TestResolve_NilStoredContextDoesNotPanic(t *testing.T) {
 
 	// And with a matching core, the nil entry must be skipped while the real one
 	// is auto-selected.
-	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}, autoSelect: true}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name, "the valid entry is still the sole candidate")
 }
@@ -717,7 +722,7 @@ func TestResolve_NilStoredContextIsSelectable(t *testing.T) {
 			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
 		},
 	}
-	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}, autoSelect: true}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name)
 }
@@ -866,7 +871,7 @@ func TestResolve_AutoSelectionOnlyForEntireSites(t *testing.T) {
 	require.Error(t, err, "acme is the sole eligible login, and must still not be chosen unasked")
 	assert.Contains(t, err.Error(), `cluster git.acme.com does not accept your active login "prod"`)
 	assert.Contains(t, err.Error(), "These saved logins can authenticate it: acme")
-	assert.Contains(t, err.Error(), "entire auth use")
+	assert.Contains(t, err.Error(), "entire auth switch")
 	assert.Empty(t, buf.String(), "nothing was selected, so nothing is announced")
 
 	// Named explicitly, the same login works — the allowlist gates only the

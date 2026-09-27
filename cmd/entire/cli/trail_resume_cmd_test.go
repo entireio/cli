@@ -628,6 +628,7 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 			Counts: trailReviewCommentCounts{Open: 1, OpenHigh: 1},
 			Top: []api.TrailReviewComment{{
 				ID:       "finding-1",
+				ReviewID: "review-example",
 				Severity: &sev,
 				Status:   trailReviewStatusOpen,
 			}},
@@ -658,7 +659,8 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 			OpenHigh int `json:"open_high"`
 		} `json:"findings_summary"`
 		Findings []struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			ReviewID string `json:"reviewId"`
 		} `json:"findings"`
 		Commands []string `json:"commands"`
 	}
@@ -682,6 +684,9 @@ func TestEncodeTrailResumeContextJSON(t *testing.T) {
 	}
 	if len(decoded.Findings) != 1 || decoded.Findings[0].ID != "finding-1" {
 		t.Fatalf("decoded findings = %#v", decoded.Findings)
+	}
+	if decoded.Findings[0].ReviewID != "review-example" {
+		t.Fatalf("finding JSON keys changed: %s", out.String())
 	}
 }
 

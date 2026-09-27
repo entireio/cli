@@ -107,7 +107,7 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 		}
 
 		switch {
-		case p.Type == transcriptTypeMessage && p.Role == "user":
+		case p.Type == transcriptTypeMessage && p.Role == transcript.TypeUser:
 			text := codexUserText(p.Content)
 			if text == "" {
 				continue
@@ -122,7 +122,7 @@ func compactCodex(content []byte, opts MetadataFields) ([]byte, error) {
 			line.Content = contentJSON
 			appendLine(&result, line)
 
-		case p.Type == transcriptTypeMessage && p.Role == "assistant":
+		case p.Type == transcriptTypeMessage && p.Role == transcript.TypeAssistant:
 			text := codexAssistantText(p.Content)
 			if text == "" {
 				continue

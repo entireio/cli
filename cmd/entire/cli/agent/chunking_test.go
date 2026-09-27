@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
 func TestChunkJSONL_SmallContent(t *testing.T) {
@@ -228,44 +226,22 @@ func TestChunkJSONL_OversizedLineInMiddle(t *testing.T) {
 	}
 }
 
-func TestDetectAgentTypeFromContent(t *testing.T) {
+// Gemini CLI is no longer registered, but its chunked transcripts in stored
+// checkpoints are JSON documents: JSONL reassembly would join them into
+// invalid JSON.
+func TestReassembleTranscript_HistoricalGeminiChunks(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		content  []byte
-		expected types.AgentType
-	}{
-		{
-			name:     "Gemini JSON",
-			content:  []byte(`{"messages":[{"type":"user","content":"hi"}]}`),
-			expected: AgentTypeGemini,
-		},
-		{
-			name:     "JSONL",
-			content:  []byte(`{"type":"human","message":"hi"}`),
-			expected: "",
-		},
-		{
-			name:     "Empty messages array",
-			content:  []byte(`{"messages":[]}`),
-			expected: "", // Empty messages should not be detected as Gemini
-		},
-		{
-			name:     "Invalid JSON",
-			content:  []byte(`not json`),
-			expected: "",
-		},
+	chunks := [][]byte{
+		[]byte(`{"messages":[{"type":"user","content":"hello"}]}`),
+		[]byte(`{"messages":[{"type":"gemini","content":"hi"}]}`),
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			result := DetectAgentTypeFromContent(tt.content)
-			if result != tt.expected {
-				t.Errorf("DetectAgentTypeFromContent() = %q, want %q", result, tt.expected)
-			}
-		})
+	result, err := ReassembleTranscript(chunks, AgentTypeGemini)
+	if err != nil {
+		t.Fatalf("ReassembleTranscript error: %v", err)
+	}
+	want := `{"messages":[{"type":"user","content":"hello"},{"type":"gemini","content":"hi"}]}`
+	if string(result) != want {
+		t.Errorf("ReassembleTranscript = %s, want %s", result, want)
 	}
 }

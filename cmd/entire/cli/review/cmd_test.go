@@ -145,9 +145,9 @@ func TestReviewCmd_ListModels(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	out := buf.String()
-	// claude-code advertises real aliases; codex/gemini have no enumeration
-	// command, so they list no models and point at Default/--model instead.
-	for _, want := range []string{"claude-code", "opus", "sonnet", "codex", "gemini", "no advertised models"} {
+	// claude-code advertises real aliases; codex has no enumeration command,
+	// so it lists no models and points at Default/--model instead.
+	for _, want := range []string{"claude-code", "opus", "sonnet", "codex", "no advertised models"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--models output missing %q:\n%s", want, out)
 		}
@@ -176,8 +176,8 @@ func TestReviewCmd_ListModelsFilteredByAgent(t *testing.T) {
 	if !strings.Contains(out, "codex") || !strings.Contains(out, "no advertised models") {
 		t.Errorf("expected codex section with no-advertised-models note, got:\n%s", out)
 	}
-	if strings.Contains(out, "gemini") {
-		t.Errorf("--agent codex should not list gemini:\n%s", out)
+	if strings.Contains(out, "sonnet") {
+		t.Errorf("--agent codex should not list claude-code's models:\n%s", out)
 	}
 }
 
@@ -1378,14 +1378,14 @@ func TestDispatchFork_AllWorkersInvalidStillFails(t *testing.T) {
 
 	if err := seedReviewConfig(context.Background(), map[string]settings.ReviewConfig{
 		testCodexAgent: {Skills: []string{"$missing-review"}},
-		"gemini":       {Skills: []string{"$also-missing"}},
+		"pi":           {Skills: []string{"$also-missing"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	deps := review.Deps{
 		GetAgentsWithHooksInstalled: func(_ context.Context) []types.AgentName {
-			return []types.AgentName{testCodexAgent, "gemini"}
+			return []types.AgentName{testCodexAgent, "pi"}
 		},
 		NewSilentError: func(err error) error { return err },
 		HeadHasReviewCheckpoint: func(_ context.Context) (bool, string) {

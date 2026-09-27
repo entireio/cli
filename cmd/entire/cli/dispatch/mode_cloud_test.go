@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -19,16 +20,19 @@ import (
 // itself should not call this helper.
 func stubCloudDispatchAuth(t *testing.T) {
 	t.Helper()
-	oldResource := lookupResourceToken
+	oldResolve := resolveDataAPI
 	oldRequire := requireSecureDispatchURL
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
+	resolveDataAPI = stubDataAPI
 	requireSecureDispatchURL = func(string) error { return nil }
 	t.Cleanup(func() {
-		lookupResourceToken = oldResource
+		resolveDataAPI = oldResolve
 		requireSecureDispatchURL = oldRequire
 	})
+}
+
+// stubDataAPI returns the test token for the configured data host.
+func stubDataAPI(context.Context) (auth.DataAPI, error) {
+	return auth.DataAPI{BaseURL: api.BaseURL(), Token: testCloudDispatchToken}, nil
 }
 
 func TestServerMode_HappyPath(t *testing.T) {
@@ -49,8 +53,9 @@ func TestServerMode_HappyPath(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+		// The origin-derived default names its forge.
 		repos, ok := body["repos"].([]any)
-		if !ok || len(repos) != 1 || repos[0] != testRepoFullName {
+		if !ok || len(repos) != 1 || repos[0] != testRepoSlug {
 			t.Fatalf("unexpected repos payload: %v", body)
 		}
 		if _, ok := body["repo"]; ok {
@@ -193,16 +198,24 @@ func TestAPIToDispatch_DerivesRepoURLs(t *testing.T) {
 		Repos: []APIRepo{
 			{FullName: testRepoFullName},
 			{FullName: "bad/repo)"},
+			{FullName: testRepoSlug},
+			{FullName: "et/myproject/service"},
 		},
 	})
-	if len(got.Repos) != 2 {
-		t.Fatalf("expected two repos, got %+v", got.Repos)
+	if len(got.Repos) != 4 {
+		t.Fatalf("expected four repos, got %+v", got.Repos)
 	}
 	if got.Repos[0].URL != testRepoURL {
 		t.Fatalf("unexpected valid repo URL: %q", got.Repos[0].URL)
 	}
 	if got.Repos[1].URL != "" {
 		t.Fatalf("expected unsafe repo URL to be omitted, got %q", got.Repos[1].URL)
+	}
+	if got.Repos[2].FullName != testRepoSlug || got.Repos[2].URL != testRepoURL {
+		t.Fatalf("a gh/-prefixed echo keeps its name and links to github.com, got %+v", got.Repos[2])
+	}
+	if got.Repos[3].FullName != "et/myproject/service" || got.Repos[3].URL != "" {
+		t.Fatalf("a native repo keeps its name and gets no github.com link, got %+v", got.Repos[3])
 	}
 }
 
@@ -369,14 +382,12 @@ func TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	oldResource := lookupResourceToken
+	oldResolve := resolveDataAPI
 	oldNow := nowUTC
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
+	resolveDataAPI = stubDataAPI
 	nowUTC = func() time.Time { return time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() {
-		lookupResourceToken = oldResource
+		resolveDataAPI = oldResolve
 		nowUTC = oldNow
 	})
 
@@ -402,11 +413,9 @@ func TestServerMode_InsecureHTTPAuthBypassesSecureURLCheck(t *testing.T) {
 // fire. If a future refactor drops the check, this test breaks before the
 // leak reaches users.
 func TestServerMode_RejectsPlainHTTPBaseURL(t *testing.T) {
-	oldResource := lookupResourceToken
-	lookupResourceToken = func(_ context.Context, _ string) (string, error) {
-		return testCloudDispatchToken, nil
-	}
-	t.Cleanup(func() { lookupResourceToken = oldResource })
+	oldResolve := resolveDataAPI
+	resolveDataAPI = stubDataAPI
+	t.Cleanup(func() { resolveDataAPI = oldResolve })
 
 	t.Setenv("ENTIRE_API_BASE_URL", "http://dispatch.example.invalid")
 

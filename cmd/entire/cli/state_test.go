@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -920,5 +921,115 @@ func TestFilterToUncommittedFiles_ReallyModified(t *testing.T) {
 	result := filterToUncommittedFiles(context.Background(), []string{"file.txt"}, tmpDir)
 	if len(result) != 1 || result[0] != "file.txt" {
 		t.Errorf("filterToUncommittedFiles() = %v, want [file.txt]", result)
+	}
+}
+
+// TestFilterToUncommittedFiles_CleanFilteredFileIsDropped pins the condition
+// that left a stale shadow branch behind after every commit on Windows.
+//
+// Under core.autocrlf (the Git for Windows default, and what InitRepo and
+// e2e/testutil/repo.go both set) a committed text file holds CRLF in the
+// working tree and LF in its blob. Comparing the two raw byte strings reports
+// the file as still modified, which defeats turn-end's "no changes, skip" gate
+// and mints a fresh shadow branch on the new HEAD right after PostCommit
+// condensed and deleted the old one — and nothing condenses that one away.
+//
+// The file here is fully committed with no subsequent edit, so the only
+// correct answer is to drop it.
+func TestFilterToUncommittedFiles_CleanFilteredFileIsDropped(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir) // sets core.autocrlf=true
+
+	// Written with CRLF and committed through native Git, so the clean filter
+	// normalises the blob to LF while the working tree keeps CRLF.
+	const relPath = "docs/blue.md"
+	testutil.WriteFile(t, tmpDir, relPath, "# Blue\r\n\r\nAbout the colour blue.\r\n")
+	testutil.RunGit(t, tmpDir, "add", relPath)
+	testutil.RunGit(t, tmpDir, "commit", "-m", "Add documentation about the colour blue")
+
+	// Assert the premise rather than assume it: if Git ever stops normalising
+	// here, this test would pass for the wrong reason and stop guarding
+	// anything.
+	blob := testutil.RunGit(t, tmpDir, "cat-file", "-p", "HEAD:"+relPath)
+	if strings.Contains(blob, "\r\n") {
+		t.Fatalf("precondition failed: blob still contains CRLF, so core.autocrlf did not apply")
+	}
+	onDisk, err := os.ReadFile(filepath.Join(tmpDir, filepath.FromSlash(relPath)))
+	if err != nil {
+		t.Fatalf("failed to read working tree file: %v", err)
+	}
+	if !strings.Contains(string(onDisk), "\r\n") {
+		t.Fatalf("precondition failed: working tree file has no CRLF, so the byte comparison would agree anyway")
+	}
+
+	if got := filterToUncommittedFiles(context.Background(), []string{relPath}, tmpDir); len(got) != 0 {
+		t.Errorf("filterToUncommittedFiles() = %v, want [] — the file is committed, so it is not an uncommitted change", got)
+	}
+}
+
+// TestFilterToUncommittedFiles_CleanFilteredFileEditedIsKept is the other half:
+// the clean-filter-aware comparison must still notice a real edit to a file
+// whose line endings are converted, rather than dropping every committed path.
+func TestFilterToUncommittedFiles_CleanFilteredFileEditedIsKept(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+
+	const relPath = "docs/blue.md"
+	testutil.WriteFile(t, tmpDir, relPath, "# Blue\r\n")
+	testutil.RunGit(t, tmpDir, "add", relPath)
+	testutil.RunGit(t, tmpDir, "commit", "-m", "Add blue")
+
+	// A genuine edit, still CRLF-terminated.
+	testutil.WriteFile(t, tmpDir, relPath, "# Blue\r\n\r\nNow with more content.\r\n")
+
+	got := filterToUncommittedFiles(context.Background(), []string{relPath}, tmpDir)
+	if len(got) != 1 || got[0] != relPath {
+		t.Errorf("filterToUncommittedFiles() = %v, want [%s]", got, relPath)
+	}
+}
+
+// TestFilterToUncommittedFiles_TypechangeToSymlinkIsKept pins the hole the
+// clean-filter comparison would otherwise open. git hash-object follows a
+// working-tree symlink and hashes the target's content, so a tracked regular
+// file replaced by a link to identical content hashes equal to its HEAD blob
+// and would be dropped as "already committed" — even though git status calls
+// it a typechange (" T"). Checking only the HEAD mode does not catch it,
+// because the HEAD entry is still a regular file.
+func TestFilterToUncommittedFiles_TypechangeToSymlinkIsKept(t *testing.T) {
+	testutil.SkipWithoutSymlinks(t)
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+
+	const relPath = "foo.txt"
+	testutil.WriteFile(t, tmpDir, relPath, "hello\n")
+	testutil.RunGit(t, tmpDir, "add", relPath)
+	testutil.RunGit(t, tmpDir, "commit", "-m", "Add foo")
+
+	// Replace the tracked regular file with a symlink whose target holds the
+	// identical content, so hash-object returns exactly the HEAD blob hash.
+	testutil.WriteFile(t, tmpDir, "elsewhere.txt", "hello\n")
+	if err := os.Remove(filepath.Join(tmpDir, relPath)); err != nil {
+		t.Fatalf("failed to remove tracked file: %v", err)
+	}
+	if err := os.Symlink("elsewhere.txt", filepath.Join(tmpDir, relPath)); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	// Assert the premise: native Git really does hash the link to the blob it
+	// replaced, which is what makes the naive comparison unsafe.
+	if got := strings.TrimSpace(testutil.RunGit(t, tmpDir, "hash-object", "--", relPath)); got !=
+		strings.TrimSpace(testutil.RunGit(t, tmpDir, "rev-parse", "HEAD:"+relPath)) {
+		t.Fatalf("precondition failed: hash-object did not follow the symlink to the HEAD blob (got %s)", got)
+	}
+
+	if got := filterToUncommittedFiles(context.Background(), []string{relPath}, tmpDir); len(got) != 1 || got[0] != relPath {
+		t.Errorf("filterToUncommittedFiles() = %v, want [%s] — a typechange is an uncommitted change", got, relPath)
 	}
 }

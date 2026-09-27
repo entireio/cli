@@ -730,6 +730,83 @@ func TestExpertsCommandFailedPlacement(t *testing.T) {
 	}
 }
 
+// TestParseExpertsRepo pins which --repo spelling may drop a trailing `.git`.
+//
+// The suffix is decoration on a mirror and part of the name on a native repo,
+// so only the gh/ triple — the one spelling that names its forge — may trim it.
+// Trimming the bare pair too made the same command name two different
+// repositories inside a clone of a native repo called `<name>.git`; see
+// TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag.
+func TestParseExpertsRepo(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "bare pair passes through", in: "acme/widget", want: "acme/widget"},
+		{name: "bare pair keeps a .git name", in: "audit1/foo.git", want: "audit1/foo.git"},
+		{name: "gh triple drops the forge", in: "gh/acme/widget", want: "acme/widget"},
+		{name: "gh triple drops the decoration", in: "gh/acme/widget.git", want: "acme/widget"},
+		{name: "surrounding slashes are ignored", in: "/gh/acme/widget.git/", want: "acme/widget"},
+		{name: "a gh name that is only the suffix is refused", in: "gh/acme/.git", wantErr: true},
+		{name: "a non-gh triple is not a pair", in: "et/audit1/foo", wantErr: true},
+		{name: "one segment is not a pair", in: "widget", wantErr: true},
+		{name: "empty is refused", in: "", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseExpertsRepo(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseExpertsRepo(%q) = %q, want an error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseExpertsRepo(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseExpertsRepo(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag is the
+// divergence the trim caused, stated as the guarantee it broke: the pair
+// `entire experts` derives from a native origin must survive being passed back
+// as --repo. A repo genuinely named "foo.git" otherwise resolved as "foo" on
+// the flag path and "foo.git" on the origin path: two repositories, one
+// command.
+//
+// Not parallel: t.Chdir points ResolveRemoteRepo at the fixture repo.
+func TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag(t *testing.T) {
+	dir := t.TempDir()
+	runExpertsGit(t, dir, "init")
+	runExpertsGit(t, dir, "remote", "add", "origin", "entire://cell1.entire.io/et/audit1/foo.git")
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	fromOrigin, err := resolveExpertsRepo(context.Background(), "")
+	if err != nil {
+		t.Fatalf("resolveExpertsRepo from origin: %v", err)
+	}
+	if fromOrigin != "audit1/foo.git" {
+		t.Fatalf("origin resolved to %q, want %q", fromOrigin, "audit1/foo.git")
+	}
+
+	fromFlag, err := resolveExpertsRepo(context.Background(), fromOrigin)
+	if err != nil {
+		t.Fatalf("resolveExpertsRepo from --repo %q: %v", fromOrigin, err)
+	}
+	if fromFlag != fromOrigin {
+		t.Errorf("--repo %q resolved to %q; the flag and the origin must name one repo", fromOrigin, fromFlag)
+	}
+}
+
 func runExpertsGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmdArgs := append([]string{"-c", "commit.gpgsign=false"}, args...)

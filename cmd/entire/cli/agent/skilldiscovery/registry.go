@@ -14,7 +14,7 @@ type CuratedSkill struct {
 // discovered set, the hint is suppressed.
 //
 // When ProvidesAny is nil, the hint is always shown — use this for
-// ecosystems where we can't predict plugin skill names (e.g. Gemini).
+// ecosystems where we can't predict plugin skill names.
 type InstallHint struct {
 	Message     string
 	ProvidesAny []string
@@ -23,8 +23,7 @@ type InstallHint struct {
 // curatedBuiltins lists the review-adjacent commands that ship with each
 // agent binary (no plugin install required). See
 // docs/superpowers/specs/2026-04-22-entire-review-picker-install-awareness-design.md
-// §Data model for the sources these names came from. Gemini CLI has no
-// built-in review command and relies on the install hint below.
+// §Data model for the sources these names came from.
 var curatedBuiltins = map[string][]CuratedSkill{
 	"claude-code": {
 		{Name: "/review", Desc: "Review changes and find issues"},
@@ -36,8 +35,7 @@ var curatedBuiltins = map[string][]CuratedSkill{
 	// not when piped through exec. Codex's review skills (code-reviewer,
 	// review-swarm, …) live on disk and are surfaced by DiscoverReviewSkills in
 	// $name form, so there are no curated built-ins to hardcode here.
-	"codex":  {},
-	"gemini": {},
+	"codex": {},
 }
 
 // installHints lists the passive install pointers shown in the picker when
@@ -76,9 +74,15 @@ var installHints = map[string][]InstallHint{
 			ProvidesAny: []string{"$codex:adversarial-review"},
 		},
 	},
-	"gemini": {
+	// Antigravity has no built-in review command and no predictable plugin
+	// skill names, so the hint is always shown (ProvidesAny nil). The path is
+	// agy 1.1+'s global skills root; ~/.gemini/skills is a pre-1.1 layout (see
+	// antigravity/discovery.go). Entire scans both, so a skill placed at the
+	// old path still reaches Entire's prompt — but agy itself will not load
+	// it, which is the half a hint pointing there would silently get wrong.
+	"antigravity": {
 		{
-			Message:     "Install gemini-code-review: gemini extensions install <url>",
+			Message:     "Add a review skill under ~/.gemini/config/skills/<name>/SKILL.md, e.g.: npx antigravity-awesome-skills --agy",
 			ProvidesAny: nil,
 		},
 	},

@@ -10,10 +10,20 @@
 package review
 
 import (
+	"regexp"
 	"strings"
 
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
+
+// profileLabelPattern admits identifier-shaped profile names into the composed
+// prompt. The profile name is a map key, so the settings provenance gate that
+// covers task and prompt cannot drop it, and a committed name is otherwise a
+// free-text instruction channel sitting directly above the gated task in an
+// approvals-disabled agent's prompt. A name that does not match just loses its
+// label line (the label is context, not instructions); selection, display, and
+// every other use of the name are unaffected.
+var profileLabelPattern = regexp.MustCompile(`^[A-Za-z0-9._ -]{1,64}$`)
 
 // ComposeReviewPrompt assembles the prompt sent to a worker agent. It joins
 // the configured skill invocations, the profile's canonical task, per-agent
@@ -36,7 +46,7 @@ func ComposeReviewPrompt(cfg reviewtypes.RunConfig) string {
 		sections = append(sections, strings.Join(cfg.Skills, "\n"))
 	}
 
-	if cfg.ProfileName != "" {
+	if cfg.ProfileName != "" && profileLabelPattern.MatchString(cfg.ProfileName) {
 		sections = append(sections, "Review profile: "+cfg.ProfileName)
 	}
 	if trimmed := strings.TrimRight(cfg.Task, "\n\r "); trimmed != "" {

@@ -26,7 +26,7 @@ import "strings"
 const entireSkillNamespace = "entire:"
 
 // scaffoldedAgentHelpSkill is the skill `entire enable --agent-help-skill`
-// writes (.claude/skills/entire/SKILL.md and the codex/gemini equivalents).
+// writes (.claude/skills/entire/SKILL.md and the codex equivalent).
 // It is installed unnamespaced, under Entire's own name.
 const scaffoldedAgentHelpSkill = "entire"
 

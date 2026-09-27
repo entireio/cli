@@ -7,14 +7,15 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 
 	// Import agents to ensure they are registered before we iterate
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/pi"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/vogon"
@@ -49,6 +50,16 @@ func newHooksCmd() *cobra.Command {
 
 			// Verify the agent was discovered
 			if _, err := agent.Get(agentName); err != nil {
+				// Hooks left behind by a retired built-in agent must not fail
+				// every event in the agent that still runs them. Checked after
+				// discovery so an external plugin may claim the name, and not
+				// taken when that plugin is installed but discovery missed it
+				// (a timeout): its hook should fail loudly, not vanish.
+				if agentName == retiredGeminiAgentName && !retiredGeminiNameClaimed() {
+					logging.Debug(cmd.Context(), "ignoring hook for retired agent",
+						"agent", string(agentName), "hook", hookName)
+					return nil
+				}
 				return fmt.Errorf("unknown agent %q (not found as built-in or external plugin)", agentName)
 			}
 
@@ -67,7 +78,27 @@ func newHooksCmd() *cobra.Command {
 			continue
 		}
 		if handler, ok := agent.AsHookSupport(ag); ok {
-			cmd.AddCommand(newAgentHooksCmd(agentName, handler))
+			sub := newAgentHooksCmd(agentName, handler)
+			// title-tee is not a lifecycle verb: it runs globally (outside
+			// git repos, without the enabled check) and owns its stdout.
+			//
+			// Exempt from the root `.entire` guard, and only this command:
+			// cobra.EnableTraverseRunHooks means root's PersistentPreRunE runs
+			// for it, and RequireEntireDir answers nil only for
+			// ErrNotARepository — an unresolvable repository (git's
+			// safe.directory refusal, git absent from PATH) or a `.entire` that
+			// is not a real directory makes it print a multi-line remedy to
+			// stderr and fail the command. agy fires this on every agent state
+			// change, so that would be a repeating stderr blob and a non-zero
+			// exit per fire, against this command's NEVER-exit-non-zero
+			// contract, with token capture silently dead. The tee writes only
+			// to the per-user cache, never under `.entire`, so it has nothing
+			// the guard protects. The lifecycle verbs keep the guard: they are
+			// the checkpoint-writing path and must fail closed.
+			if agentName == agent.AgentNameAntigravity {
+				sub.AddCommand(exemptFromEntireDirCheck(newAntigravityTitleTeeCmd()))
+			}
+			cmd.AddCommand(sub)
 		}
 	}
 

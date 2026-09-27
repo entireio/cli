@@ -1,13 +1,11 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package interactive
 
 import "os"
 
-// ttyInRawMode cannot inspect terminal modes on platforms without the unix
-// termios ioctls, so it reports false (fail open — see rawmode_unix.go). Those
-// platforms don't have a /dev/tty for CanPromptInteractively to open either, so
-// this path is not reached in practice.
+// ttyInRawMode cannot inspect terminal modes on these platforms, so it reports
+// false (fail open — see rawmode_unix.go and rawmode_windows.go).
 func ttyInRawMode(_ *os.File) bool {
 	return false
 }

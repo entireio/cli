@@ -28,9 +28,9 @@ import (
 // large (there is no chunked form to fall back to), so it warns rather than failing
 // the checkpoint, which still records the subagent's files and metadata.
 //
-// The agent type must be passed in, not detected: DetectAgentTypeFromContent only
-// recognizes Gemini, so content-based detection would silently make this a no-op for
-// Codex — the one agent that actually needs sanitizing.
+// The agent type must be passed in, not detected: nothing recovers it from content,
+// and without it this would silently be a no-op for Codex — the one agent that
+// actually needs sanitizing.
 func prepareSubagentTranscript(ctx context.Context, agentType types.AgentType, path string, content []byte) (prepared []byte, tooLarge bool) {
 	// Sanitize first, then measure. The size that matters is what would be stored,
 	// and sanitizing strips the bulk: Codex encrypted_content runs to ~20% of a

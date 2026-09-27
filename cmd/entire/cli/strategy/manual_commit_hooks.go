@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -21,7 +22,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -53,7 +53,8 @@ const (
 	ttyResultLinkAlways                  // Link and remember: add trailer + save "always" preference
 )
 
-// askConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
+// askConfirmTTY prompts via the controlling terminal whether to link a commit
+// to session context.
 // This requires a controlling terminal — callers must check
 // interactive.CanPromptInteractively() first and handle the no-TTY case
 // (agent subprocesses, CI) themselves.
@@ -71,10 +72,10 @@ func askConfirmTTY(header string, details []string, prompt string, defaultYes bo
 		return defaultResult
 	}
 
-	// Open /dev/tty for both reading and writing.
-	// This is the controlling terminal, which works even when stdin/stderr are redirected
-	// (e.g., human runs git commit -m where stdin is not a pipe).
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	// Open the controlling terminal for both reading and writing. This works even
+	// when stdin/stderr are redirected (e.g., human runs git commit -m where
+	// stdin is not a pipe).
+	tty, err := interactive.OpenPromptTTY()
 	if err != nil {
 		return defaultResult
 	}
@@ -330,7 +331,8 @@ func isGitSequenceOperation(ctx context.Context) bool {
 // The source parameter indicates how the commit was initiated:
 //   - "" or "template": normal editor flow - adds trailer with explanatory comment
 //   - "message": using -m or -F flag - prompts user interactively via /dev/tty
-//   - "merge", "squash": skip trailer entirely (auto-generated messages)
+//   - "merge": skip trailer entirely (the merged commits keep their own)
+//   - "squash": git's seeded squash message - inherits the squashed trailers, then matches as usual
 //   - "commit": amend operation - preserves existing trailer or restores from LastCheckpointID
 //
 
@@ -347,10 +349,13 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
-	// Skip for merge and squash sources
-	// These are auto-generated messages - not from Claude sessions
-	switch source {
-	case "merge", "squash":
+	// Inherited trailers link the squashed commits' checkpoints; matching still
+	// runs so work the session holds gets a checkpoint of its own.
+	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
+	recordInheritedTrailers(ctx, inherited)
+
+	// A merge commit is skipped: the merged commits keep their own trailers.
+	if source == "merge" {
 		logging.Debug(logCtx, "prepare-commit-msg: skipped for source",
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
@@ -402,7 +407,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	s.warnIfAttributionDiverged(ctx, sessions)
 
 	// Fast path: skip content detection for mid-turn agent commits.
-	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source) {
+	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source, inherited) {
 		return nil
 	}
 
@@ -432,8 +437,8 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	message := string(content)
 
-	// Check if trailer already exists (ParseCheckpoint validates format, so found==true means valid)
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	// A trailer prepare already stamped is kept (e.g. amend); inherited ones are links
+	if existingCpID, found := stampedTrailer(message, inherited); found {
 		readCommitMessageSpan.End()
 		// Trailer already exists (e.g., amend) - keep it
 		logging.Debug(logCtx, "prepare-commit-msg: trailer already exists",
@@ -479,7 +484,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	// NOTE: TTY confirmation (askConfirmTTY) is intentionally NOT wrapped in a span
 	// because it blocks on user input and would skew timing.
 	switch source {
-	case "message":
+	case commitSourceMessage:
 		// Using -m or -F: behavior depends on TTY availability and commit_linking setting
 		switch {
 		case !interactive.CanPromptInteractively():
@@ -535,6 +540,160 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	writeCommitMessageSpan.End()
 
 	return nil
+}
+
+// inheritSquashedCheckpointTrailers handles a commit made while `git merge
+// --squash` is in progress (SQUASH_MSG present): the squashed commits'
+// Entire-Checkpoint trailers are carried into the message when a staged path is
+// one the recorded commits changed. `commit -m` reports source "message", not "squash", so this runs
+// before the source switch — but only for those two sources: an amend must
+// keep its own logic even when an abandoned squash left SQUASH_MSG behind.
+// Returns the inherited IDs; nil when there are none or the message is
+// unusable. Ordinary matching runs afterwards either way.
+func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Context, commitMsgFile, source string) []id.CheckpointID {
+	if source != commitSourceMessage && source != "squash" {
+		return nil
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return nil
+	}
+	// SQUASH_MSG lives in the PER-WORKTREE git dir, like the sequencer markers.
+	// The root is the shared registry handle (gitdir.OpenAt): never close it.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return nil
+	}
+	squashMsg, err := osroot.ReadFileNoFollow(root, "SQUASH_MSG")
+	if err != nil {
+		return nil // no squash in progress (or unreadable: fall through to normal matching)
+	}
+
+	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	if len(inherited) == 0 {
+		return nil
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return nil
+	}
+	defer repo.Close()
+	if !squashTouchesStagedPath(ctx, repo, squashMsg) {
+		stripInheritedCheckpointTrailers(commitMsgFile, inherited)
+		logging.Debug(logCtx, "prepare-commit-msg: ignored stale squash message whose commits changed none of the staged paths",
+			slog.String("source", source),
+			slog.Int("inherited", len(inherited)))
+		return nil
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return nil // nothing inherited; let ordinary matching report its own failure
+	}
+	message := string(content)
+	present := make(map[string]bool)
+	for _, cpID := range trailers.ParseAllCheckpoints(message) {
+		present[cpID.String()] = true
+	}
+	added := 0
+	for _, cpID := range inherited {
+		if present[cpID.String()] {
+			continue
+		}
+		message = addInheritedCheckpointTrailer(message, cpID, source)
+		added++
+	}
+	if added == 0 {
+		logging.Debug(logCtx, "prepare-commit-msg: squash in progress, message already carries the squashed trailers",
+			slog.String("source", source),
+			slog.Int("inherited", len(inherited)))
+		return inherited
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(message), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return nil // nothing landed; hooks stay silent, ordinary matching may still try
+	}
+	logging.Info(logCtx, "prepare-commit-msg: inherited checkpoint trailers from the squashed commits",
+		slog.String("strategy", "manual-commit"),
+		slog.String("source", source),
+		slog.Int("inherited", len(inherited)),
+		slog.Int("added", added))
+	return inherited
+}
+
+// squashTouchesStagedPath reports whether a staged path is one that a
+// commit Git recorded in SQUASH_MSG changed. Git leaves SQUASH_MSG behind when a
+// squash is abandoned, so the file alone is not proof that the current staged
+// work belongs to those commits; matching paths rather than content keeps a
+// squash whose files were touched up before committing.
+func squashTouchesStagedPath(ctx context.Context, repo *git.Repository, squashMsg []byte) bool {
+	files, err := getStagedFiles(ctx)
+	if err != nil || len(files) == 0 {
+		return false
+	}
+	staged := make(map[string]bool, len(files))
+	for _, f := range files {
+		staged[f] = true
+	}
+	for _, line := range strings.Split(string(squashMsg), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "commit" || !plumbing.IsHash(fields[1]) {
+			continue
+		}
+		commit, err := repo.CommitObject(plumbing.NewHash(fields[1]))
+		if err != nil {
+			continue
+		}
+		if commitChangesAnyPath(commit, staged) {
+			return true
+		}
+	}
+	return false
+}
+
+// commitChangesAnyPath reports whether c changed one of wanted relative to its
+// first parent (or added it, for a root commit).
+func commitChangesAnyPath(c *object.Commit, wanted map[string]bool) bool {
+	tree, err := c.Tree()
+	if err != nil {
+		return false
+	}
+	var parentTree *object.Tree
+	if parent, err := c.Parents().Next(); err == nil {
+		if parentTree, err = parent.Tree(); err != nil {
+			return false
+		}
+	}
+	changes, err := object.DiffTree(parentTree, tree)
+	if err != nil {
+		return false
+	}
+	for _, change := range changes {
+		if wanted[change.To.Name] || wanted[change.From.Name] {
+			return true
+		}
+	}
+	return false
+}
+
+func stripInheritedCheckpointTrailers(commitMsgFile string, inherited []id.CheckpointID) {
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return
+	}
+	remove := make(map[string]bool, len(inherited))
+	for _, cpID := range inherited {
+		remove[trailers.CheckpointTrailerKey+": "+cpID.String()] = true
+	}
+	lines := strings.Split(string(content), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !remove[strings.TrimSpace(line)] {
+			kept = append(kept, line)
+		}
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(strings.Join(kept, "\n")), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return // hooks stay silent on failure
+	}
 }
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
@@ -932,8 +1091,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if commit has checkpoint trailer (ParseCheckpoint validates format)
-	checkpointID, found := trailers.ParseCheckpoint(commit.Message)
+	// Condense into the trailer prepare stamped, never into an inherited one.
+	stamped := stampedTrailersOf(ctx, commit)
+	checkpointID, targetPreexisting, found := s.condensationTarget(ctx, repo, stamped)
 	openRepoSpan.End()
 
 	if !found {
@@ -941,6 +1101,9 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		// Still update BaseCommit for active sessions so future commits can match.
 		s.postCommitUpdateBaseCommitOnly(ctx, head)
 		return nil
+	}
+	if targetPreexisting {
+		ctx = withPreexistingTarget(ctx)
 	}
 
 	_, findSessionsSpan := perf.Start(ctx, "find_sessions_for_worktree")
@@ -1515,9 +1678,19 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 
 	// State is saved by the outer MutateSessionState in PostCommit.
 
-	// Only preserve shadow branch for active sessions that were NOT condensed.
-	// Condensed sessions already have their data on entire/checkpoints/v1.
-	if state.Phase.IsActive() && !handler.condensed {
+	// Only preserve the shadow branch for active sessions that were NOT
+	// condensed AND still have content on it — their uncondensed checkpoints
+	// are the only copy of that work. An active session with nothing on the
+	// branch has nothing to lose (SaveStep recreates shadow branches on
+	// demand), so it must not pin the branch. Observed with Antigravity:
+	// a subagent runs as its own conversation and does all the work, while
+	// the parent conversation's final fullyIdle Stop never arrives in
+	// headless mode — leaving a "ghost" session that is ACTIVE forever with
+	// zero files and zero steps, which would otherwise preserve the branch
+	// indefinitely. Content is judged the same way condensation judges it
+	// (sessionHasShadowContent): a session whose first checkpoint captured a
+	// transcript but no file edits yet still has a commit to lose.
+	if state.Phase.IsActive() && !handler.condensed && sessionHasShadowContent(handler.filesTouchedBefore, state) {
 		uncondensedActiveOnBranch[shadowBranchName] = true
 	}
 
@@ -1539,6 +1712,12 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	opts condenseOpts,
 ) (condensed bool, newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
+	if stampedByAnotherCommit(ctx, checkpointID, state) {
+		logging.Warn(logCtx, "refusing to condense into a checkpoint this session did not stamp",
+			slog.String("session_id", state.SessionID),
+			slog.String("checkpoint_id", checkpointID.String()))
+		return false, nil, nil
+	}
 	result, err := s.CondenseSession(ctx, repo, checkpointID, state, committedFiles, opts)
 	if err != nil {
 		logging.Warn(logCtx, "condensation failed",
@@ -2020,7 +2199,23 @@ func (s *ManualCommitStrategy) sessionHasNewContent(ctx context.Context, repo *g
 func (s *ManualCommitStrategy) sessionHasNewContentFromLiveTranscript(ctx context.Context, state *SessionState, stagedFiles []string) (bool, error) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
-	if !s.hasNewTranscriptWork(ctx, state) {
+	// Hook-captured files are evidence of new work on their own: FilesTouched
+	// is cleared by condensation, so anything in it is uncondensed. Transcript
+	// growth is only consulted when the hooks recorded nothing, because for a
+	// late-transcript writer the file is still empty mid-turn — before agy's
+	// first Stop, position and CheckpointTranscriptStart are both zero — and
+	// letting that veto the hook-captured edits dropped the trailer from a
+	// user's mid-turn commit made from a terminal (the no-TTY fast path never
+	// reaches this function).
+	//
+	// Scoped to LateTranscriptWriter, because that reasoning is: only such an
+	// agent has an empty transcript mid-turn. For a streaming-transcript agent
+	// the growth check is meaningful evidence and stays a precondition, as it
+	// was before Antigravity — an agent added to the registry must not change
+	// the commit path of the agents already in it.
+	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; AsLateTranscriptWriter handles nil
+	_, lateWriter := agent.AsLateTranscriptWriter(ag)
+	if (!lateWriter || len(state.FilesTouched) == 0) && !s.hasNewTranscriptWork(ctx, state) {
 		return false, nil
 	}
 
@@ -2205,7 +2400,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 			}
 		}
 	} else {
-		files, _, err := analyzer.ExtractModifiedFilesFromOffset(state.TranscriptPath, offset)
+		files, _, err := analyzer.ExtractModifiedFilesFromOffset(logCtx, state.TranscriptPath, offset)
 		if err != nil {
 			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: main transcript extraction failed",
 				slog.String("transcript_path", state.TranscriptPath),
@@ -2298,14 +2493,14 @@ func (s *ManualCommitStrategy) warnIfAttributionDiverged(ctx context.Context, se
 // The fast path activates when an eligible session exists and either:
 //   - No TTY is available (agent subprocess, CI), or
 //   - commit_linking="always" (user opted into auto-linking — needed because
-//     some agents like Gemini subagents commit mid-turn from processes that
+//     some agents' subagents commit mid-turn from processes that
 //     have /dev/tty but can't respond to prompts, and content detection fails
 //     since the shadow branch doesn't exist yet).
 //
 // A session is eligible when it is ACTIVE, or IDLE with a fresh task record
 // (a background subagent committing between the parent's turns; the widened
 // no-TTY trust window is an accepted trade-off — see PR #2034).
-func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string) bool {
+func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commitMsgFile string, sessions []*SessionState, source string, inherited []id.CheckpointID) bool {
 	noTTY := !interactive.CanPromptInteractively()
 	skipContentDetection := noTTY
 	if !skipContentDetection {
@@ -2328,14 +2523,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			continue
 		}
 		eligibleSessions++
-		// Skip sessions that have no condensable content: no transcript path,
-		// no tracked files, no SaveStep checkpoints, and no task records. These
-		// would produce a Skipped result in CondenseSession, leaving the
-		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
-		// NOTE: conservative approximation of the skip gate in CondenseSession
-		// (which checks extracted data, not raw state). Keep aligned.
-		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 &&
-			state.StepCount == 0 && !state.HasTaskContent() {
+		if sessionLacksCondensableContent(state) {
 			emptyEligibleSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
@@ -2343,7 +2531,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			)
 			continue
 		}
-		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source) //nolint:errcheck // always returns nil; kept for signature stability
+		_ = s.addTrailerForAgentCommit(logCtx, commitMsgFile, state, source, inherited) //nolint:errcheck // always returns nil; kept for signature stability
 		return true
 	}
 	// Log why fast path didn't fire — task_records spans ALL sessions so
@@ -2369,6 +2557,84 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 	return false
 }
 
+// sessionHasShadowContent reports whether a session has checkpoints on its
+// shadow branch that a later condensation still needs: tracked files, at least
+// one written step, or task checkpoints. StepCount only counts checkpoint
+// commits that were actually written (a dedup-skipped step returns before the
+// increment) and is reset to zero when the session is condensed, so a non-zero
+// value means an uncondensed commit exists even when no file has been edited
+// yet — a read-only first turn, or a question answered without touching the
+// tree. filesTouched is passed separately because the post-commit handler
+// judges the snapshot it took before mutating state.
+func sessionHasShadowContent(filesTouched []string, state *SessionState) bool {
+	return len(filesTouched) > 0 || state.StepCount > 0 || state.HasTaskContent()
+}
+
+// sessionLacksCondensableContent reports whether an ACTIVE session has nothing
+// CondenseSession could turn into a checkpoint: no tracked files, no shadow
+// branch data (StepCount == 0), no task records, and no transcript content. Stamping a trailer
+// for such a session would leave the commit permanently referencing a
+// checkpoint the condensation skip gate never writes (dangling trailer).
+//
+// For most agents a non-empty TranscriptPath implies content — their
+// transcripts stream during the turn. A LateTranscriptWriter (e.g. agy)
+// writes its transcript file only AFTER the Stop hook, so mid-turn the
+// recorded path routinely points at a missing or still-empty file; only an
+// on-disk stat tells the truth. Other agents keep the cheap path-only check:
+// for them an empty transcript file at commit time is a transient write race,
+// and condensation errors-and-retries rather than skipping, so the trailer
+// heals on the next commit.
+//
+// NOTE: conservative approximation of the skip gate in CondenseSession (which
+// checks extracted data, not raw state). Keep aligned.
+func sessionLacksCondensableContent(state *SessionState) bool {
+	if sessionHasShadowContent(state.FilesTouched, state) {
+		return false
+	}
+	if state.TranscriptPath == "" {
+		return true
+	}
+	if ag, err := agent.GetByAgentType(state.AgentType); err == nil {
+		if _, lateOK := agent.AsLateTranscriptWriter(ag); lateOK {
+			// IsRegular, not merely "not a symlink": a directory or any other
+			// non-file at the path has a Size() too (a directory's is its
+			// entry-table size), and the readers downstream cannot condense
+			// it, so anything that is not a regular file counts as no content.
+			info, statErr := lstatLateTranscript(ag, state)
+			if statErr != nil {
+				// An absent file, or a path the store refuses (a symlink at
+				// any component, a non-regular leaf), is "no content": the
+				// full path would refuse it too. Any other stat failure
+				// (EACCES, ENOTDIR, an I/O error) says nothing about the
+				// transcript, and classing it as empty would drop the session
+				// from this commit's trailer with no visible error; the full
+				// path reads the file and reports what is wrong with it.
+				return errors.Is(statErr, fs.ErrNotExist) ||
+					errors.Is(statErr, osroot.ErrSymlinkedPath) ||
+					errors.Is(statErr, osroot.ErrNotRegularFile)
+			}
+			return !info.Mode().IsRegular() || info.Size() == 0
+		}
+	}
+	return false
+}
+
+// lstatLateTranscript stats a late-transcript agent's transcript path the way
+// its own reads are contained: as a name inside the agent's SessionStore when
+// the path lies in the agent's session directory (a symlink at any component
+// is refused there, not followed), and otherwise with a plain Lstat — never a
+// Stat — so a linked leaf is still reported as a link and counts as no content
+// (filesystem-safety.md). The path is one the hook recorded into session state,
+// and the fallback is the documented read-side gap, not a parent-derived root.
+func lstatLateTranscript(ag agent.Agent, state *SessionState) (os.FileInfo, error) {
+	if store, err := agent.OpenSessionStore(ag, state.WorktreePath); err == nil {
+		if name, nameErr := store.Name(state.TranscriptPath); nameErr == nil {
+			return store.Lstat(name) //nolint:wrapcheck // preserved for the caller's "no content" classification
+		}
+	}
+	return os.Lstat(state.TranscriptPath) //nolint:wrapcheck // same classification; see doc comment
+}
+
 // addTrailerForAgentCommit handles the fast path for an eligible agent session.
 // The caller has already gated on no TTY or commit_linking="always" and selected
 // an ACTIVE session or an IDLE session with a fresh task record.
@@ -2379,7 +2645,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 // this commit's checkpoint ID and merge unrelated transcript ranges. The ended
 // session loses nothing: without touched files PostCommit does not condense it,
 // and `entire doctor` remains its retry path.
-func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string) error { //nolint:unparam // kept for signature stability
+func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, commitMsgFile string, state *SessionState, source string, inherited []id.CheckpointID) error { //nolint:unparam // kept for signature stability
 	cpID, err := checkpointIDForSessions(logCtx, []*SessionState{state})
 	if err != nil {
 		return nil //nolint:nilerr // Hook must be silent on failure
@@ -2392,8 +2658,8 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 
 	message := string(content)
 
-	// Don't add if trailer already exists
-	if _, found := trailers.ParseCheckpoint(message); found {
+	// Don't add if prepare already stamped one (inherited trailers are links)
+	if _, found := stampedTrailer(message, inherited); found {
 		return nil
 	}
 
@@ -2429,6 +2695,28 @@ func checkpointIDForSessions(ctx context.Context, states []*SessionState) (id.Ch
 // Delegates to trailers.AppendCheckpointTrailer for trailer-aware formatting.
 func addCheckpointTrailer(message string, checkpointID id.CheckpointID) string {
 	return trailers.AppendCheckpointTrailer(message, checkpointID.String())
+}
+
+// commitSourceMessage is prepare-commit-msg's source for `-m`/`-F` messages.
+const commitSourceMessage = "message"
+
+// addInheritedCheckpointTrailer adds an inherited trailer above git's comment
+// block rather than after it: with `commit -v` git discards everything below
+// the scissors line, and the trailer with it. Only an editor message has that
+// block; a `-m`/`-F` message (source "message") keeps `#` lines as content, so
+// its trailer is appended as usual.
+func addInheritedCheckpointTrailer(message string, checkpointID id.CheckpointID, source string) string {
+	if source == commitSourceMessage {
+		return addCheckpointTrailer(message, checkpointID)
+	}
+	lines := strings.Split(message, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "#") {
+			head := strings.TrimRight(addCheckpointTrailer(strings.Join(lines[:i], "\n"), checkpointID), "\n")
+			return head + "\n\n" + strings.Join(lines[i:], "\n")
+		}
+	}
+	return addCheckpointTrailer(message, checkpointID)
 }
 
 // addCheckpointTrailerWithComment adds the Entire-Checkpoint trailer with an explanatory comment.
@@ -2528,6 +2816,52 @@ func correctSessionAgentType(ctx context.Context, currentType types.AgentType, t
 	return owner.Type(), true
 }
 
+// transitionSessionToCodex initializes Codex child-accounting state when a
+// transcript path proves that an existing session is Codex-owned. The
+// transition deliberately happens in the same session-state mutation as the
+// AgentType correction so readers can never observe a Codex session with
+// legacy, ambiguous child-coverage markers.
+func transitionSessionToCodex(state *SessionState) {
+	dirty := hasPriorSubagentEvidence(state)
+	complete := !dirty
+
+	// Task records predate the durable Codex inventory. Preserve their child
+	// identities without calling RegisterSubagent: this is a migration of known
+	// evidence, not a new observation, so it must not advance the ledger again.
+	for _, record := range state.TaskRecords {
+		if record.AgentID == "" || state.FindSubagentInventory(record.AgentID) != nil {
+			continue
+		}
+		state.SubagentInventory = append(state.SubagentInventory, session.SubagentInventoryEntry{
+			AgentID:                record.AgentID,
+			DeclaredTranscriptPath: record.DeclaredTranscriptPath,
+		})
+	}
+
+	state.TokenUsage = types.WithClearedSubagentTokens(state.TokenUsage, complete)
+	state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, complete)
+	state.SubagentTokensBaseline = nil
+	state.SubagentInventoryComplete = &complete
+	state.SubagentTokensBaselineComplete = &complete
+}
+
+func hasPriorSubagentEvidence(state *SessionState) bool {
+	if len(state.SubagentInventory) > 0 || len(state.TaskRecords) > 0 || state.SubagentLedgerVersion != 0 || state.SubagentTokensBaseline != nil {
+		return true
+	}
+	if state.TokenUsage != nil && (state.TokenUsage.SubagentTokens != nil || explicitlyIncomplete(state.TokenUsage.SubagentTokensComplete)) {
+		return true
+	}
+	if state.CheckpointTokenUsage != nil && (state.CheckpointTokenUsage.SubagentTokens != nil || explicitlyIncomplete(state.CheckpointTokenUsage.SubagentTokensComplete)) {
+		return true
+	}
+	return explicitlyIncomplete(state.SubagentInventoryComplete) || explicitlyIncomplete(state.SubagentTokensBaselineComplete)
+}
+
+func explicitlyIncomplete(complete *bool) bool {
+	return complete != nil && !*complete
+}
+
 // InitializeSession creates session state for a new session or updates an existing one.
 // This implements the optional SessionInitializer interface.
 // Called during UserPromptSubmit to allow git hooks to detect active sessions.
@@ -2585,17 +2919,22 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		state.TurnID = turnID.String()
 
-		// Update AgentType when it isn't set yet, or when the transcript path
-		// proves we're a different agent than the one stored.
-		if state.AgentType == "" && resolvedAgentType != "" {
-			state.AgentType = resolvedAgentType
-		} else if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
+		// A transcript path is stronger evidence than both a stored owner and
+		// the current hook. Apply transcript-proven corrections first, including
+		// the empty-owner case, so a Codex correction can initialize all of its
+		// child-accounting markers atomically.
+		if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
 			logging.Info(logging.WithComponent(ctx, "hooks"), "corrected session agent type from transcript path",
 				slog.String("session_id", sessionID),
 				slog.String("from", string(state.AgentType)),
 				slog.String("to", string(corrected)),
 				slog.String("transcript_path", transcriptPath))
+			if corrected == agent.AgentTypeCodex && state.AgentType != agent.AgentTypeCodex {
+				transitionSessionToCodex(state)
+			}
 			state.AgentType = corrected
+		} else if state.AgentType == "" && resolvedAgentType != "" {
+			state.AgentType = resolvedAgentType
 		}
 		if model != "" {
 			state.ModelName = model
@@ -2837,7 +3176,7 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
@@ -2845,12 +3184,9 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 	}
 
 	staged := []string{}
-	trimmed := strings.TrimSpace(string(output))
-	// Normalize Windows line endings (\r\n) to Unix (\n) for cross-platform git output
-	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
-	for _, line := range strings.Split(trimmed, "\n") {
-		if line != "" {
-			staged = append(staged, filepath.ToSlash(line))
+	for _, name := range bytes.Split(output, []byte{0}) {
+		if len(name) != 0 {
+			staged = append(staged, filepath.ToSlash(string(name)))
 		}
 	}
 	return staged, nil
@@ -2992,25 +3328,61 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 	// intentionally resets CheckpointTranscriptStart to 0 so the next checkpoint
 	// remains self-contained with the full transcript.
 	if hadMidTurnCommits && state.TranscriptPath != "" && len(state.FilesTouched) == 0 {
-		transcriptPath, resolveErr := resolveTranscriptPath(state)
-		if resolveErr == nil {
-			if ag, agErr := agent.GetByAgentType(state.AgentType); agErr == nil {
-				if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
-					if pos, posErr := analyzer.GetTranscriptPosition(transcriptPath); posErr == nil && pos > state.CheckpointTranscriptStart {
-						logging.Debug(logging.WithComponent(ctx, "hooks"),
-							"advancing CheckpointTranscriptStart to turn end after mid-turn commit",
-							slog.String("session_id", state.SessionID),
-							slog.Int("old_offset", state.CheckpointTranscriptStart),
-							slog.Int("new_offset", pos),
-						)
-						state.CheckpointTranscriptStart = pos
-					}
-				}
+		advanceCheckpointTranscriptStartToTurnEnd(ctx, state)
+	}
+
+	return nil
+}
+
+// advanceCheckpointTranscriptStartToTurnEnd moves CheckpointTranscriptStart to
+// the current transcript end after a fully-condensed turn (see HandleTurnEnd's
+// call-site comment). When the advance cannot run for a late-transcript agent
+// — agy flushes its transcript only after Stop, so this read routinely races
+// the flush and sees the pre-turn state — the failure is recorded in
+// TranscriptOffsetPending so the next mid-turn condensation can retry against
+// the by-then-flushed file (resolvePendingTranscriptOffset). Without the
+// retry, a lost race leaves the offset inside the previous turn, so the next
+// checkpoint's prompt extraction picks up the previous turn's prompt and its
+// scoped transcript includes an already-condensed tail. Streaming-transcript
+// agents never set the flag: for them a non-growing transcript legitimately
+// means "no new content".
+func advanceCheckpointTranscriptStartToTurnEnd(ctx context.Context, state *SessionState) {
+	logCtx := logging.WithComponent(ctx, "hooks")
+	ag, agErr := agent.GetByAgentType(state.AgentType)
+	if agErr != nil {
+		return
+	}
+	_, isLate := agent.AsLateTranscriptWriter(ag)
+
+	advanced := false
+	if transcriptPath, resolveErr := resolveTranscriptPath(state); resolveErr == nil {
+		if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+			if pos, posErr := analyzer.GetTranscriptPosition(transcriptPath); posErr == nil && pos > state.CheckpointTranscriptStart {
+				logging.Debug(logCtx,
+					"advancing CheckpointTranscriptStart to turn end after mid-turn commit",
+					slog.String("session_id", state.SessionID),
+					slog.Int("old_offset", state.CheckpointTranscriptStart),
+					slog.Int("new_offset", pos),
+				)
+				state.CheckpointTranscriptStart = pos
+				advanced = true
 			}
 		}
 	}
 
-	return nil
+	if !isLate {
+		return
+	}
+	if advanced {
+		state.TranscriptOffsetPending = false
+		return
+	}
+	state.TranscriptOffsetPending = true
+	logging.Debug(logCtx,
+		"turn-end offset advance lost the transcript flush race, deferring to next condensation",
+		slog.String("session_id", state.SessionID),
+		slog.Int("offset", state.CheckpointTranscriptStart),
+	)
 }
 
 // precomputeTranscriptBlobsForFinalize chunks + zlib-compresses the redacted
@@ -3118,8 +3490,26 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		return 1 // Count as error - all checkpoints will be skipped
 	}
 
+	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
+
 	fullTranscript, err := agent.ReadTranscriptFile(transcriptPath)
 	if err != nil || len(fullTranscript) == 0 {
+		// A late-transcript agent (agy) writes its transcript AFTER the Stop
+		// hook, so an empty file here is the placeholder PrepareTranscript
+		// materialised when the flush lost the race — a normal, transient
+		// state, not a lost transcript. Keep TurnCheckpointIDs so a later
+		// HandleTurnEnd in this turn finalizes with the flushed content, the
+		// same deferral the degraded-scanner path below uses; nilling them
+		// would abandon the backfill for every mid-turn checkpoint of the turn
+		// on the first Stop that beat the flush.
+		if _, late := agent.AsLateTranscriptWriter(ag); late && err == nil {
+			logging.Info(logCtx, "finalize: late-transcript agent has not flushed yet, deferring",
+				slog.String("session_id", state.SessionID),
+				slog.String("transcript_path", state.TranscriptPath),
+				slog.Int("checkpoint_count", len(state.TurnCheckpointIDs)),
+			)
+			return 1 // Reported, not abandoned: TurnCheckpointIDs survive for the retry
+		}
 		msg := "finalize: empty transcript, skipping"
 		if err != nil {
 			msg = "finalize: failed to read transcript, skipping"
@@ -3143,24 +3533,12 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		return 1 // Count as error - all checkpoints will be skipped
 	}
 	defer repo.Close()
-	policy, err := readLocalCheckpointPolicy(logCtx, repo)
-	if err != nil {
-		warnOrLogCheckpointPolicyReadFailure(logCtx, err)
-		state.TurnCheckpointIDs = nil
-		return 1
-	}
-	if !checkpointpolicy.CanSatisfyPolicy(policy) {
-		warnIfCheckpointPolicyNeedsUpgrade(logCtx, policy)
-		state.TurnCheckpointIDs = nil
-		return 1
-	}
 
 	prompts := readPromptsFromShadowBranch(ctx, repo, state)
 	if len(prompts) == 0 {
 		prompts = readPromptsFromFilesystem(ctx, state.SessionID)
 	}
 
-	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 	// Persist newly extracted events into state (the caller's MutateSessionState
 	// saves them); telemetry for them is emitted by the lifecycle turn-end
 	// handler, which snapshots state.SkillEvents growth around HandleTurnEnd.
@@ -3401,6 +3779,9 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	state.StepCount = 1
 	state.CheckpointTranscriptStart = 0
 	state.CheckpointTranscriptSize = 0
+	// Carry-forward deliberately restarts the offset at 0; a pending turn-end
+	// advance from before the carry-forward must not re-apply on top of it.
+	state.TranscriptOffsetPending = false
 	state.LastCheckpointID = ""
 	// NOTE: TurnCheckpointIDs is intentionally NOT cleared here. Those checkpoint
 	// IDs from earlier in the turn still need finalization with the full transcript

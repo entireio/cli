@@ -38,16 +38,18 @@ var entireDirCheckExemptions = map[string]string{
 	"entire auth":       "reads ~/.config/entire and the OS keyring, never the repo",
 	"entire login":      "control-plane login; user-level credentials only",
 	"entire logout":     "control-plane logout; user-level credentials only",
+	"entire cluster":    "control-plane only",
 	"entire org":        "control-plane only",
 	"entire project":    "control-plane only",
 	"entire repo":       "control-plane only; git content operations are out of scope",
-	"entire grant":      "control-plane only",
 	"entire api":        "authenticated passthrough; no local state",
 	"entire plugin":     "managed installs live under the per-user dirs",
 	"entire version":    "prints build information; no repo state",
 	"entire labs":       "prints a static list of experimental workflows",
 	"entire completion": "prints a shell script; users eval it from a shell rc, which a broken repo must not break",
 	"entire doctor":     "diagnostic; has to run ON a broken repo in order to report it",
+	"entire hooks antigravity title-tee": "captures agy's token counts into the per-user cache; touches no repo state, " +
+		"and agy fires it on every agent state change, so failing the guard would print the remedy and exit non-zero once per fire",
 }
 
 // collectExemptions walks the tree and returns every command path whose own

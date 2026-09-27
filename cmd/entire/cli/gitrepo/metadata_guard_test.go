@@ -40,6 +40,7 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 		{source: "session_adopt.go:stateStoreForWorktree", flag: "--git-common-dir"}:                    "adoption validates an arbitrary source repository in the session split",
 		{source: "session_adopt.go:stateStoreForWorktree", flag: "--show-toplevel"}:                     "adoption validates an arbitrary source repository in the session split",
 		{source: "settings/settings.go:clonePreferencesPathForWorktreeRoot", flag: "--git-common-dir"}:  "settings migrates with the remaining consumers",
+		{source: "testutil/gitgrep.go:GitGrepGuardRepoRoot", flag: "--show-toplevel"}:                   "the source-level guard tests scan the checkout they live in, which is the repository git reports and not one resolved from a worktree path",
 		{source: "strategy/common.go:GetGitCommonDir", flag: "--git-common-dir"}:                        "strategy migrates in the strategy-and-hooks split",
 		{source: "strategy/hooks.go:getGitDirInPath", flag: "--git-dir"}:                                "hook directory discovery migrates in the strategy-and-hooks split",
 		{source: "strategy/manual_commit_session.go:gitCommonDirForWorktree", flag: "--git-common-dir"}: "session routing migrates in the strategy-and-hooks split",

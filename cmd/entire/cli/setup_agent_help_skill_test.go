@@ -11,7 +11,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
-	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 )
 
 // The agent-help skill scaffolds a marker-managed, near-immutable file that
@@ -36,13 +35,6 @@ func TestScaffoldAgentHelpSkill_CreatesManagedFiles(t *testing.T) {
 				return scaffoldAgentHelpSkill(context.Background(), codex.NewCodexAgent())
 			},
 			relPath: filepath.Join(".codex", "agents", "entire.toml"),
-		},
-		{
-			name: "gemini",
-			scaffN: func() (managedScaffoldResult, error) {
-				return scaffoldAgentHelpSkill(context.Background(), geminicli.NewGeminiCLIAgent())
-			},
-			relPath: filepath.Join(".gemini", "agents", "entire.md"),
 		},
 	}
 

@@ -1,6 +1,7 @@
 package copilotcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
+
+var _ agent.HookFreshness = (*CopilotCLIAgent)(nil)
 
 // HooksFileName is the hooks file managed by Entire for Copilot CLI.
 const HooksFileName = "entire.json"
@@ -25,6 +28,7 @@ var hookConfigKey = map[string]string{
 	HookNameSessionStart:        "sessionStart",
 	HookNameAgentStop:           "agentStop",
 	HookNameSessionEnd:          "sessionEnd",
+	HookNameSubagentStart:       "subagentStart",
 	HookNameSubagentStop:        "subagentStop",
 	HookNamePreToolUse:          "preToolUse",
 	HookNamePostToolUse:         "postToolUse",
@@ -271,17 +275,70 @@ func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 		hasEntireHook(hooksFile.Hooks.SessionStart) ||
 		hasEntireHook(hooksFile.Hooks.AgentStop) ||
 		hasEntireHook(hooksFile.Hooks.SessionEnd) ||
+		hasEntireHook(hooksFile.Hooks.SubagentStart) ||
 		hasEntireHook(hooksFile.Hooks.SubagentStop) ||
 		hasEntireHook(hooksFile.Hooks.PreToolUse) ||
 		hasEntireHook(hooksFile.Hooks.PostToolUse) ||
 		hasEntireHook(hooksFile.Hooks.ErrorOccurred), nil
 }
 
+// CheckHookConfig reports whether every hook Entire manages is present with
+// its current command. This makes repositories enabled by an older CLI surface
+// the newly added subagentStart hook as drift instead of silently staying old.
+func (c *CopilotCLIAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	cfg, err := copilotHookConfig(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	data, err := cfg.Read()
+	if err != nil {
+		return agent.HooksAbsent
+	}
+
+	var rawFile map[string]json.RawMessage
+	var rawHooks map[string]json.RawMessage
+	if json.Unmarshal(data, &rawFile) != nil || json.Unmarshal(rawFile["hooks"], &rawHooks) != nil {
+		if bytes.Contains(data, []byte("entire hooks copilot-cli")) {
+			return agent.HooksOutdated
+		}
+		return agent.HooksAbsent
+	}
+
+	owned, current := false, true
+	for _, hookName := range c.HookNames() {
+		var entries []CopilotHookEntry
+		if parseCopilotHookType(rawHooks, hookConfigKey[hookName], &entries) != nil {
+			return agent.HooksOutdated
+		}
+		desired := agent.WrapProductionSilentHookCommand("entire hooks copilot-cli " + hookName)
+		found := false
+		for _, entry := range entries {
+			if !isEntireHook(entry.Bash) {
+				continue
+			}
+			owned = true
+			if entry.Bash == desired {
+				found = true
+			} else {
+				current = false
+			}
+		}
+		current = current && found
+	}
+	if !owned {
+		return agent.HooksAbsent
+	}
+	if current {
+		return agent.HooksCurrent
+	}
+	return agent.HooksOutdated
+}
+
 // GetSupportedHooks returns the normalized lifecycle events this agent supports.
-// Note: HookNames() returns 8 hooks but GetSupportedHooks() returns only 6.
-// The two not listed here are:
-//   - subagentStop: handled by ParseHookEvent (returns SubagentEnd), but there is no
-//     HookType constant for subagent events (they use EventType instead).
+// Note: HookNames() returns 9 hooks but GetSupportedHooks() returns only 6.
+// The three not listed here are:
+//   - subagentStart/subagentStop: native child hooks have no HookType constant
+//     (they use EventType instead).
 //   - errorOccurred: pass-through hook with no lifecycle action (ParseHookEvent returns nil).
 func (c *CopilotCLIAgent) GetSupportedHooks() []agent.HookType {
 	return []agent.HookType{

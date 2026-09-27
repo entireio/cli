@@ -6,6 +6,7 @@ before:
   hooks:
     - go mod tidy
     - mise run completions
+    - mise run winversion {{.Version}}
 
 builds:
   - id: entire

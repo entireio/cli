@@ -208,7 +208,7 @@ func TestDumpSink_CancelledAgent(t *testing.T) {
 	sink := DumpSink{W: &buf}
 
 	run := reviewtypes.AgentRun{
-		Name:   "gemini-cli",
+		Name:   "opencode",
 		Status: reviewtypes.AgentStatusCancelled,
 		Buffer: []reviewtypes.Event{
 			reviewtypes.AssistantText{Text: "partial output"},
@@ -243,7 +243,7 @@ func TestDumpSink_Mixed(t *testing.T) {
 			Err:    errors.New("timeout"),
 		},
 		reviewtypes.AgentRun{
-			Name:   "gemini-cli",
+			Name:   "opencode",
 			Status: reviewtypes.AgentStatusCancelled,
 		},
 	)
@@ -256,8 +256,8 @@ func TestDumpSink_Mixed(t *testing.T) {
 	if !strings.Contains(out, "# codex review") {
 		t.Errorf("expected codex heading, got:\n%s", out)
 	}
-	if !strings.Contains(out, "# gemini-cli review") {
-		t.Errorf("expected gemini-cli heading, got:\n%s", out)
+	if !strings.Contains(out, "# opencode review") {
+		t.Errorf("expected opencode heading, got:\n%s", out)
 	}
 	if !strings.Contains(out, "3 agent(s) done — 1 succeeded, 1 failed, 1 cancelled") {
 		t.Errorf("expected mixed counts line, got:\n%s", out)

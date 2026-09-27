@@ -104,31 +104,3 @@ func TestFetchMetadataTreeOnly_ElectedCandidateWinsAndAdvancesLocal(t *testing.T
 	assert.Equal(t, upstreamHash, got, "the elected candidate must win")
 	assert.NotEqual(t, originHash, got)
 }
-
-// The legacy read tier must never become a policy push or local-update target.
-func TestResolveCheckpointPolicyTargets_SplitsReadAndPush(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	testutil.WriteFile(t, dir, "f.txt", "init")
-	testutil.GitAdd(t, dir, "f.txt")
-	testutil.GitCommit(t, dir, "init")
-	testutil.AddRemote(t, dir, "origin", "https://example.com/origin.git")
-	testutil.AddRemote(t, dir, "upstream", "https://example.com/upstream.git")
-	testutil.WriteCheckpointPushRemoteSetting(t, dir, "upstream")
-	t.Chdir(dir)
-
-	readTargets, pushTarget, err := resolveCheckpointPolicyTargets(context.Background())
-	require.NoError(t, err)
-
-	require.Len(t, readTargets, 2)
-	assert.Equal(t, "upstream", readTargets[0].Remote)
-	assert.False(t, readTargets[0].SkipLocalUpdate, "the elected remote may advance the local policy ref")
-	assert.Equal(t, "origin", readTargets[1].Remote)
-	assert.True(t, readTargets[1].SkipLocalUpdate, "the legacy tier is read-only")
-
-	require.NotNil(t, pushTarget)
-	assert.Equal(t, "upstream", pushTarget.Remote, "the push target is the elected remote only")
-	assert.False(t, pushTarget.SkipLocalUpdate)
-	assert.NotEmpty(t, pushTarget.Dir)
-}

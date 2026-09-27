@@ -11,7 +11,7 @@ import (
 // experimental visibility flag. Names match cobra's Command.Name() (the first
 // token of Use).
 var experimentalRootCommands = []string{
-	"tokens", "import", "review", "investigate",
+	"tokens", "import", "review",
 	"blame", "why", "experts", "runner",
 }
 
@@ -32,16 +32,6 @@ func findCommand(parent *cobra.Command, name string) *cobra.Command {
 		}
 	}
 	return nil
-}
-
-// checkpointPolicy returns the `checkpoint policy` command.
-func checkpointPolicy(t *testing.T, root *cobra.Command) *cobra.Command {
-	t.Helper()
-	cp := findCommand(root, "checkpoint")
-	if cp == nil {
-		t.Fatal("checkpoint command not found on root")
-	}
-	return findCommand(cp, "policy")
 }
 
 // TestExperimental_VisibleInDevBuild verifies that, in a developer build
@@ -67,17 +57,6 @@ func TestExperimental_VisibleInDevBuild(t *testing.T) {
 		if cmd.GroupID != experimental.GroupID {
 			t.Errorf("%q GroupID = %q, want %q", name, cmd.GroupID, experimental.GroupID)
 		}
-	}
-
-	policy := checkpointPolicy(t, root)
-	if policy == nil {
-		t.Fatal("checkpoint policy not found")
-	}
-	if policy.Hidden {
-		t.Error("checkpoint policy should be visible in a dev build")
-	}
-	if policy.GroupID != experimental.GroupID {
-		t.Errorf("checkpoint policy GroupID = %q, want %q", policy.GroupID, experimental.GroupID)
 	}
 }
 
@@ -105,13 +84,5 @@ func TestExperimental_HiddenInReleaseBuild(t *testing.T) {
 		if cmd.GroupID != "" {
 			t.Errorf("%q GroupID = %q, want empty in a release build", name, cmd.GroupID)
 		}
-	}
-
-	policy := checkpointPolicy(t, root)
-	if policy == nil {
-		t.Fatal("checkpoint policy not found")
-	}
-	if !policy.Hidden {
-		t.Error("checkpoint policy should be hidden in a release build")
 	}
 }

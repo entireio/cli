@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // rootOpeners cover both package-level os.OpenRoot and Root.OpenRoot, plus the
@@ -33,6 +35,7 @@ var rootOpeners = []string{".OpenRoot(", "osroot.Shared("}
 // (entiredir, gitdir, worktreedir, userdirs, agent.SessionStore) over a new
 // root; those exist so a call site does not have to decide what its base is.
 var allowedRootBases = map[string]string{
+	"cmd/entire/cli/agent/codex/codex.go": "configured Codex session and archive roots, resolved independently of hook-supplied transcript paths",
 	// The anchors themselves. Each opens exactly one directory, resolved
 	// independently of anything it is later asked to read.
 	"cmd/entire/cli/osroot/osroot.go":            "the registry",
@@ -43,14 +46,18 @@ var allowedRootBases = map[string]string{
 
 	// Trees with their own resolver, anchored at the boundary between what
 	// Entire owns and what it does not.
-	"cmd/entire/cli/agent/session_store.go":      "the agent's own GetSessionDir (opened per operation, not memoized)",
-	"cmd/entire/cli/plugin_store.go":             "pluginParentDir()",
-	"cmd/entire/cli/plugin_index.go":             "the per-index cache dir, opened at the clone it contains",
-	"cmd/entire/cli/plugin_install_remote.go":    "a staging dir this process just created",
-	"cmd/entire/cli/plugin_fetch.go":             "the staging dir its caller created",
-	"cmd/entire/cli/utils.go":                    "one of worktree root / home / temp, chosen by containment",
-	"internal/entireclient/contexts/contexts.go": "the caller's config dir, not the contexts file's parent",
-	"internal/entireclient/discovery/cache.go":   "the caller's cache dir, not the cache file's parent",
+	"cmd/entire/cli/agent/antigravity/statusline.go":    "$ENTIRE_ANTIGRAVITY_STATUS_DIR, an operator override held to RequireAbsoluteOverride like userdirs' own; the default store is a name inside userdirs.CacheRoot",
+	"cmd/entire/cli/agent/antigravity/title_install.go": "agy's own config dir (~/.gemini/antigravity-cli, or the absolute $ENTIRE_ANTIGRAVITY_CONFIG_DIR override); settings.json is a name inside it",
+	"cmd/entire/cli/agent/session_store.go":             "the agent's own GetSessionDir (opened per operation, not memoized)",
+	"cmd/entire/cli/agent/vouched_dirs.go":              "worktree root, or a symlinked agent directory the user vouched for in settings.local.json, resolved",
+	"cmd/entire/cli/strategy/hooks.go":                  "git rev-parse --git-path hooks; core.hooksPath can name a directory no other anchor covers",
+	"cmd/entire/cli/plugin_store.go":                    "pluginParentDir()",
+	"cmd/entire/cli/plugin_index.go":                    "the per-index cache dir, opened at the clone it contains",
+	"cmd/entire/cli/plugin_install_remote.go":           "a staging dir this process just created",
+	"cmd/entire/cli/plugin_fetch.go":                    "the staging dir its caller created",
+	"cmd/entire/cli/utils.go":                           "one of worktree root / home / temp, chosen by containment",
+	"internal/entireclient/contexts/contexts.go":        "the caller's config dir, not the contexts file's parent",
+	"internal/entireclient/discovery/cache.go":          "the caller's cache dir, not the cache file's parent",
 
 	// The two deliberate exceptions, both on a path the CALLER named, where
 	// the file's parent IS the caller's choice and no other base exists. Each
@@ -71,26 +78,17 @@ var allowedRootBases = map[string]string{
 func TestRootBasesAreTrusted(t *testing.T) {
 	t.Parallel()
 
-	repoRoot, err := exec.Command("git", "rev-parse", "--show-toplevel").Output() //nolint:noctx // guard test, no cancellation needed
-	if err != nil {
-		t.Skipf("not in a git checkout: %v", err)
+	repoRoot, ok := testutil.GitGrepGuardRepoRoot(t)
+	if !ok {
+		return
 	}
 
 	var checked int
 	for _, opener := range rootOpeners {
-		// --no-color because this parses git's output: color.ui / color.grep
-		// set to `always` colorizes even into a pipe, and the escapes land
-		// inside the filename field, so every line below fails the .go suffix
-		// check and the guard reports itself stale on a perfectly good tree.
-		// That is not hypothetical -- it was read as a real staleness failure
-		// on main (#2248) before the cause was found.
-		grep := exec.Command("git", "grep", "-n", "--no-color", "--fixed-strings", "--", opener, "--", ":(glob)**/*.go") //nolint:noctx // guard test, no cancellation needed
-		grep.Dir = strings.TrimSpace(string(repoRoot))
-		out, grepErr := grep.Output()
-		if grepErr != nil {
-			t.Fatalf("git grep for %q found nothing, which cannot be right: %v", opener, grepErr)
-		}
-		for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		// testutil.GitGrepGuard owns --untracked, --no-color and the repo-selector
+		// scrubbing, and explains why each is load-bearing for a guard like this.
+		out := testutil.GitGrepGuard(t, repoRoot, "-n", "--fixed-strings", "--", opener, "--", ":(glob)**/*.go")
+		for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 			if line == "" {
 				continue
 			}
@@ -122,7 +120,7 @@ func TestRootBasesAreTrusted(t *testing.T) {
 				"path that arrived as data. Prefer an existing anchor (entiredir, "+
 				"gitdir, worktreedir, userdirs, agent.SessionStore); if this really "+
 				"needs its own root, add it to allowedRootBases with the reason its "+
-				"base is trusted. See \"The Root Anchors\" in CLAUDE.md.", file, line)
+				"base is trusted. See docs/development/filesystem-safety.md#the-root-anchors.", file, line)
 		}
 	}
 
@@ -134,7 +132,7 @@ func TestRootBasesAreTrusted(t *testing.T) {
 	}
 
 	for file := range allowedRootBases {
-		if !fileStillOpensARoot(t, strings.TrimSpace(string(repoRoot)), file) {
+		if !fileStillOpensARoot(t, repoRoot, file) {
 			t.Errorf("%s is in allowedRootBases but no longer opens a root; remove the entry", file)
 		}
 	}
@@ -146,8 +144,12 @@ func TestRootBasesAreTrusted(t *testing.T) {
 func fileStillOpensARoot(t *testing.T, repoRoot, file string) bool {
 	t.Helper()
 	for _, opener := range rootOpeners {
-		grep := exec.Command("git", "grep", "-q", "--no-color", "--fixed-strings", "--", opener, "--", file) //nolint:noctx // guard test, no cancellation needed
+		// -q, so this one cannot use GitGrepGuard: a miss is the expected answer
+		// here, not a stale pattern. The flags still have to match it, which is
+		// what makes the shared helper's doc comment the place they are explained.
+		grep := exec.Command("git", "grep", "-q", "--untracked", "--no-color", "--fixed-strings", "--", opener, "--", file) //nolint:noctx // guard test, no cancellation needed
 		grep.Dir = repoRoot
+		grep.Env = testutil.GuardGitEnv()
 		if grep.Run() == nil {
 			return true
 		}

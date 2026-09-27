@@ -4,7 +4,7 @@
 // AgentReviewer using two caller-supplied functions: BuildCmd (per-agent
 // argv/env construction) and Parser (per-agent stdout-to-Event stream).
 //
-// Current adapter-backed review agents (claude-code, codex, gemini, pi)
+// Current adapter-backed review agents (claude-code, codex, pi)
 // share the Start/Process/Wait/Events scaffolding. Only the build-cmd
 // step and the stdout parser genuinely differ. The template owns the
 // shared lifecycle (spawn → pipe stdout → run parser → forward events

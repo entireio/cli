@@ -39,8 +39,8 @@ const (
 	SubagentEnd
 
 	// ModelUpdate indicates the agent reported the LLM model being used.
-	// This fires on hooks that carry model info but have no other lifecycle action
-	// (e.g., Gemini CLI's BeforeModel). The framework stores the model as a hint
+	// This fires on hooks that carry model info but have no other lifecycle action.
+	// No built-in agent emits it today; external agents can. The framework stores the model as a hint
 	// for subsequent TurnStart/TurnEnd events in the same session.
 	ModelUpdate
 
@@ -98,7 +98,7 @@ type Event struct {
 	Prompt string
 
 	// Model is the LLM model identifier (e.g., "claude-sonnet-4-20250514").
-	// Populated on SessionStart (Claude Code), ModelUpdate (Gemini CLI BeforeModel),
+	// Populated on SessionStart (Claude Code), ModelUpdate,
 	// and TurnStart/TurnEnd events when the agent provides model info.
 	Model string
 
@@ -108,19 +108,39 @@ type Event struct {
 	// ToolUseID identifies the tool invocation (for SubagentStart/SubagentEnd events).
 	ToolUseID string
 
+	// TurnID identifies the agent turn that produced the event.
+	TurnID string
+
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 
+	// ProvisionalSubagentStop is true when a subagent-stop event may arrive
+	// before the root rollout has reached its final state.
+	ProvisionalSubagentStop bool
+
 	// Final is true only for events that represent true completion of a
-	// subagent (Claude Code's SubagentStop), never for the launch-time
+	// subagent (for example Claude Code or Copilot CLI's SubagentStop), never
+	// for the launch-time
 	// PostToolUse SubagentEnd, which fires at the background launch stub
 	// seconds after launch. Downstream lifecycle branching keys off this flag,
 	// not any payload sentinel. Final is the disambiguator for agents with a
 	// two-signal model (a launch-time stub plus a separate completion hook,
 	// like Claude Code's background tasks); agents whose single subagent-end
-	// event already fires at true completion must leave it false so the
-	// existing pipeline handles them unchanged.
+	// event already fires at true completion normally leaves it false so the
+	// existing pipeline handles it unchanged. CompletionWithoutLaunch marks the
+	// narrow final-event shape whose identity becomes available only at stop.
 	Final bool
+
+	// CompletionWithoutLaunch marks a true completion whose stable identity was
+	// learned at completion time rather than from a correlated start hook.
+	// Shared lifecycle may create the task record only when the parent session
+	// is still active; it must never create parent state for this path.
+	CompletionWithoutLaunch bool
+
+	// SubagentTranscriptUnavailable records an agent contract with no standalone
+	// child transcript. It prevents later generic layout probing from mistaking
+	// an unrelated agent-<id>.jsonl file for this child's transcript.
+	SubagentTranscriptUnavailable bool
 
 	// SubagentTranscriptPath is the agent-declared path to the subagent's own
 	// transcript (SubagentEnd). Set it whenever the hook payload names the file;
@@ -182,6 +202,15 @@ type Event struct {
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string
+
+	// SuppressIfSessionActive marks a TurnStart the dispatcher should drop when
+	// an active (mid-turn) session already exists for SessionID. It exists for
+	// agents whose per-invocation hooks can't distinguish a follow-up model call
+	// from the first call of a resumed turn (e.g. Antigravity's PreInvocation,
+	// which fires per model invocation): the parser emits a conditional TurnStart
+	// and the dispatcher resolves it against session state (which agent packages
+	// may not read directly).
+	SuppressIfSessionActive bool
 }
 
 // ReadAndParseHookInput decodes a single JSON hook payload from stdin into the
@@ -192,7 +221,7 @@ type Event struct {
 // keep the write end of that pipe open for the hook's lifetime rather than
 // closing it after writing — notably on Windows/Git Bash, where a full payload
 // arrives but EOF never does. io.ReadAll then blocked indefinitely and the hook
-// (e.g. gemini session-start) hung forever (issue #1398). A streaming
+// hung forever (issue #1398). A streaming
 // json.Decoder returns as soon as one complete JSON value has been read,
 // independent of when — or whether — stdin is closed.
 func ReadAndParseHookInput[T any](stdin io.Reader) (*T, error) {
@@ -248,5 +277,5 @@ func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, err
 // instead of blocking on a read that will never complete (issue #1398).
 func StdinLooksInteractive(r io.Reader) bool {
 	f, ok := r.(*os.File)
-	return ok && term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+	return ok && term.IsTerminal(int(f.Fd()))
 }

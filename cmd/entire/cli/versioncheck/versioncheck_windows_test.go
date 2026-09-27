@@ -218,17 +218,6 @@ func assertNoPOSIXInstallerNames(t *testing.T, cmd string) {
 	}
 }
 
-// The Windows commands are printed for the user to paste, and the install.ps1
-// one-liners only work in PowerShell, so every message that prints one has a
-// shell to name.
-func TestWindowsUpdateCommandShell(t *testing.T) {
-	t.Parallel()
-
-	if got := UpdateCommandShell(); got != "PowerShell" {
-		t.Errorf("UpdateCommandShell() = %q, want %q", got, "PowerShell")
-	}
-}
-
 // TestWindowsScoopBeatsAMiseRootCoveringTheSamePath is the Windows half of
 // TestUnixBrewBeatsAMiseRootCoveringTheSamePath: installProbes puts scoopProbe
 // first, and it matches a Scoop apps path by marker, so a MISE_INSTALLS_DIR

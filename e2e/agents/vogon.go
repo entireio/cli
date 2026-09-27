@@ -40,6 +40,20 @@ func (v *Vogon) Bootstrap() error { return nil }
 func (v *Vogon) IsTransientError(_ Output, _ error) bool { return false }
 
 func (v *Vogon) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	// No default: the canary answers in seconds, so a ceiling of our own would
+	// only ever misfire. It still honors an explicit one — a hung fake agent is
+	// the reason someone reaches for E2E_TIMEOUT on the canary leg.
+	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	if err != nil {
+		return Output{}, err
+	}
+	defer cancel()
+
 	args := []string{"-p", prompt}
 	displayArgs := []string{"-p", fmt.Sprintf("%q", prompt)}
 	env := filterEnv(os.Environ(), "ENTIRE_TEST_TTY")

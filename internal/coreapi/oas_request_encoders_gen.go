@@ -10,6 +10,20 @@ import (
 	ht "github.com/ogen-go/ogen/http"
 )
 
+func encodeAcceptInvitationRequest(
+	req *AcceptInvitationInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeAddOrgMemberRequest(
 	req *AddOrgMemberInputBody,
 	r *http.Request,
@@ -24,8 +38,22 @@ func encodeAddOrgMemberRequest(
 	return nil
 }
 
-func encodeBatchLookupRequest(
-	req *BatchLookupInputBody,
+func encodeConnectOrgCIBuildkiteCredentialRequest(
+	req *ConnectOrgCIBuildkiteCredentialInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeConnectOrgCIDepotOrganizationRequest(
+	req *ConnectOrgCIDepotOrganizationInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -52,20 +80,6 @@ func encodeCreateBindingRequest(
 	return nil
 }
 
-func encodeCreateMirrorRequest(
-	req *CreateMirrorInputBody,
-	r *http.Request,
-) error {
-	const contentType = "application/json"
-	e := new(jx.Encoder)
-	{
-		req.Encode(e)
-	}
-	encoded := e.Bytes()
-	ht.SetBody(r, bytes.NewReader(encoded), contentType)
-	return nil
-}
-
 func encodeCreateMirrorRequestRequest(
 	req *CreateMirrorRequestInputBody,
 	r *http.Request,
@@ -80,8 +94,36 @@ func encodeCreateMirrorRequestRequest(
 	return nil
 }
 
+func encodeCreateNativeMirrorRequest(
+	req *CreateNativeMirrorInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeCreateOrgRequest(
 	req *CreateOrgInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeCreateOrgInvitationRequest(
+	req *CreateOrgInvitationInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -151,7 +193,7 @@ func encodeCreateServiceAccountRequest(
 }
 
 func encodeGrantProjectAccessRequest(
-	req *GrantProjectAccessInputBody,
+	req *GrantAccessBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -165,7 +207,7 @@ func encodeGrantProjectAccessRequest(
 }
 
 func encodeGrantRepoAccessRequest(
-	req *GrantRepoAccessInputBody,
+	req *GrantAccessBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -192,6 +234,20 @@ func encodeGrantServiceAccountAccessRequest(
 	return nil
 }
 
+func encodeMintOrgCIGitHubActionsCredentialRequest(
+	req *MintOrgCIGitHubActionsCredentialInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodePatchRepoCIWebhookRequest(
 	req *PatchRepoCIWebhookInputBody,
 	r *http.Request,
@@ -206,8 +262,106 @@ func encodePatchRepoCIWebhookRequest(
 	return nil
 }
 
+func encodePreviewInvitationRequest(
+	req *PreviewInvitationInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeRegisterOrgCIBuildkiteClusterRequest(
+	req *RegisterOrgCIBuildkiteClusterInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeResolveRepoIDsRequest(
+	req *ResolveRepoIDsInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeResolveReposRequest(
+	req *ResolveReposInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeSetBranchProtectionRequest(
+	req *BranchProtection,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeSetRepoVisibilityRequest(
 	req *SetRepoVisibilityInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeUpdateBranchProtectionRequest(
+	req *UpdateBranchProtectionInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeUpdateOrgMemberRoleRequest(
+	req *UpdateOrgMemberRoleInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"

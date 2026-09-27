@@ -119,8 +119,8 @@ func TestDefaultListDispatchWizardPlacements_ReadyOnlyKeyedBySlug(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || strings.Join(got["acme/widget"], ",") != "us" {
-		t.Fatalf("expected ready placements keyed by lowercased slug, got %v", got)
+	if len(got) != 1 || strings.Join(got["gh/acme/widget"], ",") != "us" {
+		t.Fatalf("expected ready placements keyed by lowercased gh/ slug, got %v", got)
 	}
 }
 

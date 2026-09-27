@@ -58,14 +58,6 @@ func TestCopilotCLIAgent_Description(t *testing.T) {
 	}
 }
 
-func TestCopilotCLIAgent_IsPreview(t *testing.T) {
-	t.Parallel()
-	ag := &CopilotCLIAgent{}
-	if !ag.IsPreview() {
-		t.Error("IsPreview() = false, want true")
-	}
-}
-
 func TestCopilotCLIAgent_ProtectedDirs(t *testing.T) {
 	t.Parallel()
 	ag := &CopilotCLIAgent{}
