@@ -21,7 +21,9 @@ import (
 // The pool is the owning org's membership minus whoever holds a DIRECT grant on
 // the target. Org membership does not itself grant project or repo access — the
 // server's authz schema gives an org member `view` but neither `read` nor
-// `write` — so every org member is a real candidate until they hold one.
+// `write` — so every org member is a real candidate until they hold one. A
+// repo's pool also offers the accounts its project grants directly without
+// their being org members (addProjectGrantees): the org would never list them.
 //
 // The `project:<name>` rows `ListRepoGrants` returns alongside the direct ones
 // are deliberately NOT subtracted. Project access does reach the project's
@@ -204,6 +206,10 @@ type memberPool struct {
 	candidates  []grantCandidate
 	window      listWindow // how much of the org's membership this read
 	addressable int        // of the members read, the ones that can be granted at all
+	// members is every account the membership walk read, offered or not, so a
+	// pool that adds grantees from elsewhere can tell who the org already
+	// covered.
+	members map[string]bool
 }
 
 // orgMemberCandidates lists the owning org's members who can be granted the
@@ -233,8 +239,9 @@ func orgMemberCandidates(ctx context.Context, c *coreapi.Client, orgID string, d
 	if err != nil {
 		return memberPool{}, err
 	}
-	pool := memberPool{window: listWindow{scanned: len(members), partial: partial}}
+	pool := memberPool{window: listWindow{scanned: len(members), partial: partial}, members: make(map[string]bool, len(members))}
 	for _, m := range members {
+		pool.members[m.AccountId] = true
 		handle, ok := grantableMember(m)
 		if !ok {
 			continue
@@ -388,7 +395,43 @@ func repoGrantCandidates(ctx context.Context, c *coreapi.Client, repoID string) 
 		return memberPool{}, err
 	}
 	// A repo lists its own grants and its project's; only the former counts.
-	return orgMemberCandidates(ctx, c, orgID, directHolders(mapRows(grants, repoGrantRowOf)))
+	held := directHolders(mapRows(grants, repoGrantRowOf))
+	pool, err := orgMemberCandidates(ctx, c, orgID, held)
+	if err != nil {
+		return memberPool{}, err
+	}
+	// Unbounded too: a partial listing would silently leave out someone the
+	// project grants.
+	projectGrants, err := pagedList(ctx, listProjectGrants(c, repo.Response.OwningProjectId))
+	if err != nil {
+		return memberPool{}, err
+	}
+	addProjectGrantees(&pool, mapRows(projectGrants, projectGrantRowOf), held)
+	return pool, nil
+}
+
+// addProjectGrantees offers, on a repo, the accounts its project grants
+// directly that the org's membership did not already cover: someone given the
+// project without joining the org is someone a repo grant can be written for,
+// and org membership alone would never list them. Their ref is the qualified
+// handle the listing resolved, which the typed path takes like any other; a
+// row the server could not name has no handle to grant by and is skipped, as
+// an unaddressable member is. Holders of a direct repo grant are left out on
+// the same rule as members.
+func addProjectGrantees(pool *memberPool, rows []grantRow, repoHolders map[string]bool) {
+	for _, r := range rows {
+		if r.granteeType != granteeTypeAccount || r.source != grantSourceDirect || pool.members[r.granteeID] {
+			continue
+		}
+		if _, _, err := parseQualifiedHandle(r.name); err != nil {
+			continue
+		}
+		pool.addressable++
+		if repoHolders[r.granteeID] {
+			continue
+		}
+		pool.candidates = append(pool.candidates, handleCandidate(r.name))
+	}
 }
 
 // grantPicker is the single seam the picker's forms sit behind. Production

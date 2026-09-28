@@ -56,6 +56,9 @@ type pickerFixture struct {
 	// withOwnerRow adds the synthetic row for the owning org, which every real
 	// listing carries and neither picker may offer.
 	withOwnerRow bool
+	// projectOnly holds accounts the project grants directly that are not org
+	// members: the org listing never names them, so only the project's does.
+	projectOnly []holder
 }
 
 // inactive is a member who has not joined, so no provider identity resolves for
@@ -77,8 +80,8 @@ func member(handle, accountID string) coreapi.OrgMemberListItem {
 }
 
 func (f pickerFixture) projectGrants() []coreapi.ProjectGrant {
-	rows := make([]coreapi.ProjectGrant, 0, len(f.held))
-	for _, h := range f.held {
+	rows := make([]coreapi.ProjectGrant, 0, len(f.held)+len(f.projectOnly))
+	for _, h := range append(append([]holder{}, f.held...), f.projectOnly...) {
 		rows = append(rows, coreapi.ProjectGrant{GranteeId: h.id, GranteeType: granteeTypeAccount, GranteeName: coreapi.NewOptString(h.handle), Role: "writer", Source: "direct"})
 	}
 	if f.withOwnerRow {
@@ -1324,4 +1327,33 @@ func TestMemberCandidate_LabelCarriesTheDisplayName(t *testing.T) {
 
 	unnamed := memberCandidate("github:alice", member("github:alice", "acct-a"))
 	require.Equal(t, "github:alice", unnamed.label)
+}
+
+// TestGrantPicker_RepoOffersProjectGranteesOutsideTheOrg pins that a repo's
+// pool includes whoever the project grants directly without being an org
+// member — the org listing alone would never name them — while still leaving
+// out anyone holding the repo directly, anyone the org already covers, and a
+// project row the server could not name.
+//
+// Not parallel: swaps the activeCoreClient and grantPicker seams.
+func TestGrantPicker_RepoOffersProjectGranteesOutsideTheOrg(t *testing.T) {
+	var grants []string
+	srv := pickerServer(t, pickerFixture{
+		members: []coreapi.OrgMemberListItem{member("github:alice", "acct-a")},
+		held:    []holder{{id: "acct-d", handle: "github:dave"}},
+		projectOnly: []holder{
+			{id: "acct-a", handle: "github:alice"},       // an org member: offered once, as a member
+			{id: "acct-c", handle: "google:google-1001"}, // project-only: offered
+			{id: "acct-d", handle: "github:dave"},        // holds the repo directly: left out
+			{id: "acct-u", handle: ""},                   // no handle to grant by: left out
+		},
+		withOwnerRow: true,
+	}, &grants, nil)
+	t.Cleanup(srv.Close)
+	offered := capturePicker(t, func([]grantCandidate, []string, string) ([]grantSelection, error) { return nil, nil })
+
+	_, _, err := runPickerCmd(t, newRepoGrantCmd, srv.URL, wiringRepoPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"github:alice", "google:google-1001"}, handles(*offered))
+	require.Equal(t, "google:1001", (*offered)[1].label)
 }

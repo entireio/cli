@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -142,4 +144,47 @@ func TestGrantRows(t *testing.T) {
 		})
 		require.Equal(t, []string{ulid, "reader", "inherited", "team"}, row)
 	})
+}
+
+// A grantee held several ways is one table row: its strongest role, and every
+// way it holds the target with the role each carries, so revoking the direct
+// grant visibly leaves the inherited one. Rows held once are untouched.
+func TestMergeRepoGrants(t *testing.T) {
+	t.Parallel()
+	rows := []coreapi.RepoGrant{
+		{GranteeType: granteeTypeAccount, GranteeId: "acct-a", GranteeName: coreapi.NewOptString("github:alice"), Role: "admin", Source: "direct"},
+		{GranteeType: "org", GranteeId: "org-1", GranteeName: coreapi.NewOptString("acme"), Role: "owner", Source: "owner"},
+		{GranteeType: granteeTypeAccount, GranteeId: "acct-a", GranteeName: coreapi.NewOptString("github:alice"), Role: "reader", Source: "project:web"},
+		{GranteeType: granteeTypeAccount, GranteeId: "acct-b", GranteeName: coreapi.NewOptString("github:bob"), Role: "writer", Source: "project:web"},
+	}
+	got := mergeRepoGrants(rows)
+	require.Len(t, got, 3)
+	require.Equal(t, []string{"github:alice", "admin", "direct (admin), project:web (reader)", "account"}, repoGrantRow(got[0]))
+	require.Equal(t, []string{"acme", "owner", "owner", "org"}, repoGrantRow(got[1]))
+	require.Equal(t, []string{"github:bob", "writer", "project:web", "account"}, repoGrantRow(got[2]))
+	// The strongest role wins whichever row came first.
+	weakFirst := mergeRepoGrants([]coreapi.RepoGrant{rows[2], rows[0]})
+	require.Equal(t, "admin", weakFirst[0].Role)
+	require.Equal(t, "project:web (reader), direct (admin)", weakFirst[0].Source)
+}
+
+// The table folds a grantee held two ways into one row; --json keeps the wire
+// rows as sent, since merging is the table's reading, not the data's.
+//
+// Not parallel: swaps the activeCoreClient seam.
+func TestRepoGrantList_MergesTheTableNotTheJSON(t *testing.T) {
+	both := holder{id: "acct-a", handle: "github:alice"}
+	srv := pickerServer(t, pickerFixture{held: []holder{both}, viaProject: []holder{both}}, &[]string{}, nil)
+	t.Cleanup(srv.Close)
+
+	out, _, err := runCoreCmd(t, newRepoGrantCmd, srv.URL, "list", wiringRepoPath)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(out, "github:alice"), "table: one row per grantee\n%s", out)
+	require.Contains(t, out, "direct (writer), project:widgets (writer)")
+
+	out, _, err = runCoreCmd(t, newRepoGrantCmd, srv.URL, "list", wiringRepoPath, "--json")
+	require.NoError(t, err)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &rows))
+	require.Len(t, rows, 2, "--json keeps both wire rows")
 }

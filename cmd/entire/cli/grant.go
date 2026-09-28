@@ -39,6 +39,11 @@ type grantTarget[Row any] struct {
 	defaultRole string   // "" means --role is required; else the server default applied when --role is omitted
 	columns     []string
 	row         func(Row) []string
+	// merge folds a listing's rows for the table: one account can hold a
+	// target several ways (a direct repo grant and its project's), which the
+	// wire lists as separate rows. nil where rows never repeat (org). --json
+	// keeps the wire rows as sent.
+	merge func([]Row) []Row
 
 	// resolve turns the user's target ref into its ULID. project and repo wrap
 	// theirs because those resolvers take an interface, not *coreapi.Client.
@@ -336,9 +341,13 @@ func newGrantListCmd[Row any](t grantTarget[Row]) *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				return pagedList(ctx, func(ctx context.Context, pageToken coreapi.OptString) ([]Row, coreapi.OptString, error) {
+				rows, err := pagedList(ctx, func(ctx context.Context, pageToken coreapi.OptString) ([]Row, coreapi.OptString, error) {
 					return t.list(ctx, c, id, pageToken)
 				})
+				if err != nil || t.merge == nil || jsonRequested(cmd) {
+					return rows, err
+				}
+				return t.merge(rows), nil
 			})
 		},
 	}
@@ -638,6 +647,77 @@ func repoGrantRow(g coreapi.RepoGrant) []string {
 	return []string{granteeName(g.GranteeName, g.GranteeId), g.Role, g.Source, g.GranteeType}
 }
 
+// mergeProjectGrants and mergeRepoGrants fold a listing's rows per grantee, for
+// the table (see grantTarget.merge).
+func mergeProjectGrants(rows []coreapi.ProjectGrant) []coreapi.ProjectGrant {
+	return mergeGrantRows(rows,
+		func(g coreapi.ProjectGrant) (string, string, string) {
+			return g.GranteeType + "/" + g.GranteeId, g.Role, g.Source
+		},
+		func(g *coreapi.ProjectGrant, role, source string) { g.Role, g.Source = role, source })
+}
+
+func mergeRepoGrants(rows []coreapi.RepoGrant) []coreapi.RepoGrant {
+	return mergeGrantRows(rows,
+		func(g coreapi.RepoGrant) (string, string, string) {
+			return g.GranteeType + "/" + g.GranteeId, g.Role, g.Source
+		},
+		func(g *coreapi.RepoGrant, role, source string) { g.Role, g.Source = role, source })
+}
+
+// mergeGrantRows keeps one row per grantee, in first-seen order. A grantee
+// held several ways shows its strongest role, and its SOURCE names each way
+// with the role it carries ("direct (admin), project:web (reader)"): the
+// strongest role alone would hide that revoking the direct grant leaves the
+// inherited one in place. A grantee held once is left exactly as listed.
+func mergeGrantRows[Row any](rows []Row, fields func(Row) (key, role, source string), set func(r *Row, role, source string)) []Row {
+	type group struct {
+		row   Row
+		role  string
+		parts []string
+	}
+	var order []string
+	groups := make(map[string]*group, len(rows))
+	for _, r := range rows {
+		key, role, source := fields(r)
+		part := source + " (" + role + ")"
+		if g, ok := groups[key]; ok {
+			g.parts = append(g.parts, part)
+			if roleRank(role) > roleRank(g.role) {
+				g.role = role
+			}
+			continue
+		}
+		groups[key] = &group{row: r, role: role, parts: []string{part}}
+		order = append(order, key)
+	}
+	out := make([]Row, 0, len(order))
+	for _, key := range order {
+		g := groups[key]
+		if len(g.parts) > 1 {
+			set(&g.row, g.role, strings.Join(g.parts, ", "))
+		}
+		out = append(out, g.row)
+	}
+	return out
+}
+
+// roleRank orders grant roles by strength; an unknown role ranks lowest, so
+// a known one always wins the merge.
+func roleRank(role string) int {
+	switch role {
+	case roleOwner:
+		return 4
+	case roleAdmin:
+		return 3
+	case "writer":
+		return 2
+	case leastAccessRole:
+		return 1
+	}
+	return 0
+}
+
 // granteeName returns the friendly name when the server resolved one, in the
 // spelling users type (see displayGranteeName), falling back to the ULID for
 // grantees it couldn't label (e.g. teams).
@@ -729,6 +809,7 @@ var projectGrantTarget = grantTarget[coreapi.ProjectGrant]{
 	leastRole:  leastAccessRole,
 	columns:    grantColumns,
 	row:        projectGrantRow,
+	merge:      mergeProjectGrants,
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
 		return resolveProjectRef(ctx, c, ref)
 	},
@@ -773,6 +854,7 @@ var repoGrantTarget = grantTarget[coreapi.RepoGrant]{
 	leastRole:     leastAccessRole,
 	columns:       grantColumns,
 	row:           repoGrantRow,
+	merge:         mergeRepoGrants,
 	listBranch:    mirrorGrantListing,
 	unwritableRef: mirrorGrantsAreUpstream,
 	resolve: func(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
