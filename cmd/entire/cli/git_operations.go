@@ -322,7 +322,7 @@ func CheckoutBranch(ctx context.Context, ref string) error {
 	if err := ValidateBranchName(ctx, ref); err != nil {
 		return fmt.Errorf("checkout failed: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "git", "checkout", ref, "--")
+	cmd := exec.CommandContext(ctx, "git", "checkout", "--no-overwrite-ignore", ref, "--")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("checkout failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}
