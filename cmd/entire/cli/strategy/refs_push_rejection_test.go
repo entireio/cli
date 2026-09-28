@@ -36,7 +36,7 @@ func TestPushCheckpointRefWithRecovery_PreservesRejection(t *testing.T) {
 	t.Chdir(workDir) // CWD-based push/recovery; cannot run in parallel.
 	installCheckpointRejectHook(t, bareDir, false)
 
-	err := pushCheckpointRefWithRecovery(t.Context(), bareDir, refs[0])
+	_, err := pushCheckpointRefWithRecovery(t.Context(), bareDir, refs[0])
 	require.ErrorContains(t, err, checkpointRejectReason)
 	require.ErrorContains(t, err, checkpointUnblockURL)
 	assert.NotContains(t, err.Error(), "sync diverged")
@@ -51,7 +51,7 @@ func TestPushCheckpointRefWithRecovery_PreservesUnknownFailure(t *testing.T) {
 	t.Chdir(workDir)
 
 	// Unknown failures still attempt recovery and must preserve both causes.
-	err := pushCheckpointRefWithRecovery(t.Context(), filepath.Join(t.TempDir(), "missing.git"), refs[0])
+	_, err := pushCheckpointRefWithRecovery(t.Context(), filepath.Join(t.TempDir(), "missing.git"), refs[0])
 	var recoveryErr *checkpointRefRecoveryError
 	require.ErrorAs(t, err, &recoveryErr)
 	require.ErrorIs(t, err, recoveryErr.pushErr)

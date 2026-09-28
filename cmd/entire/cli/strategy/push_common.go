@@ -26,12 +26,14 @@ import (
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
 // rather than retrying them forever.
-func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName) {
+func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName, hashes map[string]plumbing.Hash) {
+	hashes = make(map[string]plumbing.Hash, len(refs))
 	for _, ref := range refs {
-		_, err := repo.Reference(ref, false)
+		local, err := repo.Reference(ref, false)
 		switch {
 		case err == nil:
 			existing = append(existing, ref)
+			hashes[ref.String()] = local.Hash()
 		case errors.Is(err, plumbing.ErrReferenceNotFound):
 			// Genuinely gone (e.g. deleted by cleanup) — never pushable, drop it.
 			stale = append(stale, ref)
@@ -41,7 +43,7 @@ func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (ex
 			existing = append(existing, ref)
 		}
 	}
-	return existing, stale
+	return existing, stale, hashes
 }
 
 // batchPushRefs pushes all of refs to target in a single git push,
@@ -80,7 +82,7 @@ func batchPushRefs(ctx context.Context, target string, refs []plumbing.Reference
 // (e.g. both sides rewrote the root metadata.json) surfaces as a rebase error and
 // the ref is left for a later pre-push. Returns nil only if the ref reached the
 // remote.
-func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumbing.ReferenceName) error {
+func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumbing.ReferenceName) (plumbing.Hash, error) {
 	// One shared budget across the initial push, fetch+replay, and retry, matching
 	// doPushRef (fetchAndRebaseRefCommon relies on the caller's deadline).
 	ctx, cancel := context.WithTimeout(ctx, checkpointPushBudget)
@@ -88,20 +90,30 @@ func pushCheckpointRefWithRecovery(ctx context.Context, target string, ref plumb
 
 	pushErr := batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
 	if pushErr == nil {
-		return nil
+		return plumbing.ZeroHash, nil
 	}
 	if checkpointRefRejectionReason(pushErr) != "" {
 		// Fetch+replay cannot fix a remote policy/hook rejection. If the ref
 		// already exists remotely, replay would needlessly rewrite local
 		// commits (including their committer timestamps) on every push.
-		return pushErr
+		return plumbing.ZeroHash, pushErr
 	}
 	if err := fetchAndRebaseRefCommon(ctx, target, ref); err != nil {
 		// Recovery is speculative: a missing remote ref may mean the push was
 		// blocked, not that it diverged. Keep the push failure primary.
-		return &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
+		return plumbing.ZeroHash, &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
 	}
-	return batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return plumbing.ZeroHash, &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
+	}
+	defer repo.Close()
+	local, err := repo.Reference(ref, false)
+	if err != nil {
+		return plumbing.ZeroHash, &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
+	}
+	// Capture the rebased tip before retrying. A later local advance must stay queued.
+	return local.Hash(), batchPushRefs(ctx, target, []plumbing.ReferenceName{ref})
 }
 
 // checkpointRefRecoveryError keeps both failures inspectable, while allowing the
