@@ -192,9 +192,12 @@ shared store holds one state file per session, so a per-candidate walk would
 repeat the hostname, boot-id, and proc reads dozens of times per commit.
 Host, boot, and start-time guards mean a recycled PID or an identity recorded
 on another machine can never match. The nearest ancestor wins, so a nested
-agent is attributed over the outer agent that spawned it; only sessions
-matching at the same depth (one agent process hosting several sessions) fall
-back to the most recently interacting one. On platforms proclive cannot introspect (Windows),
+agent is attributed over the outer agent that spawned it. Sessions matching at
+the same depth share one agent process — hosted one after another, as after a
+resume, or at once, as Codex's TUI sessions in its app-server daemon — and
+among them the sessions the agent's caller-session variable names win, then
+those that have not ended. Sessions still tied link nothing by identity,
+leaving the worktree-matched set. On platforms proclive cannot introspect (Windows),
 identity matching reports nothing and linking falls back to worktree
 matching. This makes an agent-made commit link to
 its own session **in any worktree**, with no bookkeeping to drift. Any session

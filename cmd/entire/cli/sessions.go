@@ -940,7 +940,7 @@ func sessionResolutionLabel(resolution strategy.SessionResolution) string {
 	case strategy.ResolutionAncestry:
 		return "your own session, matched by process ancestry"
 	case strategy.ResolutionCallerAmbiguous:
-		return "a guess — several agents claim this command and nothing could order them"
+		return "a guess — several agent sessions could be running this command and nothing could order them"
 	case strategy.ResolutionOtherWorktree:
 		return "another worktree's session — this worktree has none of its own"
 	case strategy.ResolutionWorktree:

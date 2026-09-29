@@ -67,7 +67,7 @@ Examples:
 					"[entire] No session is recorded in this worktree; showing the most recent one from elsewhere in this repository. It is not this command's caller.")
 			case strategy.ResolutionCallerAmbiguous:
 				fmt.Fprintln(cmd.ErrOrStderr(),
-					"[entire] Several agent sessions claim this command and none could be ordered; showing the most plausible. Do not act on it without confirming which session is yours.")
+					"[entire] Several agent sessions could be running this command and none could be ordered; showing the most plausible. Do not act on it without confirming which session is yours.")
 			case strategy.ResolutionCallerEnv, strategy.ResolutionAncestry:
 				// Identified the caller; the answer needs no caveat.
 			case strategy.ResolutionWorktree:
