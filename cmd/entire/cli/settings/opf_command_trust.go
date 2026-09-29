@@ -158,6 +158,24 @@ const (
 	localOwn                            // verified not versioned, or no repository to clone from
 )
 
+// PathIsTracked reports whether a repo-relative path is carried by the
+// repository — present in the index of any clone that checks it out.
+//
+// Exported so callers outside this package do not hand-roll the probe: two
+// commits' worth of correctness lives in it that an open-coded index scan
+// does not get. `pathsEqualFold` rather than an exact compare, because on a
+// case-insensitive volume a differently-cased path is the same file; a
+// missing repository is a definitive "not tracked" rather than a failure;
+// an error means "could not determine" and must not be read as a negative;
+// and the answer is memoized, since trackedness cannot change inside one
+// short-lived hook process.
+//
+// Index-only, matching classifyLocalSettings: the question is whether the
+// repository carries the file, and HEAD costs more than it answers here.
+func PathIsTracked(ctx context.Context, repoRoot, relPath string) (bool, error) {
+	return pathIsVersioned(ctx, repoRoot, relPath, false)
+}
+
 // classifyLocalSettings checks the git index only.
 //
 // The index is what a delivered attack shows up in: a pull request that
@@ -185,7 +203,10 @@ func classifyLocalSettingsDeep(ctx context.Context, path string) localTrust {
 }
 
 func classify(ctx context.Context, path string, deep bool) localTrust {
-	switch versioned, err := localSettingsIsVersioned(ctx, path, deep); {
+	// The settings file is always <worktree>/.entire/settings.local.json, so
+	// its root is two levels up. Callers that know their root pass it
+	// directly through PathIsTracked.
+	switch versioned, err := pathIsVersioned(ctx, filepath.Dir(filepath.Dir(path)), EntireSettingsLocalFile, deep); {
 	case err != nil:
 		return localUnverifiable
 	case versioned:
@@ -199,7 +220,8 @@ func classify(ctx context.Context, path string, deep bool) localTrust {
 // subsumes the shallow one, but they are asked by different callers and only
 // the rare OPF path pays for HEAD.
 type probeKey struct {
-	path string
+	root string
+	rel  string
 	deep bool
 }
 
@@ -230,13 +252,13 @@ func ClearVersionedPathCache() {
 	clear(versionedPaths)
 }
 
-// localSettingsIsVersioned reports whether the local settings file is tracked
-// in the index, and with deep set, whether it is also present in HEAD.
+// pathIsVersioned reports whether a repo-relative path is tracked in the
+// index, and with deep set, whether it is also present in HEAD.
 //
 // An error means "could not determine" (unreadable repository, unreadable
 // index) and callers must treat it as untrusted rather than as a negative.
-func localSettingsIsVersioned(ctx context.Context, path string, deep bool) (bool, error) {
-	key := probeKey{path: path, deep: deep}
+func pathIsVersioned(ctx context.Context, repoRoot, rel string, deep bool) (bool, error) {
+	key := probeKey{root: repoRoot, rel: rel, deep: deep}
 
 	versionedPathsMu.Lock()
 	cached, ok := versionedPaths[key]
@@ -245,7 +267,7 @@ func localSettingsIsVersioned(ctx context.Context, path string, deep bool) (bool
 		return cached, nil
 	}
 
-	versioned, err := probeLocalSettingsIsVersioned(ctx, path, deep)
+	versioned, err := probePathIsVersioned(ctx, repoRoot, rel, deep)
 	if err != nil {
 		return false, err
 	}
@@ -271,12 +293,12 @@ func localSettingsIsVersioned(ctx context.Context, path string, deep bool) (bool
 // the grandparent would name the wrong directory. It holds today because
 // readConfined can only have succeeded on the relative form when the working
 // directory IS the worktree root.
-func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) (bool, error) {
+func probePathIsVersioned(ctx context.Context, repoRoot, rel string, deep bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("verify %s: %w", EntireSettingsLocalFile, err)
+		return false, fmt.Errorf("verify %s: %w", rel, err)
 	}
 
-	repo, err := gitrepo.OpenPath(filepath.Dir(filepath.Dir(path)))
+	repo, err := gitrepo.OpenPath(repoRoot)
 	if err != nil {
 		// No repository at all (no .git). A file cannot have arrived by
 		// cloning when there is nothing to clone, so this is a definitive
@@ -296,7 +318,7 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 		return false, fmt.Errorf("read index: %w", err)
 	}
 	for _, entry := range idx.Entries {
-		if pathsEqualFold(entry.Name, EntireSettingsLocalFile) {
+		if pathsEqualFold(entry.Name, rel) {
 			return true, nil
 		}
 	}
@@ -321,7 +343,7 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 	if err != nil {
 		return false, fmt.Errorf("read HEAD tree: %w", err)
 	}
-	return treeHasPathFold(tree, strings.Split(EntireSettingsLocalFile, "/"))
+	return treeHasPathFold(tree, strings.Split(rel, "/"))
 }
 
 // pathsEqualFold reports whether two repo-relative git paths can name the same
