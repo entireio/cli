@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -110,29 +111,45 @@ func parseObjectFormat(s string) (coreapi.CreateRepoInputBodyObjectFormat, error
 
 func newRepoCreateCmd() *cobra.Command {
 	var (
-		projectID    string
+		projectRef   string
 		objectFormat string
+		visibility   string
 		noWait       bool
 		waitTimeout  time.Duration
 	)
 	cmd := &cobra.Command{
-		Use:   cmdCreateName,
+		Use:   "create [<name>]",
 		Short: "Create a repository in a project",
 		Long: `Create a repository and wait for provisioning to become active by
 default. Active means provisioning completed; later pushes or mirror
 creation can still fail for other reasons.
 
+With both a name and --project the repository is created directly.
+Otherwise, in an interactive terminal, a wizard asks for the project,
+name, visibility and advanced options, starting from whatever was given,
+and shows a summary before creating anything. With --json the prompts
+stay off stdout, which carries only the repository object.
+
+--visibility sets the repository's visibility right after creation: public
+grants read-only (pull) access to any authenticated Entire user, private
+restricts it to explicit grantees. Omitted, the server default applies;
+the wizard defaults to private.
+
 --wait-timeout must be positive. It bounds project resolution, creation,
 and readiness polling after client setup, including creation with
---no-wait. Use --no-wait to return without confirming readiness.
+--no-wait; time spent answering the wizard does not count. Use --no-wait
+to return without confirming readiness.
 
 If creation succeeds but readiness cannot be confirmed, the command exits
 nonzero and preserves the repository result. Do not create again to
 recover. With --json, stdout contains one repository object; progress
 and recovery instructions go to stderr.`,
 		Example: "  entire repo create web --project acme\n" +
+			"  entire repo create web --project acme --visibility public\n" +
 			"  entire repo create web --project acme --no-wait\n" +
-			"  entire repo create web --project acme --wait-timeout=5m",
+			"  entire repo create web --project acme --wait-timeout=5m\n\n" +
+			"  # Pick the project and settings interactively\n" +
+			"  entire repo create web",
 		PreRunE: func(_ *cobra.Command, _ []string) error {
 			// Invalid flag values are usage errors, including zero/negative
 			// durations; match mirror add and Cobra's malformed-value path.
@@ -141,55 +158,65 @@ and recovery instructions go to stderr.`,
 			}
 			return nil
 		},
-		Args: cobra.ExactArgs(1),
+		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var format coreapi.CreateRepoInputBodyObjectFormat
+			req := repoCreateRequest{}
+			if len(args) == 1 {
+				// Trimmed once for both paths, as the wizard trims what is
+				// typed, so ' web ' names the same repo either way and a blank
+				// name counts as missing.
+				req.name = strings.TrimSpace(args[0])
+			}
 			if objectFormat != "" {
 				parsed, err := parseObjectFormat(objectFormat)
 				if err != nil {
 					cmd.SilenceUsage = true
 					return err
 				}
-				format = parsed
+				req.objectFormat = parsed
+			}
+			if visibility != "" {
+				parsed, err := parseVisibility(visibility)
+				if err != nil {
+					cmd.SilenceUsage = true
+					return err
+				}
+				req.visibility = parsed
+			}
+			opts := repoCreateOptions{noWait: noWait, waitTimeout: waitTimeout}
+			if req.name == "" || projectRef == "" {
+				// Settled from the command line alone, before any request: a
+				// run that cannot be prompted must not cost a lookup. --json
+				// still prompts in a terminal, as `grant add` does: the form
+				// renders on stderr or the controlling terminal and stdout
+				// carries only the result.
+				if !interactive.CanPromptInteractively() {
+					cmd.SilenceUsage = true
+					return errRepoCreateNeedsInput
+				}
+				return runRepoCreateWizard(cmd, req, projectRef, opts)
 			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				ctx, cancel := context.WithTimeout(ctx, waitTimeout)
 				defer cancel()
-				projID, err := resolveProjectRef(ctx, c, projectID)
+				project, err := resolveProjectRefResolved(ctx, c, projectRef)
 				if err != nil {
 					return err
 				}
-				body := &coreapi.CreateRepoInputBody{Name: args[0], ProjectId: projID}
-				if format != "" {
-					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
-				}
-				response, err := c.CreateRepo(ctx, body)
+				req.projectID, req.projectName = project.ID, project.Name
+				created, err := createRepo(ctx, c, req)
 				if err != nil {
 					return err
 				}
-				created, err := createdRepoAsRepo(&response.Response)
-				if err != nil {
-					return err
-				}
-				var waitErr error
-				if !noWait {
-					var finish func(bool)
-					waitErr = awaitRepoActive(ctx, c, created, func() {
-						finish = startSpinner(cmd.ErrOrStderr(), "Waiting for repository "+created.Name+" to become active")
-					})
-					if finish != nil {
-						finish(waitErr == nil)
-					}
-				}
-				return reportRepoCreation(cmd, created, noWait, waitErr)
+				return finishRepoCreate(ctx, cmd, c, req, created, opts)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return after creation without confirming provisioning readiness")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 10*time.Minute, "Time limit for project resolution, creation, and provisioning readiness")
-	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
+	cmd.Flags().StringVar(&projectRef, "project", "", "Owning project (by name)")
 	cmd.Flags().StringVar(&objectFormat, "object-format", "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
-	markRequired(cmd, "project")
+	cmd.Flags().StringVar(&visibility, "visibility", "", "Visibility to set after creation: public or private (defaults to the server default)")
 	addJSONFlag(cmd)
 	return cmd
 }

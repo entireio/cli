@@ -389,7 +389,7 @@ func TestReportRepoCreationNoWaitReason(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&stderr)
 	result := &coreapi.Repo{ID: testDeleteULID, State: coreapi.NewOptString("failed"), ProvisionReason: coreapi.NewOptString("max retries exhausted")}
-	require.NoError(t, reportRepoCreation(cmd, result, true, nil))
+	require.NoError(t, reportRepoCreation(cmd, result, "", true, nil))
 	require.Contains(t, out.String(), "max retries exhausted")
 	require.Contains(t, stderr.String(), "unconfirmed")
 }
