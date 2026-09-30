@@ -470,6 +470,59 @@ func TestRepoCreate_SendsTrimmedName(t *testing.T) {
 	}
 }
 
+// TestRepoCreate_SuggestsANameTheServerWouldAccept pins that the parenthetical
+// is advice the user can act on, not just the typed string minus four bytes.
+// It used to be the latter: "WEB.git" was answered with `(use "WEB")`, and the
+// server then refused "WEB" for carrying uppercase — a second refusal, for a
+// reason the first message had not mentioned.
+//
+// The hint is lowercased because `repo create` is the one path where the
+// server does NOT fold case (an uppercase name is refused outright), and it
+// is withheld entirely when the remainder fails the shape the server enforces.
+// Withholding is the safe direction: the check gates whether the CLI speaks,
+// never whether it refuses.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_SuggestsANameTheServerWouldAccept(t *testing.T) {
+	// A well-formed ULID. The server refuses a name of this shape outright,
+	// so proposing one would be proposing a second rejection.
+	const rawULID = "01KS6KFJR2XS6PZ188MVYE07AN"
+
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{name: "already lowercase", in: "web.git", want: "web"},
+		{name: "uppercase is folded", in: "WEB.git", want: "web"},
+		{name: "uppercase name and suffix", in: "WEB.GIT", want: "web"},
+		{name: "mixed case dotted name", in: "Trails.EL.GIT", want: "trails.el"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveRepoCreate(t)
+			err := execRepoCreateNamed(t, tc.in)
+			require.ErrorContains(t, err, `(use "`+tc.want+`")`)
+		})
+	}
+
+	for _, tc := range []struct{ name, in string }{
+		{name: "underscore survives the fold", in: "WEB_1.git"},
+		{name: "consecutive dots", in: "widgets..git"},
+		{name: "trailing dash once the suffix goes", in: "widgets-.git"},
+		{name: "a raw ULID is not a name", in: rawULID + ".git"},
+		{name: "a lowercased raw ULID is still one", in: strings.ToLower(rawULID) + ".GIT"},
+		{name: "too long by one", in: strings.Repeat("a", 65) + ".git"},
+		{name: "the suffix alone", in: ".git"},
+	} {
+		t.Run("no hint: "+tc.name, func(t *testing.T) {
+			serveRepoCreate(t)
+			err := execRepoCreateNamed(t, tc.in)
+			// Still refused, and still for the suffix — only the advice is
+			// withheld.
+			require.ErrorContains(t, err, gitDirSuffix)
+			require.NotContains(t, err.Error(), "(use ")
+		})
+	}
+}
+
 // TestRepoCreate_HasNoClusterHostFlag pins that a repo's home cluster is not
 // the caller's to choose: it is the primary cell of the owning project's
 // region. The flag is gone rather than kept as a rejecting stub, so the whole

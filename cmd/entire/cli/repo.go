@@ -108,6 +108,37 @@ func parseObjectFormat(s string) (coreapi.CreateRepoInputBodyObjectFormat, error
 	}
 }
 
+// suggestRepoName returns the name worth recommending in place of one that
+// carried the `.git` suffix, and whether there is one at all. It answers only
+// the question "is this advice the user can act on?".
+//
+// Lowercased, because `repo create` is the one path where the server does NOT
+// fold case: resolution folds (which is why nativeRepoRe accepts uppercase),
+// but an uppercase name is refused outright at create time. So the answer to
+// "WEB.git" is "web". Suggesting "WEB" — the typed string minus four bytes —
+// earned the user a second refusal naming a rule the first message had not
+// mentioned.
+//
+// The shape checks are nativeRepoRe's, which already carries the server's
+// accepted name shape, plus the two rules a regexp cannot: no consecutive
+// dots (RE2 has no negative lookahead, so parseNativeCloneRef checks it
+// separately too) and no raw ULID.
+//
+// This gates only whether the CLI SPEAKS, never whether it refuses, and that
+// is the whole reason it is safe to run locally. nativeRepoRe drifts one way
+// (see its comment): if the server loosens, a local check refuses names that
+// would in fact work. A ref survives that — a ULID or a full entire:// URL
+// gets past it — but a refused `create` has no such escape hatch, so the name
+// itself stays the server's to judge. Going quiet costs a hint; guessing wrong
+// costs a name the user cannot create.
+func suggestRepoName(rest string) (string, bool) {
+	s := strings.ToLower(rest)
+	if s == "" || !nativeRepoRe.MatchString(s) || strings.Contains(s, "..") || looksLikeULID(s) {
+		return "", false
+	}
+	return s, true
+}
+
 func newRepoCreateCmd() *cobra.Command {
 	var (
 		projectID    string
@@ -163,8 +194,8 @@ and recovery instructions go to stderr.`,
 			if rest, had := cutGitDirSuffix(name); had {
 				cmd.SilenceUsage = true
 				err := fmt.Errorf("repo name %q must not end in %s, in any case: the suffix is never part of a repo name, so Entire could not address the repo by the name you typed", name, gitDirSuffix)
-				if rest != "" {
-					err = fmt.Errorf("%w (use %q)", err, rest)
+				if use, ok := suggestRepoName(rest); ok {
+					err = fmt.Errorf("%w (use %q)", err, use)
 				}
 				return err
 			}
