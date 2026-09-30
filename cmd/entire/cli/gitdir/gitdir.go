@@ -38,6 +38,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -168,6 +169,15 @@ func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, err
 	}
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
 	cmd.Dir = worktreeRoot
+	// Scrubbed, unlike CommonDir above, and the difference is the contract.
+	// That one answers "the repository I am in", so a GIT_DIR exported to a
+	// hook is the right answer. This one is handed an explicit root and must
+	// answer about THAT directory — but git exports GIT_DIR and GIT_WORK_TREE
+	// to its hooks and they outrank cmd.Dir, so an inherited environment makes
+	// it answer about the hook's repository instead. Callers use the result to
+	// decide whether two paths are the same clone; being wrong there attributes
+	// one repository's state, or its settings, to another.
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)

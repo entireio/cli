@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 )
 
 // AgentPromptRejection reports one agent instruction field Load dropped as
@@ -21,7 +22,7 @@ type AgentPromptRejection struct {
 // an agent that runs with approvals disabled does not read as executable to a
 // reviewer.
 const (
-	agentPromptRejectionNotLocal   = "it did not come from .entire/settings.local.json or clone-local preferences"
+	agentPromptRejectionNotLocal   = "it did not come from the user settings file, .entire/settings.local.json, or clone-local preferences"
 	agentPromptRejectionUnverified = "the local settings file could not be verified as untracked"
 )
 
@@ -37,9 +38,10 @@ func (s *EntireSettings) AgentPromptRejections() []AgentPromptRejection {
 }
 
 // enforceAgentPromptTrust drops agent instruction fields unless they came from
-// a layer that is this developer's own: clone-local preferences (which live in
-// the git common dir and cannot arrive by cloning), or a local settings file
-// positively verified as untracked.
+// a layer that is this developer's own: the user settings file (which lives
+// outside the repository), clone-local preferences (which live in the git
+// common dir and cannot arrive by cloning), or a local settings file positively
+// verified as untracked.
 //
 // The gated fields are the free-text instruction channels: every
 // ReviewConfig.Prompt and every review profile's Task. Both land verbatim in
@@ -95,6 +97,19 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 		}
 	}
 
+	// userOwned reports whether the user settings file supplied this field.
+	// The local file is checked first below because it merges after this tier.
+	userOwned := func(field string) bool {
+		switch {
+		case strings.HasPrefix(field, "review_profiles."):
+			rest := strings.TrimPrefix(field, "review_profiles.")
+			name, _, ok := strings.Cut(rest, ".")
+			return ok && s.userPromptOwnership.ownsProfile(name)
+		default:
+			return false
+		}
+	}
+
 	// The deep (index AND HEAD) trackedness check is asked at most once, and
 	// only when some gated field's provenance is the local file.
 	verified := false
@@ -108,9 +123,9 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 	}
 
 	// decide returns the field's surviving value, recording a rejection when
-	// it is dropped. setLocally must win over prefsOwned: a key present in the
-	// local file merged last, so the effective value is the local file's even
-	// when preferences also carried one.
+	// it is dropped. setLocally must win over every lower layer: a key present
+	// in the local file merged last, so the effective value is the local file's
+	// even when the user tier or clone preferences also carried one.
 	decide := func(field, value string, setLocally, prefsOwned bool) string {
 		if value == "" {
 			return ""
@@ -123,6 +138,10 @@ func enforceAgentPromptTrust(ctx context.Context, s *EntireSettings, localSettin
 			s.agentPromptRejections = append(s.agentPromptRejections,
 				AgentPromptRejection{Field: field, Value: value, Reason: agentPromptRejectionUnverified})
 			return ""
+		case userOwned(field):
+			// The user settings file needs no trackedness probe: nothing a
+			// repository can do puts content under ~/.config.
+			return value
 		case prefsOwned:
 			return value
 		default:
