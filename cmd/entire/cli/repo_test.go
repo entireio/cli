@@ -405,10 +405,17 @@ func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
 			bodyCh := serveRepoCreate(t)
 			err := execRepoCreateNamed(t, tc.in)
 			require.ErrorContains(t, err, gitDirSuffix)
-			if tc.rest != "" {
+			if _, stillCarriesSuffix := cutGitDirSuffix(tc.rest); tc.rest == "" || stillCarriesSuffix {
+				// A doubled suffix leaves a remainder this same guard would
+				// refuse, and the suffix alone leaves nothing at all. Neither
+				// is advice, so neither is offered.
+				require.NotContains(t, err.Error(), "(use ")
+			} else {
 				// The refusal earns its round trip only by naming the
-				// spelling to use instead.
-				require.ErrorContains(t, err, tc.rest)
+				// spelling to use instead. Assert the whole parenthetical:
+				// a bare substring check passes on the quoted name itself,
+				// which is how a doubled suffix went unnoticed.
+				require.ErrorContains(t, err, `(use "`+tc.rest+`")`)
 			}
 			select {
 			case raw := <-bodyCh:
@@ -511,6 +518,14 @@ func TestRepoCreate_SuggestsANameTheServerWouldAccept(t *testing.T) {
 		{name: "a lowercased raw ULID is still one", in: strings.ToLower(rawULID) + ".GIT"},
 		{name: "too long by one", in: strings.Repeat("a", 65) + ".git"},
 		{name: "the suffix alone", in: ".git"},
+		// A doubled suffix is the case the shape checks alone cannot catch:
+		// nativeRepoRe allows interior dots, so "widgets.git" looks like a
+		// perfectly good name to every check except the one that matters —
+		// the guard immediately above, which refuses it on the next attempt.
+		{name: "doubled suffix", in: "widgets.git.git"},
+		{name: "doubled suffix, mixed case", in: "widgets.GIT.git"},
+		{name: "doubled suffix, uppercase last", in: "widgets.git.GIT"},
+		{name: "tripled suffix", in: "widgets.git.git.git"},
 	} {
 		t.Run("no hint: "+tc.name, func(t *testing.T) {
 			serveRepoCreate(t)

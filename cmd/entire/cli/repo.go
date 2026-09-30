@@ -133,6 +133,15 @@ func parseObjectFormat(s string) (coreapi.CreateRepoInputBodyObjectFormat, error
 // costs a name the user cannot create.
 func suggestRepoName(rest string) (string, bool) {
 	s := strings.ToLower(rest)
+	// A doubled suffix is the one case the shape checks below cannot catch,
+	// because there is nothing malformed about what it leaves. The cut runs
+	// exactly once (see cutGitDirSuffix), so "widgets.git.git" leaves
+	// "widgets.git" — an interior dot, which nativeRepoRe rightly allows.
+	// Recommending it would send the user straight back into the guard that
+	// called this, refused a second time by the rule they had just been told.
+	if _, stillCarriesSuffix := cutGitDirSuffix(s); stillCarriesSuffix {
+		return "", false
+	}
 	if s == "" || !nativeRepoRe.MatchString(s) || strings.Contains(s, "..") || looksLikeULID(s) {
 		return "", false
 	}
