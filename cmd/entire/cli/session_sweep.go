@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/spawnmarker"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -203,9 +204,10 @@ const sessionSweepSpawnThrottle = 15 * time.Minute
 // sweepRecentlySpawned reports whether a detached sweep was spawned for this
 // repo within sessionSweepSpawnThrottle and, when it wasn't, records now as
 // the most recent spawn. Same flock-serialized marker mechanism as the
-// trail-enablement refresh (see recentlySpawnedMarker), with its own marker.
+// trail-enablement refresh (see spawnmarker.RecentlySpawned), with its own
+// marker.
 func sweepRecentlySpawned(commonDir string, now time.Time) bool {
-	return recentlySpawnedMarker(commonDir, "session-sweep-spawn", sessionSweepSpawnThrottle, now)
+	return spawnmarker.RecentlySpawned(commonDir, "session-sweep-spawn", sessionSweepSpawnThrottle, now)
 }
 
 // maybeSpawnSessionSweep fires one detached __sweep_sessions child when the

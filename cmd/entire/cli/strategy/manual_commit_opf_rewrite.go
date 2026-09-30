@@ -157,15 +157,11 @@ func resolveBootstrapLimit() int {
 	return bootstrapDefaultLimit
 }
 
-// OPFBatchTooLargeError: one OPF pass — a single checkpoint ref on
-// git-refs, the whole unpushed v1 chain on git-branch — has more
-// prose-leaf content than ENTIRE_OPF_BATCH_LIMIT will allow OPF to chew
-// through in one inference call. Pushing under the limit yields a single
-// ~10-30s pause; without the cap, a 100MB-of-prose push could take an hour.
-//
-// The user-facing remediation is identical in shape to
-// BootstrapTooLargeError: bump the limit, push without OPF, or break
-// the push into smaller pieces.
+// OPFBatchTooLargeError: one OPF unit of work — a single checkpoint ref on
+// git-refs, the whole unpushed v1 chain on git-branch — has more prose-leaf
+// content than ENTIRE_OPF_BATCH_LIMIT allows. See batchDefaultLimit: this is a
+// backstop against broken input, so hitting it says something about the
+// content, not about the size of the session.
 type OPFBatchTooLargeError struct {
 	LeafBytes int
 	Limit     int
@@ -173,17 +169,26 @@ type OPFBatchTooLargeError struct {
 
 func (e *OPFBatchTooLargeError) Error() string {
 	return fmt.Sprintf("OPF would run inference on %d prose-leaf bytes "+
-		"(limit %d). Set ENTIRE_OPF_BATCH_LIMIT=<bytes> or =unlimited to override, "+
-		"or push without OPF (ENTIRE_OPF=no git push) and let a smaller follow-up push run OPF",
+		"(limit %d). No real session should reach this limit, so check what this "+
+		"content is — a corrupted transcript or an accidentally-embedded binary is "+
+		"the likely explanation. If it really is content you want redacted, set "+
+		"ENTIRE_OPF_BATCH_LIMIT=<bytes> or =unlimited to override, or push without "+
+		"OPF (ENTIRE_OPF=no git push)",
 		e.LeafBytes, e.Limit)
 }
 
 const (
-	// batchDefaultLimit caps the cumulative prose-leaf bytes one push
-	// will hand to OPF. 2 MB at ~5.4s/100KB ≈ ~110s of inference, on
-	// the high end of what's acceptable as a single push pause but
-	// generous enough that any realistic push fits.
-	batchDefaultLimit = 2 * 1024 * 1024
+	// batchDefaultLimit caps the prose-leaf bytes of one OPF unit of work:
+	// one checkpoint ref on git-refs, the whole unpushed v1 chain on
+	// git-branch. It is a backstop against broken input (a corrupted
+	// transcript, an embedded binary, a multi-GiB paste), not a speed target:
+	// the model runs in the background scan worker in 1 MiB calls, so a large
+	// real session only takes longer. The largest real sessions measured hold
+	// a few MiB of prose (docs/development/opf-bug-investigation.md), so
+	// 128 MiB is far above anything real and well below redact's 256 MiB
+	// allocation wall, which keeps this check the one with an actionable
+	// message.
+	batchDefaultLimit = 128 * 1024 * 1024
 	batchEnvVar       = "ENTIRE_OPF_BATCH_LIMIT"
 )
 
@@ -240,12 +245,87 @@ func (e *OPFRawBytesTooLargeError) Error() string {
 		e.RawBytes, e.Limit, rawByteCapMultiplier)
 }
 
-// rawByteCapMultiplier ties the raw-byte RAM ceiling to the leaf-byte
-// inference cap. 100× means: leaf cap 2 MiB → raw ceiling 200 MiB.
-// Picked to comfortably exceed any realistic JSON-scaffolding ratio
-// (a 10 MiB JSONL with 300 KB of leaves still fits) while preventing
-// pathological RAM blowups (a 5 GiB pasted dump aborts before loading).
-const rawByteCapMultiplier = 100
+// rawByteCapMultiplier ties the raw-byte RAM ceiling to the leaf-byte cap
+// so one env var moves both: default leaf cap 128 MiB → raw ceiling 256 MiB.
+// The raw ceiling is the sized quantity (what one process may buffer at
+// once); the multiplier only preserves the order the error messages rely on.
+// Real transcripts run ~1.2× raw bytes per prose-leaf byte, so real content
+// at the leaf cap trips the leaf cap first.
+const rawByteCapMultiplier = 2
+
+// opfRewriteMode says whether a rewrite may run the OPF model itself.
+type opfRewriteMode int
+
+const (
+	// opfScanThenApply scans whatever the span cache lacks, then applies it.
+	// Used where waiting for the model is the point: the background scan
+	// worker and the explicit migration push.
+	opfScanThenApply opfRewriteMode = iota
+	// opfApplyCachedOnly never runs the model. The pre-push hook uses it so a
+	// user's git push never waits on inference; content the worker has not
+	// scanned yet surfaces as *OPFScanPendingError.
+	opfApplyCachedOnly
+)
+
+// OPFScanPendingError: the content to push has not been scanned by OPF yet.
+// Nothing was rewritten. It is not a failure — the scan worker is running or
+// about to, and delivers the content itself once the scan finishes.
+type OPFScanPendingError struct{}
+
+func (e *OPFScanPendingError) Error() string {
+	return "the OpenAI Privacy Filter has not finished scanning these checkpoints"
+}
+
+// OPFCacheUnavailableError: the OPF span cache in the git common dir cannot be
+// opened. Pre-push can then neither use earlier scan results nor hand work to
+// the scan worker, which needs the same cache, so the content is withheld with
+// the real cause instead of being reported as a scan in progress.
+type OPFCacheUnavailableError struct {
+	Cause error
+}
+
+func (e *OPFCacheUnavailableError) Error() string {
+	return fmt.Sprintf("cannot use the OpenAI Privacy Filter scan cache (%v); checkpoints are held "+
+		"until it is fixed. Check permissions and free space in the repository's .git directory, "+
+		"or set ENTIRE_OPF=no on the push to skip OPF for this push only", e.Cause)
+}
+
+func (e *OPFCacheUnavailableError) Unwrap() error { return e.Cause }
+
+// redactBlobsForOPFRewrite produces the OPF-redacted bytes for blobs through the
+// span cache in the git common dir. Without a usable cache it falls back to a
+// one-pass scan when mode allows the model, and returns *OPFCacheUnavailableError
+// when it does not.
+func redactBlobsForOPFRewrite(ctx context.Context, repo *git.Repository, blobs []redact.NamedBlob, mode opfRewriteMode) ([][]byte, error) {
+	cache, cacheErr := checkpoint.OPFSpanCacheForRepo(repo)
+	if cacheErr != nil {
+		if mode == opfApplyCachedOnly {
+			return nil, &OPFCacheUnavailableError{Cause: cacheErr}
+		}
+		out, err := redact.BatchBytesWithPrivacyFilter(ctx, blobs)
+		return out, opfRewriteRedactError(err)
+	}
+	if mode == opfScanThenApply {
+		if err := redact.ScanBlobsWithPrivacyFilter(ctx, blobs, cache); err != nil {
+			return nil, opfRewriteRedactError(err)
+		}
+	}
+	out, err := redact.ApplyCachedPrivacyFilter(blobs, cache)
+	if errors.Is(err, redact.ErrOPFScanPending) {
+		return nil, &OPFScanPendingError{}
+	}
+	return out, opfRewriteRedactError(err)
+}
+
+// opfRewriteRedactError maps a redact-layer failure onto the rewrite's error
+// taxonomy. ErrOPFNoEnabledCategories passes through for callers to convert to
+// their config-remediation error; anything else is a runtime failure.
+func opfRewriteRedactError(err error) error {
+	if err == nil || errors.Is(err, redact.ErrOPFNoEnabledCategories) {
+		return err
+	}
+	return &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
+}
 
 // RewriteUnpushedV1WithOPF re-redacts unpushed entire/checkpoints/v1
 // commits with OPF, builds new commits carrying Entire-OPF-Applied:
@@ -259,6 +339,14 @@ const rawByteCapMultiplier = 100
 // privacy-critical failures — the pre-push hook propagates these so
 // git push aborts.
 func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string) (plumbing.Hash, error) {
+	return rewriteUnpushedV1WithOPF(ctx, repo, target, opfScanThenApply)
+}
+
+// rewriteUnpushedV1WithOPF is RewriteUnpushedV1WithOPF with an explicit mode.
+// Under opfApplyCachedOnly it never runs the model and returns
+// *OPFScanPendingError, with the local ref untouched, when any unpushed commit
+// holds content the scan worker has not covered yet.
+func rewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string, mode opfRewriteMode) (plumbing.Hash, error) {
 	localTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("read local v1: %w", err)
@@ -309,7 +397,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	// before tagging any commits as OPF-applied. Without this, the
 	// per-blob fallback inside the no-OPF cases of BatchBytesWithPrivacyFilter
 	// could let regex-only content slip out with the trailer attached.
-	if redact.OPFBreakerTripped() {
+	if mode == opfScanThenApply && redact.OPFBreakerTripped() {
 		return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
 	}
 
@@ -330,11 +418,10 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	pendings := make([]pendingCommit, 0, len(unpushed))
 	// Bound raw-bytes-in-memory incrementally so a pathological push
 	// (e.g. 5 GiB of pasted dumps) aborts before exhausting the user's
-	// shell RAM. The leaf-byte cap downstream is about inference cost;
-	// this one is about memory ceiling and fires earlier.
+	// shell RAM. The leaf-byte cap downstream backstops implausible
+	// content; this one is a memory ceiling and fires earlier.
 	// rawByteCapForBatchLimit saturates at math.MaxInt so "unlimited"
-	// actually means unlimited — without saturation, "unlimited" × 100
-	// overflows int and the cap trips on every push.
+	// actually means unlimited instead of overflowing.
 	rawCap := rawByteCapForBatchLimit(resolveBatchLimit())
 	rawBudget := newOPFRawByteBudget(rawCap)
 	for _, c := range unpushed {
@@ -378,7 +465,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		if limit := resolveBatchLimit(); leafBytes > limit {
 			return plumbing.ZeroHash, &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}
 		}
-		globalRedacted, err = redact.BatchBytesWithPrivacyFilter(ctx, globalBlobs)
+		globalRedacted, err = redactBlobsForOPFRewrite(ctx, repo, globalBlobs, mode)
 		if err != nil {
 			// Converge with the up-front gate: the misconfiguration
 			// sentinel must surface config remediation, not "verify
@@ -386,7 +473,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 			if errors.Is(err, redact.ErrOPFNoEnabledCategories) {
 				return plumbing.ZeroHash, &OPFNoCategoriesError{}
 			}
-			return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
+			return plumbing.ZeroHash, err
 		}
 	}
 
@@ -685,7 +772,7 @@ func collectTreeBlobsWithinBudget(
 			if pathPrefix != "" {
 				fullPath = pathPrefix + "/" + e.Name
 			}
-			*blobs = append(*blobs, redact.NamedBlob{Name: e.Name, Content: content})
+			*blobs = append(*blobs, redact.NamedBlob{Name: e.Name, Content: content, ID: e.Hash.String()})
 			*paths = append(*paths, fullPath)
 		case filemode.Empty, filemode.Deprecated, filemode.Symlink, filemode.Submodule:
 			// Non-blob/non-tree entries are not redactable blobs.

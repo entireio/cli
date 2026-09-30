@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -312,7 +311,7 @@ func TestRewriteUnpushedV1WithOPF_NoEnabledCategoriesAbortsThenRepairs(t *testin
 	require.True(t, trailers.HasOPFApplied(repaired.Message))
 }
 
-func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
+func TestPrePushFromGitHook_UnscannedV1IsHeldForTheWorker(t *testing.T) {
 	fake := &fakeOPFForRewrite{}
 	configureFakeOPF(t, fake)
 
@@ -326,18 +325,44 @@ func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
+	spawns := swapOPFScanSpawn(t)
 
-	// The empty remote defers Entire's automatic metadata push. The OPF rewrite
-	// still must run because the user's outer git push may include v1 directly.
+	// Pre-push never runs the model: v1 has not been scanned, so it is held
+	// back, the user's push succeeds, and the scan worker is started for the
+	// remote this push named.
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
-
+	require.Zero(t, fake.batchCallCount(), "pre-push must not call the model")
+	require.Equal(t, []string{"origin"}, *spawns, "the worker must be spawned for the push's remote")
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
-	require.NotEqual(t, originalTip, ref.Hash(), "OPF rewrite must advance the local v1 ref before deferral")
-	commit, err := repo.CommitObject(ref.Hash())
+	require.Equal(t, originalTip, ref.Hash(), "a held v1 must not be rewritten by the hook")
+}
+
+// git-branch users whose checkpoints are held get one pointer to git-refs, not
+// one on every push.
+func TestPrePushFromGitHook_HintsGitRefsOnceForHeldV1(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	dir, repo, _ := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
 	require.NoError(t, err)
-	require.True(t, trailers.HasOPFApplied(commit.Message))
-	require.Equal(t, 1, fake.batchCallCount())
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	swapOPFScanSpawn(t)
+
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = oldWriter })
+
+	for range 2 {
+		require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	}
+	require.Equal(t, 1, strings.Count(buf.String(), "migrate-checkpoints"), "the hint must appear once, not per push")
+	require.Equal(t, 2, strings.Count(buf.String(), opfScanPendingNotice), "every held push still says why")
 }
 
 // Regression: the no-categories abort must reach the git hook boundary.
@@ -1037,10 +1062,8 @@ func queuedRefEntries(t *testing.T, repo *git.Repository) []checkpoint.PushQueue
 // Queued checkpoint refs are OPF-rewritten and stamped applied; a second run is
 // a no-op because the trailer marks them done (no re-scan, no ref movement).
 //
-// Scanning is scoped per ref — one OPF call per ref rather than one for the
-// whole flush — so an oversized ref's cap failure cannot take its siblings down
-// with it (see TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers).
-// The cost of that isolation is N shell-outs instead of 1.
+// Scanning is scoped per ref, so an oversized ref's cap failure cannot take its
+// siblings down with it (see TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers).
 func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.T) {
 	fake := &fakeOPFForRewrite{}
 	configureFakeOPF(t, fake)
@@ -1048,7 +1071,9 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.
 	before := refHashes(t, repo, refs)
 
 	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
-	require.Equal(t, 2, fake.batchCallCount(), "one OPF call per ref")
+	// Blobs the refs share are scanned once and then served from the span cache.
+	require.GreaterOrEqual(t, fake.batchCallCount(), 1)
+	firstRunCalls := fake.batchCallCount()
 
 	after := refHashes(t, repo, refs)
 	entries := queuedRefEntries(t, repo)
@@ -1064,7 +1089,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.
 	}
 
 	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
-	require.Equal(t, 2, fake.batchCallCount(), "already-applied refs must not be re-scanned")
+	require.Equal(t, firstRunCalls, fake.batchCallCount(), "already-applied refs must not be re-scanned")
 	require.Equal(t, after, refHashes(t, repo, refs), "already-applied refs must keep their exact hash")
 }
 
@@ -1184,7 +1209,7 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RawByteCapIsPerRef(t *testing.T) {
 	before := refHashes(t, repo, refs)
 
 	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
-	require.Equal(t, 2, fake.batchCallCount(), "each fitting ref must reach OPF")
+	require.GreaterOrEqual(t, fake.batchCallCount(), 1, "the fitting refs must reach OPF")
 	after := refHashes(t, repo, refs)
 	for i := range refs {
 		require.NotEqual(t, before[i], after[i])
@@ -1268,12 +1293,12 @@ func TestRewriteQueuedCheckpointRefsWithOPF_OversizedRefDoesNotBlockOthers(t *te
 	require.Equal(t, 1, fake.batchCallCount(), "only the ref that fits may reach OPF")
 }
 
-// Backend divergence: the v1 path aborts the user's push on OPF failure; the
-// refs path fails closed by withholding the flush instead — the user's push
-// succeeds, nothing un-OPF'd ships, and the refs stay queued.
-func TestPrePushCheckpointRefs_OPFFailureWithholdsFlush(t *testing.T) {
+// Pre-push never runs the model: unscanned refs are withheld, the user's push
+// succeeds, the user is told why, and nothing reaches the remote.
+func TestPrePushCheckpointRefs_UnscannedRefsAreWithheldWithNotice(t *testing.T) {
 	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
 	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	swapOPFScanSpawn(t)
 
 	var buf bytes.Buffer
 	oldWriter := stderrWriter
@@ -1281,15 +1306,24 @@ func TestPrePushCheckpointRefs_OPFFailureWithholdsFlush(t *testing.T) {
 	t.Cleanup(func() { stderrWriter = oldWriter })
 
 	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
-		"an OPF failure must not block the user's git push")
+		"unscanned checkpoints must not block the user's git push")
 
-	assert.Contains(t, buf.String(), "checkpoint ref", "the withheld push must be visible to the user")
-	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued for the next push")
-	lsCmd := exec.CommandContext(t.Context(), "git", "ls-remote", bareDir)
-	lsCmd.Env = testutil.GitIsolatedEnv()
-	out, err := lsCmd.CombinedOutput()
-	require.NoError(t, err, "ls-remote failed: %s", out)
-	assert.NotContains(t, string(out), refs[0].String(), "no ref may reach the remote when OPF failed")
+	assert.Contains(t, buf.String(), opfScanPendingNotice, "the held push must be visible to the user")
+	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "no unscanned ref may reach the remote")
+}
+
+// A worker whose model call fails delivers nothing: the refs stay queued and
+// off the remote, so the next push (or worker) tries again.
+func TestRunOPFScan_RuntimeFailureDeliversNothing(t *testing.T) {
+	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+
+	require.NoError(t, RunOPFScan(t.Context(), "origin"), "the worker is best-effort and never fails the process")
+	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "refs stay queued after a failed scan")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "no ref may reach the remote when OPF failed")
 }
 
 // With OPF off the git-refs path is unchanged: refs push as written, unrewritten.
@@ -1358,4 +1392,66 @@ func TestRewriteQueuedCheckpointRefsWithOPF_AncestryOverBootstrapLimit(t *testin
 	require.Equal(t, 2, tooLarge.Count)
 	require.Equal(t, 1, tooLarge.Limit)
 	require.Equal(t, before, refHashes(t, repo, refs), "an over-limit ancestry must not move any ref")
+}
+
+// Cache-only mode is what pre-push uses: it must never call the model, report
+// unscanned refs as pending with the refs untouched, and rewrite them without a
+// model call once a scan has filled the cache.
+func TestRewriteQueuedCheckpointRefsWithOPF_ApplyCachedOnly(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	before := refHashes(t, repo, refs)
+
+	err := rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, opfApplyCachedOnly)
+	var pending *OPFScanPendingError
+	require.ErrorAs(t, err, &pending)
+	require.Zero(t, fake.batchCallCount(), "cache-only mode must never call the model")
+	require.Equal(t, before, refHashes(t, repo, refs), "pending refs must be left untouched")
+
+	// Scan without rewriting, the way the worker fills the cache first.
+	blobs := checkpointRefBlobsForTest(t, repo, refs)
+	cache, err := checkpoint.OPFSpanCacheForRepo(repo)
+	require.NoError(t, err)
+	require.NoError(t, redact.ScanBlobsWithPrivacyFilter(t.Context(), blobs, cache))
+	scanCalls := fake.batchCallCount()
+
+	require.NoError(t, rewriteQueuedCheckpointRefsWithOPF(t.Context(), repo, opfApplyCachedOnly))
+	require.Equal(t, scanCalls, fake.batchCallCount(), "applying from the cache must not call the model")
+	after := refHashes(t, repo, refs)
+	for i := range refs {
+		commit, cErr := repo.CommitObject(after[i])
+		require.NoError(t, cErr)
+		require.True(t, trailers.HasOPFApplied(commit.Message))
+		require.NotContains(t, treeContents(t, repo, after[i]), "PERSONABC")
+	}
+}
+
+func TestRewriteUnpushedV1WithOPF_ApplyCachedOnly(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	repo, originalTip := setupV1Repo(t)
+
+	_, err := rewriteUnpushedV1WithOPF(context.Background(), repo, "origin", opfApplyCachedOnly)
+	var pending *OPFScanPendingError
+	require.ErrorAs(t, err, &pending)
+	require.Zero(t, fake.batchCallCount(), "cache-only mode must never call the model")
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "a pending v1 rewrite must not move the ref")
+}
+
+// checkpointRefBlobsForTest collects the redactable blobs of every commit on
+// refs, with their object IDs, the way the scan worker does.
+func checkpointRefBlobsForTest(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceName) []redact.NamedBlob {
+	t.Helper()
+	var blobs []redact.NamedBlob
+	for _, ref := range refs {
+		pending, err := collectCheckpointRefForOPF(repo, ref, rawByteCapForBatchLimit(resolveBatchLimit()), resolveBootstrapLimit())
+		require.NoError(t, err)
+		for _, c := range pending.commits {
+			blobs = append(blobs, c.blobs...)
+		}
+	}
+	return blobs
 }

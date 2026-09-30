@@ -588,6 +588,21 @@ func (s *EntireSettings) GoredactEnabled() bool {
 	return *s.Redaction.Goredact.Enabled
 }
 
+// OPFEnabled reports whether the OpenAI Privacy Filter layer is switched on.
+// Default: false.
+//
+// This is the SETTINGS answer, which is not the same question as
+// redact.OPFEnabled: that one reports the process-global runtime, and it only
+// becomes true once something has called EnsureRedactionConfigured. Read-only
+// surfaces that never configure the runtime — `entire status` — must ask here,
+// or they would report the filter as off in every repo that has it on.
+func (s *EntireSettings) OPFEnabled() bool {
+	if s == nil || s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil {
+		return false
+	}
+	return s.Redaction.OpenAIPrivacyFilter.Enabled
+}
+
 // ErrScannerConfig marks scanner-configuration failures. Consumers use
 // errors.Is to distinguish these (fail-closed) from ordinary settings
 // problems (warn-and-default).

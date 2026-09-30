@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -30,6 +31,31 @@ func opfSettingsBlock(command string) map[string]any {
 			"command":        command,
 		},
 	}
+}
+
+// waitForOPFScanWorker waits for the background OPF scan worker, which the
+// push starts and which is where the opf binary actually runs, to log that it
+// finished. Asserting on the marker before that would make the negative tests
+// pass vacuously.
+func waitForOPFScanWorker(t *testing.T, env *TestEnv) {
+	t.Helper()
+	logPath := filepath.Join(env.RepoDir, ".entire", "logs", "entire.log")
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "opf scan worker finished") {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(logPath) //nolint:errcheck // diagnostics only
+	var opfLines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "opf") || strings.Contains(line, "OPF") {
+			opfLines = append(opfLines, line)
+		}
+	}
+	t.Fatalf("the background OPF scan worker never reported finishing; OPF log lines:\n%s",
+		strings.Join(opfLines, "\n"))
 }
 
 // setupOPFAttack stages the attacker's payload inside the repo and returns the
@@ -56,10 +82,10 @@ func setupOPFAttack(t *testing.T, env *TestEnv) (marker, command string) {
 // holding a lock — but this test is what surfaced the hang, and a recurrence
 // still shows up here as a timeout.
 //
-// The push is expected to FAIL: with the command correctly ignored, OPF falls
-// back to resolving "opf" on $PATH, which is absent here, and the pre-push
-// rewrite fails closed rather than pushing content OPF never scanned. What
-// matters is which binary was reached — asserted via the marker.
+// With the command correctly ignored, OPF falls back to resolving "opf" on
+// $PATH: absent, the background scan fails closed; present, it scans with that
+// binary instead. Either way what matters is which binary was reached —
+// asserted via the marker once the worker has finished.
 func TestOPFCommandTrust_CommittedCommandIsNotExecuted(t *testing.T) {
 	t.Parallel()
 
@@ -76,6 +102,7 @@ func TestOPFCommandTrust_CommittedCommandIsNotExecuted(t *testing.T) {
 	_ = createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
 
 	err := env.GitPushWithHooksAllowError("origin", "HEAD")
+	waitForOPFScanWorker(t, env)
 
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatal("payload from a committed settings.json was EXECUTED during push")
@@ -111,11 +138,13 @@ func TestOPFCommandTrust_UntrackedLocalCommandIsExecuted(t *testing.T) {
 
 	_ = createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
 
-	// The push is expected to fail: the payload exits non-zero, so OPF fails
-	// closed. Reaching the binary at all is the point here.
-	if pushErr := env.GitPushWithHooksAllowError("origin", "HEAD"); pushErr == nil {
-		t.Log("push succeeded; OPF still resolved the local command")
+	// The push itself succeeds: OPF runs in the background worker it starts.
+	// The payload exits non-zero there, so the scan fails closed; reaching the
+	// binary at all is the point here.
+	if pushErr := env.GitPushWithHooksAllowError("origin", "HEAD"); pushErr != nil {
+		t.Logf("push failed: %v", pushErr)
 	}
+	waitForOPFScanWorker(t, env)
 
 	if _, statErr := os.Stat(marker); statErr != nil {
 		t.Fatal("a developer-owned local command must still be honored; " +
@@ -143,6 +172,9 @@ func TestOPFCommandTrust_CommittedLocalFileIsNotExecuted(t *testing.T) {
 
 	_ = createCheckpointedCommit(t, env, "Add auth module", "auth.go", "package auth", "Add auth module")
 
+	// The whole committed layer is ignored, and it was the only place OPF was
+	// enabled, so OPF is off: no background worker starts and there is nothing
+	// to wait for before checking the marker.
 	if pushErr := env.GitPushWithHooksAllowError("origin", "HEAD"); pushErr == nil {
 		t.Log("push succeeded")
 	}
