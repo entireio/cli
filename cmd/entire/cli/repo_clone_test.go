@@ -42,6 +42,14 @@ func TestParseMirrorCloneRef(t *testing.T) {
 		// part of a name, so it is only ever decoration.
 		{name: "git suffix is dropped", ref: "/gh/entirehq/entire-api.git", wantOwner: "entirehq", wantRepo: "entire-api"},
 		{name: "git suffix dropped from a dotted name", ref: "/gh/entirehq/trails.el.git", wantOwner: "entirehq", wantRepo: "trails.el"},
+		// This branch lowercases before it cuts, so a ".GIT" ref already
+		// worked — by ordering, not by intent. Pin it: the sibling native
+		// parser and the mirror-URL parser both got the order wrong, and
+		// nothing here said which of the two arrangements was load-bearing.
+		{name: "uppercase git suffix is dropped", ref: "/gh/entirehq/entire-api.GIT", wantOwner: "entirehq", wantRepo: "entire-api"},
+		{name: "mixed-case git suffix is dropped", ref: "/gh/EntireHQ/Entire-API.Git", wantOwner: "entirehq", wantRepo: "entire-api"},
+		{name: "uppercase suffix alone leaves no name", ref: "/gh/entirehq/.GIT", wantErr: true},
+		{name: "gitignore is not the suffix", ref: "/gh/entirehq/entire-api.gitignore", wantOwner: "entirehq", wantRepo: "entire-api.gitignore"},
 		// `..git` is not dot-only as typed; it becomes so once the suffix goes,
 		// which is why the trim has to run first.
 		{name: "dot-only once the suffix is dropped", ref: "/gh/entirehq/..git", wantErr: true},
@@ -92,6 +100,19 @@ func TestParseNativeCloneRef(t *testing.T) {
 		{name: "git suffix is dropped", ref: "/et/paul/dogbark.git", wantProject: "paul", wantRepo: "dogbark"},
 		{name: "git suffix dropped from a dotted name", ref: "/et/paul/entire-trails.el.git", wantProject: "paul", wantRepo: "entire-trails.el"},
 		{name: "only the last git suffix is dropped", ref: "/et/paul/dogbark.git.git", wantProject: "paul", wantRepo: "dogbark.git"},
+		// A repo transport path accepts this suffix whatever its case, so
+		// `git clone` resolves a ".GIT" path. A case-sensitive cut here made
+		// `entire repo clone` the one client that could not follow a URL
+		// git had just handled.
+		{name: "uppercase git suffix is dropped", ref: "/et/paul/dogbark.GIT", wantProject: "paul", wantRepo: "dogbark"},
+		{name: "mixed-case git suffix is dropped", ref: "/et/paul/dogbark.Git", wantProject: "paul", wantRepo: "dogbark"},
+		{name: "uppercase suffix dropped from a dotted name", ref: "/et/paul/entire-trails.el.GIT", wantProject: "paul", wantRepo: "entire-trails.el"},
+		{name: "only the last suffix goes, whatever its case", ref: "/et/paul/dogbark.git.GIT", wantProject: "paul", wantRepo: "dogbark.git"},
+		{name: "uppercase suffix alone leaves no name", ref: "/et/paul/.GIT", wantErr: true},
+		// A longer extension that merely starts with the suffix is a name,
+		// not decoration, and must survive in every case.
+		{name: "gitignore is not the suffix", ref: "/et/paul/dogbark.gitignore", wantProject: "paul", wantRepo: "dogbark.gitignore"},
+		{name: "GITIGNORE is not the suffix", ref: "/et/paul/dogbark.GITIGNORE", wantProject: "paul", wantRepo: "dogbark.GITIGNORE"},
 		{name: "single-char repo", ref: "/et/paul/x", wantProject: "paul", wantRepo: "x"},
 		{name: "shortest project", ref: "/et/abc/dogbark", wantProject: "abc", wantRepo: "dogbark"},
 		{name: "longest project", ref: "/et/" + maxProject + "/dogbark", wantProject: maxProject, wantRepo: "dogbark"},

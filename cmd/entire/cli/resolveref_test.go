@@ -380,11 +380,20 @@ func TestResolveRepoInProject_GitSuffixMissCarriesHint(t *testing.T) {
 			t.Errorf("encode empty: %v", err)
 		}
 	})
-	_, err := resolveRepoRef(context.Background(), c, "web.git", ulidProjectWidgets)
-	require.Error(t, err)
-	require.ErrorIs(t, err, errNamedRefNotFound)
-	require.Contains(t, err.Error(), `no repo named "web.git"`)
-	require.Contains(t, err.Error(), "drop the suffix")
+	// Every case of the suffix earns the hint. A user who typed ".GIT" has
+	// exactly the misconception the hint exists to correct, and used to be
+	// the one person it stayed silent for.
+	for _, name := range []string{"web.git", "web.GIT", "web.Git", "web.gIt"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := resolveRepoRef(context.Background(), c, name, ulidProjectWidgets)
+			require.Error(t, err)
+			require.ErrorIs(t, err, errNamedRefNotFound)
+			require.Contains(t, err.Error(), `no repo named "`+name+`"`)
+			require.Contains(t, err.Error(), "drop the suffix")
+			require.Contains(t, err.Error(), `"web"`)
+		})
+	}
 }
 
 // TestResolveRepoInProject_PlainMissHasNoHint pins that the hint is scoped to

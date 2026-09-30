@@ -414,7 +414,8 @@ func parseExpertsRepo(value string) (string, error) {
 	// Trimmed before the checks below, so a name the trim empties (".git") or
 	// turns dot-only ("..git" → ".") is refused here rather than forwarded to
 	// placement resolution. See dotOnlyRe.
-	owner, repo := parts[0], strings.TrimSuffix(parts[1], gitDirSuffix)
+	owner := parts[0]
+	repo, _ := cutGitDirSuffix(parts[1])
 	if owner == "" || repo == "" || dotOnlyRe.MatchString(owner) || dotOnlyRe.MatchString(repo) {
 		return "", fmt.Errorf("invalid --repo %q (use owner/repo)", value)
 	}

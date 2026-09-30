@@ -143,16 +143,28 @@ and recovery instructions go to stderr.`,
 		},
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Refuse a name that ends in `.git`. The suffix is never part of a
-			// repo name (see gitDirSuffix): every ref parser drops it, so the
-			// name would round-trip to a different string than the one typed.
-			// The server refuses it too; saying so here costs no round trip and
-			// names the spelling to use instead.
-			if name := strings.TrimSpace(args[0]); strings.HasSuffix(name, gitDirSuffix) {
+			// Refuse a name that ends in `.git`, whatever its case. The suffix
+			// is never part of a repo name (see gitDirSuffix): every ref
+			// parser drops it, so the name would round-trip to a different
+			// string than the one typed. The server refuses it too; saying so
+			// here costs no round trip and names the spelling to use instead.
+			//
+			// The case-insensitive cut is what makes that promise hold. A
+			// case-sensitive check let ".GIT" through to the server, which
+			// rejects it for carrying uppercase — a true statement about a
+			// different problem, leaving the user to discover the suffix rule
+			// on a second attempt.
+			//
+			// The trimmed name is what gets checked AND what gets sent
+			// (see body below): a guard reading one value while another
+			// travels is a disagreement waiting for the server to stop
+			// covering for it.
+			name := strings.TrimSpace(args[0])
+			if rest, had := cutGitDirSuffix(name); had {
 				cmd.SilenceUsage = true
-				err := fmt.Errorf("repo name %q must not end in %s: the suffix is never part of a repo name, so Entire could not address the repo by the name you typed", name, gitDirSuffix)
-				if trimmed := strings.TrimSuffix(name, gitDirSuffix); trimmed != "" {
-					err = fmt.Errorf("%w (use %q)", err, trimmed)
+				err := fmt.Errorf("repo name %q must not end in %s, in any case: the suffix is never part of a repo name, so Entire could not address the repo by the name you typed", name, gitDirSuffix)
+				if rest != "" {
+					err = fmt.Errorf("%w (use %q)", err, rest)
 				}
 				return err
 			}
@@ -172,7 +184,7 @@ and recovery instructions go to stderr.`,
 				if err != nil {
 					return err
 				}
-				body := &coreapi.CreateRepoInputBody{Name: args[0], ProjectId: projID}
+				body := &coreapi.CreateRepoInputBody{Name: name, ProjectId: projID}
 				if format != "" {
 					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
 				}

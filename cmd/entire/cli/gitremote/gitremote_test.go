@@ -161,6 +161,43 @@ func TestParseURL(t *testing.T) {
 			url:      "git@github.com:org/repo.git.git",
 			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo.git"},
 		},
+		{
+			// Case is not part of the suffix. Entire's data plane cuts it
+			// with EqualFold, so a `.GIT` remote resolves over the wire;
+			// a case-sensitive cut here would report a different repo name
+			// than the server the very same URL reaches.
+			name:     "entire:// native drops an uppercase .GIT",
+			url:      "entire://entirehost/et/audit1/foo.GIT",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "et", Owner: "audit1", Repo: "foo"},
+		},
+		{
+			name:     "entire:// mirror drops a mixed-case .Git",
+			url:      "entire://entirehost/gh/entireio/cli.Git",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "gh", Owner: "entireio", Repo: "cli"},
+		},
+		{
+			name:     "HTTPS drops an uppercase .GIT",
+			url:      "https://github.com/org/repo.GIT",
+			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			name:     "SCP drops a mixed-case .Git",
+			url:      "git@github.com:org/repo.Git",
+			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
+		},
+		{
+			// Still exactly one cut, whatever the cases involved.
+			name:     "entire:// native drops only the last suffix, whatever its case",
+			url:      "entire://entirehost/et/audit1/foo.GIT.git",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "et", Owner: "audit1", Repo: "foo.GIT"},
+		},
+		{
+			// A longer dotted extension merely starts with the suffix; it
+			// is part of the name and must survive in every case.
+			name:     "entire:// native keeps a .gitignore name",
+			url:      "entire://entirehost/et/audit1/foo.gitignore",
+			wantInfo: &Info{Protocol: ProtocolEntire, Host: "entirehost", Forge: "et", Owner: "audit1", Repo: "foo.gitignore"},
+		},
 	}
 
 	for _, tt := range tests {

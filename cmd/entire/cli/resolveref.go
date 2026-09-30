@@ -544,7 +544,7 @@ func noRepoNamedErr(name string) error {
 	// The hint is built into the message rather than wrapped around the error:
 	// repository routing classifies a definitive miss through
 	// errNamedRefNotFound, and wrapping would either hide that or duplicate it.
-	if trimmed, had := strings.CutSuffix(name, gitDirSuffix); had && trimmed != "" {
+	if trimmed, had := cutGitDirSuffix(name); had && trimmed != "" {
 		msg += fmt.Sprintf("; %q is never part of a repo name, so if you meant %q, drop the suffix", gitDirSuffix, trimmed)
 	}
 	return &namedRefNotFoundError{message: msg}

@@ -79,6 +79,29 @@ const (
 // never part of a repo name on any forge — see splitOwnerRepo.
 const gitDirSuffix = ".git"
 
+// cutGitDirSuffix removes a trailing gitDirSuffix in ANY case, reporting
+// whether one was there.
+//
+// This duplicates cli.cutGitDirSuffix, which carries the full reasoning. The
+// duplication is structural: this package cannot import its parent, which is
+// why the gitDirSuffix constant is already spelled twice. A change to either
+// has to be mirrored in the other.
+//
+// The short version: case-insensitive, because a repo transport path accepts
+// the suffix whatever its case. This package exists to tell callers which
+// repository a remote URL names, and that answer has to be the one the server
+// dialing that URL would give.
+func cutGitDirSuffix(path string) (string, bool) {
+	if len(path) < len(gitDirSuffix) {
+		return path, false
+	}
+	cut := len(path) - len(gitDirSuffix)
+	if !strings.EqualFold(path[cut:], gitDirSuffix) {
+		return path, false
+	}
+	return path[:cut], true
+}
+
 // pathForges are the forge tokens Entire uses in an entire:// URL path
 // (`entire://<cluster-host>/<forge>/…`), mapped to the placeholder spelling of
 // the two segments that follow — a mirror is addressed by owner, a native repo
@@ -380,6 +403,14 @@ func ResolveRemoteRepo(ctx context.Context, remoteName string) (forge, owner, re
 // git strips it exactly once too (one strip_suffix_mem in git_url_basename), so
 // "repo.git.git" names "repo.git" here and clones into "repo.git" there.
 //
+// Where this deliberately PARTS WAYS with git_url_basename is case: git's is a
+// case-sensitive strncmp, because it is guessing a local directory name and a
+// wrong guess costs the user a `mv`. This function answers a different
+// question — which repository a remote names — and the authority on that is
+// the server, which accepts the suffix on a transport path whatever its case.
+// Matching git here instead would mean reporting one repo name for a URL the
+// server resolves to another. See cutGitDirSuffix.
+//
 // Trailing separators go FIRST, which is also git's order. Trimming the suffix
 // first leaves "p/foo.git/" spelled with the suffix intact — a trailing slash is
 // exactly what a pasted URL carries — and lets "o/../" reach the dot-only guard
@@ -390,7 +421,7 @@ func ResolveRemoteRepo(ctx context.Context, remoteName string) (forge, owner, re
 // would turn the control-character rejection below into a silent accept.
 func splitOwnerRepo(path string) (string, string, error) {
 	path = strings.TrimRight(path, "/")
-	path = strings.TrimSuffix(path, gitDirSuffix)
+	path, _ = cutGitDirSuffix(path)
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("cannot parse owner/repo from path: %s", path)

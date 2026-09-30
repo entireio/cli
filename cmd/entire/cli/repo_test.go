@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -399,12 +400,16 @@ func TestRepoCreate_WarnsOnInvalidServerHost(t *testing.T) {
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
 func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
-	for _, name := range []string{"web.git", "trails.el.git"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range gitSuffixCases {
+		t.Run(tc.in, func(t *testing.T) {
 			bodyCh := serveRepoCreate(t)
-			err := execRepoCreateNamed(t, name)
+			err := execRepoCreateNamed(t, tc.in)
 			require.ErrorContains(t, err, gitDirSuffix)
-			require.ErrorContains(t, err, strings.TrimSuffix(name, gitDirSuffix))
+			if tc.rest != "" {
+				// The refusal earns its round trip only by naming the
+				// spelling to use instead.
+				require.ErrorContains(t, err, tc.rest)
+			}
 			select {
 			case raw := <-bodyCh:
 				t.Fatalf("no create request expected, got body %s", raw)
@@ -413,13 +418,56 @@ func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
 		})
 	}
 
-	t.Run("a dotted name that does not end in the suffix is accepted", func(t *testing.T) {
-		bodyCh := serveRepoCreate(t)
-		require.NoError(t, execRepoCreateNamed(t, "trails.el"))
-		var body map[string]any
-		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
-		require.Equal(t, "trails.el", body["name"])
-	})
+	// Surrounding whitespace is trimmed before the suffix is looked for, so a
+	// padded name is refused exactly as the bare one is. A shell that expands
+	// an empty variable into the argument is the ordinary way this happens,
+	// and the refusal must not depend on the padding being absent.
+	for _, name := range []string{" web.git", "web.git ", "  web.GIT  ", "\tweb.Git\n"} {
+		t.Run("padded "+strconv.Quote(name), func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			err := execRepoCreateNamed(t, name)
+			require.ErrorContains(t, err, gitDirSuffix)
+			require.ErrorContains(t, err, "web")
+			// The message quotes the trimmed name: echoing the padding back
+			// would show the user a spelling they cannot tell apart from
+			// the one they typed.
+			require.NotContains(t, err.Error(), strconv.Quote(name))
+			select {
+			case raw := <-bodyCh:
+				t.Fatalf("no create request expected, got body %s", raw)
+			default:
+			}
+		})
+	}
+
+	for _, name := range gitSuffixNonCases {
+		t.Run("accepted "+name, func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			require.NoError(t, execRepoCreateNamed(t, name))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+			require.Equal(t, name, body["name"])
+		})
+	}
+}
+
+// TestRepoCreate_SendsTrimmedName pins that the name checked and the name sent
+// are the same string. `repo create` validates the trimmed argument, so
+// putting the raw one on the wire left a seam: the server trims too, which is
+// the only reason it never showed. A check that guards one value while a
+// different value travels is a latent disagreement, not a working design.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_SendsTrimmedName(t *testing.T) {
+	for _, name := range []string{"  web  ", "\tweb\n", "web "} {
+		t.Run(strconv.Quote(name), func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			require.NoError(t, execRepoCreateNamed(t, name))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+			require.Equal(t, "web", body["name"])
+		})
+	}
 }
 
 // TestRepoCreate_HasNoClusterHostFlag pins that a repo's home cluster is not
