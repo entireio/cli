@@ -315,8 +315,8 @@ func TestResolveCallerSession_MatchesOwnerByProcessAncestry(t *testing.T) {
 	}
 }
 
-// What the environment tier is actually for, now that a nearer owner outranks
-// it: naming a session ancestry cannot rank. A session whose owner was never
+// What the environment tier is for besides breaking ties at equal depth, now
+// that a nearer owner outranks it: naming a session ancestry cannot rank. A session whose owner was never
 // recorded (no turn has started yet) is invisible to the process walk, and on
 // a platform that cannot introspect at all the walk finds nothing — the
 // published ID is the only evidence there is, and it is good evidence.

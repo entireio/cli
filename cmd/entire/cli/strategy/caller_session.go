@@ -42,9 +42,10 @@ const (
 	// ResolutionCallerAmbiguous means we are demonstrably inside an agent
 	// session but cannot say which: several agents claim us and nothing
 	// ordered their claims — no owner recorded on any of them, or a platform
-	// that cannot introspect processes. The reported session is the most
-	// plausible of them and explicitly a guess, so this does NOT satisfy
-	// IsCaller.
+	// that cannot introspect processes — or several sessions share our
+	// nearest owner process and neither the environment nor their phase tells
+	// them apart. The reported session is the most plausible of them and
+	// explicitly a guess, so this does NOT satisfy IsCaller.
 	//
 	// Reported rather than resolved on purpose. Picking one and calling it
 	// "your own session" is the failure this whole type exists to prevent, and
@@ -159,16 +160,6 @@ func ResolveCallerSession(ctx context.Context) ResolvedSession {
 	return ResolvedSession{Resolution: ResolutionNone}
 }
 
-// callerCandidate is one session that might be running us, with the evidence
-// for it: whether the environment named it, and how near its owner process is
-// in our ancestry (-1 when it could not be placed there at all).
-type callerCandidate struct {
-	state     *SessionState
-	agentType types.AgentType
-	envNamed  bool
-	depth     int
-}
-
 // resolveCallerIdentity identifies the session running this process from the
 // environment and the process tree together, or reports that it cannot.
 //
@@ -179,7 +170,8 @@ type callerCandidate struct {
 // Ancestry says which owner is nearest, but only for sessions that recorded an
 // owner (turn start), and not at all on a platform that cannot introspect
 // processes. So candidates are gathered from either signal and ranked by
-// depth, with the environment breaking ties depth cannot.
+// pickOwner: depth first, with the environment and then the session's phase
+// breaking ties depth cannot.
 func resolveCallerIdentity(ctx context.Context, states []*SessionState) (ResolvedSession, bool) {
 	claims := agent.CallerSessionCandidates()
 	claimedBy := make(map[string]types.AgentType, len(claims))
@@ -196,13 +188,13 @@ func resolveCallerIdentity(ctx context.Context, states []*SessionState) (Resolve
 		ancestry, haveAncestry = proclive.CurrentAncestry()
 	}
 
-	var candidates []callerCandidate
+	var candidates []ownerCandidate
 	placedClaims := make(map[string]bool, len(claimedBy))
 	for _, state := range states {
 		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" {
 			continue
 		}
-		agentType, envNamed := claimedBy[state.SessionID]
+		_, envNamed := claimedBy[state.SessionID]
 		depth := -1
 		if haveAncestry && state.Owner != nil {
 			depth = ancestry.Depth(*state.Owner)
@@ -213,28 +205,22 @@ func resolveCallerIdentity(ctx context.Context, states []*SessionState) (Resolve
 		if envNamed && depth >= 0 {
 			placedClaims[state.SessionID] = true
 		}
-		if !envNamed {
-			agentType = state.AgentType
-		}
-		candidates = append(candidates, callerCandidate{
-			state: state, agentType: agentType, envNamed: envNamed, depth: depth,
-		})
+		candidates = append(candidates, ownerCandidate{state: state, depth: depth, envNamed: envNamed})
 	}
 
 	if len(candidates) == 0 {
 		return resolveUntrackedClaims(ctx, claims)
 	}
 
-	best := candidates[0]
-	for _, candidate := range candidates[1:] {
-		if isNearerOwner(candidate.depth, best.depth, candidate.state, best.state) {
-			best = candidate
-		}
+	best, decided := pickOwner(candidates)
+	agentType := best.state.AgentType
+	if best.envNamed {
+		agentType = claimedBy[best.state.SessionID]
 	}
 
 	resolution := ResolutionCallerEnv
 	switch {
-	case !claimsRuledOut(claimedBy, placedClaims, best.state.SessionID, best.depth):
+	case !decided, !claimsRuledOut(claimedBy, placedClaims, best.state.SessionID, best.depth):
 		resolution = ResolutionCallerAmbiguous
 	case !best.envNamed:
 		resolution = ResolutionAncestry
@@ -243,7 +229,7 @@ func resolveCallerIdentity(ctx context.Context, states []*SessionState) (Resolve
 	resolved := ResolvedSession{
 		SessionID:  best.state.SessionID,
 		Resolution: resolution,
-		AgentType:  best.agentType,
+		AgentType:  agentType,
 		Tracked:    true,
 	}
 	logging.Debug(logging.WithComponent(ctx, "session"),
@@ -272,9 +258,10 @@ func resolveCallerIdentity(ctx context.Context, states []*SessionState) (Resolve
 // than that, so no unplaced claim can shadow it however many there are. Note
 // the exemption claims only that: nothing NEARER. An unplaced claim whose
 // owner happens to be that same parent process — one agent process hosting two
-// sessions after a resume — is equally near and invisible, which is the
-// residual this cannot close. Equal depth is the case recency breaks when both
-// sides are placed; here one side cannot be seen at all.
+// sessions, one after another after a resume or at once as the Codex
+// app-server daemon does — is equally near and invisible, which is the
+// residual this cannot close. Equal depth is the case pickOwner breaks when
+// both sides are placed; here one side cannot be seen at all.
 //
 // A claim that IS the winner shadows nothing — it is the thing being believed.
 // This is the ordinary single-agent shape: one variable, one session, whose

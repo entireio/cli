@@ -26,10 +26,11 @@ hop away in our ancestry. The resolver reported the outer session as
 `caller-env` and `IsCaller()` true — "safe to act on" — which is exactly the
 mistake the type exists to prevent. Depth is the only signal that separates
 "Codex ran me" from "Codex ran opencode ran me", so the nearest owner wins
-wherever ancestry can rank at all. The environment's remaining job is real and
-narrower: naming a session ancestry *cannot* rank — one whose owner was never
-recorded (no turn yet), or any session on a platform that cannot introspect
-processes.
+wherever ancestry can rank at all. The environment's remaining jobs are real
+and narrower: breaking a tie between sessions of one owner process, which the
+Codex app-server daemon makes common, and naming a session ancestry *cannot*
+rank — one whose owner was never recorded (no turn yet), or any session on a
+platform that cannot introspect processes.
 
 `session tokens` preserves this provenance in its JSON `resolution` field and
 in text/agent-brief `Resolved:` lines (omitted for an explicit session ID).
@@ -46,7 +47,9 @@ no owner to compare, or tracked with no owner recorded yet — therefore sits at
 an unmeasured depth, and unmeasured means possibly nearer. Exactly two
 exemptions: a winner at depth 0 owns our immediate parent, so nothing can be
 nearer; and a claim that IS the winner shadows nothing, which is the ordinary
-single-agent shape.
+single-agent shape. The tier also reports `caller-ambiguous` when several
+sessions share the nearest owner and nothing tells them apart (`pickOwner`,
+below).
 
 Three revisions of this rule were wrong in review, each in the same direction —
 overclaiming identification — and the sequence is worth knowing because the
@@ -151,8 +154,14 @@ nobody asked with someone else's session.
 Several tier-1 claims at once is the normal **nested** case, not a conflict: a
 `codex exec` run from Claude Code's shell tool inherits the outer agent's
 variables through the inner agent's process. Tracked claims are ranked by
-ancestry depth (nearest wins), then by most recent interaction when ancestry
-cannot separate them.
+ancestry depth (nearest wins); at equal depth the sessions the environment
+named win, then those that have not ended, judged by their phase rather than
+their owner's liveness. Sessions still tied are `caller-ambiguous`, with the
+most recently interacting of them reported as the guess. Equal depth is not
+rare: Codex runs its TUI sessions in one app-server daemon, so they all share
+one owner, and recency there names whichever session last crossed a turn
+boundary. The rule is `pickOwner`, shared with commit linking, where a tie
+links only the worktree-matched sessions.
 
 **Tests that touch this must clear the variables**, derived from
 `agent.CallerSessionEnvVars()` rather than hand-listed. `go test` is routinely

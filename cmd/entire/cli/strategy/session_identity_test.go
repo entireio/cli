@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -85,7 +86,7 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		})
 
 		s := NewManualCommitStrategy()
-		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s))
+		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), nil)
 		require.NotNil(t, got)
 		assert.Equal(t, "sess-agent", got.SessionID, "identity match must ignore worktree paths")
 	})
@@ -98,7 +99,7 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		})
 
 		s := NewManualCommitStrategy()
-		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s)))
+		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), nil))
 	})
 
 	t.Run("dead process refs cannot match a recycled PID", func(t *testing.T) {
@@ -113,7 +114,7 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		})
 
 		s := NewManualCommitStrategy()
-		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s)))
+		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), nil))
 	})
 
 	t.Run("imported sessions never match", func(t *testing.T) {
@@ -126,7 +127,7 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		})
 
 		s := NewManualCommitStrategy()
-		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s)))
+		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), nil))
 	})
 
 	t.Run("sessions without a worktree never match", func(t *testing.T) {
@@ -138,14 +139,14 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		})
 
 		s := NewManualCommitStrategy()
-		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s)))
+		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), nil))
 	})
 
 	t.Run("nested agent beats outer agent: nearest ancestor wins over recency", func(t *testing.T) {
 		// Two real ancestors at different depths stand in for a nested agent
 		// (nearer the commit) and the outer agent that spawned it. Depth must
-		// decide the winner; interaction recency is only a tiebreak within one
-		// depth — so the nearer, less recently interacting session wins.
+		// decide the winner whatever the recency — so the nearer, less recently
+		// interacting session wins.
 		dir := identityTestRepo(t)
 		ancestry, ok := proclive.CurrentAncestry()
 		require.True(t, ok)
@@ -166,32 +167,127 @@ func TestFindSessionByCommitAncestry(t *testing.T) {
 		})
 
 		s := NewManualCommitStrategy()
-		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s))
+		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), nil)
 		require.NotNil(t, got)
 		assert.Equal(t, "sess-nested", got.SessionID,
 			"the session whose agent is closest to the commit is its author, regardless of which interacted last")
 	})
 
-	t.Run("same agent recorded by two sessions: latest interaction wins", func(t *testing.T) {
-		// A resumed agent process produces a new session ID with the same
-		// ancestry; the commit belongs to the one currently interacting.
+	t.Run("same agent recorded by two sessions: the one that has not ended wins", func(t *testing.T) {
+		// Sessions of one agent process end at different times. One that
+		// ended while the other was mid-turn — a Codex TUI closed under the
+		// shared daemon — interacted last, yet the commit belongs to the live
+		// one.
 		dir := identityTestRepo(t)
 		anc := selfAncestorOwner(t)
 		old := time.Now().Add(-2 * time.Hour)
-		saveIdentitySession(t, "sess-old", func(st *SessionState) {
+		saveIdentitySession(t, "sess-ended", func(st *SessionState) {
+			st.Owner = anc
+			st.Phase = session.PhaseEnded
+			st.WorktreePath = dir
+		})
+		saveIdentitySession(t, "sess-live", func(st *SessionState) {
 			st.Owner = anc
 			st.LastInteractionTime = &old
 			st.WorktreePath = dir
 		})
-		saveIdentitySession(t, "sess-new", func(st *SessionState) {
-			st.Owner = anc
+
+		s := NewManualCommitStrategy()
+		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), nil)
+		require.NotNil(t, got)
+		assert.Equal(t, "sess-live", got.SessionID)
+	})
+
+	t.Run("a nearer owner beats the session the environment names", func(t *testing.T) {
+		// An inner agent that publishes no ID forwards the outer agent's
+		// variable, so the claim names the outer session.
+		dir := identityTestRepo(t)
+		ancestry, ok := proclive.CurrentAncestry()
+		require.True(t, ok)
+		chain := ancestry.Chain()
+		if len(chain) < 2 {
+			t.Skip("test process has fewer than two introspectable ancestors")
+		}
+		nested, outer := chain[0], chain[1]
+		saveIdentitySession(t, "sess-nested", func(st *SessionState) {
+			st.Owner = &nested
+			st.WorktreePath = dir
+		})
+		saveIdentitySession(t, "sess-outer", func(st *SessionState) {
+			st.Owner = &outer
 			st.WorktreePath = dir
 		})
 
 		s := NewManualCommitStrategy()
-		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s))
+		got := s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), []agent.CallerSessionCandidate{{SessionID: "sess-outer"}})
 		require.NotNil(t, got)
-		assert.Equal(t, "sess-new", got.SessionID)
+		assert.Equal(t, "sess-nested", got.SessionID)
+	})
+
+	t.Run("a claim alone links nothing", func(t *testing.T) {
+		// A process can carry an agent's variable without being run by that
+		// agent, so the claim only chooses among sessions ancestry placed.
+		dir := identityTestRepo(t)
+		saveIdentitySession(t, "sess-named", func(st *SessionState) {
+			owner := *selfAncestorOwner(t)
+			owner.Start += "-another-process"
+			st.Owner = &owner
+			st.WorktreePath = dir
+		})
+
+		s := NewManualCommitStrategy()
+		assert.Nil(t, s.findSessionByCommitAncestry(ctx, mustListStates(ctx, t, s), []agent.CallerSessionCandidate{{SessionID: "sess-named"}}))
+	})
+}
+
+// Regression for #2612: Codex runs its TUI sessions in one app-server daemon,
+// so a session in the main checkout and one in a linked worktree record the
+// same owner, at the same depth of any commit either makes. Recency broke that tie for both the commit and the caller: the
+// commit guest-linked whichever session last crossed a turn boundary, and the
+// caller resolved to it as identified, even while CODEX_SESSION_ID named the
+// committing session.
+//
+// Not parallel: uses t.Chdir() and t.Setenv()
+func TestSharedOwner_CommitAndCallerFollowTheEnvironment(t *testing.T) {
+	ctx := context.Background()
+	clearCallerSessionEnv(t)
+	dir := identityTestRepo(t)
+	sibling := addSiblingWorktree(t, dir, "codex")
+	daemon := selfAncestorOwner(t)
+	old := time.Now().Add(-time.Hour)
+	saveIdentitySession(t, "sess-committing", func(st *SessionState) {
+		st.Owner = daemon
+		st.LastInteractionTime = &old
+		st.WorktreePath = dir
+	})
+	saveIdentitySession(t, "sess-sibling", func(st *SessionState) {
+		st.Owner = daemon
+		st.WorktreePath = sibling
+	})
+	s := NewManualCommitStrategy()
+
+	t.Run("named by the environment", func(t *testing.T) {
+		t.Setenv("CODEX_SESSION_ID", "sess-committing")
+
+		linked, err := s.findSessionsForCommitLinking(ctx, dir)
+		require.NoError(t, err)
+		require.Len(t, linked, 1, "the sibling worktree's session must not be guest-linked")
+		assert.Equal(t, "sess-committing", linked[0].SessionID)
+
+		caller := ResolveCallerSession(ctx)
+		assert.Equal(t, "sess-committing", caller.SessionID)
+		assert.Equal(t, ResolutionCallerEnv, caller.Resolution)
+	})
+
+	t.Run("named by nothing", func(t *testing.T) {
+		linked, err := s.findSessionsForCommitLinking(ctx, dir)
+		require.NoError(t, err)
+		require.Len(t, linked, 1, "an ancestry tie between live sessions links the worktree's own sessions only")
+		assert.Equal(t, "sess-committing", linked[0].SessionID)
+
+		caller := ResolveCallerSession(ctx)
+		assert.Equal(t, ResolutionCallerAmbiguous, caller.Resolution)
+		assert.False(t, caller.Resolution.IsCaller(), "a guess between live sessions of one owner is not an identification")
 	})
 }
 
@@ -502,35 +598,67 @@ func TestFindSessionsForCommitLinking_FallsBackToWorktree(t *testing.T) {
 		"human commits (no agent ancestry) keep worktree matching")
 }
 
-// isNearerOwner is the shared comparator behind commit attribution and caller
-// resolution, and its contract covers input pairs neither caller produces
-// today. Pinned directly so it stays true for a future one.
-func TestIsNearerOwner_Contract(t *testing.T) {
+// pickOwner is the rule commit attribution and caller resolution share, and
+// its contract covers shapes only one of them produces (commit attribution
+// never passes an unplaced depth). Pinned directly so it holds for both.
+func TestPickOwner_Contract(t *testing.T) {
+	t.Parallel()
+
+	oldest := time.Now().Add(-2 * time.Hour)
 	older := time.Now().Add(-time.Hour)
 	newer := time.Now()
-	stale := &SessionState{SessionID: "stale", LastInteractionTime: &older}
-	fresh := &SessionState{SessionID: "fresh", LastInteractionTime: &newer}
+	live, ended := session.PhaseActive, session.PhaseEnded
+	candidate := func(id string, depth int, envNamed bool, phase session.Phase, lastInteraction time.Time) ownerCandidate {
+		return ownerCandidate{
+			state:    &SessionState{SessionID: id, Phase: phase, LastInteractionTime: &lastInteraction},
+			depth:    depth,
+			envNamed: envNamed,
+		}
+	}
 
 	cases := []struct {
-		name             string
-		depth, bestDepth int
-		state, best      *SessionState
-		want             bool
+		name        string
+		candidates  []ownerCandidate
+		want        string
+		wantDecided bool
 	}{
-		{"placed beats unplaced", 3, -1, stale, fresh, true},
-		{"unplaced loses to placed", -1, 3, fresh, stale, false},
-		{"nearer wins", 0, 1, stale, fresh, true},
-		{"farther loses", 2, 1, fresh, stale, false},
-		{"equal depth breaks by recency", 1, 1, fresh, stale, true},
-		{"equal depth keeps the fresher incumbent", 1, 1, stale, fresh, false},
-		{"both unplaced break by recency", -1, -1, fresh, stale, true},
-		{"both unplaced keep the fresher incumbent", -1, -1, stale, fresh, false},
+		{"placed beats unplaced", []ownerCandidate{
+			candidate("unplaced", -1, true, live, newer), candidate("placed", 3, false, live, older),
+		}, "placed", true},
+		{"nearer beats named and recent", []ownerCandidate{
+			candidate("far", 2, true, live, newer), candidate("near", 1, false, live, older),
+		}, "near", true},
+		{"named wins at equal depth", []ownerCandidate{
+			candidate("recent", 1, false, live, newer), candidate("named", 1, true, live, older),
+		}, "named", true},
+		{"the only live one wins at equal depth", []ownerCandidate{
+			candidate("ended", 1, false, ended, newer), candidate("live", 1, false, live, older),
+		}, "live", true},
+		{"named wins over live at equal depth", []ownerCandidate{
+			candidate("live", 1, false, live, newer), candidate("named", 1, true, ended, older),
+		}, "named", true},
+		{"a lone candidate wins even ended", []ownerCandidate{
+			candidate("only", 0, false, ended, older),
+		}, "only", true},
+		{"live sessions at equal depth are a guess", []ownerCandidate{
+			candidate("older", 1, false, live, older), candidate("newer", 1, false, live, newer),
+		}, "newer", false},
+		{"the guess is a live session, not a more recent ended one", []ownerCandidate{
+			candidate("oldest", 1, false, live, oldest), candidate("ended", 1, false, ended, newer), candidate("older", 1, false, live, older),
+		}, "older", false},
+		{"ended sessions at equal depth are a guess", []ownerCandidate{
+			candidate("older", 1, false, ended, older), candidate("newer", 1, false, ended, newer),
+		}, "newer", false},
+		{"unplaced claims tie like placed ones", []ownerCandidate{
+			candidate("older", -1, true, live, older), candidate("newer", -1, true, live, newer),
+		}, "newer", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := isNearerOwner(c.depth, c.bestDepth, c.state, c.best); got != c.want {
-				t.Errorf("isNearerOwner(%d, %d, %s, %s) = %v, want %v",
-					c.depth, c.bestDepth, c.state.SessionID, c.best.SessionID, got, c.want)
+			t.Parallel()
+			best, decided := pickOwner(c.candidates)
+			if best.state.SessionID != c.want || decided != c.wantDecided {
+				t.Errorf("pickOwner() = (%s, %v), want (%s, %v)", best.state.SessionID, decided, c.want, c.wantDecided)
 			}
 		})
 	}
