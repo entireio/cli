@@ -926,6 +926,9 @@ func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFac
 If Entire is not yet configured, this runs the full configuration flow.
 If Entire is already configured but disabled, this re-enables it.
 
+Existing git hooks are kept: each is moved to <hook>.pre-entire and runs after
+Entire's hook.
+
 If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
 publish the repository yourself when you're ready.`,
@@ -1310,7 +1313,8 @@ show a disabled message.
 
 To completely remove Entire integrations from this repository, use --uninstall:
   - .entire/ directory (settings, logs, metadata)
-  - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
+  - Git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push),
+    restoring any hooks Entire backed up
   - Session state files (.git/entire-sessions/)
   - Shadow branches (entire/<hash>)
   - Agent hooks
@@ -2901,16 +2905,22 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 // Failures render in the same shape as a failed agent-hook removal: a red ✗
 // headline naming the step, with the reason nested beneath it.
 func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
-	removed, err := strategy.RemoveGitHook(ctx)
+	res, err := strategy.RemoveGitHookDetailed(ctx)
 	if err != nil {
 		p.stepFailed("Failed to remove git hooks")
 		p.warnUnder("failed to remove git hooks: %v", err)
 		return false
 	}
-	if removed > 0 {
-		p.step("Removed git hooks (%d)", removed)
+	if res.Removed > 0 {
+		p.step("Removed git hooks (%d)", res.Removed)
 	} else {
 		p.noop("No git hooks to remove")
+	}
+	for _, hook := range res.Restored {
+		p.step("Restored your original %s hook", hook)
+	}
+	if len(res.OlderCopies) > 0 {
+		p.warn("Left older copies of your hooks in place: %s", strings.Join(res.OlderCopies, ", "))
 	}
 	return true
 }

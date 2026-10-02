@@ -354,6 +354,20 @@ comments at each site say which case applies:
   would be: refusing to read through someone's link must not mean silently
   discarding it.
 
+  A foreign hook is never overwritten (`prepareHookBackup`). If `<hook>.pre-entire`
+  already exists and differs (a checkout restored the hook, the user edited it, a
+  hook manager rewrote it), the existing backup is renamed to
+  `<hook>.pre-entire.<yyyymmddThhmmssZ>` (with `-N` on collision, found by an
+  `Lstat` probe because rename replaces silently) and the current hook becomes
+  the backup. Identical content is replaced without rotation. One exception: when
+  `<hook>.legacy` carries Entire's marker, pre-commit is in migration mode and
+  runs that copy first; rotating would chain it into pre-commit's own wrapper and
+  fail every commit, so the hook is replaced as before. A backup that carries
+  Entire's marker is never chained to, since the chain would call itself. The
+  marker re-check before each rename and this refusal guard against concurrent
+  installs (parallel agent turns, linked worktrees); they are check-then-act, not
+  atomic.
+
   **The directory refusal is install-only, and that asymmetry is load-bearing.**
   `hooksRootForRemoval` resolves the link and anchors on its target; only
   `hooksRootForInstall` refuses. Removal deletes files carrying Entire's marker

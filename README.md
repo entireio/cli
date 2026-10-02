@@ -162,6 +162,14 @@ After setup:
 
 The hooks capture session data as you work. Checkpoints are created when you or the agent make a git commit. Your code commits stay clean, Entire never creates commits on your active branch. Session metadata is stored outside your branch's history, in the checkpoint storage described under [Checkpoint Storage](#checkpoint-storage).
 
+#### Existing git hooks
+
+If your repository already has git hooks (your own scripts, git-lfs, lefthook, pre-commit), `entire enable` keeps them: each one is moved to `<hook>.pre-entire` in the hooks directory, and Entire's hook runs first, then yours.
+
+- If a hook manager reinstalls its hooks later, Entire's hooks come back on the next agent turn or `entire enable`, chained to the hook manager's version.
+- If a hook changed since Entire backed it up (for example a checkout restored it), the current version becomes `<hook>.pre-entire` and runs; the older one is kept as `<hook>.pre-entire.<timestamp>` and no longer runs. To use the older one again, rename it over `<hook>.pre-entire`.
+- `entire disable --uninstall` removes Entire's hooks and puts yours back.
+
 ### 2. Work with Your AI Agent
 
 Just use one of your AI agents as before. Entire runs in the background, tracking your session:
@@ -186,7 +194,7 @@ Entire checks out the branch, restores the latest checkpointed session metadata 
 entire disable
 ```
 
-Removes the git hooks. Your code and commit history remain untouched.
+Turns Entire off: its hooks stay installed but do nothing. To remove Entire's hooks and restore any hooks you had before, use `entire disable --uninstall`. Your code and commit history remain untouched.
 
 ## Key Concepts
 

@@ -1390,7 +1390,7 @@ func envWithPath(path string) []string {
 	return append(env, "PATH="+path)
 }
 
-func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
+func TestInstallGitHook_KeepsBothBackupAndNewForeignHook(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// Create a backup file manually (simulating a previous backup)
@@ -1412,13 +1412,21 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
 
-	// Verify the original backup was NOT overwritten
+	// Neither hook is lost: the second becomes the backup that runs, the first
+	// is kept as an older copy.
 	backupData, err := os.ReadFile(backupPath)
 	if err != nil {
 		t.Fatalf("backup should still exist: %v", err)
 	}
-	if string(backupData) != firstBackupContent {
-		t.Errorf("backup content = %q, want original %q", string(backupData), firstBackupContent)
+	if string(backupData) != secondCustomContent {
+		t.Errorf("backup content = %q, want the current hook %q", string(backupData), secondCustomContent)
+	}
+	older, err := filepath.Glob(backupPath + ".*")
+	if err != nil || len(older) != 1 {
+		t.Fatalf("older copies = %v (%v), want one", older, err)
+	}
+	if data, err := os.ReadFile(older[0]); err != nil || string(data) != firstBackupContent {
+		t.Errorf("older copy = %q (%v), want original %q", data, err, firstBackupContent)
 	}
 
 	// Verify our hook was installed with chain call
@@ -2164,4 +2172,37 @@ func TestSymlinkedHooksDirError_UsesTheQuotedCommand(t *testing.T) {
 	assert.Contains(t, msg, HooksPathCommand(realHooks))
 	assert.NotContains(t, msg, "core.hooksPath "+realHooks,
 		"the bare unquoted path would be split by the shell the user pastes into")
+}
+
+func TestRemoveGitHookDetailed_AfterRotationRestoresCurrentAndReportsOlder(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+	prePush := filepath.Join(hooksDir, "pre-push")
+	v1 := "#!/bin/sh\necho v1\n"
+	v2 := "#!/bin/sh\necho v2\n"
+	if err := os.WriteFile(prePush, []byte(v1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(prePush, []byte(v2), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := RemoveGitHookDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("RemoveGitHookDetailed() error = %v", err)
+	}
+	if !slices.Contains(res.Restored, "pre-push") {
+		t.Errorf("Restored = %v, want pre-push", res.Restored)
+	}
+	if data, err := os.ReadFile(prePush); err != nil || string(data) != v2 {
+		t.Errorf("restored pre-push = %q (%v), want the current hook", data, err)
+	}
+	if len(res.OlderCopies) != 1 || !strings.HasPrefix(res.OlderCopies[0], "pre-push"+backupSuffix+".") {
+		t.Errorf("OlderCopies = %v, want one older pre-push copy", res.OlderCopies)
+	}
 }
