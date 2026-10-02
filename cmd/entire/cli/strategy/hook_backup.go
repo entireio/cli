@@ -23,11 +23,11 @@ import (
 type backupAction string
 
 const (
-	backupNone           backupAction = ""                // no foreign hook
-	backupCreated        backupAction = "created"         // moved to <hook>.pre-entire
-	backupRotated        backupAction = "rotated"         // replaced a different backup, which was kept
-	backupReplacedSame   backupAction = "replaced_same"   // identical to the backup
-	backupReplacedLegacy backupAction = "replaced_legacy" // pre-commit migration state, see entireLegacyCopy
+	backupNone            backupAction = ""                  // no foreign hook
+	backupCreated         backupAction = "created"           // moved to <hook>.pre-entire
+	backupRotated         backupAction = "rotated"           // replaced a different backup, which was kept
+	backupReplacedSame    backupAction = "replaced_same"     // identical to the backup
+	backupKeptAsideLegacy backupAction = "kept_aside_legacy" // pre-commit migration state, see entireLegacyCopy
 )
 
 // legacySuffix is where pre-commit keeps a hook it replaces; its wrapper runs
@@ -39,7 +39,7 @@ const rotationStampLayout = "20060102T150405Z"
 
 type hookBackupResult struct {
 	Action    backupAction
-	OlderCopy string // name the previous backup was kept under (backupRotated)
+	OlderCopy string // where the displaced file was kept (backupRotated, backupKeptAsideLegacy)
 	Chain     bool   // Entire's hook should call <hook>.pre-entire
 	// SelfBackup: <hook>.pre-entire carries Entire's marker, so chaining to it
 	// would make the hook call itself; Chain is false.
@@ -70,7 +70,16 @@ func prepareHookBackup(root *os.Root, name string, now time.Time) (hookBackupRes
 			}
 			res.Action = backupCreated
 		case entireLegacyCopy(root, name):
-			res.Action = backupReplacedLegacy
+			// Keep the backup that runs; save the foreign hook beside it rather
+			// than overwrite it.
+			older, err := freeRotationName(root, backupName, now)
+			if err != nil {
+				return hookBackupResult{}, err
+			}
+			if err := renameIfStillForeign(root, name, older); err != nil {
+				return hookBackupResult{}, err
+			}
+			res.Action, res.OlderCopy = backupKeptAsideLegacy, older
 		case sameHookFile(root, name, backupName):
 			res.Action = backupReplacedSame
 		default:
@@ -211,9 +220,9 @@ func reportHookBackup(ctx context.Context, hook, displayDir string, res hookBack
 	case backupRotated:
 		fmt.Fprintf(os.Stderr, "[entire] %s changed since Entire backed it up. The current version now runs after Entire's; the older copy was kept as %s and no longer runs.\n",
 			hook, filepath.Join(displayDir, res.OlderCopy))
-	case backupReplacedLegacy:
-		fmt.Fprintf(os.Stderr, "[entire] Warning: replacing %s (pre-commit keeps Entire's previous hook as %s%s; %s%s left as is)\n",
-			hook, hook, legacySuffix, hook, backupSuffix)
+	case backupKeptAsideLegacy:
+		fmt.Fprintf(os.Stderr, "[entire] %s was replaced by another tool while pre-commit keeps Entire's previous hook as %s%s. Your %s still runs; the replacing hook was kept as %s and does not run.\n",
+			hook, hook, legacySuffix, backupPath, filepath.Join(displayDir, res.OlderCopy))
 	case backupNone, backupReplacedSame:
 	}
 	if res.Action != backupNone {

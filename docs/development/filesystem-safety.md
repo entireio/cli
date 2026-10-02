@@ -362,7 +362,8 @@ comments at each site say which case applies:
   the backup. Identical content is replaced without rotation. One exception: when
   `<hook>.legacy` carries Entire's marker, pre-commit is in migration mode and
   runs that copy first; rotating would chain it into pre-commit's own wrapper and
-  fail every commit, so the hook is replaced as before. A backup that carries
+  fail every commit, so the backup is left as it is and the foreign hook is kept
+  aside as an older copy instead. A backup that carries
   Entire's marker is never chained to, since the chain would call itself. The
   marker re-check before each rename and this refusal guard against concurrent
   installs (parallel agent turns, linked worktrees); they are check-then-act, not
