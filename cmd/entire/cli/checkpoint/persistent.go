@@ -489,14 +489,14 @@ func (s *treeWriter) writeTaskRecordEntries(opts WriteOptions, basePath string, 
 // writeTaskRecordEntry writes one TaskPayload's agent-<agent-id>.jsonl (when
 // its transcript is available) and task.json into entries.
 func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, entries map[string]object.TreeEntry) error {
-	taskDir := checkpointSubtreePath(basePath, "tasks", task.ToolUseID)
+	taskDir := checkpointSubtreePath(basePath, taskRecordsDirName, task.ToolUseID)
 
 	if task.Transcript.Len() > 0 {
 		agentBlobHash, err := CreateBlobFromContent(s.repo, task.Transcript.Bytes())
 		if err != nil {
 			return fmt.Errorf("failed to create task transcript blob: %w", err)
 		}
-		agentPath := checkpointSubtreePath(taskDir, "agent-"+task.AgentID+".jsonl")
+		agentPath := checkpointSubtreePath(taskDir, taskTranscriptFileName(task.AgentID))
 		entries[agentPath] = object.TreeEntry{
 			Name: agentPath,
 			Mode: filemode.Regular,
@@ -508,7 +508,7 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 	// whatever the prompt carried), and task.json is pushed with the checkpoint,
 	// so it goes through the same redactor as the summary fields — see
 	// RedactSummary. The transcript beside it arrives pre-redacted.
-	metadata := taskRecordMetadata{
+	metadata := TaskRecord{
 		ToolUseID:                   task.ToolUseID,
 		AgentID:                     task.AgentID,
 		SubagentType:                task.SubagentType,
@@ -527,7 +527,7 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 	if err != nil {
 		return fmt.Errorf("failed to create task metadata blob: %w", err)
 	}
-	taskFile := checkpointSubtreePath(taskDir, "task.json")
+	taskFile := checkpointSubtreePath(taskDir, taskRecordFileName)
 	entries[taskFile] = object.TreeEntry{
 		Name: taskFile,
 		Mode: filemode.Regular,
@@ -1304,26 +1304,6 @@ func (s *treeWriter) buildCommitMessage(opts WriteOptions) string {
 	}
 
 	return commitMsg.String()
-}
-
-// taskRecordMetadata is the on-disk shape of a materialized task record's
-// task.json — the durable record of one subagent's work inside a session
-// checkpoint. See TaskPayload for field semantics.
-type taskRecordMetadata struct {
-	ToolUseID       string            `json:"tool_use_id"`
-	AgentID         string            `json:"agent_id,omitempty"`
-	SubagentType    string            `json:"subagent_type,omitempty"`
-	TaskDescription string            `json:"task_description,omitempty"`
-	Files           []string          `json:"files,omitempty"`
-	TokenUsage      *types.TokenUsage `json:"token_usage,omitempty"`
-	// StartedAt/CompletedAt use omitzero (not omitempty, which classic
-	// encoding/json never treats a struct as "empty" for): CompletedAt's
-	// absence from the JSON is exactly what marks the task in flight when
-	// this checkpoint was materialized, so a zero time.Time must actually be
-	// omitted, not serialized as "0001-01-01T00:00:00Z".
-	StartedAt                   time.Time `json:"started_at,omitzero"`
-	CompletedAt                 time.Time `json:"completed_at,omitzero"`
-	TranscriptUnavailableReason string    `json:"transcript_unavailable_reason,omitempty"`
 }
 
 // Read reads a committed checkpoint's summary by ID from the entire/checkpoints/v1 branch.

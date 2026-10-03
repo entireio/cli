@@ -399,6 +399,13 @@ gets a `task.json` carrying a stable, path-free
 Records with an empty/unsafe `ToolUseID` or `AgentID` are skipped with a
 warning, never allowed to wedge condensation.
 
+**Reading them back.** `checkpoint.TaskReader` (`ListTasks`,
+`ReadTaskTranscript`; part of `PersistentStore`) reads the records through
+one tree reader shared by both git backends (`task_reader.go`), re-validating
+the directory name and `task.json`'s `agent_id` since both are pushed data.
+`entire checkpoint explain --json` lists them under `tasks`, and
+`--transcript --task <tool_use_id|agent_id>` streams one transcript.
+
 **Self-contained checkpoints.** Live records are materialized too: each
 condensation stores the transcript-so-far, so a mid-task commit carries a
 partial transcript and a later checkpoint carries the full one — the same

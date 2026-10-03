@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -20,6 +19,7 @@ import (
 type crossRepoReader interface {
 	checkpoint.CheckpointReader
 	checkpoint.SessionReader
+	checkpoint.TaskReader
 	GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (checkpoint.Author, error)
 	checkpointCommit(ctx context.Context, checkpointID id.CheckpointID) ([]associatedCommit, error)
 }
@@ -74,6 +74,8 @@ type crossRepoExplainOptions struct {
 	json          bool
 	transcript    bool
 	rawTranscript bool
+	// task selects a subagent task record's transcript (with transcript).
+	task string
 	// sessionIndex is -1 for "latest session".
 	sessionIndex int
 
@@ -225,6 +227,11 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	}
 
 	switch {
+	case opts.task != "":
+		// The task records are not served over the API; the reader says so.
+		stop(false)
+		return streamTaskTranscript(ctx, w, reader, cid, opts.task)
+
 	case opts.transcript || opts.rawTranscript:
 		content, contentErr := readCrossRepoSessionContent(ctx, reader, cid, summary, opts.sessionIndex)
 		if contentErr != nil {
@@ -247,19 +254,9 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	case opts.json:
 		envelope, failed := buildCheckpointJSONEnvelope(ctx, reader, summary, cid)
 		stop(!envelope.Partial)
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(envelope); err != nil {
-			return fmt.Errorf("failed to encode checkpoint json: %w", err)
-		}
-		// Parity with the local --json path: fail hard so automation can't
-		// mistake incomplete metadata for a clean export. The envelope, with
-		// its per-session error fields, is already on stdout.
-		if envelope.Partial {
-			fmt.Fprintf(errW, "checkpoint %s: failed to read metadata for %d session(s) (indexes %v)\n", cid, len(failed), failed)
-			return NewSilentError(fmt.Errorf("checkpoint %s export incomplete: %d session(s) unreadable", cid, len(failed)))
-		}
-		return nil
+		// Parity with the local --json path, including failing hard on a
+		// partial envelope.
+		return writeCheckpointJSONEnvelope(w, errW, cid, envelope, failed)
 
 	default:
 		content, contentErr := readCrossRepoSessionContent(ctx, reader, cid, summary, opts.sessionIndex)

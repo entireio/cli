@@ -75,6 +75,47 @@ type TaskPayload struct {
 	TranscriptUnavailableReason string
 }
 
+// TaskRecord is the persisted task.json of one materialized subagent task
+// record: tasks/<tool_use_id>/task.json at the checkpoint root. The writer
+// builds it from a TaskPayload (see its fields for semantics); readers get it
+// back through TaskReader.ListTasks.
+type TaskRecord struct {
+	ToolUseID       string            `json:"tool_use_id"`
+	AgentID         string            `json:"agent_id,omitempty"`
+	SubagentType    string            `json:"subagent_type,omitempty"`
+	TaskDescription string            `json:"task_description,omitempty"`
+	Files           []string          `json:"files,omitempty"`
+	TokenUsage      *types.TokenUsage `json:"token_usage,omitempty"`
+	// StartedAt/CompletedAt use omitzero (not omitempty, which classic
+	// encoding/json never treats a struct as "empty" for): CompletedAt's
+	// absence from the JSON is exactly what marks the task in flight when
+	// this checkpoint was materialized, so a zero time.Time must actually be
+	// omitted, not serialized as "0001-01-01T00:00:00Z".
+	StartedAt                   time.Time `json:"started_at,omitzero"`
+	CompletedAt                 time.Time `json:"completed_at,omitzero"`
+	TranscriptUnavailableReason string    `json:"transcript_unavailable_reason,omitempty"`
+}
+
+// TaskEntry is one tasks/<tool_use_id>/ directory of a committed checkpoint,
+// as TaskReader.ListTasks reports it.
+type TaskEntry struct {
+	// ToolUseID is the directory name. It is set even when Err is, so a
+	// caller can name the record it could not read.
+	ToolUseID string
+
+	// Record is the parsed task.json. Zero when Err is non-nil.
+	Record TaskRecord
+
+	// TranscriptStored reports whether the record's agent-<agent_id>.jsonl
+	// transcript is present in the checkpoint. It is derived from the stored
+	// tree, not from task.json.
+	TranscriptStored bool
+
+	// Err is set when this record could not be read or failed validation.
+	// The rest of the list is still returned.
+	Err error
+}
+
 // WriteOptions contains options for writing a persistent checkpoint.
 type WriteOptions struct {
 	// CheckpointID is the stable 12-hex-char identifier

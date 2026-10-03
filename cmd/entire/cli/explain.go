@@ -236,6 +236,7 @@ func newExplainCmd() *cobra.Command {
 	var searchAllFlag bool
 	var jsonFlag bool
 	var transcriptFlag bool
+	var taskFlag string
 	var repoFlag string
 	var insecureHTTPFlag bool
 	var summaryTimeoutSecondsFlag int
@@ -278,7 +279,8 @@ Output verbosity levels (when explaining a specific item):
 
 Machine-readable export modes (additive surface for external consumers):
   --json           Metadata-only JSON. Lists checkpoints when no target is given;
-                   emits a single checkpoint envelope when a target is supplied.
+                   emits a single checkpoint envelope when a target is supplied,
+                   including its subagent task records under "tasks".
                    Transcript bytes are NEVER embedded in the JSON envelope.
   --transcript     Stream stored checkpoint transcript bytes (JSONL) to stdout
                    for the selected session. Same bytes as --raw-transcript
@@ -286,6 +288,9 @@ Machine-readable export modes (additive surface for external consumers):
   --session-index  Pick a session within a multi-session checkpoint (0-based).
                    Defaults to the latest session. Only meaningful with
                    --transcript or --raw-transcript.
+  --task           With --transcript, stream a subagent's stored transcript
+                   instead, selected by tool_use_id or agent_id (as listed
+                   under "tasks" in --json).
   --limit          Cap the number of checkpoints returned by the list view.
                    Defaults to 100. When the cap is hit, a stderr note
                    says how many were skipped. Only meaningful with --json.
@@ -336,6 +341,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 				rawTranscript:         rawTranscriptFlag,
 				transcript:            transcriptFlag,
 				json:                  jsonFlag,
+				task:                  taskFlag,
 				sessionIndex:          sessionIndex,
 				listLimit:             listLimit,
 				summaryTimeoutSeconds: summaryTimeoutSecondsFlag,
@@ -364,6 +370,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 						json:          jsonFlag,
 						transcript:    transcriptFlag,
 						rawTranscript: rawTranscriptFlag,
+						task:          taskFlag,
 						sessionIndex:  crossRepoExplainSessionIndex(cmd.Flags().Changed("session-index"), sessionIndex),
 						verbose:       !shortFlag,
 						full:          fullFlag,
@@ -390,6 +397,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 					transcript:     transcriptFlag,
 					rawTranscript:  rawTranscriptFlag,
 					sessionIndex:   sessionIndex,
+					task:           taskFlag,
 					listLimit:      listLimit,
 				})
 			}
@@ -411,8 +419,9 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Regenerate summary even if one already exists (requires --generate)")
 	cmd.Flags().BoolVar(&searchAllFlag, "search-all", false, "Search all commits (no branch/depth limit, may be slow)")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output metadata as JSON (no transcript bytes)")
-	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout")
+	cmd.Flags().BoolVar(&transcriptFlag, "transcript", false, "Stream stored checkpoint transcript bytes to stdout (a session's, or a subagent's with --task)")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Session index within a multi-session checkpoint (0-based, defaults to latest)")
+	cmd.Flags().StringVar(&taskFlag, "task", "", "Subagent task (tool_use_id or agent_id) whose stored transcript --transcript streams")
 	cmd.Flags().IntVar(&listLimit, "limit", 0, "Cap the list view at N checkpoints (default: 100). Only meaningful with --json.")
 	cmd.Flags().StringVar(&repoFlag, "repo", "", "Explain a checkpoint owned by another repo ("+explainRepoFlagShapes+"), read from that repo's Entire API")
 	cmd.Flags().BoolVar(&insecureHTTPFlag, "insecure-http-auth", false, "Allow plain-HTTP auth for --repo (local dev only)")
@@ -420,6 +429,8 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 
 	// Verbosity / transcript output modes are mutually exclusive
 	cmd.MarkFlagsMutuallyExclusive("short", "full", "raw-transcript", "transcript", "json")
+	// --task replaces the session as the transcript's source.
+	cmd.MarkFlagsMutuallyExclusive("task", "session-index")
 	// --repo reads another repo over HTTP: --commit resolves against local
 	// history, --session filters the local list view, --search-all walks local
 	// commits, and --generate would write a summary the foreign repo never
@@ -441,7 +452,7 @@ Note: --session filters the list view; the positional arg, --commit, and --check
 // combination rules, so validateExplainFlagCombinations can enforce them
 // outside the already-large newExplainCmd closure.
 type explainFlagValues struct {
-	checkpoint, commit, repo                         string
+	checkpoint, commit, repo, task                   string
 	generate, force, rawTranscript, transcript, json bool
 	sessionIndex, listLimit, summaryTimeoutSeconds   int
 }
@@ -473,6 +484,14 @@ func validateExplainFlagCombinations(cmd *cobra.Command, v explainFlagValues, po
 	}
 	if v.transcript && !hasCheckpointTarget {
 		return errors.New("--transcript requires a checkpoint ID or commit SHA (positional), --checkpoint/-c, or --commit flag")
+	}
+	if cmd.Flags().Changed("task") {
+		if !v.transcript {
+			return errors.New("--task only applies with --transcript")
+		}
+		if v.task == "" {
+			return errors.New("--task requires a tool_use_id or agent_id")
+		}
 	}
 	if cmd.Flags().Changed("session-index") {
 		if !v.transcript && !v.rawTranscript {

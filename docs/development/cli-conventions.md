@@ -45,6 +45,12 @@ the commands are always runnable in every build.
   that falls through to the local path. See `checkpoint_api_reader.go`
   (`apiCheckpointReader`, which implements the two checkpoint reader tiers and
   deliberately not `Writer`) and `explain_repo.go`.
+  For a local checkpoint, `explain --json` also lists the subagent task records
+  stored at `tasks/<tool_use_id>/` under `tasks` (metadata only), and
+  `--transcript --task <tool_use_id|agent_id>` streams one subagent's stored
+  transcript; both read through `checkpoint.TaskReader`. The cell does not
+  serve task records, so under `--repo` the `tasks` key is omitted (not
+  reported empty) and `--task` fails with `ErrTaskRecordsUnsupported`.
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy

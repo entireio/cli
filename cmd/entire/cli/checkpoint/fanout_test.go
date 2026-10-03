@@ -45,6 +45,13 @@ func (f *fakePrimary) ReadSessionMetadataAndPrompts(context.Context, id.Checkpoi
 	return &Metadata{}, "", nil
 }
 
+func (f *fakePrimary) ListTasks(context.Context, id.CheckpointID) ([]TaskEntry, error) {
+	return []TaskEntry{}, nil
+}
+func (f *fakePrimary) ReadTaskTranscript(context.Context, id.CheckpointID, string) ([]byte, error) {
+	return nil, ErrTaskNotFound
+}
+
 func (f *fakePrimary) Write(_ context.Context, req WriteRequest) error {
 	if f.writeErr != nil {
 		return f.writeErr

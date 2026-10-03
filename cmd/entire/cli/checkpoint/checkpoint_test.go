@@ -4529,7 +4529,7 @@ func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing
 			if err != nil {
 				t.Fatalf("failed to read task.json: %v", err)
 			}
-			var meta taskRecordMetadata
+			var meta TaskRecord
 			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
 				t.Fatalf("failed to unmarshal task.json: %v", err)
 			}
@@ -4612,7 +4612,7 @@ func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJS
 	if err != nil {
 		t.Fatalf("failed to read task.json: %v", err)
 	}
-	var meta taskRecordMetadata
+	var meta TaskRecord
 	if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
 		t.Fatalf("failed to unmarshal task.json: %v", err)
 	}
@@ -4721,7 +4721,7 @@ func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
 			if strings.Contains(taskContent, awsKeyFixture) {
 				t.Errorf("task.json still carries the secret: %s", taskContent)
 			}
-			var meta taskRecordMetadata
+			var meta TaskRecord
 			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
 				t.Fatalf("failed to unmarshal task.json: %v", err)
 			}

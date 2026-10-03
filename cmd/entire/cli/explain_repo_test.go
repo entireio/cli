@@ -184,6 +184,16 @@ func (s *stubCrossRepoReader) ReadSessionContent(ctx context.Context, cid id.Che
 	return &checkpoint.SessionContent{Metadata: *meta, Transcript: s.transcript, Prompts: prompts}, nil
 }
 
+// The task tier answers like the real API reader: the cell does not serve
+// task records.
+func (s *stubCrossRepoReader) ListTasks(ctx context.Context, cid id.CheckpointID) ([]checkpoint.TaskEntry, error) {
+	return (&apiCheckpointReader{ownerRepo: "gh/acme/widgets"}).ListTasks(ctx, cid)
+}
+
+func (s *stubCrossRepoReader) ReadTaskTranscript(ctx context.Context, cid id.CheckpointID, toolUseID string) ([]byte, error) {
+	return (&apiCheckpointReader{ownerRepo: "gh/acme/widgets"}).ReadTaskTranscript(ctx, cid, toolUseID)
+}
+
 func (s *stubCrossRepoReader) GetCheckpointAuthor(context.Context, id.CheckpointID) (checkpoint.Author, error) {
 	return checkpoint.Author{Name: "Foreign Author"}, nil
 }
@@ -251,6 +261,29 @@ func TestRunCrossRepoExplain_JSON(t *testing.T) {
 	assert.Equal(t, testAPICheckpointID.String(), envelope.CheckpointID)
 	assert.Equal(t, 2, envelope.SessionCount)
 	assert.False(t, envelope.Partial, "a complete read must not be flagged partial")
+
+	// The API does not serve subagent task records: the key is omitted rather
+	// than reported as an empty list, and that is not a partial export.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &raw))
+	assert.NotContains(t, raw, "tasks")
+	assert.NotContains(t, raw, "tasks_error")
+}
+
+func TestRunCrossRepoExplain_TaskTranscriptIsUnsupported(t *testing.T) {
+	withStubCrossRepoReader(t, &stubCrossRepoReader{})
+
+	var out, errOut bytes.Buffer
+	err := runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
+		repoFlag:     "gh/acme/widgets",
+		target:       testAPICheckpointID.String(),
+		sessionIndex: -1,
+		transcript:   true,
+		task:         "toolu_x",
+	})
+	require.ErrorIs(t, err, checkpoint.ErrTaskRecordsUnsupported)
+	assert.Contains(t, err.Error(), "gh/acme/widgets")
+	assert.Empty(t, out.String())
 }
 
 func TestRunCrossRepoExplain_NativeRepoThreadsForge(t *testing.T) {
