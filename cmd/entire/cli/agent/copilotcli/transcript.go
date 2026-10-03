@@ -15,8 +15,12 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ agent.TranscriptAnalyzer = (*CopilotCLIAgent)(nil)
-	_ agent.TokenCalculator    = (*CopilotCLIAgent)(nil)
+	_ agent.TranscriptAnalyzer          = (*CopilotCLIAgent)(nil)
+	_ agent.ConfinedTranscriptAnalyzer  = (*CopilotCLIAgent)(nil)
+	_ agent.StreamingTranscriptAnalyzer = (*CopilotCLIAgent)(nil)
+	_ agent.TokenCalculator             = (*CopilotCLIAgent)(nil)
+	_ agent.PromptExtractor             = (*CopilotCLIAgent)(nil)
+	_ agent.TranscriptPromptExtractor   = (*CopilotCLIAgent)(nil)
 )
 
 // copilotEvent is a single line in events.jsonl.
@@ -482,6 +486,10 @@ func (c *CopilotCLIAgent) GetTranscriptPosition(path string) (int, error) {
 // ExtractModifiedFilesFromOffset extracts files modified since a given line number.
 // For Copilot CLI (JSONL format), offset is the starting line number.
 // Uses bufio.Reader to handle arbitrarily long lines (no size limit).
+// Streams the path and delegates to ExtractModifiedFilesFromReader —
+// callers that already hold a home-confined read of the transcript (e.g.
+// condensation, which must not trust a bare path from adopted session state)
+// should call ExtractModifiedFilesFromBytes directly instead.
 // Returns:
 //   - files: list of file paths modified by Copilot (from tool.execution_complete events)
 //   - currentPosition: total number of lines in the file
@@ -491,13 +499,24 @@ func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(_ context.Context, path
 		return nil, 0, nil
 	}
 
-	file, openErr := os.Open(path) //nolint:gosec // Path comes from Copilot CLI transcript location
-	if openErr != nil {
-		return nil, 0, fmt.Errorf("failed to open transcript file: %w", openErr)
+	file, readErr := agent.OpenTranscriptFileUnderHome(path, "")
+	if readErr != nil {
+		return nil, 0, fmt.Errorf("failed to read transcript: %w", readErr)
 	}
 	defer file.Close()
+	return c.ExtractModifiedFilesFromReader(file, startOffset)
+}
 
-	reader := bufio.NewReader(file)
+// ExtractModifiedFilesFromBytes is the bytes-based equivalent of
+// ExtractModifiedFilesFromOffset, for callers that already hold a
+// home-confined read of the transcript (agent.ConfinedTranscriptAnalyzer).
+func (c *CopilotCLIAgent) ExtractModifiedFilesFromBytes(transcriptData []byte, startOffset int) (files []string, currentPosition int, err error) {
+	return c.ExtractModifiedFilesFromReader(bytes.NewReader(transcriptData), startOffset)
+}
+
+// ExtractModifiedFilesFromReader streams main-transcript files and raw line position.
+func (c *CopilotCLIAgent) ExtractModifiedFilesFromReader(r io.Reader, startOffset int) (files []string, currentPosition int, err error) {
+	reader := bufio.NewReader(r)
 	var events []copilotEvent
 	lineNum := 0
 
@@ -526,14 +545,25 @@ func (c *CopilotCLIAgent) ExtractModifiedFilesFromOffset(_ context.Context, path
 	return extractModifiedFilesFromEvents(events), lineNum, nil
 }
 
-// ExtractPrompts extracts user prompts from the transcript starting at the given offset.
+// ExtractPrompts extracts user prompts from the transcript starting at the
+// given offset. Reads the path itself — callers that already hold a
+// home-confined read of the transcript (e.g. condensation, which must not
+// trust a bare sessionRef from adopted session state) should call
+// ExtractPromptsFromTranscript instead.
 func (c *CopilotCLIAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
 	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
 	if err != nil {
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
+	return c.ExtractPromptsFromTranscript(data, fromOffset)
+}
 
-	events, err := parseEventsFromOffset(data, fromOffset)
+// ExtractPromptsFromTranscript implements agent.TranscriptPromptExtractor over
+// transcript bytes the caller already holds (e.g. a home-confined read via
+// agent.ReadTranscriptFileUnderHome), with the same offset metric as
+// ExtractPrompts. It never reads a path itself.
+func (c *CopilotCLIAgent) ExtractPromptsFromTranscript(content []byte, fromOffset int) ([]string, error) {
+	events, err := parseEventsFromOffset(content, fromOffset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript events: %w", err)
 	}
@@ -552,4 +582,9 @@ func (c *CopilotCLIAgent) ExtractSummary(sessionRef string) (string, error) {
 		return "", fmt.Errorf("failed to parse transcript events: %w", err)
 	}
 	return extractSummaryFromEvents(events), nil
+}
+
+// GetTranscriptPositionFromReader counts raw JSONL lines without parsing messages.
+func (c *CopilotCLIAgent) GetTranscriptPositionFromReader(r io.Reader) (int, error) {
+	return agent.CountTranscriptLines(r) //nolint:wrapcheck // preserve shared counter errors
 }

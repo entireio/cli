@@ -3,6 +3,7 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -120,8 +121,7 @@ func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 		return "", err
 	}
 
-	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(configDir, "projects", projectDir), nil
+	return c.SessionDirUnder(configDir, repoPath), nil
 }
 
 // GetSessionBaseDir returns the base directory containing per-project session subdirectories.
@@ -248,25 +248,41 @@ func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 	return lineCount, nil
 }
 
-// ExtractModifiedFilesFromOffset extracts files modified since a given line number.
-// For Claude Code (JSONL format), offset is the starting line number.
-// Uses bufio.Reader to handle arbitrarily long lines (no size limit).
-// Returns:
-//   - files: list of file paths modified by Claude (from Write/Edit tools)
-//   - currentPosition: total number of lines in the file
-//   - error: any error encountered during reading
+// ExtractModifiedFilesFromOffset streams the main transcript from a raw line
+// offset. Callers holding confined bytes can use ExtractModifiedFilesFromBytes;
+// callers holding a confined reader can use ExtractModifiedFilesFromReader.
 func (c *ClaudeCodeAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}
 
-	file, openErr := os.Open(path) //nolint:gosec // Path comes from Claude Code transcript location
-	if openErr != nil {
-		return nil, 0, fmt.Errorf("failed to open transcript file: %w", openErr)
+	file, readErr := agent.OpenTranscriptFileUnderHome(path, "")
+	if readErr != nil {
+		return nil, 0, fmt.Errorf("failed to read transcript file: %w", readErr)
 	}
 	defer file.Close()
+	return c.ExtractModifiedFilesFromReader(file, startOffset)
+}
 
-	reader := bufio.NewReader(file)
+// ExtractModifiedFilesFromBytes is the bytes-based equivalent of
+// ExtractModifiedFilesFromOffset, for callers that already hold a
+// home-confined read of the transcript (agent.ConfinedTranscriptAnalyzer).
+// It never reads a path itself, and considers the main transcript only — it
+// does not walk subagents the way ExtractAllModifiedFiles(UnderHome) does;
+// extractModifiedFilesFromLiveTranscript's Claude-Code branch keeps calling
+// that instead, to parse the main transcript and its subagents in one pass.
+// This method exists so that a caller which dispatches generically on
+// agent.ConfinedTranscriptAnalyzer — not just that one Claude-Code-special-
+// cased branch — still gets a confined read for Claude Code, rather than
+// silently falling through to the unconfined ExtractModifiedFilesFromOffset.
+// Uses bufio.Reader to handle arbitrarily long lines (no size limit).
+func (c *ClaudeCodeAgent) ExtractModifiedFilesFromBytes(transcriptData []byte, startOffset int) (files []string, currentPosition int, err error) {
+	return c.ExtractModifiedFilesFromReader(bytes.NewReader(transcriptData), startOffset)
+}
+
+// ExtractModifiedFilesFromReader streams main-transcript files and raw line position.
+func (c *ClaudeCodeAgent) ExtractModifiedFilesFromReader(r io.Reader, startOffset int) (files []string, currentPosition int, err error) {
+	reader := bufio.NewReader(r)
 	var lines []TranscriptLine
 	lineNum := 0
 
@@ -335,3 +351,8 @@ func (c *ClaudeCodeAgent) LaunchCmd(ctx context.Context, initialPrompt string) (
 // gets its own ID rather than its parent's, so this names the session actually
 // running the caller.
 func (c *ClaudeCodeAgent) CallerSessionEnvVar() string { return "CLAUDE_CODE_SESSION_ID" }
+
+// GetTranscriptPositionFromReader counts raw JSONL lines without parsing messages.
+func (c *ClaudeCodeAgent) GetTranscriptPositionFromReader(r io.Reader) (int, error) {
+	return agent.CountTranscriptLines(r) //nolint:wrapcheck // preserve shared counter errors
+}

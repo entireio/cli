@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -3023,6 +3024,77 @@ func TestInfoCmd_TranscriptStreamsRawAgentBytes(t *testing.T) {
 
 	if !bytes.Equal(stdout.Bytes(), want) {
 		t.Errorf("transcript output mismatch.\n  want: %q\n  got:  %q", want, stdout.Bytes())
+	}
+}
+
+func TestInfoCmd_TranscriptPreservesAgentHomeBoundary(t *testing.T) {
+	for _, redirect := range []string{"none", "linked-home", "leaf", "leaf-inside", "directory", "outside"} {
+		t.Run(redirect, func(t *testing.T) {
+			setupStopTestRepo(t)
+			home := t.TempDir()
+			name := filepath.Join("projects", "proj", "session.jsonl")
+			want := "{\"content\":\"hello\"}\n"
+			testutil.WriteFile(t, home, name, want)
+			state := makeSessionState("test-info-home", session.PhaseActive)
+			state.AgentType = testAgentClaude
+			state.AgentHome = home
+			state.TranscriptPath = filepath.Join(home, name)
+			if redirect == "linked-home" {
+				state.AgentHome = filepath.Join(t.TempDir(), "home")
+				if err := os.Symlink(home, state.AgentHome); err != nil {
+					t.Skipf("symlink not supported: %v", err)
+				}
+			}
+			if err := strategy.SaveSessionState(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+
+			// Replace the previously recorded regular transcript after validation.
+			if redirect != "none" && redirect != "linked-home" {
+				outside := t.TempDir()
+				testutil.WriteFile(t, outside, "session.jsonl", "{\"content\":\"private\"}\n")
+				link, target := state.TranscriptPath, filepath.Join(outside, "session.jsonl")
+				if redirect == "leaf-inside" {
+					testutil.WriteFile(t, home, "target.jsonl", "{\"content\":\"private\"}\n")
+					target = filepath.Join(home, "target.jsonl")
+				}
+				if redirect == "outside" {
+					state.TranscriptPath = target
+					if err := strategy.SaveSessionState(context.Background(), state); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if redirect == "directory" {
+						link, target = filepath.Dir(link), outside
+					}
+					if err := os.RemoveAll(link); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(target, link); err != nil {
+						t.Skipf("symlink not supported: %v", err)
+					}
+				}
+			}
+
+			cmd := newInfoCmd()
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetArgs([]string{state.SessionID, "--transcript"})
+			err := cmd.ExecuteContext(context.Background())
+			if redirect == "none" || redirect == "linked-home" {
+				if err != nil || stdout.String() != want {
+					t.Fatalf("confined transcript: output %q, error %v", stdout.String(), err)
+				}
+				return
+			}
+			wantErr := osroot.ErrSymlinkedPath
+			if redirect == "outside" {
+				wantErr = agent.ErrOutsideSessionStore
+			}
+			if !errors.Is(err, wantErr) || stdout.Len() != 0 {
+				t.Fatalf("expected refusal without output: output %q, error %v", stdout.String(), err)
+			}
+		})
 	}
 }
 

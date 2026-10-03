@@ -2415,7 +2415,7 @@ func (s *ManualCommitStrategy) hasNewTranscriptWork(ctx context.Context, state *
 		return false
 	}
 
-	currentPos, err := analyzer.GetTranscriptPosition(state.TranscriptPath)
+	currentPos, err := agent.GetTranscriptPositionUnderHome(analyzer, state.TranscriptPath, state.AgentHome)
 	if err != nil {
 		logging.Debug(logCtx, "hasNewTranscriptWork: GetTranscriptPosition failed",
 			slog.String("session_id", state.SessionID),
@@ -2475,7 +2475,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	// AND subagent transcripts in a single pass, avoiding redundant parsing.
 	if state.AgentType == agent.AgentTypeClaudeCode {
 		subagentsDir := paths.SubagentsDir(filepath.Dir(state.TranscriptPath), state.SessionID)
-		transcriptData, readErr := agent.ReadTranscriptFile(state.TranscriptPath)
+		transcriptData, readErr := agent.ReadTranscriptFileUnderHome(state.TranscriptPath, state.AgentHome)
 		if readErr != nil {
 			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: failed to read transcript",
 				slog.String("session_id", state.SessionID),
@@ -2485,7 +2485,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 			// TODO: fix when we refactor this area.
 			// rather than instantiating claude specifically, we should iterate agents.
 			c := &claudecode.ClaudeCodeAgent{}
-			allFiles, extractErr := c.ExtractAllModifiedFiles(transcriptData, offset, subagentsDir)
+			allFiles, extractErr := c.ExtractAllModifiedFilesUnderHome(transcriptData, offset, subagentsDir, state.AgentHome)
 			if extractErr != nil {
 				logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: extraction failed",
 					slog.String("session_id", state.SessionID),
@@ -2493,6 +2493,39 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 				)
 			} else {
 				modifiedFiles = allFiles
+			}
+		}
+	} else if streaming, ok := ag.(agent.StreamingTranscriptAnalyzer); ok {
+		file, openErr := agent.OpenTranscriptFileUnderHome(state.TranscriptPath, state.AgentHome)
+		if openErr != nil {
+			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: failed to open transcript", slog.Any("error", openErr))
+		} else {
+			defer file.Close()
+			files, _, extractErr := streaming.ExtractModifiedFilesFromReader(file, offset)
+			if extractErr != nil {
+				logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: extraction failed", slog.Any("error", extractErr))
+			} else {
+				modifiedFiles = files
+			}
+		}
+	} else if confined, ok := agent.AsConfinedTranscriptAnalyzer(ag); ok {
+		// Read within the session home before passing bytes to the analyzer.
+		transcriptData, readErr := agent.ReadTranscriptFileUnderHome(state.TranscriptPath, state.AgentHome)
+		if readErr != nil {
+			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: failed to read transcript",
+				slog.String("session_id", state.SessionID),
+				slog.String("agent_type", string(state.AgentType)),
+				slog.String("error", readErr.Error()),
+			)
+		} else {
+			files, _, extractErr := confined.ExtractModifiedFilesFromBytes(transcriptData, offset)
+			if extractErr != nil {
+				logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: main transcript extraction failed",
+					slog.String("transcript_path", state.TranscriptPath),
+					slog.Any("error", extractErr),
+				)
+			} else {
+				modifiedFiles = files
 			}
 		}
 	} else {
@@ -3043,9 +3076,12 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		if userPrompt != "" {
 			state.LastPrompt = truncatePromptForStorage(userPrompt)
 		}
-		if transcriptPath != "" && state.TranscriptPath != transcriptPath {
-			state.TranscriptPath = transcriptPath
+		if err := refreshSessionTranscript(state, transcriptPath); err != nil {
+			return err
 		}
+		// Only an independently resolved active home can enter the registry.
+		// A retained home from repository session metadata grants no trust.
+		rememberAgentHome(ctx, state.AgentType, resolveAgentHome(state.AgentType, state.TranscriptPath))
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		reconcileWorktreePathForResumedTurn(ctx, state)
@@ -3458,7 +3494,7 @@ func advanceCheckpointTranscriptStartToTurnEnd(ctx context.Context, state *Sessi
 	advanced := false
 	if transcriptPath, resolveErr := resolveTranscriptPath(state); resolveErr == nil {
 		if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
-			if pos, posErr := analyzer.GetTranscriptPosition(transcriptPath); posErr == nil && pos > state.CheckpointTranscriptStart {
+			if pos, posErr := agent.GetTranscriptPositionUnderHome(analyzer, transcriptPath, state.AgentHome); posErr == nil && pos > state.CheckpointTranscriptStart {
 				logging.Debug(logCtx,
 					"advancing CheckpointTranscriptStart to turn end after mid-turn commit",
 					slog.String("session_id", state.SessionID),
@@ -3593,7 +3629,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; ExtractSkillEvents handles nil
 
-	fullTranscript, err := agent.ReadTranscriptFile(transcriptPath)
+	fullTranscript, err := agent.ReadTranscriptFileUnderHome(transcriptPath, state.AgentHome)
 	if err != nil || len(fullTranscript) == 0 {
 		// A late-transcript agent (agy) writes its transcript AFTER the Stop
 		// hook, so an empty file here is the placeholder PrepareTranscript

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -22,12 +23,16 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ agent.TranscriptAnalyzer          = (*CodexAgent)(nil)
-	_ agent.TokenCalculator             = (*CodexAgent)(nil)
-	_ agent.InventoryAwareExtractor     = (*CodexAgent)(nil)
-	_ agent.PromptExtractor             = (*CodexAgent)(nil)
-	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
-	_ agent.TranscriptSanitizer         = (*CodexAgent)(nil)
+	_ agent.ConfinedInventoryAwareExtractor = (*CodexAgent)(nil)
+	_ agent.TranscriptAnalyzer              = (*CodexAgent)(nil)
+	_ agent.ConfinedTranscriptAnalyzer      = (*CodexAgent)(nil)
+	_ agent.StreamingTranscriptAnalyzer     = (*CodexAgent)(nil)
+	_ agent.TokenCalculator                 = (*CodexAgent)(nil)
+	_ agent.InventoryAwareExtractor         = (*CodexAgent)(nil)
+	_ agent.PromptExtractor                 = (*CodexAgent)(nil)
+	_ agent.TranscriptPromptExtractor       = (*CodexAgent)(nil)
+	_ agent.RestoredSessionPathResolver     = (*CodexAgent)(nil)
+	_ agent.TranscriptSanitizer             = (*CodexAgent)(nil)
 )
 
 func sessionMetaID(data []byte) (string, error) {
@@ -285,19 +290,34 @@ func (c *CodexAgent) GetTranscriptPosition(path string) (int, error) {
 	return lineCount, nil
 }
 
-// ExtractModifiedFilesFromOffset extracts files modified since a given line offset.
+// ExtractModifiedFilesFromOffset extracts files modified since a given line
+// offset. Streams the path and delegates to ExtractModifiedFilesFromReader
+// — callers that already hold a home-confined read of the transcript (e.g.
+// condensation, which must not trust a bare path from adopted session state)
+// should call ExtractModifiedFilesFromBytes directly instead.
 func (c *CodexAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string, startOffset int) (files []string, currentPosition int, err error) {
 	if path == "" {
 		return nil, 0, nil
 	}
 
-	file, openErr := os.Open(path) //nolint:gosec // Path comes from agent hook input
-	if openErr != nil {
-		return nil, 0, fmt.Errorf("failed to open transcript: %w", openErr)
+	file, readErr := agent.OpenTranscriptFileUnderHome(path, "")
+	if readErr != nil {
+		return nil, 0, fmt.Errorf("failed to read transcript: %w", readErr)
 	}
 	defer file.Close()
+	return c.ExtractModifiedFilesFromReader(file, startOffset)
+}
 
-	reader := bufio.NewReader(file)
+// ExtractModifiedFilesFromBytes is the bytes-based equivalent of
+// ExtractModifiedFilesFromOffset, for callers that already hold a
+// home-confined read of the transcript (agent.ConfinedTranscriptAnalyzer).
+func (c *CodexAgent) ExtractModifiedFilesFromBytes(transcriptData []byte, startOffset int) (files []string, currentPosition int, err error) {
+	return c.ExtractModifiedFilesFromReader(bytes.NewReader(transcriptData), startOffset)
+}
+
+// ExtractModifiedFilesFromReader streams main-transcript files and raw line position.
+func (c *CodexAgent) ExtractModifiedFilesFromReader(r io.Reader, startOffset int) (files []string, currentPosition int, err error) {
+	reader := bufio.NewReader(r)
 	seen := make(map[string]struct{})
 	lineNum := 0
 
@@ -699,6 +719,21 @@ func exactUsageFromSnapshot(usage *exactTokenUsageData) *agent.TokenUsage {
 	return &agent.TokenUsage{InputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output}
 }
 
+// ExtractWithSubagentInventoryUnderHome uses an operation-local copy so one
+// session's home never affects another session's discovery roots.
+func (c *CodexAgent) ExtractWithSubagentInventoryUnderHome(ctx context.Context, parent []byte, fromOffset int, refs []agent.SubagentReference, home string) (agent.InventoryExtraction, error) {
+	if home == "" {
+		return c.ExtractWithSubagentInventory(ctx, parent, fromOffset, refs)
+	}
+	if !filepath.IsAbs(home) {
+		return agent.InventoryExtraction{}, errors.New("agent home must be absolute")
+	}
+	scoped := *c
+	scoped.agentHome = home
+	scoped.RolloutRoots = []string{filepath.Join(home, "sessions"), filepath.Join(home, "archived_sessions")}
+	return scoped.ExtractWithSubagentInventory(ctx, parent, fromOffset, refs)
+}
+
 // ExtractWithSubagentInventory gathers evidence only for refs supplied by the
 // caller's authoritative ledger. It never discovers children from transcript
 // text, filenames, timestamps, or token-count events.
@@ -758,7 +793,11 @@ func analyzeLoadedChild(ctx context.Context, ref agent.SubagentReference, loaded
 	return analysis
 }
 
-// ExtractPrompts returns user prompts from the transcript starting at the given offset.
+// ExtractPrompts returns user prompts from the transcript starting at the
+// given offset. Reads the path itself — callers that already hold a
+// home-confined read of the transcript (e.g. condensation, which must not
+// trust a bare sessionRef from adopted session state) should call
+// ExtractPromptsFromTranscript instead.
 func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
 	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path comes from agent hook input
 	if err != nil {
@@ -767,7 +806,21 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 		}
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
+	return extractPromptsFromRolloutBytes(data, fromOffset), nil
+}
 
+// ExtractPromptsFromTranscript implements agent.TranscriptPromptExtractor over
+// transcript bytes the caller already holds (e.g. a home-confined read via
+// agent.ReadTranscriptFileUnderHome), with the same offset metric as
+// ExtractPrompts. It never reads a path itself.
+func (c *CodexAgent) ExtractPromptsFromTranscript(content []byte, fromOffset int) ([]string, error) {
+	return extractPromptsFromRolloutBytes(content, fromOffset), nil
+}
+
+// extractPromptsFromRolloutBytes is the shared body of ExtractPrompts and
+// ExtractPromptsFromTranscript: user-message text from a Codex rollout's
+// response_item lines after fromOffset.
+func extractPromptsFromRolloutBytes(data []byte, fromOffset int) []string {
 	var prompts []string
 	lineNum := 0
 
@@ -808,7 +861,7 @@ func (c *CodexAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string
 		}
 	}
 
-	return prompts, nil
+	return prompts
 }
 
 // SanitizePortableTranscript strips encrypted history fragments that cannot be
@@ -1030,4 +1083,9 @@ func parseSessionStartTime(data []byte) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse session_meta timestamp %q: %w", meta.Timestamp, err)
 	}
 	return startTime, nil
+}
+
+// GetTranscriptPositionFromReader counts raw JSONL lines without parsing messages.
+func (c *CodexAgent) GetTranscriptPositionFromReader(r io.Reader) (int, error) {
+	return agent.CountTranscriptLines(r) //nolint:wrapcheck // preserve shared counter errors
 }

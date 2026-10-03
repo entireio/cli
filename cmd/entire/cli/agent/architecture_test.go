@@ -289,3 +289,54 @@ func hasInitWithRegister(t *testing.T, dir string) bool {
 	}
 	return false
 }
+
+// TestAgentHomeConfinementTestCoversEveryAgentPackage ensures the confinement
+// contract test imports every registered agent, including newly added packages.
+func TestAgentHomeConfinementTestCoversEveryAgentPackage(t *testing.T) {
+	t.Parallel()
+
+	agentDir := findAgentDir(t)
+	agentPkgs := discoverAgentPackages(t, agentDir)
+	if len(agentPkgs) == 0 {
+		t.Fatal("no agent packages found — test setup is broken")
+	}
+
+	const confinementTestFile = "agent_home_confinement_test.go"
+	imported := blankImportsOf(t, filepath.Join(agentDir, confinementTestFile))
+
+	for _, pkgDir := range agentPkgs {
+		pkgName := filepath.Base(pkgDir)
+		importPath := "github.com/entireio/cli/cmd/entire/cli/agent/" + pkgName
+		if !imported[importPath] {
+			t.Errorf("agent package %q exists on disk and self-registers (see TestAgentPackages_SelfRegister) "+
+				"but %s does not blank-import %q, so TestAgentHomeProvidersImplementConfinedReads cannot see it "+
+				"via agent.List() and will silently skip checking it. Add `_ %q` to %s's import block.",
+				pkgName, confinementTestFile, importPath, importPath, confinementTestFile)
+		}
+	}
+}
+
+// blankImportsOf parses a single Go file and returns the set of import paths
+// it imports for side effects only (`_ "path"`).
+func blankImportsOf(t *testing.T, file string) map[string]bool {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parser.ParseFile(%s): %v", file, err)
+	}
+
+	seen := make(map[string]bool)
+	for _, imp := range f.Imports {
+		if imp.Name == nil || imp.Name.Name != "_" {
+			continue
+		}
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			t.Fatalf("strconv.Unquote(%s): %v", imp.Path.Value, err)
+		}
+		seen[path] = true
+	}
+	return seen
+}

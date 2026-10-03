@@ -101,7 +101,7 @@ func TestResolvePendingTranscriptOffset_MidTurn(t *testing.T) {
 
 	// The misattribution without the fix: at the stale offset, the previous
 	// turn's prompt is what extraction hands to turn 2's checkpoint.
-	stale := resolvePromptsFromLateFlushedTranscript(context.Background(), ag, path, state.CheckpointTranscriptStart)
+	stale := resolvePromptsFromLateFlushedTranscript(context.Background(), ag, path, "", state.CheckpointTranscriptStart)
 	require.Equal(t, []string{"first prompt"}, stale,
 		"sanity: the stale offset attributes the previous turn's prompt to the current checkpoint")
 
@@ -109,7 +109,7 @@ func TestResolvePendingTranscriptOffset_MidTurn(t *testing.T) {
 	require.Equal(t, 2, state.CheckpointTranscriptStart, "pending advance must complete against the flushed file end")
 	require.False(t, state.TranscriptOffsetPending, "flag is one-shot")
 
-	corrected := resolvePromptsFromLateFlushedTranscript(context.Background(), ag, path, state.CheckpointTranscriptStart)
+	corrected := resolvePromptsFromLateFlushedTranscript(context.Background(), ag, path, "", state.CheckpointTranscriptStart)
 	require.Empty(t, corrected,
 		"at the corrected offset no already-condensed prompt leaks into the current checkpoint")
 }

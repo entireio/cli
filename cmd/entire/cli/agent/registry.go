@@ -140,6 +140,14 @@ func AgentForTranscriptPath(transcriptPath, repoPath string) (Agent, bool) {
 	return nil, false
 }
 
+// PathHasDirPrefix exports pathHasDirPrefix for AgentHomeProvider
+// implementations in agent subpackages (e.g. claudecode, codex), which need
+// the same separator-aware, Windows-case-insensitive containment check that
+// AgentForTranscriptPath uses here.
+func PathHasDirPrefix(path, dir string) bool {
+	return pathHasDirPrefix(path, dir)
+}
+
 // pathHasDirPrefix reports whether path is contained within dir (or equals it).
 // Adds a trailing separator before prefix-matching so /a/bc doesn't match /a/b.
 //

@@ -413,6 +413,10 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 		// Final checkpoint: add transcripts and checkpoint.json
 
 		// Add session transcript (with chunking support for large transcripts)
+		//
+		// SECURITY: production task writes are incremental and do not reach
+		// this fallback. Adopted paths must be read with their AgentHome before
+		// reaching storage; see docs/development/filesystem-safety.md.
 		if opts.TranscriptPath != "" {
 			if transcriptContent, readErr := agent.ReadTranscriptFile(opts.TranscriptPath); readErr == nil {
 				// Chunk if necessary
@@ -444,6 +448,9 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 		}
 
 		// Add subagent transcript if available
+		//
+		// SECURITY: same dead-code/confinement caveat as the TranscriptPath
+		// read above applies here — see that comment.
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			agentContent, readErr := agent.ReadTranscriptFile(opts.SubagentTranscriptPath)
 			agentContent, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)

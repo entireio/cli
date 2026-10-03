@@ -16,6 +16,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -32,6 +33,8 @@ type CodexAgent struct {
 	// RolloutRoots overrides the active and archived rollout roots for callers
 	// that already know them (notably tests). Nil uses Codex's normal home.
 	RolloutRoots []string
+	// agentHome anchors all recorded-home reads above the session directories.
+	agentHome string
 	// loadRollout and walkDir are package-private deterministic test seams.
 	// Production uses verified same-descriptor reads plus the bounded,
 	// incremental directory walker.
@@ -179,7 +182,7 @@ func openRolloutFile(root *os.Root, name string) (*os.File, fs.FileInfo, error) 
 	if !before.Mode().IsRegular() {
 		return nil, nil, errors.New("rollout is not a regular file")
 	}
-	file, err := root.OpenFile(name, os.O_RDONLY|rolloutNonblock, 0)
+	file, err := osroot.OpenFileNoFollow(root, name, os.O_RDONLY|rolloutNonblock, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open rollout: %w", err)
 	}
@@ -232,10 +235,20 @@ func readRolloutBody(file *os.File, opts rolloutReadOptions) ([]byte, error) {
 }
 
 func (c *CodexAgent) loadCandidateRollout(ctx context.Context, path string) (loadedRollout, error) {
+	if c.agentHome != "" && !c.SessionPathUnder(c.agentHome, path) {
+		return loadedRollout{}, errors.New("rollout is outside recorded home session layout")
+	}
 	if c.loadRollout != nil {
 		return c.loadRollout(path)
 	}
-	return readRegularRolloutContext(ctx, c.rolloutRoots(), path, rolloutBodyByteLimit, c.observeRolloutRead)
+	return readRegularRolloutContext(ctx, c.rolloutReadRoots(), path, rolloutBodyByteLimit, c.observeRolloutRead)
+}
+
+func (c *CodexAgent) rolloutReadRoots() []string {
+	if c.agentHome != "" {
+		return []string{c.agentHome}
+	}
+	return c.rolloutRoots()
 }
 
 func (c *CodexAgent) loadVerifiedRollout(ctx context.Context, path, agentID string) (loadedRollout, bool) {
@@ -284,6 +297,25 @@ func (c *CodexAgent) loadDirectRollout(ctx context.Context, ref agent.SubagentRe
 }
 
 func (c *CodexAgent) walkRollouts(ctx context.Context, root string, budget *rolloutScanBudget, visit func(string, fs.DirEntry) error) error {
+	if c.agentHome != "" {
+		homeRoot, err := osroot.Shared(c.agentHome)
+		if err != nil {
+			return fmt.Errorf("open recorded rollout home: %w", err)
+		}
+		name, ok := agent.TranscriptNameUnderHome(root, c.agentHome)
+		if !ok {
+			return errors.New("rollout search root is outside recorded home")
+		}
+		child, closeChild, err := osroot.OpenDirNoSymlinks(homeRoot, name)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("open recorded rollout directory: %w", err)
+		}
+		defer closeChild()
+		return walkRolloutDirectory(ctx, child, root, ".", budget, visit)
+	}
 	if c.walkDir != nil {
 		return c.walkDir(root, func(path string, entry fs.DirEntry, entryErr error) error {
 			if entryErr != nil {
@@ -363,6 +395,9 @@ func (c *CodexAgent) inspectFallbackCandidate(
 	agentIDs map[string]struct{},
 	budget *rolloutScanBudget,
 ) (string, loadedRollout, error) {
+	if c.agentHome != "" && !c.SessionPathUnder(c.agentHome, path) {
+		return "", loadedRollout{}, errors.New("rollout is outside recorded home session layout")
+	}
 	if c.loadRollout != nil {
 		loaded, loadErr := c.loadRollout(path)
 		if loadErr != nil {
@@ -390,7 +425,7 @@ func (c *CodexAgent) inspectFallbackCandidate(
 		return id, loaded, nil
 	}
 
-	file, opened, err := openScopedRollout(c.rolloutRoots(), path)
+	file, opened, err := openScopedRollout(c.rolloutReadRoots(), path)
 	if err != nil {
 		return "", loadedRollout{}, err
 	}
@@ -731,27 +766,55 @@ func (c *CodexAgent) LaunchCmd(ctx context.Context, initialPrompt string) (*exec
 }
 
 func findRolloutBySessionID(codexHome, agentSessionID string) string {
+	candidates := rolloutCandidatesBySessionID(codexHome, agentSessionID)
+	if len(candidates) != 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+// ResolveSessionFileCandidates keeps alternatives available after discovery
+// rejects an unsafe or unreadable rollout.
+func (c *CodexAgent) ResolveSessionFileCandidates(sessionDir, id string) []string {
+	if filepath.IsAbs(id) {
+		return []string{id}
+	}
+	return append(rolloutCandidatesBySessionID(sessionDir, id), filepath.Join(sessionDir, id+".jsonl"))
+}
+
+func rolloutCandidatesBySessionID(codexHome, agentSessionID string) []string {
 	if codexHome == "" || validation.ValidateAgentSessionID(agentSessionID) != nil {
-		return ""
+		return nil
 	}
 
 	patterns := []string{
-		filepath.Join(codexHome, "rollout-*-"+agentSessionID+".jsonl"),
-		filepath.Join(codexHome, "*", "*", "*", "rollout-*-"+agentSessionID+".jsonl"),
-		filepath.Join(filepath.Dir(codexHome), "archived_sessions", "*", "*", "*", "rollout-*-"+agentSessionID+".jsonl"),
+		filepath.Join(codexHome, rolloutFilePattern(agentSessionID)),
+		filepath.Join(codexHome, "*", "*", "*", rolloutFilePattern(agentSessionID)),
+		filepath.Join(filepath.Dir(codexHome), "archived_sessions", "*", "*", "*", rolloutFilePattern(agentSessionID)),
 	}
+	var candidates []string
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(pattern)
 		if err != nil || len(matches) == 0 {
 			continue
 		}
-		// Multiple restored rollouts for the same session ID can exist. Return the
-		// lexicographically latest path so newer dated restores win deterministically.
+		// Prefer newer dated restores, retaining older matches as fallbacks.
 		sort.Strings(matches)
-		return matches[len(matches)-1]
+		for i := len(matches) - 1; i >= 0; i-- {
+			candidates = append(candidates, matches[i])
+		}
 	}
 
-	return ""
+	return candidates
+}
+
+func rolloutFilePattern(id string) string { return "rollout-*-" + id + ".jsonl" }
+
+// SessionFileNameMatches checks rollout identity even when the transcript has
+// not been written yet, using the same naming rule as discovery.
+func (c *CodexAgent) SessionFileNameMatches(name, id string) bool {
+	matched, err := filepath.Match(rolloutFilePattern(id), name)
+	return err == nil && (matched || name == id+".jsonl")
 }
 
 // CallerSessionEnvVar names the variable holding the session ID Codex

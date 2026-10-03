@@ -49,6 +49,42 @@ func TestSessionStore_SessionFileResolvesInsideTheStore(t *testing.T) {
 	assert.Equal(t, filepath.Join(dir, "abc123.jsonl"), absPath)
 }
 
+func TestSessionStore_SessionFileInKeepsHomeBoundary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		lookupDir  string
+		id         string
+		escape     bool
+		wantErr    error
+		wantCalled bool
+	}{
+		{name: "sibling store", lookupDir: "sessions", id: "abc", wantCalled: true},
+		{name: "unsafe ID", lookupDir: "sessions", id: "../secret", wantErr: agent.ErrUnsafeSessionName},
+		{name: "outside lookup", lookupDir: "../elsewhere", id: "abc", wantErr: agent.ErrOutsideSessionStore},
+		{name: "outside result", lookupDir: "sessions", id: "abc", escape: true, wantErr: agent.ErrOutsideSessionStore, wantCalled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			store, home := newStore(t, func(dir, id string) string {
+				called = true
+				if tc.escape {
+					return filepath.Join(dir, "..", "..", id+".jsonl")
+				}
+				return filepath.Join(dir, "..", "archived_sessions", id+".jsonl")
+			})
+			name, path, err := store.SessionFileIn(tc.lookupDir, tc.id)
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Equal(t, tc.wantCalled, called)
+			if tc.wantErr == nil {
+				require.Equal(t, "archived_sessions/abc.jsonl", name)
+				require.Equal(t, filepath.Join(home, "archived_sessions", "abc.jsonl"), path)
+			}
+		})
+	}
+}
+
 // The check the type exists for: an agent's own layout plus a session ID from a
 // hook payload must not be able to name a file outside the agent's directory.
 // filepath.Join would have produced this path silently.

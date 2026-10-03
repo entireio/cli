@@ -7,18 +7,22 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/spf13/cobra"
 )
@@ -260,21 +264,223 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 	return adopted, filesTouched, nil
 }
 
+// validateAdoptSourceTranscript authorizes the source transcript and persists
+// a canonical home/path pair when the recorded home is independently trusted.
+// Task paths are validated against the original home before it is canonicalized.
 func validateAdoptSourceTranscript(source *session.State, sourceWorktree string) error {
+	authorizer := newAdoptPathAuthorizer(sourceWorktree)
 	if source == nil || strings.TrimSpace(source.TranscriptPath) == "" {
+		authorizer.validateTaskRecords(source)
 		return nil
 	}
 
-	owner, ok := agent.AgentForTranscriptPath(source.TranscriptPath, sourceWorktree)
+	resolved, home, ok := authorizer.authorizesSessionPath(source.TranscriptPath, source.AgentHome, source.AgentType, source.SessionID)
 	if !ok {
-		return fmt.Errorf("unexpected transcript path for session %s: %s is not owned by a registered agent for %s",
-			source.SessionID, source.TranscriptPath, sourceWorktree)
+		return unexpectedAdoptTranscriptPathError(source, sourceWorktree)
 	}
-	if source.AgentType != "" && owner.Type() != source.AgentType {
-		return fmt.Errorf("unexpected transcript path for session %s: %s belongs to %s, but source state says %s",
-			source.SessionID, source.TranscriptPath, owner.Type(), source.AgentType)
-	}
+	authorizer.validateTaskRecords(source)
+	source.TranscriptPath = resolved
+	source.AgentHome = home
 	return nil
+}
+
+// adoptPathAuthorizer caches positive and negative home provenance for a single
+// adoption. Individual transcript paths still receive their own confinement check.
+type adoptPathAuthorizer struct {
+	sourceWorktree string
+	homes          map[adoptHomeKey]*agent.TrustedTranscriptResolver
+}
+
+type adoptHomeKey struct {
+	home      string
+	agentType types.AgentType
+}
+
+func newAdoptPathAuthorizer(sourceWorktree string) *adoptPathAuthorizer {
+	return &adoptPathAuthorizer{sourceWorktree: sourceWorktree, homes: make(map[adoptHomeKey]*agent.TrustedTranscriptResolver)}
+}
+
+// authorizesPath prefers an independently trusted recorded home. Legacy
+// paths are authorized through the agent's current session store, and are
+// upgraded to the active home only when they resolve beneath it. A legacy
+// session (no recorded home) whose transcript is reached through a linked
+// directory below the home, such as a relocated projects directory, keeps the
+// legacy read protocol. A recorded home, or a linked transcript leaf, never
+// falls back: that is the redirection confinement exists to refuse.
+func (a *adoptPathAuthorizer) authorizesPath(path, agentHome string, agentType types.AgentType) (resolvedPath, resolvedHome string, ok bool) {
+	if resolved, home, ok := a.recordedHomeAcceptsPath(agentHome, agentType, path); ok {
+		return resolved, home, true
+	}
+	if strings.TrimSpace(agentHome) != "" {
+		owner, err := agent.GetByAgentType(agentType)
+		if err != nil {
+			return "", "", false
+		}
+		if _, supported := agent.AsAgentHomeProvider(owner); supported {
+			return "", "", false
+		}
+	}
+
+	owner, ok := agent.AgentForTranscriptPath(path, a.sourceWorktree)
+	if !ok {
+		return "", "", false
+	}
+	if agentType != "" && owner.Type() != agentType {
+		return "", "", false
+	}
+	if provider, hasHome := agent.AsAgentHomeProvider(owner); hasHome {
+		if home, err := provider.SessionHome(); err == nil && provider.SessionPathUnder(home, path) {
+			if resolved, canonicalHome, accepted := a.recordedHomeAcceptsPath(home, owner.Type(), path); accepted {
+				return resolved, canonicalHome, true
+			}
+			if strings.TrimSpace(agentHome) != "" || transcriptLeafIsLink(path) {
+				return "", "", false
+			}
+		}
+	}
+	return path, "", true
+}
+
+// transcriptLeafIsLink reports whether path itself is a symbolic link. A
+// missing or unreadable leaf is not one; later reads report it.
+func transcriptLeafIsLink(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
+}
+
+// validateTaskRecords clears unauthorized task transcript paths.
+// Missing task transcripts do not prevent adopting the parent session.
+func (a *adoptPathAuthorizer) validateTaskRecords(source *session.State) {
+	if source == nil {
+		return
+	}
+	for i := range source.TaskRecords {
+		record := &source.TaskRecords[i]
+		if record.DeclaredTranscriptPath == "" {
+			continue
+		}
+		resolved, _, ok := a.authorizesSessionPath(record.DeclaredTranscriptPath, source.AgentHome, source.AgentType, record.AgentID)
+		// Claude and Droid also name child transcripts agent-<id>.jsonl.
+		if !ok && record.AgentID != "" && (source.AgentType == agent.AgentTypeClaudeCode || source.AgentType == agent.AgentTypeFactoryAIDroid) {
+			resolved, _, ok = a.authorizesSessionPath(record.DeclaredTranscriptPath, source.AgentHome, source.AgentType, "agent-"+record.AgentID)
+		}
+		if !ok || !a.taskPathMatchesParentLayout(source, resolved) {
+			record.DeclaredTranscriptPath = ""
+			continue
+		}
+		record.DeclaredTranscriptPath = resolved
+	}
+}
+
+// Project-scoped children stay beside their actual parent transcript or in its
+// subagents directory. This uses transcript coordinates, never the worktree
+// association that adoption changes. Flat stores keep agent-ID-based lookup.
+func (a *adoptPathAuthorizer) taskPathMatchesParentLayout(source *session.State, task string) bool {
+	if source.TranscriptPath == "" {
+		return true
+	}
+	switch source.AgentType {
+	case agent.AgentTypeClaudeCode, agent.AgentTypeFactoryAIDroid, agent.AgentTypePi:
+		parent, _, ok := a.authorizesPath(source.TranscriptPath, source.AgentHome, source.AgentType)
+		if !ok {
+			return false
+		}
+		dir := filepath.Dir(parent)
+		if sameTranscriptLocation(filepath.Dir(task), dir) {
+			return true
+		}
+		return source.AgentType != agent.AgentTypePi &&
+			sameTranscriptLocation(filepath.Dir(task), paths.SubagentsDir(dir, source.SessionID))
+	default:
+		return true
+	}
+}
+
+// recordedHomeAcceptsPath applies the shared home authorization and read policy.
+func (a *adoptPathAuthorizer) recordedHomeAcceptsPath(agentHome string, agentType types.AgentType, path string) (resolvedPath, resolvedHome string, ok bool) {
+	key := adoptHomeKey{home: strings.TrimSpace(agentHome), agentType: agentType}
+	resolver, cached := a.homes[key]
+	if !cached {
+		owner, err := agent.GetByAgentType(agentType)
+		if err == nil {
+			if provider, supported := agent.AsAgentHomeProvider(owner); supported {
+				resolver, err = agent.NewTrustedTranscriptResolver(provider, key.home)
+				if err != nil {
+					resolver = nil
+				}
+			}
+		}
+		a.homes[key] = resolver
+	}
+	if resolver == nil {
+		return "", "", false
+	}
+	resolvedPath, resolvedHome, err := resolver.Resolve(path)
+	return resolvedPath, resolvedHome, err == nil
+}
+
+// authorizesSessionPath checks the agent's session naming in addition to home
+// provenance and confinement. Adoption intentionally preserves transcripts
+// from an earlier project; the current worktree is not their owner.
+func (a *adoptPathAuthorizer) authorizesSessionPath(path, home string, kind types.AgentType, id string) (string, string, bool) {
+	if validation.ValidateSessionID(id) != nil {
+		return "", "", false
+	}
+	resolved, canonicalHome, ok := a.authorizesPath(path, home, kind)
+	if !ok {
+		return "", "", false
+	}
+	owner, err := agent.GetByAgentType(kind)
+	if err != nil {
+		return "", "", false
+	}
+	var store *agent.SessionStore
+	if canonicalHome != "" {
+		store, err = agent.OpenSessionStoreAt(owner, canonicalHome)
+	} else {
+		store, err = agent.OpenSessionStore(owner, a.sourceWorktree)
+	}
+	if err != nil {
+		return "", "", false
+	}
+	if _, err := store.Name(resolved); err != nil {
+		return "", "", false
+	}
+	if matcher, ok := owner.(agent.SessionFileNameMatcher); ok {
+		return resolved, canonicalHome, matcher.SessionFileNameMatches(filepath.Base(resolved), id)
+	}
+	// Most agents resolve within the transcript's directory. Nested layouts
+	// such as Copilot's <id>/events.jsonl resolve from its parent instead.
+	dir := filepath.Dir(resolved)
+	for range 2 {
+		candidates, candidateErr := store.SessionFileCandidatesIn(dir, id)
+		if candidateErr == nil {
+			for _, candidate := range candidates {
+				if _, nameErr := store.Name(candidate); nameErr == nil && sameTranscriptLocation(candidate, resolved) {
+					return resolved, canonicalHome, true
+				}
+			}
+		}
+		dir = filepath.Dir(dir)
+	}
+	return "", "", false
+}
+
+func sameTranscriptLocation(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	return a == b || (runtime.GOOS == windowsGOOS && strings.EqualFold(a, b))
+}
+
+// unexpectedAdoptTranscriptPathError identifies the rejected path and relocation
+// variables that may select the correct active home.
+func unexpectedAdoptTranscriptPathError(source *session.State, sourceWorktree string) error {
+	msg := fmt.Sprintf("unexpected transcript path for session %s: %s is not owned by a registered agent for %s",
+		source.SessionID, source.TranscriptPath, sourceWorktree)
+	if home := strings.TrimSpace(source.AgentHome); home != "" {
+		msg += " or recognized under its recorded agent home " + home
+	}
+	msg += "; if the source session ran with a relocated agent home, check one of: " + strings.Join(agent.RelocationEnvVars(), ", ")
+	return errors.New(msg)
 }
 
 func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.StateStore, string, string, error) {
@@ -452,6 +658,8 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	// Keep the source live transcript path. In cross-repo adoption the transcript
 	// belongs to the continuing agent session, not the target repository; clearing
 	// or recomputing it from the target repo would drop live transcript capture.
+	// TranscriptPath and AgentHome carry the source validation's canonical
+	// coordinates; checkpoint bookkeeping below remains local to the target.
 	adopted.CLIVersion = versioninfo.Version
 	adopted.TranscriptPath = source.TranscriptPath
 	adopted.BaseCommit = head.Hash().String()

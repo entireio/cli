@@ -224,6 +224,146 @@ redaction settings from `.entire/settings.json`, and ahead of `doctor logs` /
 `doctor bundle`, which read `.entire/logs` — prints the diagnosis, and stops. It
 does not auto-fix: what occupies the path may be someone's data.
 
+### Recorded agent homes
+
+`session.State.AgentHome` is repository metadata, not authority to read a
+directory. Adoption accepts a recorded home only when
+`agent.ResolveTrustedSessionHome` matches it against the agent's active home or
+the per-user `agent_homes.json` registry. Session initialization and turn start
+record independently resolved active homes in that registry; adoption never
+populates it. Turn start does not register a retained home from session metadata.
+The registry snapshots the canonical target of an existing home, so changing a
+home symlink does not erase the previously observed target. A not-yet-created
+home retains its absolute spelling until a later session start can resolve it.
+The registry is bounded and atomically replaced. Recording a home refreshes its
+usage order, prunes positively missing or non-directory paths (retaining entries
+on permission or I/O errors), and evicts the least recently used
+entries. Malformed, unreadable, linked, or unsupported-version registries grant
+no trust and are preserved on writes; only an absent registry starts empty.
+Concurrent updates may lose an
+entry, which a subsequent session start records again.
+
+Home provenance, session layout, and read confinement are separate checks.
+`agent.ResolveTrustedTranscript` applies those checks for adoption and
+historical-home attach. It canonicalizes the authorized home and preserves the
+transcript's relative name, refusing links below the home through the same
+`SessionStore` policy used by later reads. Missing transcripts retain their
+lexical name beneath the canonical home; later reads still check every component.
+Adoption additionally checks the parent path against the agent's session-file
+naming rules for the selected session ID, using the same layouts as discovery.
+These metadata checks permit a transcript that has not been written yet,
+including timestamped Pi/Codex filenames. Declared task paths must match their
+own agent IDs, including Claude/Droid's `agent-<id>.jsonl` layout; paths without
+an identifiable child are cleared. Project-scoped task transcripts stay beside
+their actual parent transcript or in that parent's subagents directory, rather
+than a directory computed from the current worktree. Flat stores use the
+agent's child-session naming rules. A path hint cannot select another session
+merely because it lies inside a trusted home. Session IDs are validated before
+candidate enumeration. The transcript's project can differ from the current
+worktree: adoption deliberately changes the session's worktree association
+while preserving its original transcript. Parent and task paths each retain
+home provenance and no-follow confinement.
+For home-provider agents, a rejected recorded home cannot fall back to legacy
+adoption reads, including through an explicit session-directory override. Task
+transcript paths follow the same rule. A missing or unknown agent identity also
+cannot authorize dropping a recorded home.
+
+`ReadTranscriptFileUnderHome`, `OpenTranscriptFileUnderHome`, and
+`GetTranscriptPositionUnderHome` reject paths
+outside a nonempty home. They accept both the home's original spelling and its
+canonical spelling, without resolving links below it. `SessionStore` pins and
+checks those components at open time, so replacing a validated transcript with
+a symlink cannot redirect a later read. Cached transcripts under `.entire` use
+that tree's root. An empty home preserves the legacy read protocol, including
+agent session-directory overrides that do not use a home-relative layout.
+Session transcript output uses the confined opener with the recorded home,
+preserving streaming, cancellation, and the file-size snapshot boundary.
+
+A home is recorded only while `agent.HomeConfinesTranscript` holds: the
+transcript fits the agent's layout beneath it and no existing component below
+the home is a link. A relocated directory inside the home (for example a linked
+`projects/`) would make every confined read fail, so such sessions keep the
+legacy protocol; adoption of a legacy session in that layout does too. A
+home recorded before the first transcript path is provisional; when that path
+arrives, turn start resolves confinement afresh, allowing the legacy protocol
+for linked session directories that never had an established boundary. Each
+turn start reconciles the record with the current agent type and transcript
+path. Once a transcript is confined, initialization and turn start normalize
+its home and path together to canonical coordinates, preserving the selected
+target if a home alias is later retargeted. A provisional or mismatched agent's
+home can be cleared, but a path change,
+read failure, or symlink replacement does not clear an established same-agent
+home: subsequent reads must fail closed rather than switch to the legacy
+protocol. An unsafe relocation is rejected without persisting a changed
+home/path pair, so repeated turns cannot progressively downgrade the boundary.
+Partial-session repair preserves established boundaries for all home-provider
+agents even when its other bookkeeping is rebuilt. `attach`
+confines a transcript found under a recorded alternate home to that home and
+persists canonical home/path coordinates together. Reattaching
+an existing session cannot switch to legacy reads when its recorded boundary
+becomes unreadable. Auto-detecting another agent during reattachment cannot drop
+that boundary. Turn-start hooks using a linked spelling of the same home
+retain the recorded root and normalize the transcript's relative name, without
+following links below that root.
+
+Adoption creates no per-destination authorization receipts or persistent Git
+directory identities. Repeated adoption, linked-worktree moves, and main-repo
+renames use the same home and session-layout checks; transcript access does not
+depend on the previous worktree's absolute location. Existing receipt files from
+older versions are ignored. Source-session selection still verifies that the
+state belongs to the requested source worktree. Legacy explicit stores retain
+their independently resolved active-store boundary and session naming checks.
+
+The local user's agent configuration and per-user home registry are trusted
+inputs. These checks prevent repository metadata from naming arbitrary local
+files; they do not defend against code with the user's write access to private
+configuration. Home provenance, session selection, and confined I/O enforce
+separate boundaries without treating a worktree association as read authority.
+
+Transcript discovery tries the active store first, then recorded homes in
+least-recently-used order. Active and historical lookup use the same candidate
+acceptance. Unreadable or linked transcript candidates are
+skipped so they cannot mask a valid later match. Direct ID lookups use the home as the boundary, including
+both Codex's live `sessions` and sibling `archived_sessions` stores. Multi-match
+agents (Codex, Pi, and Cursor) enumerate candidates before acceptance; discovery requires a successful
+confined regular-file open and continues after rejection. This differs from
+lifecycle confinement, which permits a transcript that has not been created yet.
+Active explicit stores and linked session directories retain their existing
+root protocol; linked transcript leaves are rejected. Attach reports an
+alternate-home match in text output.
+
+Codex inventory extraction receives the recorded session home. Both direct child
+reads and bounded fallback discovery use its live and archived session layouts,
+with no-follow reads anchored above both directories. A per-operation agent copy
+keeps historical-home roots separate from the active agent instance.
+When child hooks precede the first parent transcript, the home remains
+provisional and inventory reads retain the active-store protocol. Once a parent
+path is recorded, inventory extraction always retains its recorded boundary.
+
+Checkpoint storage receives pre-read transcript bytes in production. Its legacy
+path fallbacks must not receive adopted paths without threading and enforcing
+the corresponding `AgentHome`; the unconfined-read ledger guards these exceptions.
+
+Position counting uses `ConfinedTranscriptAnalyzer.GetTranscriptPositionFromReader`:
+the caller opens the confined file, and the agent counts its offset metric.
+JSONL agents count raw lines with bounded memory, including malformed and
+oversized lines, without parsing messages or extracting modified files.
+Modified-file extraction uses `StreamingTranscriptAnalyzer` when available:
+callers open the confined descriptor and pass it to the agent's reader parser.
+Bytes wrappers reuse that parser for callers already holding transcript data.
+Pi retains full-history bytes for active-branch resolution. Confined Claude and
+Droid subagent analysis also streams from checked descriptors. Full-blob reads
+preallocate from the opened descriptor's size and still read through EOF if the
+file grows or shrinks. Adoption reuses home provenance within one operation,
+while independently checking every task transcript's layout and symlinks.
+
+Home providers with prompt extraction must also accept already-read transcript
+bytes, so late-flush retries do not bypass the session's boundary.
+
+Regression coverage lives in `session_adopt_agent_home_test.go`,
+`agent/transcript_file_test.go`, and
+`agent/transcript_position_confinement_test.go`.
+
 ### The Root Anchors
 
 Entire does filesystem I/O in eight trees, and each has one package that owns a
@@ -236,7 +376,7 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
 | the working tree | `worktreedir` | worktree root |
 | an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`, `.agents/`; also `.gemini/` for the retired Gemini CLI hook cleanup) |
-| an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
+| an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir`, or an independently authorized `AgentHome` |
 | the active git hooks dir | `strategy.hooksRootForInstall` / `ForRemoval` | `git rev-parse --git-path hooks`, absolutized |
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
 | managed plugin tree | `pluginRoot` (`plugin_store.go`) | `pluginParentDir()` — `$ENTIRE_PLUGIN_DIR`, `%LOCALAPPDATA%`, or `$XDG_DATA_HOME` |

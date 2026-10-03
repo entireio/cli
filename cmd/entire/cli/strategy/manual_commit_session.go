@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -638,6 +639,100 @@ func (s *ManualCommitStrategy) CountOtherActiveSessionsWithCheckpoints(ctx conte
 	return count, nil
 }
 
+// resolveAgentHome resolves a home only for transcripts using its session layout.
+// Explicit session-directory overrides, and transcripts reached through a link
+// below the home, retain the legacy read protocol. Without a transcript path
+// the active home is recorded provisionally; turn start resolves confinement
+// afresh when the first transcript path arrives.
+func resolveAgentHome(agentType types.AgentType, transcriptPath string) string {
+	provider, ok := agentHomeProviderFor(agentType)
+	if !ok {
+		return ""
+	}
+	home, err := provider.SessionHome()
+	if err != nil {
+		return ""
+	}
+	if transcriptPath != "" {
+		if _, _, err := agent.ResolveTrustedTranscript(provider, home, transcriptPath); err != nil {
+			return ""
+		}
+	}
+	return home
+}
+
+// refreshSessionTranscript replaces a hook's transcript path and reconciles its
+// home. A home recorded before the first path is provisional; confinement is
+// resolved afresh so linked session directories keep the legacy read protocol.
+// Homes established for an existing path stay fail-closed.
+func refreshSessionTranscript(state *SessionState, transcriptPath string) error {
+	previousHome := state.AgentHome
+	previousPath := state.TranscriptPath
+	provider, hasHome := agentHomeProviderFor(state.AgentType)
+	hadBoundary := hasHome && previousHome != "" && provider.SessionPathUnder(previousHome, state.TranscriptPath)
+	if transcriptPath != "" && state.TranscriptPath != transcriptPath {
+		if state.TranscriptPath == "" {
+			state.AgentHome = ""
+		}
+		state.TranscriptPath = transcriptPath
+	}
+	refreshAgentHome(state)
+	if hadBoundary && state.AgentHome == "" {
+		// A new path or root spelling cannot turn an established session into
+		// a legacy reader. Restore both coordinates so later turns retain it.
+		state.AgentHome = previousHome
+		state.TranscriptPath = previousPath
+		return fmt.Errorf("cannot replace transcript path for session %s outside its recorded agent home", state.SessionID)
+	}
+	return nil
+}
+
+// refreshAgentHome reconciles the home with the agent and transcript layout.
+// Another instance must not replace a home that still contains the transcript.
+// Readability failures retain the boundary so subsequent reads fail closed.
+func refreshAgentHome(state *SessionState) {
+	provider, ok := agentHomeProviderFor(state.AgentType)
+	if !ok {
+		state.AgentHome = ""
+		return
+	}
+	if state.TranscriptPath == "" {
+		return
+	}
+	if home, err := provider.SessionHome(); err == nil {
+		if path, canonicalHome, err := agent.ResolveTrustedTranscript(provider, home, state.TranscriptPath); err == nil {
+			state.AgentHome = canonicalHome
+			state.TranscriptPath = path
+			return
+		}
+		// Compare the independently resolved home with the recorded root, not
+		// the transcript target: links below the root must remain unreadable.
+		if state.AgentHome != "" && provider.SessionPathUnder(home, state.TranscriptPath) {
+			active, activeErr := os.Stat(home)
+			recorded, recordedErr := os.Stat(state.AgentHome)
+			if activeErr == nil && recordedErr == nil && os.SameFile(active, recorded) {
+				if name, underHome := agent.TranscriptNameUnderHome(state.TranscriptPath, home); underHome {
+					state.TranscriptPath = filepath.Join(state.AgentHome, name)
+					return
+				}
+			}
+		}
+	}
+	// Readability failures must not downgrade an established boundary to the
+	// legacy protocol. Only a path outside the recorded layout invalidates it.
+	if !provider.SessionPathUnder(state.AgentHome, state.TranscriptPath) {
+		state.AgentHome = ""
+	}
+}
+
+func agentHomeProviderFor(agentType types.AgentType) (agent.AgentHomeProvider, bool) {
+	ag, err := agent.GetByAgentType(agentType)
+	if err != nil {
+		return nil, false
+	}
+	return agent.AsAgentHomeProvider(ag)
+}
+
 // initializeSession creates a new session state or updates a partial one.
 // A partial state may exist if the concurrent session warning was shown.
 // agentType is the human-readable name of the agent (e.g., "Claude Code").
@@ -692,8 +787,10 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		AgentType:             agentType,
 		ModelName:             model,
 		TranscriptPath:        transcriptPath,
+		AgentHome:             resolveAgentHome(agentType, transcriptPath),
 		LastPrompt:            truncatePromptForStorage(userPrompt),
 	}
+	refreshAgentHome(state)
 	if agentType == agent.AgentTypeCodex {
 		complete := true
 		state.SubagentInventoryComplete = &complete
@@ -736,8 +833,8 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		if model != "" {
 			state.ModelName = model
 		}
-		if transcriptPath != "" {
-			state.TranscriptPath = transcriptPath
+		if err := refreshSessionTranscript(state, transcriptPath); err != nil {
+			return err
 		}
 		if userPrompt != "" {
 			state.LastPrompt = truncatePromptForStorage(userPrompt)
@@ -751,8 +848,28 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		incomplete := false
 		state.SubagentInventoryComplete = &incomplete
 		state.SubagentTokensBaselineComplete = &incomplete
+	} else if existing != nil && existing.AgentType == agentType && existing.AgentHome != "" && existing.TranscriptPath != "" {
+		// Reinitializing a partial session must preserve its established read
+		// boundary even when its other bookkeeping is rebuilt.
+		state.TranscriptPath = existing.TranscriptPath
+		state.AgentHome = existing.AgentHome
+		if err := refreshSessionTranscript(state, transcriptPath); err != nil {
+			return err
+		}
 	}
+	rememberAgentHome(ctx, state.AgentType, resolveAgentHome(state.AgentType, state.TranscriptPath))
 	return s.saveSessionState(ctx, state)
+}
+
+// rememberAgentHome records independently resolved homes at session/turn start,
+// enabling later historical-home discovery. Registry failures do not block hooks.
+func rememberAgentHome(ctx context.Context, agentType types.AgentType, home string) {
+	if home == "" {
+		return
+	}
+	if err := agent.RememberAgentHome(agentType, home); err != nil {
+		logging.Debug(ctx, "failed to record agent home", "agentType", agentType, "error", err)
+	}
 }
 
 // getShadowBranchNameForCommit returns the shadow branch name for the given base commit and worktree ID.

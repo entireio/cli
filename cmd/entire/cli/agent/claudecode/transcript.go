@@ -12,6 +12,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
+// Compile-time interface assertions.
+var (
+	_ agent.ConfinedSubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
+	_ agent.ConfinedTranscriptAnalyzer     = (*ClaudeCodeAgent)(nil)
+	_ agent.StreamingTranscriptAnalyzer    = (*ClaudeCodeAgent)(nil)
+)
+
 // TranscriptLine is an alias to the shared transcript.Line type.
 type TranscriptLine = transcript.Line
 
@@ -318,6 +325,30 @@ func nonEmptyStrings(values ...string) []string {
 }
 
 func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startLine int, subagentsDir string) (*agent.TokenUsage, error) {
+	return calculateTotalTokenUsage(transcriptData, startLine, subagentsDir, func(path string) (*agent.TokenUsage, error) {
+		return CalculateTokenUsageFromFile(path, 0)
+	})
+}
+
+// CalculateTotalTokenUsageUnderHome is CalculateTotalTokenUsage with subagent
+// reads confined to an authorized agent home.
+func (c *ClaudeCodeAgent) CalculateTotalTokenUsageUnderHome(transcriptData []byte, startLine int, subagentsDir, agentHome string) (*agent.TokenUsage, error) {
+	return calculateTotalTokenUsage(transcriptData, startLine, subagentsDir, func(path string) (*agent.TokenUsage, error) {
+		file, err := agent.OpenTranscriptFileUnderHome(path, agentHome)
+		if err != nil {
+			return nil, fmt.Errorf("read subagent transcript under agent home: %w", err)
+		}
+		defer file.Close()
+		lines, _, parseErr := transcript.ParseFromReaderAtLineWithTotal(file, 0)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse subagent transcript: %w", parseErr)
+		}
+		return CalculateTokenUsage(lines), nil
+	})
+}
+
+// calculateTotalTokenUsage reads subagent usage through the supplied boundary.
+func calculateTotalTokenUsage(transcriptData []byte, startLine int, subagentsDir string, readSubagentUsage func(path string) (*agent.TokenUsage, error)) (*agent.TokenUsage, error) {
 	if len(transcriptData) == 0 {
 		return &agent.TokenUsage{}, nil
 	}
@@ -366,9 +397,11 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
 			agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
-			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
+			agentUsage, err := readSubagentUsage(agentPath)
 			if err != nil {
-				// Agent transcript may not exist yet or may have been cleaned up
+				// Agent transcript may not exist yet, may have been cleaned up,
+				// or (UnderHome) failed confinement — skip it either way; this is
+				// a best-effort accounting total, not a correctness-critical read.
 				continue
 			}
 			subagentUsage.InputTokens += agentUsage.InputTokens
@@ -391,6 +424,30 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 // subagent's transcript from subagentsDir to collect their modified files too.
 // The result is a deduplicated list of all modified file paths.
 func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLine int, subagentsDir string) ([]string, error) {
+	return extractAllModifiedFiles(transcriptData, startLine, subagentsDir, func(path string) ([]TranscriptLine, error) {
+		return transcript.ParseFromFileAtLine(path, 0)
+	})
+}
+
+// ExtractAllModifiedFilesUnderHome is ExtractAllModifiedFiles with subagent
+// reads confined to an authorized agent home. Unreadable subagents are skipped.
+func (c *ClaudeCodeAgent) ExtractAllModifiedFilesUnderHome(transcriptData []byte, startLine int, subagentsDir, agentHome string) ([]string, error) {
+	return extractAllModifiedFiles(transcriptData, startLine, subagentsDir, func(path string) ([]TranscriptLine, error) {
+		file, err := agent.OpenTranscriptFileUnderHome(path, agentHome)
+		if err != nil {
+			return nil, fmt.Errorf("read subagent transcript under agent home: %w", err)
+		}
+		defer file.Close()
+		lines, _, parseErr := transcript.ParseFromReaderAtLineWithTotal(file, 0)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse subagent transcript: %w", parseErr)
+		}
+		return lines, nil
+	})
+}
+
+// extractAllModifiedFiles reads subagents through the supplied boundary.
+func extractAllModifiedFiles(transcriptData []byte, startLine int, subagentsDir string, readSubagent func(path string) ([]TranscriptLine, error)) ([]string, error) {
 	if len(transcriptData) == 0 {
 		return nil, nil
 	}
@@ -431,9 +488,10 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	for agentID := range agentIDs {
 		agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
-		agentLines, agentErr := transcript.ParseFromFileAtLine(agentPath, 0)
+		agentLines, agentErr := readSubagent(agentPath)
 		if agentErr != nil {
-			// Subagent transcript may not exist yet or may have been cleaned up
+			// Subagent transcript may not exist yet, may have been cleaned up,
+			// or (UnderHome) failed confinement — skip it either way.
 			continue
 		}
 		for _, f := range ExtractModifiedFiles(agentLines) {

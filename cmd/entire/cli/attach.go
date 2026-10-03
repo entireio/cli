@@ -259,7 +259,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	// Resolve agent and transcript path.
-	ag, transcriptPath, err := resolveAgentAndTranscript(logCtx, w, sessionID, agentName, existingState)
+	ag, transcriptPath, agentHome, err := resolveAgentAndTranscript(logCtx, w, sessionID, agentName, existingState)
 	if err != nil {
 		return err
 	}
@@ -269,7 +269,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		reviewSkills = resolveReviewSkills(opts.ReviewSkillsOverride)
 	}
 
-	transcriptData, err := ag.ReadTranscript(transcriptPath)
+	transcriptData, err := readAttachTranscript(ag, transcriptPath, agentHome)
 	if err != nil {
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
@@ -373,7 +373,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 
 	// Create or update session state.
-	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, checkpointID, meta, tokenUsage, opts, reviewSkills); err != nil {
+	if err := saveAttachSessionState(logCtx, repo, existingState, sessionID, ag.Type(), transcriptPath, agentHome, checkpointID, meta, tokenUsage, opts, reviewSkills); err != nil {
 		logging.Warn(logCtx, "failed to save session state", "error", err)
 	}
 
@@ -698,7 +698,7 @@ func resolveCheckpointID(ctx context.Context, headCommit *object.Commit) (id.Che
 // saveAttachSessionState creates or updates the session state file for the attached session.
 // If existingState is non-nil, it is updated in place (avoids a redundant disk load).
 // reviewSkills is the resolved skills list when opts.Review is true; ignored otherwise.
-func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath string, checkpointID id.CheckpointID, meta transcriptMetadata, tokenUsage *agent.TokenUsage, opts attachOptions, reviewSkills []string) error {
+func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingState *session.State, sessionID string, agentType types.AgentType, transcriptPath, agentHome string, checkpointID id.CheckpointID, meta transcriptMetadata, tokenUsage *agent.TokenUsage, opts attachOptions, reviewSkills []string) error {
 	stateStore, err := session.NewStateStore(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open session store: %w", err)
@@ -727,6 +727,7 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	state.AttachedManually = true
 	state.AgentType = agentType
 	state.TranscriptPath = transcriptPath
+	state.AgentHome = agentHome
 	state.LastCheckpointID = checkpointID
 	// Only transition to Ended if the session is not already active — avoid
 	// breaking an ongoing session whose BaseCommit has just been restored above.
@@ -788,39 +789,100 @@ func validateAttachPreconditions(ctx context.Context, repo *git.Repository, sess
 	return existing, nil
 }
 
-// resolveAgentAndTranscript resolves the agent and transcript path.
+// resolveAgentAndTranscript resolves the agent, transcript path, and the
+// agent home that confines reads of it ("" for the legacy read protocol).
 // For existing sessions, resolves the agent from session state's AgentType.
 // For new sessions, uses the --agent flag with auto-detection fallback.
-func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID string, agentName types.AgentName, existingState *session.State) (agent.Agent, string, error) {
+func resolveAgentAndTranscript(ctx context.Context, w io.Writer, sessionID string, agentName types.AgentName, existingState *session.State) (agent.Agent, string, string, error) {
 	ag, err := resolveAgent(existingState, agentName)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
+	}
+	hasRecordedBoundary := false
+	if existingState != nil && existingState.AgentHome != "" {
+		if provider, ok := agent.AsAgentHomeProvider(ag); ok {
+			hasRecordedBoundary = provider.SessionPathUnder(existingState.AgentHome, existingState.TranscriptPath)
+		}
 	}
 
-	transcriptPath, err := resolveAndValidateTranscript(ctx, sessionID, ag, lookupAllowFetch)
+	transcriptPath, altHome, err := resolveAndValidateTranscript(ctx, sessionID, ag, lookupAllowFetch)
 	if err != nil {
 		// Auto-detect: try all other agents.
-		detectedAg, detectedPath, detectErr := detectAgentByTranscript(ctx, sessionID, ag.Name())
+		detectedAg, detectedPath, detectedAltHome, detectErr := detectAgentByTranscript(ctx, sessionID, ag.Name())
 		if detectErr != nil {
 			var fetchFailure *transcriptFetchError
 			if errors.As(err, &fetchFailure) {
 				logging.Debug(ctx, "auto-detection also failed after transcript fetch", "error", detectErr)
-				return nil, "", err
+				return nil, "", "", err
 			}
 			// Auto-detection never asks an agent to materialize a transcript, so
 			// name the agents that could have, rather than leaving the user with
 			// "is the session ID correct?" for a session that is simply owned by
 			// an agent they did not name.
-			return nil, "", fmt.Errorf("%w (also tried auto-detecting other agents: %w)%s",
+			return nil, "", "", fmt.Errorf("%w (also tried auto-detecting other agents: %w)%s",
 				err, detectErr, unprobedFetcherHint(ag.Name()))
 		}
 		ag = detectedAg
 		transcriptPath = detectedPath
+		altHome = detectedAltHome
 		logging.Info(ctx, "auto-detected agent from transcript", "agent", ag.Name())
 		fmt.Fprintf(w, "Auto-detected agent: %s\n", ag.Name())
 	}
+	if altHome != "" {
+		provider, ok := agent.AsAgentHomeProvider(ag)
+		if !ok {
+			return nil, "", "", fmt.Errorf("agent %s does not support historical homes", ag.Name())
+		}
+		transcriptPath, altHome, err = agent.ResolveTrustedTranscript(provider, altHome, transcriptPath)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("validate alternate-home transcript: %w", err)
+		}
+	}
+	printAltHomeNotice(w, altHome)
 
-	return ag, transcriptPath, nil
+	home := attachAgentHome(ag, transcriptPath, altHome)
+	if home == "" && hasRecordedBoundary {
+		return nil, "", "", fmt.Errorf("cannot confine transcript for session %s; its recorded agent home is %s", sessionID, existingState.AgentHome)
+	}
+	return ag, transcriptPath, home, nil
+}
+
+// attachAgentHome returns the home that confines reads of an attached
+// transcript. A transcript found under a recorded alternate home is always
+// confined to it, so a link there fails closed. A transcript in the active
+// store is confined to the active home under the same conditions session
+// start records it; otherwise it keeps the legacy read protocol.
+func attachAgentHome(ag agent.Agent, transcriptPath, altHome string) string {
+	if altHome != "" {
+		return altHome
+	}
+	provider, ok := agent.AsAgentHomeProvider(ag)
+	if !ok {
+		return ""
+	}
+	home, err := provider.SessionHome()
+	if err != nil || !agent.HomeConfinesTranscript(provider, home, transcriptPath) {
+		return ""
+	}
+	return home
+}
+
+// readAttachTranscript reads through the confined reader when a home is known.
+// Agent homes belong to built-in agents whose ReadTranscript is a plain read.
+func readAttachTranscript(ag agent.Agent, transcriptPath, agentHome string) ([]byte, error) {
+	if agentHome == "" {
+		return ag.ReadTranscript(transcriptPath) //nolint:wrapcheck // caller adds context
+	}
+	return agent.ReadTranscriptFileUnderHome(transcriptPath, agentHome) //nolint:wrapcheck // caller adds context
+}
+
+// printAltHomeNotice reports a transcript found under a recorded alternate home.
+// An empty home means the transcript came from the active store.
+func printAltHomeNotice(w io.Writer, home string) {
+	if home == "" {
+		return
+	}
+	fmt.Fprintf(w, "Found transcript under a different agent home: %s\n", home)
 }
 
 // unprobedFetcherHint names the registered agents that can materialize a
@@ -892,24 +954,32 @@ const (
 	lookupAllowFetch
 )
 
-// resolveAndValidateTranscript finds the transcript file for a session, searching alternative
-// project directories if needed.
-func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agent.Agent, lookup transcriptLookup) (string, error) {
-	transcriptPath, err := resolveTranscriptPath(ctx, sessionID, ag)
+// resolveAndValidateTranscript finds a session's transcript, searching alternative
+// project directories if needed. The second result is its recorded alternate
+// home, or an empty string when it came from the active store or a fetcher.
+func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agent.Agent, lookup transcriptLookup) (string, string, error) {
+	transcriptPath, err := discoverActiveTranscript(ctx, sessionID, ag)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve transcript path: %w", err)
+		return "", "", fmt.Errorf("failed to resolve transcript path: %w", err)
 	}
 	// Only call PrepareTranscript when the file already exists — it flushes
 	// in-progress writes, but can't conjure a file that was never started.
 	// This avoids agents like Cursor polling for 3s on non-existent files
 	// during auto-detection.
-	if _, statErr := agent.StatTranscriptFile(transcriptPath); statErr == nil {
+	if transcriptPath != "" {
 		if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 			if prepErr := preparer.PrepareTranscript(ctx, transcriptPath); prepErr != nil {
 				logging.Debug(ctx, "PrepareTranscript failed (best-effort)", "error", prepErr)
 			}
+			// A preparer may replace a file; repeat validation after it.
+			transcriptPath, err = discoverActiveTranscript(ctx, sessionID, ag)
+			if err != nil {
+				return "", "", err
+			}
 		}
-		return transcriptPath, nil
+		if transcriptPath != "" {
+			return transcriptPath, "", nil
+		}
 	}
 	// Agents that can materialize a transcript on demand (e.g. OpenCode via
 	// `opencode export`) can conjure one even when no hook-cached file exists,
@@ -919,28 +989,28 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 		var fetched string
 		fetched, fetchErr = fetcher.FetchTranscript(ctx, sessionID)
 		if fetchErr == nil {
-			return fetched, nil
+			return fetched, "", nil
 		}
 		if errors.Is(fetchErr, context.Canceled) {
-			return "", fmt.Errorf("fetch transcript: %w", fetchErr)
+			return "", "", fmt.Errorf("fetch transcript: %w", fetchErr)
 		}
 		logging.Debug(ctx, "FetchTranscript failed, falling back to project-dir search", "error", fetchErr)
 	}
-	found, searchErr := searchTranscriptInProjectDirs(sessionID, ag)
+	found, foundUnderHome, searchErr := searchTranscriptInProjectDirs(sessionID, ag)
 	if searchErr == nil {
-		logging.Info(ctx, "found transcript in alternative project directory", "path", found)
-		return found, nil
+		logging.Info(ctx, "found transcript in alternative project directory", "path", found, "home", foundUnderHome)
+		return found, foundUnderHome, nil
 	}
 	logging.Debug(ctx, "fallback transcript search failed", "error", searchErr)
 	if fetchErr != nil {
-		return "", &transcriptFetchError{cause: fetchErr}
+		return "", "", &transcriptFetchError{cause: fetchErr}
 	}
-	return "", fmt.Errorf("transcript not found for agent %q with session %s; is the session ID correct?", ag.Name(), sessionID)
+	return "", "", fmt.Errorf("transcript not found for agent %q with session %s (%w); is the session ID correct?", ag.Name(), sessionID, searchErr)
 }
 
 // detectAgentByTranscript tries all registered agents (except skip) to find one whose
 // transcript resolution succeeds for the given session ID.
-func detectAgentByTranscript(ctx context.Context, sessionID string, skip types.AgentName) (agent.Agent, string, error) {
+func detectAgentByTranscript(ctx context.Context, sessionID string, skip types.AgentName) (agent.Agent, string, string, error) {
 	for _, name := range agent.List() {
 		if name == skip {
 			continue
@@ -949,14 +1019,14 @@ func detectAgentByTranscript(ctx context.Context, sessionID string, skip types.A
 		if err != nil {
 			continue
 		}
-		path, resolveErr := resolveAndValidateTranscript(ctx, sessionID, ag, lookupLocalOnly)
+		path, altHome, resolveErr := resolveAndValidateTranscript(ctx, sessionID, ag, lookupLocalOnly)
 		if resolveErr != nil {
 			logging.Debug(ctx, "auto-detect: agent did not match", "agent", string(name), "error", resolveErr)
 			continue
 		}
-		return ag, path, nil
+		return ag, path, altHome, nil
 	}
-	return nil, "", errors.New("transcript not found for any registered agent")
+	return nil, "", "", errors.New("transcript not found for any registered agent")
 }
 
 // promptAmendCommit shows the last commit and asks whether to amend it with the checkpoint trailer.

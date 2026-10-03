@@ -51,11 +51,37 @@ func ReadFileNoFollow(root *os.Root, name string) ([]byte, error) {
 	}
 	defer f.Close()
 
-	data, err := io.ReadAll(f)
+	info, err := f.Stat()
 	if err != nil {
-		return nil, err //nolint:wrapcheck // preserve original error
+		return nil, err //nolint:wrapcheck // preserve filesystem errors
+	}
+	data, err := readAllWithSize(f, info.Size())
+	if err != nil {
+		return nil, err
 	}
 	return data, nil
+}
+
+// readAllWithSize uses a descriptor's size as a hint, reading through EOF even
+// when a file grows or shrinks after Stat. The extra byte detects growth.
+func readAllWithSize(r io.Reader, size int64) ([]byte, error) {
+	if size < 0 || size >= int64(int(^uint(0)>>1)) {
+		return io.ReadAll(r) //nolint:wrapcheck // preserve reader errors
+	}
+	data := make([]byte, 0, int(size)+1)
+	for {
+		if len(data) == cap(data) {
+			data = append(data, 0)[:len(data)]
+		}
+		n, err := r.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return data, nil
+			}
+			return nil, err //nolint:wrapcheck // preserve reader errors
+		}
+	}
 }
 
 // OpenNoFollow opens an existing file without following any symlink component.

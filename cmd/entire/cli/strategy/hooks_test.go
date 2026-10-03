@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -2164,4 +2165,131 @@ func TestSymlinkedHooksDirError_UsesTheQuotedCommand(t *testing.T) {
 	assert.Contains(t, msg, HooksPathCommand(realHooks))
 	assert.NotContains(t, msg, "core.hooksPath "+realHooks,
 		"the bare unquoted path would be split by the shell the user pastes into")
+}
+
+// TestExtractModifiedFilesFromLiveTranscript_RejectsPiTranscriptSymlinkedOutOfAgentHome
+// is the regression test for the per-agent transcript extraction gap in the
+// agent-storage-roots report: session_adopt's validateAdoptSourceTranscript
+// validates a recorded AgentHome once, at adopt time, in one process, but the
+// persisted TranscriptPath is read later — here, by
+// extractModifiedFilesFromLiveTranscript via the non-Claude-Code
+// agent.TranscriptAnalyzer.ExtractModifiedFilesFromOffset path, which Pi's
+// implementation (agent/pi/transcript.go) reaches through the unconfined
+// agent.ReadTranscriptFile — so a regular file that passed validation can be
+// swapped for a symlink escaping that home before this read runs.
+//
+// This simulates the swap directly (adoption itself is covered by P2's
+// tests): a transcript recorded under an AgentHome is actually a symlink to
+// an attacker-controlled file elsewhere, containing a Pi tool call that
+// writes a distinctively-named marker path. Before the fix, extraction
+// follows the symlink and returns that marker path as a "modified file" —
+// an attacker-chosen value flowing into checkpoint metadata. After the fix,
+// the confined read refuses the symlink and extraction returns nothing.
+func TestExtractModifiedFilesFromLiveTranscript_RejectsPiTranscriptSymlinkedOutOfAgentHome(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	sessionDir := filepath.Join(home, "sessions", "--tmp-test--")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o750))
+	transcriptPath := filepath.Join(sessionDir, "session.jsonl")
+
+	// Attacker-controlled transcript OUTSIDE agentHome. Shaped as a valid Pi
+	// JSONL session containing a `write` tool call for a distinctively named
+	// path, so a leak is unambiguous in the extracted file list.
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "attacker.jsonl")
+	const markerPath = "EXFILTRATED-MARKER-7f3a2b/leak.txt"
+	attackerTranscript := `{"type":"session","version":3,"id":"attacker","timestamp":"2026-03-27T21:00:00.000Z","cwd":"/tmp/test"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-03-27T21:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"write","arguments":{"path":"` + markerPath + `","content":"leak"}}],"timestamp":1774646401000}}
+`
+	require.NoError(t, os.WriteFile(outside, []byte(attackerTranscript), 0o600))
+
+	testutil.SkipWithoutSymlinks(t)
+	// The swap: by the time extraction reads it, the leaf an adopt-time
+	// validation would have seen as a regular file is a symlink to the
+	// attacker-controlled target outside home.
+	require.NoError(t, os.Symlink(outside, transcriptPath))
+
+	state := &SessionState{
+		SessionID:      "pi-swap-attack",
+		AgentType:      agent.AgentTypePi,
+		AgentHome:      home,
+		TranscriptPath: transcriptPath,
+	}
+
+	files := NewManualCommitStrategy().extractModifiedFilesFromLiveTranscript(context.Background(), state, 0)
+	require.Empty(t, files,
+		"a transcript reachable only through a symlink escaping the recorded AgentHome must be refused, not parsed")
+}
+
+// TestExtractModifiedFilesFromLiveTranscript_RejectsClaudeSubagentTranscriptSymlinkedOutOfAgentHome
+// is the regression test for Item 3 of the agent-storage-roots p4 report: the
+// main TranscriptPath is confined to AgentHome (P2/P2b/P2c), but subagentsDir
+// — one directory below it, <dir>/<sessionID>/subagents — and the
+// agent-<id>.jsonl files inside it never were. ClaudeCodeAgent.ExtractAllModifiedFiles
+// reads each one via transcript.ParseFromFileAtLine's bare os.Open, which
+// follows symlinks, so the same adopt-time-validated/read-time-swapped attack
+// P2b closed for the main transcript works one directory over, against a file
+// whose path is entirely predictable from the (confined) main transcript's
+// own layout.
+//
+// This simulates the swap directly, same as the Pi test above: a subagent
+// transcript at the predictable agent-<id>.jsonl path is actually a symlink
+// to an attacker-controlled file elsewhere, containing a Write tool call for
+// a distinctively-named marker path. Before the fix
+// (ExtractAllModifiedFilesUnderHome), extraction follows the symlink and
+// returns that marker path as a "modified file". After the fix, the confined
+// read refuses the symlink and extraction returns nothing for the subagent
+// (the main transcript's own Task tool_use/tool_result pair carries no
+// modified file itself).
+func TestExtractModifiedFilesFromLiveTranscript_RejectsClaudeSubagentTranscriptSymlinkedOutOfAgentHome(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	const sessionID = "claude-subagent-swap"
+	projectDir := filepath.Join(home, "projects", "adopt-test")
+	require.NoError(t, os.MkdirAll(projectDir, 0o750))
+	transcriptPath := filepath.Join(projectDir, sessionID+".jsonl")
+
+	// Main transcript: a Task tool_use whose tool_result declares the spawned
+	// subagent's ID — exactly what ExtractSpawnedAgentIDs looks for, and the
+	// only thing that makes ExtractAllModifiedFiles look at subagentsDir at
+	// all.
+	mainTranscript := `{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"toolu_task1","name":"Task","input":{"prompt":"implement feature"}}]}}
+{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_task1","content":"agentId: sub123"}]}}
+`
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(mainTranscript), 0o600))
+
+	subagentsDir := filepath.Join(projectDir, sessionID, "subagents")
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o750))
+	subagentLeaf := filepath.Join(subagentsDir, "agent-sub123.jsonl")
+
+	// Attacker-controlled transcript OUTSIDE agentHome, shaped as a valid
+	// Claude Code JSONL subagent transcript containing a Write tool call for a
+	// distinctively named path, so a leak is unambiguous in the extracted
+	// file list.
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "attacker.jsonl")
+	const markerPath = "EXFILTRATED-MARKER-9c1e4f/leak.txt"
+	attackerTranscript := `{"type":"assistant","uuid":"sa1","message":{"content":[{"type":"tool_use","id":"toolu_write1","name":"Write","input":{"file_path":"` + markerPath + `","content":"leak"}}]}}
+`
+	require.NoError(t, os.WriteFile(outside, []byte(attackerTranscript), 0o600))
+
+	testutil.SkipWithoutSymlinks(t)
+	// The swap: by the time extraction reads it, the leaf an adopt-time
+	// validation of the MAIN transcript never even inspected (subagentsDir is
+	// derived, not itself validated) is a symlink to attacker-controlled
+	// content outside home.
+	require.NoError(t, os.Symlink(outside, subagentLeaf))
+
+	state := &SessionState{
+		SessionID:      sessionID,
+		AgentType:      agent.AgentTypeClaudeCode,
+		AgentHome:      home,
+		TranscriptPath: transcriptPath,
+	}
+
+	files := NewManualCommitStrategy().extractModifiedFilesFromLiveTranscript(context.Background(), state, 0)
+	require.Empty(t, files,
+		"a subagent transcript reachable only through a symlink escaping the recorded AgentHome must be refused, not parsed")
 }

@@ -17,8 +17,8 @@ type CapabilityDeclarer interface {
 // can deserialize directly into this type.
 //
 // Not every optional interface appears here: built-in-only capabilities that
-// have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
-// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
+// have no external-protocol equivalent (SessionBaseDirProvider, AgentHomeProvider,
+// ModelExtractor, SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
 // InventoryAwareExtractor) are intentionally
 // excluded — their As* helpers resolve by type assertion alone (see
 // builtinCapability), with no DeclaredCaps gate.
@@ -86,6 +86,23 @@ func AsEffectiveHookDiagnostics(ag Agent) (EffectiveHookDiagnostics, bool) {
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptAnalyzer(ag Agent) (TranscriptAnalyzer, bool) {
 	return declaredCapability[TranscriptAnalyzer](ag, func(c DeclaredCaps) bool { return c.TranscriptAnalyzer })
+}
+
+// AsConfinedTranscriptAnalyzer returns the agent as ConfinedTranscriptAnalyzer
+// if it implements the interface. No capability declaration is needed: this
+// is a built-in-only feature tied to AgentHomeProvider, which external agents
+// cannot implement either (see AsAgentHomeProvider).
+func AsConfinedTranscriptAnalyzer(ag Agent) (ConfinedTranscriptAnalyzer, bool) {
+	return builtinCapability[ConfinedTranscriptAnalyzer](ag)
+}
+
+// AsConfinedSubagentAwareExtractor returns the agent as
+// ConfinedSubagentAwareExtractor if it implements the interface. No capability
+// declaration is needed: this is a built-in-only feature tied to
+// AgentHomeProvider, which external agents cannot implement either (see
+// AsAgentHomeProvider).
+func AsConfinedSubagentAwareExtractor(ag Agent) (ConfinedSubagentAwareExtractor, bool) {
+	return builtinCapability[ConfinedSubagentAwareExtractor](ag)
 }
 
 // AsTranscriptPreparer returns the agent as TranscriptPreparer if it both
@@ -263,6 +280,14 @@ func AsSubagentSessionResolver(ag Agent) (SubagentSessionResolver, bool) {
 // (external agents use the agent binary's own session resolution).
 func AsSessionBaseDirProvider(ag Agent) (SessionBaseDirProvider, bool) {
 	return builtinCapability[SessionBaseDirProvider](ag)
+}
+
+// AsAgentHomeProvider returns the agent as AgentHomeProvider if it implements
+// the interface. No capability declaration is needed: this is a built-in-only
+// feature (external agents report their own session paths through their own
+// protocol and have no home-directory concept Entire can verify independently).
+func AsAgentHomeProvider(ag Agent) (AgentHomeProvider, bool) {
+	return builtinCapability[AgentHomeProvider](ag)
 }
 
 // AsModelExtractor returns the agent as ModelExtractor if it implements the

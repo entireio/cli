@@ -155,7 +155,7 @@ func (a *PiAgent) GetSessionDir(repoPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "sessions", encodeRepoPathForPi(repoPath)), nil
+	return a.SessionDirUnder(home, repoPath), nil
 }
 
 // GetSessionBaseDir returns the base directory containing per-project
@@ -229,18 +229,59 @@ func encodeRepoPathForPi(repoPath string) string {
 // the lexicographically latest match (most recent timestamp) or "" when
 // no match exists or sessionDir/sessionID is empty.
 func findPiSessionByID(sessionDir, sessionID string) string {
-	if sessionDir == "" || sessionID == "" {
-		return ""
+	candidates := piSessionCandidates(sessionDir, sessionID)
+	if len(candidates) != 0 {
+		return candidates[0]
 	}
-	matches, err := filepath.Glob(filepath.Join(sessionDir, "*_"+sessionID+".jsonl"))
+	return ""
+}
+
+var _ agent.SessionFileCandidatesProvider = (*PiAgent)(nil)
+
+// ResolveSessionFileCandidates retains older timestamped copies so discovery
+// can reject an unsafe or unreadable latest match without losing the session.
+func (a *PiAgent) ResolveSessionFileCandidates(sessionDir, id string) []string {
+	if filepath.IsAbs(id) {
+		return []string{id}
+	}
+	return append(piSessionCandidates(sessionDir, id), filepath.Join(sessionDir, id+".jsonl"))
+}
+
+func piSessionCandidates(sessionDir, sessionID string) []string {
+	if sessionDir == "" || sessionID == "" {
+		return nil
+	}
+	matches, err := filepath.Glob(filepath.Join(sessionDir, piSessionFilePattern(sessionID)))
 	if err != nil || len(matches) == 0 {
-		return ""
+		return nil
 	}
 	sort.Strings(matches)
-	return matches[len(matches)-1]
+	for i, j := 0, len(matches)-1; i < j; i, j = i+1, j-1 {
+		matches[i], matches[j] = matches[j], matches[i]
+	}
+	return matches
+}
+
+func piSessionFilePattern(id string) string { return "*_" + id + ".jsonl" }
+
+// SessionFileNameMatches also recognizes timestamped transcripts before their
+// first write, using the same naming rule as discovery.
+func (a *PiAgent) SessionFileNameMatches(name, id string) bool {
+	matched, err := filepath.Match(piSessionFilePattern(id), name)
+	return err == nil && (matched || name == id+".jsonl")
 }
 
 // ReadSession loads a captured Pi transcript and returns it as an AgentSession.
+//
+// SECURITY: input.SessionRef is read unconfined. No production path reaches
+// this today — the external-agent passthrough wrapper
+// (agent/external/capabilities.go) is Pi's only caller of ReadSession, and
+// external agents cannot implement AgentHomeProvider, so there is no recorded
+// AgentHome to confine against here. If a caller is ever added that passes a
+// path sourced from adopted session.State, route the read through
+// agent.ReadTranscriptFileUnderHome(input.SessionRef, agentHome) instead and
+// fail closed on a confinement error, the way ReadTranscript's other confined
+// call sites already do.
 func (a *PiAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {
 	if input == nil || input.SessionRef == "" {
 		return nil, errors.New("no session ref provided")

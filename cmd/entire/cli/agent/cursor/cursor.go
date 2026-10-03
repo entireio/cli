@@ -91,6 +91,15 @@ func (c *CursorAgent) ResolveSessionFile(sessionDir, agentSessionID string) stri
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
+var _ agent.SessionFileCandidatesProvider = (*CursorAgent)(nil)
+
+// ResolveSessionFileCandidates lets discovery try the flat layout when the
+// preferred nested layout is missing, unsafe, or unreadable. ResolveSessionFile
+// still predicts the nested path for restores before its file exists.
+func (c *CursorAgent) ResolveSessionFileCandidates(dir, id string) []string {
+	return []string{filepath.Join(dir, id, id+".jsonl"), filepath.Join(dir, id+".jsonl")}
+}
+
 // ProtectedDirs returns directories that Cursor uses for config/state.
 func (c *CursorAgent) ProtectedDirs() []string { return []string{".cursor"} }
 

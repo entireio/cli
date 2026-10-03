@@ -30,12 +30,12 @@ func TestResolveCondensationPrompts_UsesTranscriptBytesWhenLivePathIsGone(t *tes
 `)
 	missing := filepath.Join(t.TempDir(), "gone.jsonl")
 
-	got := resolveCondensationPrompts(context.Background(), ag, transcript, missing, 2)
+	got := resolveCondensationPrompts(context.Background(), ag, transcript, missing, "", 2)
 	require.Equal(t, []string{"add another"}, got)
 
 	// Without bytes in hand the rung degrades to the path-based read, which
 	// finds nothing here — the behaviour this test exists to stop relying on.
-	require.Nil(t, resolveCondensationPrompts(context.Background(), ag, nil, missing, 2))
+	require.Nil(t, resolveCondensationPrompts(context.Background(), ag, nil, missing, "", 2))
 }
 
 // buildShadowRepo commits files into a throwaway repo and returns it with the
@@ -83,7 +83,7 @@ func TestExtractSessionData_ResolvesPromptsWithEmptyTranscript(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 	data, err := s.extractSessionData(context.Background(), repo, hash, sessionID, nil,
-		agent.AgentTypeAntigravity, "", 0, false)
+		agent.AgentTypeAntigravity, "", "", 0, false)
 	require.NoError(t, err)
 	require.Empty(t, data.Transcript, "sanity: this is the empty-transcript case")
 	require.Equal(t, []string{"the prompt that must survive"}, data.Prompts,

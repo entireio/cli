@@ -145,10 +145,48 @@ func (s *SessionStore) openRootForWrite() (*os.Root, error) {
 // name relative to the store rejects an ID that walked out of the directory,
 // which a plain filepath.Join would have produced silently.
 func (s *SessionStore) SessionFile(agentSessionID string) (name, absPath string, err error) {
+	return s.sessionFile(s.dir, agentSessionID)
+}
+
+// SessionFileIn resolves an ID using a subdirectory's layout while confining
+// the result to the whole store. This permits sibling transcript stores such
+// as Codex's sessions and archived_sessions beneath one authorized home.
+func (s *SessionStore) SessionFileIn(sessionDir, agentSessionID string) (name, absPath string, err error) {
+	dirName, err := s.Name(sessionDir)
+	if err != nil {
+		return "", "", err
+	}
+	return s.sessionFile(filepath.Join(s.dir, filepath.FromSlash(dirName)), agentSessionID)
+}
+
+// SessionFileCandidatesIn validates the ID before enumerating alternatives.
+// Every returned path still needs individual containment and read checks.
+func (s *SessionStore) SessionFileCandidatesIn(sessionDir, id string) ([]string, error) {
+	if err := validation.ValidateSessionID(id); err != nil {
+		return nil, fmt.Errorf("resolve session candidates: %w: %w", ErrUnsafeSessionName, err)
+	}
+	if sessionDir != s.dir {
+		name, err := s.Name(sessionDir)
+		if err != nil {
+			return nil, err
+		}
+		sessionDir = filepath.Join(s.dir, filepath.FromSlash(name))
+	}
+	if provider, ok := s.agent.(SessionFileCandidatesProvider); ok {
+		return provider.ResolveSessionFileCandidates(sessionDir, id), nil
+	}
+	_, path, err := s.sessionFile(sessionDir, id)
+	if err != nil {
+		return nil, err
+	}
+	return []string{path}, nil
+}
+
+func (s *SessionStore) sessionFile(sessionDir, agentSessionID string) (name, absPath string, err error) {
 	if err := validation.ValidateSessionID(agentSessionID); err != nil {
 		return "", "", fmt.Errorf("resolve session file: %w: %w", ErrUnsafeSessionName, err)
 	}
-	resolved := s.agent.ResolveSessionFile(s.dir, agentSessionID)
+	resolved := s.agent.ResolveSessionFile(sessionDir, agentSessionID)
 	name, err = s.Name(resolved)
 	if err != nil {
 		return "", "", err
@@ -376,6 +414,17 @@ func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 	}
 	defer root.Close()
 	return osroot.ReadFileNoFollow(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
+}
+
+// OpenFile opens a regular session file without following links below the store.
+// The caller closes the returned file.
+func (s *SessionStore) OpenFile(name string) (*os.File, error) {
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return osroot.OpenNoFollow(root, name) //nolint:wrapcheck // preserve filesystem errors
 }
 
 // WriteFile writes name in the store, creating parent directories. Session

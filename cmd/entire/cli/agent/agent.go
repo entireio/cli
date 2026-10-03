@@ -13,6 +13,19 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
+// SessionFileCandidatesProvider enumerates possible transcripts in preference
+// order. Discovery validates each candidate before choosing one.
+type SessionFileCandidatesProvider interface {
+	ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string
+}
+
+// SessionFileNameMatcher checks agent-generated filenames without requiring
+// the transcript to exist. Callers separately establish the store boundary
+// and layout, and validate the session ID before using this capability.
+type SessionFileNameMatcher interface {
+	SessionFileNameMatches(name, agentSessionID string) bool
+}
+
 // Agent defines the interface for interacting with a coding agent.
 // Each agent implementation (Claude Code, Cursor, Aider, etc.) converts its
 // native format to the normalized types defined in this package.
@@ -221,6 +234,29 @@ type TranscriptAnalyzer interface {
 	ExtractModifiedFilesFromOffset(ctx context.Context, path string, startOffset int) (files []string, currentPosition int, err error)
 }
 
+// ConfinedTranscriptAnalyzer analyzes transcripts supplied by a caller that
+// owns the read boundary. It is a built-in capability; external agents use
+// their own protocol.
+type ConfinedTranscriptAnalyzer interface {
+	TranscriptAnalyzer
+
+	// GetTranscriptPositionFromReader returns the same position as
+	// GetTranscriptPosition without opening a path or extracting files.
+	GetTranscriptPositionFromReader(r io.Reader) (int, error)
+
+	// ExtractModifiedFilesFromBytes is the bytes-based equivalent of
+	// ExtractModifiedFilesFromOffset: same semantics and return shape, parsed
+	// from already-read transcriptData instead of reading a path itself.
+	ExtractModifiedFilesFromBytes(transcriptData []byte, startOffset int) (files []string, currentPosition int, err error)
+}
+
+// StreamingTranscriptAnalyzer extracts modified files without retaining the raw
+// transcript. Agents whose format requires full history may retain the bytes API.
+type StreamingTranscriptAnalyzer interface {
+	ConfinedTranscriptAnalyzer
+	ExtractModifiedFilesFromReader(r io.Reader, startOffset int) (files []string, currentPosition int, err error)
+}
+
 // PromptExtractor extracts user prompts from a transcript file.
 // Used as a fallback when prompt data isn't captured via hooks (e.g., Factory AI
 // Droid's exec mode doesn't fire UserPromptSubmit).
@@ -407,6 +443,13 @@ type InventoryAwareExtractor interface {
 	Agent
 
 	ExtractWithSubagentInventory(ctx context.Context, parent []byte, fromOffset int, refs []SubagentReference) (InventoryExtraction, error)
+}
+
+// ConfinedInventoryAwareExtractor confines inventory reads to the recorded
+// session home rather than the invoking process's active home.
+type ConfinedInventoryAwareExtractor interface {
+	InventoryAwareExtractor
+	ExtractWithSubagentInventoryUnderHome(ctx context.Context, parent []byte, fromOffset int, refs []SubagentReference, home string) (InventoryExtraction, error)
 }
 
 // ModelExtractor extracts the LLM model identifier from a transcript for agents
@@ -615,6 +658,33 @@ type SessionBaseDirProvider interface {
 	GetSessionBaseDir() (string, error)
 }
 
+// AgentHomeProvider describes a built-in agent's per-user session layout.
+// SessionPathUnder checks layout, not the provenance of home.
+//
+//nolint:revive // callers use agent.AgentHomeProvider
+type AgentHomeProvider interface {
+	Agent
+
+	// SessionHome returns the directory this agent keeps per-user state in,
+	// resolved the same way GetSessionDir resolves it.
+	SessionHome() (string, error)
+
+	// SessionPathUnder reports whether path could be a session this agent
+	// stored beneath home. Pure path arithmetic: no environment access, no I/O.
+	SessionPathUnder(home, path string) bool
+
+	// SessionBaseDirUnder derives the session search root without I/O or
+	// environment access. home must be independently authorized by the caller.
+	SessionBaseDirUnder(home string) string
+}
+
+// WorktreeSessionDirProvider derives a project-scoped session directory under
+// an independently authorized home, without environment access or I/O.
+type WorktreeSessionDirProvider interface {
+	AgentHomeProvider
+	SessionDirUnder(home, worktree string) string
+}
+
 // SubagentSessionLink identifies the parent task invocation that spawned a
 // subagent session. It is resolved from the subagent's own transcript, so it
 // stays valid regardless of when the parent's tool hooks fire.
@@ -692,4 +762,15 @@ type SubagentAwareExtractor interface {
 	// path). An implementation that instead returned per-window deltas would
 	// silently break that accounting with no compile-time or test signal.
 	CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, subagentsDir string) (*TokenUsage, error)
+}
+
+// ConfinedSubagentAwareExtractor computes token usage while confining subagent
+// reads to an authorized home. It is a built-in capability.
+type ConfinedSubagentAwareExtractor interface {
+	SubagentAwareExtractor
+
+	// CalculateTotalTokenUsageUnderHome is CalculateTotalTokenUsage, with every
+	// subagent transcript read confined to agentHome. Same cumulative-snapshot
+	// contract as CalculateTotalTokenUsage.
+	CalculateTotalTokenUsageUnderHome(transcriptData []byte, fromOffset int, subagentsDir, agentHome string) (*TokenUsage, error)
 }

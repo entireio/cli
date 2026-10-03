@@ -398,7 +398,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			continue
 		}
 
-		raw, transcriptPath, readErr := readFirstTranscript(candidates)
+		raw, transcriptPath, readErr := readFirstTranscript(candidates, state.AgentHome)
 		if readErr != nil {
 			logging.Warn(logCtx, "failed to read subagent transcript; storing task without it",
 				slog.String("session_id", state.SessionID),
@@ -440,14 +440,13 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	return payloads, assets
 }
 
-// readFirstTranscript tries each candidate path in order and returns the bytes
-// of the first one that reads successfully, along with the path it came from
-// (for logging — never for storage). Returns the last error when every
-// candidate fails (callers only reach here with at least one candidate).
-func readFirstTranscript(candidates []string) ([]byte, string, error) {
+// readFirstTranscript reads candidates in order, confined to agentHome.
+// It returns the first successful read and its path, or the last read error.
+// An empty home preserves the legacy protocol.
+func readFirstTranscript(candidates []string, agentHome string) ([]byte, string, error) {
 	var lastErr error
 	for _, path := range candidates {
-		data, err := agent.ReadTranscriptFile(path)
+		data, err := agent.ReadTranscriptFileUnderHome(path, agentHome)
 		if err == nil {
 			return data, path, nil
 		}
@@ -924,7 +923,7 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 	case hasShadowBranch:
 		// Shadow branch exists (from SaveStep commits) — extract transcript and
 		// metadata from the branch tree, preferring the live transcript if fresher.
-		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
+		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.AgentHome, state.CheckpointTranscriptStart, state.Phase.IsActive())
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", err)
 		}
@@ -1445,7 +1444,7 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
 // checkpointTranscriptStart is the line offset (JSONL agents) or message index (OpenCode) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
+func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, agentHome string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
 	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
@@ -1472,7 +1471,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		if isActive {
 			prepareTranscriptIfNeeded(ctx, ag, liveTranscriptPath)
 		}
-		if liveData, readErr := agent.ReadTranscriptFile(liveTranscriptPath); readErr == nil && len(liveData) > 0 {
+		if liveData, readErr := agent.ReadTranscriptFileUnderHome(liveTranscriptPath, agentHome); readErr == nil && len(liveData) > 0 {
 			fullTranscript = string(liveData)
 		}
 	}
@@ -1522,7 +1521,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 	// empty file).
 	if len(data.Prompts) == 0 {
 		promptSource = "transcript"
-		data.Prompts = resolveCondensationPrompts(ctx, ag, data.Transcript, liveTranscriptPath, checkpointTranscriptStart)
+		data.Prompts = resolveCondensationPrompts(ctx, ag, data.Transcript, liveTranscriptPath, agentHome, checkpointTranscriptStart)
 	}
 	logCondensationPrompts(ctx, sessionID, promptSource, len(data.Prompts), checkpointTranscriptStart)
 
@@ -1562,7 +1561,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		return nil, resolveErr
 	}
 
-	liveData, err := agent.ReadTranscriptFile(transcriptPath)
+	liveData, err := agent.ReadTranscriptFileUnderHome(transcriptPath, state.AgentHome)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read live transcript: %w", err)
 	}
@@ -1597,7 +1596,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// transcript after the Stop hook).
 	if len(data.Prompts) == 0 {
 		promptSource = "transcript"
-		data.Prompts = resolveCondensationPrompts(ctx, ag, data.Transcript, transcriptPath, state.CheckpointTranscriptStart)
+		data.Prompts = resolveCondensationPrompts(ctx, ag, data.Transcript, transcriptPath, state.AgentHome, state.CheckpointTranscriptStart)
 	}
 	logCondensationPrompts(ctx, state.SessionID, promptSource, len(data.Prompts), state.CheckpointTranscriptStart)
 
@@ -1679,7 +1678,7 @@ func resolvePendingTranscriptOffset(ctx context.Context, ag agent.Agent, state *
 	if err != nil {
 		return
 	}
-	pos, posErr := analyzer.GetTranscriptPosition(transcriptPath)
+	pos, posErr := agent.GetTranscriptPositionUnderHome(analyzer, transcriptPath, state.AgentHome)
 	if posErr != nil || pos <= state.CheckpointTranscriptStart {
 		logging.Info(ctx, "deferred turn-end offset advance still unresolved (transcript not flushed); keeping it pending",
 			slog.String("session_id", state.SessionID),
@@ -1704,7 +1703,7 @@ func resolvePendingTranscriptOffset(ctx context.Context, ag agent.Agent, state *
 // when a re-read of the path would find nothing and record no prompt while the
 // checkpoint carried the full conversation. Agents without the bytes extractor
 // keep the path-based fallback.
-func resolveCondensationPrompts(ctx context.Context, ag agent.Agent, transcript []byte, transcriptPath string, offset int) []string {
+func resolveCondensationPrompts(ctx context.Context, ag agent.Agent, transcript []byte, transcriptPath, agentHome string, offset int) []string {
 	if len(transcript) > 0 {
 		if extractor, ok := agent.AsTranscriptPromptExtractor(ag); ok {
 			prompts, err := extractor.ExtractPromptsFromTranscript(transcript, offset)
@@ -1716,7 +1715,7 @@ func resolveCondensationPrompts(ctx context.Context, ag agent.Agent, transcript 
 			}
 		}
 	}
-	return resolvePromptsFromLateFlushedTranscript(ctx, ag, transcriptPath, offset)
+	return resolvePromptsFromLateFlushedTranscript(ctx, ag, transcriptPath, agentHome, offset)
 }
 
 // logCondensationPrompts records which rung of the prompt ladder supplied the
@@ -1735,16 +1734,29 @@ func logCondensationPrompts(ctx context.Context, sessionID, source string, count
 	)
 }
 
-// resolvePromptsFromLateFlushedTranscript re-extracts user prompts directly
-// from a populated transcript at condensation time. Agents like Antigravity
-// write their transcript AFTER the Stop hook, so the TurnEnd prompt backfill
-// (lifecycle.go) saw an empty transcript and prompt.txt is empty. By
-// condensation the live transcript is populated. General — any PromptExtractor
-// benefits; callers only invoke this when prompts are otherwise empty.
-func resolvePromptsFromLateFlushedTranscript(ctx context.Context, ag agent.Agent, transcriptPath string, offset int) []string {
+// resolvePromptsFromLateFlushedTranscript recovers prompts written after
+// TurnEnd. With a recorded home, bytes-based extractors read through that home
+// and fail closed. Other sessions retain the agent's path-based read protocol.
+func resolvePromptsFromLateFlushedTranscript(ctx context.Context, ag agent.Agent, transcriptPath, agentHome string, offset int) []string {
 	if transcriptPath == "" {
 		return nil
 	}
+	if confined, ok := agent.AsTranscriptPromptExtractor(ag); ok && agentHome != "" {
+		data, readErr := agent.ReadTranscriptFileUnderHome(transcriptPath, agentHome)
+		if readErr != nil {
+			logging.Warn(ctx, "condensation late-flush prompt read failed",
+				slog.String("error", readErr.Error()))
+			return nil
+		}
+		prompts, err := confined.ExtractPromptsFromTranscript(data, offset)
+		if err != nil {
+			logging.Warn(ctx, "condensation prompt extraction failed",
+				slog.String("error", err.Error()))
+			return nil
+		}
+		return prompts
+	}
+
 	extractor, ok := agent.AsPromptExtractor(ag)
 	if !ok {
 		return nil
@@ -1766,7 +1778,7 @@ func calculateLiveTranscriptTokenUsage(
 	transcriptPath string,
 ) *agent.TokenUsage {
 	subagentsDir := liveSubagentsDir(ag, state, transcriptPath)
-	usage := agent.CalculateTokenUsage(ctx, ag, transcript, state.CheckpointTranscriptStart, subagentsDir)
+	usage := agent.CalculateTokenUsageUnderHome(ctx, ag, transcript, state.CheckpointTranscriptStart, subagentsDir, state.AgentHome)
 	if usage == nil || usage.SubagentTokens == nil {
 		return usage
 	}

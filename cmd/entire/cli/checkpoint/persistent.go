@@ -1010,6 +1010,10 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 	// TranscriptPath fallback: data read from disk is an untrusted source,
 	// so we redact it here. The in-memory path (opts.Transcript) is already
 	// pre-redacted by the caller — enforced by the RedactedBytes type.
+	//
+	// SECURITY: production callers supply pre-read Transcript bytes. Adopted
+	// paths must be read with their AgentHome before reaching storage; see
+	// docs/development/filesystem-safety.md.
 	if len(transcriptBytes) == 0 && opts.TranscriptPath != "" {
 		rawData, readErr := agent.ReadTranscriptFile(opts.TranscriptPath)
 		if readErr != nil {

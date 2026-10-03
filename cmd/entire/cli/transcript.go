@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -46,26 +48,136 @@ func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg
 	return absPath, nil
 }
 
+// discoverActiveTranscript uses the same candidate acceptance as historical
+// discovery. Its home boundary includes sibling archives. Explicit stores and
+// linked session directories retain the established active-store protocol.
+func discoverActiveTranscript(ctx context.Context, id string, ag agentpkg.Agent) (string, error) {
+	if err := validation.ValidateSessionID(id); err != nil {
+		return "", fmt.Errorf("invalid session ID for transcript path: %w", err)
+	}
+	worktree, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve active worktree: %w", err)
+	}
+	store, err := agentpkg.OpenSessionStore(ag, worktree)
+	if err != nil {
+		return "", fmt.Errorf("open active session store: %w", err)
+	}
+	dir := store.Dir()
+	if provider, ok := agentpkg.AsAgentHomeProvider(ag); ok {
+		if home, err := provider.SessionHome(); err == nil && agentpkg.PathHasDirPrefix(dir, provider.SessionBaseDirUnder(home)) {
+			homeStore, err := agentpkg.OpenSessionStoreAt(ag, home)
+			if err != nil {
+				return "", fmt.Errorf("open active agent home: %w", err)
+			}
+			name, err := homeStore.Name(dir)
+			if err != nil {
+				return "", fmt.Errorf("resolve active session directory: %w", err)
+			}
+			info, statErr := homeStore.Lstat(name)
+			if (statErr == nil && info.IsDir()) || errors.Is(statErr, os.ErrNotExist) {
+				return discoverSessionFile(homeStore, ag, dir, id, home), nil
+			}
+			// Only linked session directories justify the legacy root. Permission
+			// or I/O errors must not downgrade an otherwise confined store.
+			linked := errors.Is(statErr, osroot.ErrSymlinkedPath) || (statErr == nil && info.Mode()&os.ModeSymlink != 0)
+			if !linked {
+				return "", nil
+			}
+		}
+	}
+	return discoverSessionFile(store, ag, dir, id, ""), nil
+}
+
 // searchTranscriptInProjectDirs searches for a session transcript across an agent's
 // project directories that could plausibly belong to the current repository.
 // Agents like Claude Code derive the project directory from the cwd,
 // so the transcript may be stored under a different project directory if the session
 // was started from a different working directory.
 //
-// The search is scoped to the agent's base directory (e.g., ~/.claude/projects) and only
-// walks immediate subdirectories (plus a few extra levels for agents that nest
-// transcripts under a project subdirectory).
-// Only agents implementing SessionBaseDirProvider support this fallback search.
-func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string, error) {
-	provider, ok := agentpkg.AsSessionBaseDirProvider(ag)
-	if !ok {
-		return "", fmt.Errorf("fallback transcript search not supported for agent %q", ag.Name())
-	}
-	baseDir, err := provider.GetSessionBaseDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get base directory: %w", err)
+// Agents implementing SessionBaseDirProvider are searched from the active base
+// directory, walking at most three directory levels below each base. Agents
+// implementing AgentHomeProvider also try recorded homes: walked the same way
+// when the agent has per-project directories, or resolved directly beneath
+// SessionBaseDirUnder when its layout is keyed by session ID alone (Codex,
+// Copilot CLI), whose active store discoverActiveTranscript already covered.
+//
+// The second result is the recorded alternate home, or an empty string for
+// a transcript found under the active base directory.
+func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (found, foundUnderHome string, err error) {
+	baseProvider, walksProjects := agentpkg.AsSessionBaseDirProvider(ag)
+	homeProvider, hasHomes := agentpkg.AsAgentHomeProvider(ag)
+	if !walksProjects && !hasHomes {
+		return "", "", fmt.Errorf("fallback transcript search not supported for agent %q", ag.Name())
 	}
 
+	type candidate struct {
+		dir  string
+		home string // "" for the active base dir
+	}
+	var candidates []candidate
+	if walksProjects {
+		baseDir, baseErr := baseProvider.GetSessionBaseDir()
+		if baseErr != nil {
+			return "", "", fmt.Errorf("failed to get base directory: %w", baseErr)
+		}
+		candidates = append(candidates, candidate{dir: baseDir})
+	}
+
+	if hasHomes {
+		activeHome, homeErr := homeProvider.SessionHome()
+		if homeErr != nil {
+			activeHome = ""
+		} else {
+			activeHome = filepath.Clean(activeHome)
+		}
+		for _, home := range agentpkg.KnownAgentHomes(ag.Type()) {
+			if home == activeHome {
+				continue
+			}
+			candidates = append(candidates, candidate{
+				dir:  homeProvider.SessionBaseDirUnder(home),
+				home: home,
+			})
+		}
+	}
+	if len(candidates) == 0 {
+		return "", "", fmt.Errorf("transcript not found under any recorded %s home", ag.Name())
+	}
+
+	var searchedDirs []string
+	for _, c := range candidates {
+		searchedDirs = append(searchedDirs, c.dir)
+		var hit string
+		if walksProjects {
+			var walkErr error
+			hit, walkErr = searchOneSessionBaseDir(c.dir, ag, sessionID, c.home)
+			if walkErr != nil {
+				return "", "", fmt.Errorf("failed to search project directories: %w", walkErr)
+			}
+		} else {
+			hit = probeSessionHome(c.home, homeProvider, sessionID)
+		}
+		if hit != "" {
+			return hit, c.home, nil
+		}
+	}
+	return "", "", fmt.Errorf("transcript not found in any project directory searched (%s)", strings.Join(searchedDirs, ", "))
+}
+
+// probeSessionHome resolves an ID using the agent's layout, with the home as
+// the read boundary so sibling stores (Codex archived_sessions) are included.
+func probeSessionHome(home string, provider agentpkg.AgentHomeProvider, sessionID string) string {
+	store, err := agentpkg.OpenSessionStoreAt(provider, home)
+	if err != nil {
+		return ""
+	}
+	return discoverSessionFile(store, provider, provider.SessionBaseDirUnder(home), sessionID, home)
+}
+
+// searchOneSessionBaseDir finds sessionID under baseDir. It returns an empty
+// path without an error if no transcript is found.
+func searchOneSessionBaseDir(baseDir string, ag agentpkg.Agent, sessionID, home string) (string, error) {
 	// Walk subdirectories with a max depth of 3 (baseDir/project/subdir/file)
 	// to avoid scanning unrelated project trees.
 	const maxExtraDepth = 3
@@ -73,7 +185,7 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 	var found string
 	walkErr := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil //nolint:nilerr // skip inaccessible dirs
+			return nil //nolint:nilerr // skip inaccessible dirs (including a baseDir that no longer exists)
 		}
 		if !d.IsDir() {
 			return nil
@@ -94,25 +206,50 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 		if storeErr != nil {
 			return nil //nolint:nilerr // an unusable candidate directory is skipped, not fatal to the search
 		}
-		name, absPath, resolveErr := store.SessionFile(sessionID)
-		if resolveErr != nil {
-			// The ID does not resolve inside this candidate — the next one may
-			// still hold the session, so keep walking.
-			return nil //nolint:nilerr // see comment
-		}
-		if store.Exists(name) {
-			found = absPath
+		if hit := discoverSessionFile(store, ag, path, sessionID, home); hit != "" {
+			found = hit
 			return filepath.SkipAll
 		}
 		return nil
 	})
 	if walkErr != nil {
-		return "", fmt.Errorf("failed to search project directories: %w", walkErr)
+		return "", fmt.Errorf("walk %s: %w", baseDir, walkErr)
 	}
-	if found != "" {
-		return found, nil
+	return found, nil
+}
+
+// discoverSessionFile accepts only readable regular transcripts and continues
+// after rejection. Metadata-only confinement also permits missing transcripts,
+// which is useful for lifecycle validation but insufficient for discovery.
+func discoverSessionFile(store *agentpkg.SessionStore, ag agentpkg.Agent, dir, id, home string) string {
+	candidates, err := store.SessionFileCandidatesIn(dir, id)
+	if err != nil {
+		return ""
 	}
-	return "", errors.New("transcript not found in any project directory")
+	for _, path := range candidates {
+		name, err := store.Name(path)
+		if err != nil {
+			continue
+		}
+		var file *os.File
+		if home != "" {
+			provider, ok := agentpkg.AsAgentHomeProvider(ag)
+			if !ok || !agentpkg.HomeConfinesTranscript(provider, home, path) {
+				continue
+			}
+			file, err = agentpkg.OpenTranscriptFileUnderHome(path, home)
+		} else if _, _, underEntire := entiredir.Split(path); underEntire {
+			// Agent caches use the repository's .entire anchor, even when their
+			// session directory is supplied through the legacy store protocol.
+			file, err = agentpkg.OpenTranscriptFileUnderHome(path, "")
+		} else {
+			file, err = store.OpenFile(name)
+		}
+		if err == nil && file.Close() == nil {
+			return path
+		}
+	}
+	return ""
 }
 
 // ResolveAgentTranscriptPath returns the path to an existing subagent transcript

@@ -773,6 +773,7 @@ func TestDispatchFork_MultiAgentPassesPerAgentConfigs(t *testing.T) {
 	// already precludes parallelism via t.Chdir.)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 	skillDir := filepath.Join(home, ".codex", "skills", "code-review")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatal(err)

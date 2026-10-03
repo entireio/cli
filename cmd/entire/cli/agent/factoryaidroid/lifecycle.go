@@ -16,12 +16,16 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ agent.TranscriptAnalyzer      = (*FactoryAIDroidAgent)(nil)
-	_ agent.TokenCalculator         = (*FactoryAIDroidAgent)(nil)
-	_ agent.SubagentAwareExtractor  = (*FactoryAIDroidAgent)(nil)
-	_ agent.SubagentSessionResolver = (*FactoryAIDroidAgent)(nil)
-	_ agent.HookResponseWriter      = (*FactoryAIDroidAgent)(nil)
-	_ agent.PromptExtractor         = (*FactoryAIDroidAgent)(nil)
+	_ agent.TranscriptAnalyzer             = (*FactoryAIDroidAgent)(nil)
+	_ agent.ConfinedTranscriptAnalyzer     = (*FactoryAIDroidAgent)(nil)
+	_ agent.StreamingTranscriptAnalyzer    = (*FactoryAIDroidAgent)(nil)
+	_ agent.TokenCalculator                = (*FactoryAIDroidAgent)(nil)
+	_ agent.SubagentAwareExtractor         = (*FactoryAIDroidAgent)(nil)
+	_ agent.SubagentSessionResolver        = (*FactoryAIDroidAgent)(nil)
+	_ agent.HookResponseWriter             = (*FactoryAIDroidAgent)(nil)
+	_ agent.PromptExtractor                = (*FactoryAIDroidAgent)(nil)
+	_ agent.TranscriptPromptExtractor      = (*FactoryAIDroidAgent)(nil)
+	_ agent.ConfinedSubagentAwareExtractor = (*FactoryAIDroidAgent)(nil)
 )
 
 // WriteHookResponse outputs the hook response as plain text to stdout.
@@ -97,13 +101,52 @@ func (f *FactoryAIDroidAgent) ExtractModifiedFilesFromOffset(_ context.Context, 
 	return files, currentPos, nil
 }
 
-// ExtractPrompts extracts user prompts from the transcript starting at the given line offset.
+// ExtractModifiedFilesFromBytes is the bytes-based equivalent of
+// ExtractModifiedFilesFromOffset, for callers that already hold a
+// home-confined read of the transcript (agent.ConfinedTranscriptAnalyzer).
+func (f *FactoryAIDroidAgent) ExtractModifiedFilesFromBytes(transcriptData []byte, startOffset int) ([]string, int, error) {
+	return f.ExtractModifiedFilesFromReader(bytes.NewReader(transcriptData), startOffset)
+}
+
+// ExtractModifiedFilesFromReader streams normalized Droid entries from startOffset.
+func (f *FactoryAIDroidAgent) ExtractModifiedFilesFromReader(r io.Reader, startOffset int) ([]string, int, error) {
+	lines, currentPos, err := parseDroidTranscriptFromReader(r, startOffset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+	files := ExtractModifiedFiles(lines)
+	return files, currentPos, nil
+}
+
+// ExtractPrompts extracts user prompts from the transcript starting at the
+// given line offset. Reads sessionRef itself via ParseDroidTranscript's bare
+// os.Open. Callers that already hold a home-confined read of the transcript
+// (e.g. condensation, which must not trust a bare sessionRef from adopted
+// session state) should call ExtractPromptsFromTranscript instead.
 func (f *FactoryAIDroidAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
 	lines, _, err := ParseDroidTranscript(sessionRef, fromOffset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse transcript: %w", err)
 	}
+	return extractPromptsFromDroidLines(lines), nil
+}
 
+// ExtractPromptsFromTranscript implements agent.TranscriptPromptExtractor over
+// transcript bytes the caller already holds (e.g. a home-confined read via
+// agent.ReadTranscriptFileUnderHome), with the same offset metric as
+// ExtractPrompts. It never reads a path itself.
+func (f *FactoryAIDroidAgent) ExtractPromptsFromTranscript(content []byte, fromOffset int) ([]string, error) {
+	lines, _, err := ParseDroidTranscriptFromBytes(content, fromOffset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+	return extractPromptsFromDroidLines(lines), nil
+}
+
+// extractPromptsFromDroidLines is the shared body of ExtractPrompts and
+// ExtractPromptsFromTranscript: user-message text from parsed Droid
+// transcript lines.
+func extractPromptsFromDroidLines(lines []transcript.Line) []string {
 	var prompts []string
 	for i := range lines {
 		if lines[i].Type != transcript.TypeUser {
@@ -116,7 +159,7 @@ func (f *FactoryAIDroidAgent) ExtractPrompts(sessionRef string, fromOffset int) 
 			prompts = append(prompts, content)
 		}
 	}
-	return prompts, nil
+	return prompts
 }
 
 // ExtractSummary extracts the last assistant message as a session summary.
@@ -164,6 +207,13 @@ func (f *FactoryAIDroidAgent) ExtractAllModifiedFiles(transcriptData []byte, fro
 // CalculateTotalTokenUsage computes token usage including all spawned subagents.
 func (f *FactoryAIDroidAgent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, subagentsDir string) (*agent.TokenUsage, error) {
 	return CalculateTotalTokenUsageFromBytes(transcriptData, fromOffset, subagentsDir)
+}
+
+// CalculateTotalTokenUsageUnderHome implements agent.ConfinedSubagentAwareExtractor:
+// CalculateTotalTokenUsage with every subagent transcript read confined to
+// agentHome.
+func (f *FactoryAIDroidAgent) CalculateTotalTokenUsageUnderHome(transcriptData []byte, fromOffset int, subagentsDir, agentHome string) (*agent.TokenUsage, error) {
+	return CalculateTotalTokenUsageUnderHomeFromBytes(transcriptData, fromOffset, subagentsDir, agentHome)
 }
 
 // --- Internal hook parsing functions ---
@@ -306,4 +356,9 @@ func extractHookToolResponseAgentID(text string) string {
 	}
 
 	return after[:end]
+}
+
+// GetTranscriptPositionFromReader counts raw JSONL lines without parsing messages.
+func (f *FactoryAIDroidAgent) GetTranscriptPositionFromReader(r io.Reader) (int, error) {
+	return agent.CountTranscriptLines(r) //nolint:wrapcheck // preserve shared counter errors
 }

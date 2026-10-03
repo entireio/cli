@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -12,10 +13,12 @@ import (
 
 // Compile-time interface assertions
 var (
-	_ agent.TokenCalculator    = (*PiAgent)(nil)
-	_ agent.TranscriptAnalyzer = (*PiAgent)(nil)
-	_ agent.PromptExtractor    = (*PiAgent)(nil)
-	_ agent.ModelExtractor     = (*PiAgent)(nil)
+	_ agent.TokenCalculator            = (*PiAgent)(nil)
+	_ agent.TranscriptAnalyzer         = (*PiAgent)(nil)
+	_ agent.ConfinedTranscriptAnalyzer = (*PiAgent)(nil)
+	_ agent.PromptExtractor            = (*PiAgent)(nil)
+	_ agent.TranscriptPromptExtractor  = (*PiAgent)(nil)
+	_ agent.ModelExtractor             = (*PiAgent)(nil)
 )
 
 // CalculateTokenUsage sums per-assistant-message token usage from a Pi JSONL
@@ -88,12 +91,18 @@ func (a *PiAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string,
 	if err != nil {
 		return nil, 0, fmt.Errorf("read pi transcript: %w", err)
 	}
+	return a.ExtractModifiedFilesFromBytes(data, startOffset)
+}
 
+// ExtractModifiedFilesFromBytes is the bytes-based equivalent of
+// ExtractModifiedFilesFromOffset, for callers that already hold a
+// home-confined read of the transcript (agent.ConfinedTranscriptAnalyzer).
+func (a *PiAgent) ExtractModifiedFilesFromBytes(data []byte, startOffset int) ([]string, int, error) {
 	totalLines := pijsonl.CountLines(data)
 	seen := make(map[string]bool)
 	var files []string
 
-	err = pijsonl.ForEachActiveMessage(data, startOffset, func(entry pijsonl.Entry) {
+	err := pijsonl.ForEachActiveMessage(data, startOffset, func(entry pijsonl.Entry) {
 		if entry.Message.Role != pijsonl.RoleAssistant {
 			return
 		}
@@ -127,7 +136,12 @@ func (a *PiAgent) ExtractModifiedFilesFromOffset(_ context.Context, path string,
 }
 
 // ExtractPrompts returns user-message text from the transcript starting at
-// the given line offset. Branch-aware (drops abandoned-branch prompts).
+// the given line offset. Branch-aware (drops abandoned-branch prompts). Reads
+// sessionRef itself via agent.ReadTranscriptFile — only .entire-cache
+// confined, not AgentHome confined. Callers that already hold a
+// home-confined read of the transcript (e.g. condensation, which must not
+// trust a bare sessionRef from adopted session state) should call
+// ExtractPromptsFromTranscript instead.
 func (a *PiAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, error) {
 	if sessionRef == "" {
 		return nil, nil
@@ -136,9 +150,16 @@ func (a *PiAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, e
 	if err != nil {
 		return nil, fmt.Errorf("read pi transcript: %w", err)
 	}
+	return a.ExtractPromptsFromTranscript(data, fromOffset)
+}
 
+// ExtractPromptsFromTranscript implements agent.TranscriptPromptExtractor over
+// transcript bytes the caller already holds (e.g. a home-confined read via
+// agent.ReadTranscriptFileUnderHome), with the same offset metric as
+// ExtractPrompts. It never reads a path itself.
+func (a *PiAgent) ExtractPromptsFromTranscript(data []byte, fromOffset int) ([]string, error) {
 	var prompts []string
-	err = pijsonl.ForEachActiveMessage(data, fromOffset, func(entry pijsonl.Entry) {
+	err := pijsonl.ForEachActiveMessage(data, fromOffset, func(entry pijsonl.Entry) {
 		if entry.Message.Role != pijsonl.RoleUser {
 			return
 		}
@@ -161,4 +182,9 @@ func (a *PiAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, e
 		return prompts, fmt.Errorf("extract prompts: %w", err)
 	}
 	return prompts, nil
+}
+
+// GetTranscriptPositionFromReader counts raw JSONL lines without parsing messages.
+func (a *PiAgent) GetTranscriptPositionFromReader(r io.Reader) (int, error) {
+	return agent.CountTranscriptLines(r) //nolint:wrapcheck // preserve shared counter errors
 }

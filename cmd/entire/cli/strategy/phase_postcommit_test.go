@@ -1438,6 +1438,85 @@ func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
 		"prior checkpoint transcript must stay intact when the finalize is skipped")
 }
 
+// TestFinalizeAllTurnCheckpoints_RejectsTranscriptSymlinkedOutOfAgentHome is
+// the regression test for the HIGH finding this task fixes: finalize reads a
+// session's own TranscriptPath and sanitizes/externalizes/redacts it straight
+// into checkpoint metadata that gets pushed — the actual exfiltration sink in
+// the agent-storage-roots report. session_adopt's validateAdoptSourceTranscript
+// checks a recorded AgentHome only once, at adopt time, in one process; the
+// persisted TranscriptPath is read later, by a different process (here:
+// finalizeAllTurnCheckpoints at turn end), so a regular file that passed
+// validation can be swapped for a symlink escaping that home in the meantime.
+// This simulates the swap directly (skipping adopt itself, which P2's tests
+// already cover) and asserts finalize never reads through it: the prior
+// checkpoint's transcript must stay exactly as it was, never gaining the
+// symlink target's content.
+func TestFinalizeAllTurnCheckpoints_RejectsTranscriptSymlinkedOutOfAgentHome(t *testing.T) {
+	// No t.Parallel: t.Chdir.
+	workDir := setupGitRepo(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	sessionID := "adopt-swap-attack"
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session{
+		CheckpointID: testTrailerCheckpointID,
+		SessionID:    sessionID,
+		Strategy:     StrategyNameManualCommit,
+		Transcript:   redact.AlreadyRedacted([]byte("old transcript\n")),
+		Prompts:      []string{"old prompt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+		Agent:        "Claude Code",
+	}))
+
+	// The recorded AgentHome, exactly as validateAdoptSourceTranscript would
+	// have accepted it, and the Claude Code session-file shape underneath it.
+	home := t.TempDir()
+	projectsDir := filepath.Join(home, "projects", "adopt-test")
+	require.NoError(t, os.MkdirAll(projectsDir, 0o750))
+	transcriptPath := filepath.Join(projectsDir, sessionID+".jsonl")
+
+	// A file OUTSIDE home, shaped as valid JSONL (so redaction's JSONL parse
+	// does not simply drop it as unparsable, which would mask the leak this
+	// test exists to catch) and carrying a marker no secret scanner flags, so
+	// a leak is visible verbatim in the checkpoint's stored transcript.
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "id_ed25519")
+	const leakMarker = "UNCONFINED-READ-MARKER-7f3a2b"
+	require.NoError(t, os.WriteFile(outside,
+		[]byte(`{"type":"user","message":{"role":"user","content":"`+leakMarker+`"}}`+"\n"), 0o600))
+
+	// The swap: by the time finalize reads it, the leaf validation saw as a
+	// regular file is a symlink to the outside target.
+	if err := os.Symlink(outside, transcriptPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	state := &SessionState{
+		SessionID:         sessionID,
+		AgentType:         "Claude Code",
+		AgentHome:         home,
+		TranscriptPath:    transcriptPath,
+		TurnCheckpointIDs: []string{testTrailerCheckpointID.String()},
+	}
+
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	require.Equal(t, 1, errCount,
+		"a transcript reachable only through a symlink escaping the recorded AgentHome must be refused, not read")
+	require.Empty(t, state.TurnCheckpointIDs)
+
+	content, err := store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
+	require.NoError(t, err)
+	require.Equal(t, "old transcript\n", string(content.Transcript),
+		"the prior checkpoint must stay intact — the symlink target's content must never reach it")
+	require.NotContains(t, string(content.Transcript), leakMarker)
+}
+
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
 // on the shadow branch so there is content available for condensation.
 // Also modifies test.txt to "agent modified content" and includes it in the checkpoint,

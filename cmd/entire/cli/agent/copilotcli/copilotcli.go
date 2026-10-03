@@ -56,20 +56,26 @@ func (c *CopilotCLIAgent) GetSessionID(input *agent.HookInput) string {
 	return input.SessionID
 }
 
+// resolveCopilotHome returns Copilot CLI's home directory: $COPILOT_HOME or
+// ~/.copilot. See agent.ResolveHome for the override policy.
+func resolveCopilotHome() (string, error) {
+	// Copilot stores its config and state under COPILOT_HOME when that is set,
+	// falling back to ~/.copilot. Honouring it points transcript resolution at
+	// wherever the agent actually wrote, rather than at a directory it never
+	// used — which is what a user with COPILOT_HOME set, or a harness that
+	// isolates Copilot state per session, would otherwise get.
+	return agent.ResolveHome("COPILOT_HOME", ".copilot") //nolint:wrapcheck // the error already names the override and its value
+}
+
 // GetSessionDir returns the directory where Copilot CLI stores session transcripts.
 func (c *CopilotCLIAgent) GetSessionDir(_ string) (string, error) {
 	if override := os.Getenv("ENTIRE_TEST_COPILOT_SESSION_DIR"); override != "" {
 		return override, nil
 	}
 
-	// Copilot stores its config and state under COPILOT_HOME when that is set,
-	// falling back to ~/.copilot. Honouring it points transcript resolution at
-	// wherever the agent actually wrote, rather than at a directory it never
-	// used — which is what a user with COPILOT_HOME set, or a harness that
-	// isolates Copilot state per session, would otherwise get.
-	copilotHome, err := agent.ResolveHome("COPILOT_HOME", ".copilot")
+	copilotHome, err := resolveCopilotHome()
 	if err != nil {
-		return "", err //nolint:wrapcheck // the error already names the override and its value
+		return "", err
 	}
 	return filepath.Join(copilotHome, "session-state"), nil
 }

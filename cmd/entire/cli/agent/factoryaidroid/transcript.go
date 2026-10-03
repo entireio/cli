@@ -358,6 +358,39 @@ func extractAgentIDFromText(text string) string {
 // including subagents. It parses the main transcript bytes from startLine, extracts spawned
 // agent IDs, and calculates their token usage from transcript files in subagentsDir.
 func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir string) (*agent.TokenUsage, error) {
+	return calculateTotalTokenUsageFromBytes(data, startLine, subagentsDir, func(path string) (*agent.TokenUsage, error) {
+		return CalculateTokenUsageFromFile(path, 0)
+	})
+}
+
+// CalculateTotalTokenUsageUnderHomeFromBytes is CalculateTotalTokenUsageFromBytes,
+// with every subagent transcript read confined to agentHome via
+// agent.ReadTranscriptFileUnderHome instead of CalculateTokenUsageFromFile's
+// bare os.Open. See claudecode's ExtractAllModifiedFilesUnderHome doc comment
+// for the threat this closes: subagentsDir sits one directory below an
+// already-confined TranscriptPath, but each agent-<id>.jsonl inside it was
+// still read by following symlinks.
+func CalculateTotalTokenUsageUnderHomeFromBytes(data []byte, startLine int, subagentsDir, agentHome string) (*agent.TokenUsage, error) {
+	return calculateTotalTokenUsageFromBytes(data, startLine, subagentsDir, func(path string) (*agent.TokenUsage, error) {
+		file, err := agent.OpenTranscriptFileUnderHome(path, agentHome)
+		if err != nil {
+			return nil, fmt.Errorf("read subagent transcript under agent home: %w", err)
+		}
+		defer file.Close()
+		lines, _, parseErr := parseDroidTranscriptFromReader(file, 0)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse subagent transcript: %w", parseErr)
+		}
+		return CalculateTokenUsage(lines), nil
+	})
+}
+
+// calculateTotalTokenUsageFromBytes is the shared body of
+// CalculateTotalTokenUsageFromBytes and CalculateTotalTokenUsageUnderHomeFromBytes:
+// parses the main transcript, then reads each spawned subagent's transcript
+// through readSubagentUsage — the only thing that differs between an
+// unconfined (bare path) and AgentHome-confined read.
+func calculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir string, readSubagentUsage func(path string) (*agent.TokenUsage, error)) (*agent.TokenUsage, error) {
 	if len(data) == 0 {
 		return &agent.TokenUsage{}, nil
 	}
@@ -398,7 +431,7 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
 			agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
-			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
+			agentUsage, err := readSubagentUsage(agentPath)
 			if err != nil {
 				continue
 			}

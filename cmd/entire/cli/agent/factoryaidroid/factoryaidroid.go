@@ -114,8 +114,7 @@ func (f *FactoryAIDroidAgent) GetSessionDir(repoPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	projectDir := sanitizeRepoPath(repoPath)
-	return filepath.Join(homeDir, ".factory", "sessions", projectDir), nil
+	return f.SessionDirUnder(homeDir, repoPath), nil
 }
 
 // GetSessionBaseDir returns the base directory containing per-project session subdirectories.

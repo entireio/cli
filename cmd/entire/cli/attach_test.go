@@ -122,7 +122,7 @@ func TestResolveAndValidateTranscript_PreservesFetchFailureAfterFallback(t *test
 		err:        wantErr,
 	}
 
-	_, err = resolveAndValidateTranscript(context.Background(), "test-fetch-failure", ag, lookupAllowFetch)
+	_, _, err = resolveAndValidateTranscript(context.Background(), "test-fetch-failure", ag, lookupAllowFetch)
 	if err == nil || err.Error() != wantErr.Error() {
 		t.Fatalf("resolveAndValidateTranscript error = %v, want %q", err, wantErr)
 	}
@@ -147,7 +147,7 @@ func TestResolveAndValidateTranscript_LocalOnlyDoesNotFetch(t *testing.T) {
 		err:        errors.New("fetch must not run"),
 	}
 
-	_, err = resolveAndValidateTranscript(context.Background(), "test-local-only", ag, lookupLocalOnly)
+	_, _, err = resolveAndValidateTranscript(context.Background(), "test-local-only", ag, lookupLocalOnly)
 	if err == nil {
 		t.Fatal("expected transcript-not-found error")
 	}
@@ -182,7 +182,7 @@ func TestResolveAndValidateTranscript_FallbackWinsAfterFetchFailure(t *testing.T
 		err:     errors.New("fetch failed"),
 	}
 
-	got, err := resolveAndValidateTranscript(context.Background(), sessionID, ag, lookupAllowFetch)
+	got, _, err := resolveAndValidateTranscript(context.Background(), sessionID, ag, lookupAllowFetch)
 	if err != nil {
 		t.Fatalf("expected fallback transcript to win, got: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestResolveAgentAndTranscript_HidesFailedAutoDetectionAfterFetchFailure(t *
 	t.Setenv("HOME", t.TempDir())
 
 	var out bytes.Buffer
-	_, _, err := resolveAgentAndTranscript(
+	_, _, _, err := resolveAgentAndTranscript(
 		context.Background(),
 		&out,
 		"test-fetch-failure-autodetect",

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -46,12 +45,10 @@ import (
 //     bounded by conversation size and rarely exceed a few MB even for
 //     long sessions, so buffering is acceptable here.
 //
-// path comes from a session-state file that Entire writes exclusively
-// under the user's own .git/. The path is therefore as trusted as any
-// other entry the local user has on disk; we do not validate it against a
-// confinement root.
-func streamTranscriptToStdout(ctx context.Context, w io.Writer, path string, agentType types.AgentType) error {
-	f, err := os.Open(path) //nolint:gosec // see comment above on trust model
+// Recorded agent homes and .entire caches enforce their rooted, no-follow
+// boundary at open time. An empty home retains the legacy agent read protocol.
+func streamTranscriptToStdout(ctx context.Context, w io.Writer, path, agentHome string, agentType types.AgentType) error {
+	f, err := agent.OpenTranscriptFileUnderHome(path, agentHome)
 	if err != nil {
 		return fmt.Errorf("open transcript: %w", err)
 	}
@@ -569,7 +566,7 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 	// etc.), not flag-usage problems — don't print cobra's usage block on top
 	// of any partial stdout output.
 	cmd.SilenceUsage = true
-	return streamTranscriptToStdout(ctx, cmd.OutOrStdout(), path, state.AgentType)
+	return streamTranscriptToStdout(ctx, cmd.OutOrStdout(), path, state.AgentHome, state.AgentType)
 }
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.

@@ -1325,7 +1325,14 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 		refs = append(refs, agent.SubagentReference{ObservedTurnIDs: entry.ObservedTurnIDs, AgentID: entry.AgentID, DeclaredTranscriptPath: entry.DeclaredTranscriptPath, ResolvedTranscriptPath: entry.ResolvedTranscriptPath})
 	}
 	version := state.SubagentLedgerVersion
-	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs)
+	home := state.AgentHome
+	if state.TranscriptPath == "" {
+		// Child hooks can arrive before the parent's first transcript. Its home
+		// is still provisional, so retain the active-store protocol until the
+		// parent path establishes a boundary (including explicit store overrides).
+		home = ""
+	}
+	extraction, ok := agent.ExtractWithSubagentInventoryUnderHome(ctx, ag, parent, fromOffset, refs, home)
 	if !ok {
 		return nil, &version
 	}

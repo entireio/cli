@@ -411,6 +411,11 @@ type State struct {
 	// TranscriptPath is the path to the live transcript file (for mid-session commit detection)
 	TranscriptPath string `json:"transcript_path,omitempty"`
 
+	// AgentHome is the session's per-user agent directory. Adoption verifies
+	// its provenance and canonicalizes it together with TranscriptPath.
+	// Empty denotes the legacy protocol or a session-directory override.
+	AgentHome string `json:"agent_home,omitempty"`
+
 	// LastPrompt is the most recent user prompt for this session (truncated for display).
 	// Updated on every turn start (UserPromptSubmit). JSON tag kept as "first_prompt"
 	// for backward compatibility with existing state files.

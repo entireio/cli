@@ -15,35 +15,8 @@ import (
 // ParseFromBytes parses transcript content from a byte slice.
 // Uses bufio.Reader to handle arbitrarily long lines.
 func ParseFromBytes(content []byte) ([]Line, error) {
-	var lines []Line
-	reader := bufio.NewReader(bytes.NewReader(content))
-
-	for {
-		lineBytes, err := reader.ReadBytes('\n')
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("failed to read transcript: %w", err)
-		}
-
-		// Handle empty line or EOF without content
-		if len(lineBytes) == 0 {
-			if err == io.EOF {
-				break
-			}
-			continue
-		}
-
-		var line Line
-		if err := json.Unmarshal(lineBytes, &line); err == nil {
-			normalizeLineType(&line)
-			lines = append(lines, line)
-		}
-
-		if err == io.EOF {
-			break
-		}
-	}
-
-	return lines, nil
+	lines, _, err := ParseFromReaderAtLineWithTotal(bytes.NewReader(content), 0)
+	return lines, err
 }
 
 // ParseFromFileAtLine reads and parses a transcript file starting from a specific line.
@@ -77,8 +50,14 @@ func ParseFromFileAtLineWithTotal(path string, startLine int) ([]Line, int, erro
 	}
 	defer func() { _ = file.Close() }()
 
+	return ParseFromReaderAtLineWithTotal(file, startLine)
+}
+
+// ParseFromReaderAtLineWithTotal parses entries after startLine and counts all raw lines.
+// The caller owns the reader and its filesystem boundary.
+func ParseFromReaderAtLineWithTotal(r io.Reader, startLine int) ([]Line, int, error) {
 	var lines []Line
-	reader := bufio.NewReader(file)
+	reader := bufio.NewReader(r)
 
 	totalLines := 0
 	for {

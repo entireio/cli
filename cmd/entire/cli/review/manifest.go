@@ -431,7 +431,7 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State, lookup a
 			slog.String("error", err.Error()))
 		return nil
 	}
-	transcript, err := agent.ReadTranscriptFile(st.TranscriptPath)
+	transcript, err := agent.ReadTranscriptFileUnderHome(st.TranscriptPath, st.AgentHome)
 	if err != nil {
 		logging.Debug(ctx, "review token usage: transcript read failed",
 			slog.String("session_id", st.SessionID),
@@ -439,7 +439,7 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State, lookup a
 			slog.String("error", err.Error()))
 		return nil
 	}
-	return agent.CalculateTokenUsage(ctx, ag, transcript, st.CheckpointTranscriptStart, reviewSubagentsDir(st))
+	return agent.CalculateTokenUsageUnderHome(ctx, ag, transcript, st.CheckpointTranscriptStart, reviewSubagentsDir(st), st.AgentHome)
 }
 
 func reviewSubagentsDir(st *session.State) string {
