@@ -389,7 +389,7 @@ If your AI sessions will touch sensitive data:
 - **Use a private repository.** This is the simplest and most complete protection. Committed checkpoints are then only visible to collaborators.
 - **Avoid passing sensitive files to your agent.** Content that never enters the agent conversation never appears in transcripts.
 - **Never paste a screenshot or image containing secrets or personal data.** Nothing in Entire reads what an image depicts, and on most agents the image is stored unredacted — see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots).
-- **Review before pushing.** Checkpoints are written locally at commit time and pushed separately, so there is always a window to inspect them:
+- **Review before pushing.** Checkpoints are written locally — at commit time, or when a session with no file changes is snapshotted with the hidden `entire checkpoint create` — and pushed separately, so there is always a window to inspect them:
 
   ```fish
   # git-refs: list local checkpoint refs, then read one

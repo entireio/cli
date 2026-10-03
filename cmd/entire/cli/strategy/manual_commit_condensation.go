@@ -126,6 +126,20 @@ type condenseOpts struct {
 	// result. The gate is memoized per commit by commitCondensedEmitter, so the
 	// settings load behind it runs at most once per PostCommit.
 	searchProbeAllowed func() bool
+
+	// noCommitAttribution omits code attribution for a write that no commit
+	// backs (snapshot checkpoints). Attribution compares the shadow tree with
+	// HEAD on the premise that HEAD holds the work just committed; without a
+	// commit, HEAD predates the agent's uncommitted changes and every one of
+	// them would be counted as a human removal.
+	noCommitAttribution bool
+
+	// failOnRedactionError makes a runtime redaction failure abort the write
+	// instead of dropping the transcript and continuing. The hook paths drop
+	// and continue because a commit must never be blocked on it; an explicit
+	// snapshot exists for its transcript, so one written without it — or
+	// reported as "nothing to checkpoint" — would be a silent wrong answer.
+	failOnRedactionError bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -623,7 +637,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// externalized, redacted copy is stored.
 	externalizedTranscript, extractedAssets, transcriptSizeBaseline := prepareTranscriptForStorage(ctx, logCtx, ag, state, sessionData.Transcript)
 
-	redactedTranscript, redactDuration := redactOrDrop(logCtx, repo, state.SessionID, externalizedTranscript, checkpointID)
+	redactedTranscript, redactDuration, err := redactOrDrop(logCtx, repo, state.SessionID, externalizedTranscript, checkpointID, o.failOnRedactionError)
+	if err != nil {
+		return nil, err
+	}
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}
@@ -759,17 +776,20 @@ func buildCondensationWriteOptions(
 	}
 
 	attributionStart := time.Now()
-	attrCtx, attributionSpan := perf.Start(ctx, "calculate_session_attribution")
-	attribution := calculateSessionAttributions(attrCtx, repo, shadowRef, sessionData, state, attributionOpts{
-		headTree:              o.headTree,
-		parentTree:            o.parentTree,
-		repoDir:               o.repoDir,
-		attributionBaseCommit: attrBase,
-		parentCommitHash:      o.parentCommitHash,
-		headCommitHash:        o.headCommitHash,
-		allAgentFiles:         o.allAgentFiles,
-	})
-	attributionSpan.End()
+	var attribution *cpkg.Attribution
+	if !o.noCommitAttribution {
+		attrCtx, attributionSpan := perf.Start(ctx, "calculate_session_attribution")
+		attribution = calculateSessionAttributions(attrCtx, repo, shadowRef, sessionData, state, attributionOpts{
+			headTree:              o.headTree,
+			parentTree:            o.parentTree,
+			repoDir:               o.repoDir,
+			attributionBaseCommit: attrBase,
+			parentCommitHash:      o.parentCommitHash,
+			headCommitHash:        o.headCommitHash,
+			allAgentFiles:         o.allAgentFiles,
+		})
+		attributionSpan.End()
+	}
 	attributionDuration := time.Since(attributionStart)
 
 	var summary *cpkg.Summary
@@ -819,17 +839,22 @@ func buildCondensationWriteOptions(
 // redactOrDrop runs redactSessionTranscript and, on failure, logs a warning
 // and returns empty bytes. Drop-on-failure is the long-standing contract here:
 // hooks have no retry path, and a failed redaction must not block the commit.
-func redactOrDrop(logCtx context.Context, repo *git.Repository, sessionID string, transcript []byte, checkpointID id.CheckpointID) (redact.RedactedBytes, time.Duration) {
+// failOnError returns the failure instead, for callers whose only purpose is
+// the transcript (condenseOpts.failOnRedactionError).
+func redactOrDrop(logCtx context.Context, repo *git.Repository, sessionID string, transcript []byte, checkpointID id.CheckpointID, failOnError bool) (redact.RedactedBytes, time.Duration, error) {
 	redactedTranscript, redactDuration, err := redactSessionTranscript(logCtx, repo, sessionID, transcript)
+	if err != nil && failOnError {
+		return redact.RedactedBytes{}, redactDuration, fmt.Errorf("failed to redact transcript: %w", err)
+	}
 	if err != nil {
 		logging.Warn(logCtx, "failed to redact transcript secrets, dropping transcript for checkpoint",
 			slog.String("session_id", sessionID),
 			slog.String("checkpoint_id", checkpointID.String()),
 			slog.String("error", err.Error()),
 		)
-		return redact.RedactedBytes{}, redactDuration
+		return redact.RedactedBytes{}, redactDuration, nil
 	}
-	return redactedTranscript, redactDuration
+	return redactedTranscript, redactDuration, nil
 }
 
 // skipIfNothingToCondense returns a Skipped result when there is no

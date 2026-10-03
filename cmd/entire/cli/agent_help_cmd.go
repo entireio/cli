@@ -102,6 +102,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"search": {agentHelpAudienceReadOnly, true},
 
 	"checkpoint":         {agentHelpAudienceTaskDriven, true},
+	"checkpoint create":  {agentHelpAudienceUserOwned, false},  // hidden; writes a checkpoint
 	"checkpoint explain": {agentHelpAudienceTaskDriven, false}, // --generate writes a summary
 	"checkpoint list":    {agentHelpAudienceReadOnly, false},
 	"checkpoint search":  {agentHelpAudienceReadOnly, false},

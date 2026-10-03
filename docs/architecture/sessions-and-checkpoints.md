@@ -54,6 +54,8 @@ const (
 | Ephemeral | Full state (code + metadata) | Pending session state, pre-commit |
 | Persistent | Metadata + commit reference | Permanent record, post-commit |
 
+Most persistent checkpoints are written when a commit condenses a session, but some have no commit: eager condensation at session end, `entire doctor` and the session sweeper, and snapshots from the hidden `entire checkpoint create`. Snapshots exist for sessions that change no files (research, planning, review), which no other path checkpoints; see [implementation contracts](../development/checkpoint-implementation.md).
+
 ## Interface
 
 ### Session Access
