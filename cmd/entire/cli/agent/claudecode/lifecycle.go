@@ -187,6 +187,8 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 	if raw.ToolResponse.AgentID != "" {
 		event.SubagentID = raw.ToolResponse.AgentID
 	}
+	event.ToolResponseStatus = raw.ToolResponse.Status
+	event.ToolResponseIsAsync = raw.ToolResponse.IsAsync
 	return event, nil
 }
 

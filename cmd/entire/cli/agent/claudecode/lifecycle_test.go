@@ -235,8 +235,10 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 		"transcript_path": "/tmp/main.jsonl",
 		"tool_use_id":     "toolu_xyz789",
 		"tool_input":      json.RawMessage(`{"prompt": "task done"}`),
-		"tool_response": map[string]string{
+		"tool_response": map[string]any{
 			"agentId": "agent-subagent-001",
+			"status":  "async_launched",
+			"isAsync": true,
 		},
 	}
 	inputBytes, marshalErr := json.Marshal(inputData)
@@ -258,6 +260,12 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	}
 	if event.SubagentID != "agent-subagent-001" {
 		t.Errorf("expected subagent_id 'agent-subagent-001', got %q", event.SubagentID)
+	}
+	if event.ToolResponseStatus != "async_launched" {
+		t.Errorf("expected tool_response status 'async_launched', got %q", event.ToolResponseStatus)
+	}
+	if !event.ToolResponseIsAsync {
+		t.Error("expected tool_response isAsync to be true")
 	}
 	// PostToolUse fires at the background launch stub, seconds after launch,
 	// not at true completion — Final must stay false so downstream lifecycle
