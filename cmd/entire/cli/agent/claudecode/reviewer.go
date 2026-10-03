@@ -66,7 +66,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
 	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose",
-		flagSettingSources, "user", "--settings", reviewHookSettings(), "--strict-mcp-config"}
+		flagSettingSources, "user", "--settings", reviewHookSettings(), flagStrictMCP}
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)
@@ -75,7 +75,7 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 
 // reviewIsolationFlags are the flags buildReviewCmd relies on to keep the
 // reviewed checkout's configuration out of the reviewer.
-var reviewIsolationFlags = []string{flagSettingSources, "--settings", "--strict-mcp-config"}
+var reviewIsolationFlags = []string{flagSettingSources, "--settings", flagStrictMCP}
 
 // unknownOptionPattern matches the error Claude Code's option parser prints
 // for a flag it does not know, e.g. "error: unknown option '--setting-sources'".

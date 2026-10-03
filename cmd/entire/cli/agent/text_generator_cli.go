@@ -30,9 +30,29 @@ func (e *TextGenerationError) Unwrap() error { return e.Err }
 // TextCommandRunner matches exec.CommandContext and allows tests to inject a runner.
 type TextCommandRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
 
-// RunIsolatedTextGeneratorCLI executes a text-generation CLI in an isolated temp
-// directory with all GIT_* environment variables removed. This avoids recursive
-// hook triggers and repo side effects while preserving provider-specific flags.
+// NewTextGenerationDir creates an empty working directory for one
+// text-generation run; cleanup removes it.
+//
+// A text generator's prompt carries untrusted transcript content, and the
+// agent CLIs let their file tools reach the working directory (Copilot also
+// the system temp directory) without approval. Running from the shared
+// system temp directory therefore exposed everything in it, including
+// credential files other tools and Entire itself leave there, to an
+// injected "read this file" instruction. Each generator also removes its
+// tools where the CLI allows it; an empty directory is what remains for the
+// ones that cannot (Antigravity) and a backstop for the rest.
+func NewTextGenerationDir() (string, func(), error) {
+	dir, err := os.MkdirTemp("", "entire-textgen-")
+	if err != nil {
+		return "", nil, fmt.Errorf("create text generation dir: %w", err)
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// RunIsolatedTextGeneratorCLI executes a text-generation CLI in a fresh empty
+// directory (NewTextGenerationDir) with all GIT_* environment variables
+// removed. This avoids recursive hook triggers and repo side effects while
+// preserving provider-specific flags.
 //
 // Optional envOverrides take precedence over inherited values; GIT_* entries
 // are removed even from overrides.
@@ -41,12 +61,25 @@ type TextCommandRunner func(ctx context.Context, name string, args ...string) *e
 // stdoutByteCount are populated even on error so callers can wrap them into a
 // *agent.TextGenerationError for timeout diagnostics.
 func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string, envOverrides ...string) (string, string, int, error) {
+	dir, cleanup, err := NewTextGenerationDir()
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer cleanup()
+	return RunIsolatedTextGeneratorCLIIn(ctx, runner, dir, binary, displayName, args, stdin, envOverrides...)
+}
+
+// RunIsolatedTextGeneratorCLIIn is RunIsolatedTextGeneratorCLI in a directory
+// the caller already created with NewTextGenerationDir, for a CLI whose argv
+// or setup must name that directory (Cursor's --workspace and its
+// .cursor/cli.json).
+func RunIsolatedTextGeneratorCLIIn(ctx context.Context, runner TextCommandRunner, dir, binary, displayName string, args []string, stdin string, envOverrides ...string) (string, string, int, error) {
 	if runner == nil {
 		runner = exec.CommandContext
 	}
 
 	cmd := runner(ctx, binary, args...)
-	cmd.Dir = os.TempDir()
+	cmd.Dir = dir
 	cmd.Env = StripGitEnv(append(os.Environ(), envOverrides...))
 	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
 	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.

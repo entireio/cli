@@ -172,8 +172,18 @@ For `explain --generate` and auto-summarize, Entire invokes Copilot via stdin
 rather than the documented `-p "prompt"` form:
 
 ```
-copilot --allow-all-tools --disable-builtin-mcps   # prompt piped to stdin
+copilot --deny-tool shell --deny-tool write --deny-tool url \
+  --no-ask-user --no-custom-instructions --disable-builtin-mcps \
+  --available-tools=entire_text_generation_uses_no_tools -s --disallow-temp-dir   # prompt piped to stdin
 ```
+
+The prompt carries untrusted transcript content, so the run has no tools at
+all: the allowlist names a tool that does not exist (an empty
+`--available-tools` leaves every tool available), and `-s` keeps Copilot's
+"Disabled tools" notice off stdout. It runs from a fresh empty directory.
+`generateTextArgs` in `generate.go` documents each flag;
+`TestTextGeneration_LiveHasNoToolReach` (opt-in, `ENTIRE_TEST_REAL_AGENTS=1`)
+checks the contract against the installed CLI.
 
 This matches the pattern used by every other summary-capable agent in the
 repo (Claude, Codex, Cursor), which all converge on one transport

@@ -100,7 +100,7 @@ func probeConfigDir(ctx context.Context) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin,
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-		"--settings", `{"disableAllHooks":true}`, "--strict-mcp-config")
+		"--settings", `{"disableAllHooks":true}`, flagStrictMCP)
 	cmd.Dir = tmp
 	cmd.Env = os.Environ()
 	// Stderr stays nil (the null device) rather than io.Discard: a writer
