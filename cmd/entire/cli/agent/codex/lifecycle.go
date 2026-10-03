@@ -156,6 +156,7 @@ func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
 		TurnID:       raw.TurnID,
 		SubagentID:   raw.AgentID,
 		SubagentType: raw.AgentType,
+		CWD:          raw.CWD,
 		Model:        raw.Model,
 		Timestamp:    time.Now(),
 	}, nil
@@ -179,6 +180,7 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		ProvisionalSubagentStop: true,
 		SubagentType:            raw.AgentType,
 		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),
+		CWD:                     raw.CWD,
 		Model:                   raw.Model,
 		Timestamp:               time.Now(),
 	}, nil
@@ -213,6 +215,7 @@ func (c *CodexAgent) parseTurnStart(ctx context.Context, stdin io.Reader) (*agen
 	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
+		CWD:        raw.CWD,
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Prompt:     raw.Prompt,
@@ -287,6 +290,7 @@ func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.
 	}
 	return &agent.Event{
 		Type:       agent.TurnEnd,
+		CWD:        raw.CWD,
 		SessionID:  raw.SessionID,
 		SessionRef: derefString(raw.TranscriptPath),
 		Model:      raw.Model,

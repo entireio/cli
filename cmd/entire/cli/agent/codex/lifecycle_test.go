@@ -469,6 +469,7 @@ func TestParseHookEvent_SubagentStart(t *testing.T) {
 	require.Equal(t, testCodexAgentID, ev.ToolUseID)
 	require.Equal(t, "reviewer", ev.SubagentType)
 	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the parent rollout")
+	require.Equal(t, "/repo", ev.CWD)
 	require.False(t, ev.Final)
 }
 
@@ -503,6 +504,7 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the PARENT rollout")
 	require.Equal(t, "/rollouts/"+testCodexAgentID+".jsonl", ev.SubagentTranscriptPath,
 		"the subagent's own rollout")
+	require.Equal(t, "/repo", ev.CWD)
 	require.True(t, ev.ProvisionalSubagentStop)
 	require.False(t, ev.Final)
 }

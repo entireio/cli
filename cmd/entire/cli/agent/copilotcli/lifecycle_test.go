@@ -699,3 +699,26 @@ func TestHookNames_ReturnsAllHooks(t *testing.T) {
 		}
 	}
 }
+
+// Every lifecycle event carries the payload's working directory, so the
+// dispatcher can follow the agent into another worktree.
+func TestParseHookEvent_CarriesWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	transcriptPath := filepath.Join(t.TempDir(), "events.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte("{}\n"), 0o600))
+	cases := map[string]string{
+		HookNameUserPromptSubmitted: `{"timestamp":1771480081360,"cwd":"/work/tree","sessionId":"` + testSessionID + `","prompt":"hi"}`,
+		HookNameSessionStart:        `{"timestamp":1771480081383,"cwd":"/work/tree","sessionId":"` + testSessionID + `","source":"new"}`,
+		HookNameAgentStop:           `{"timestamp":1771480085412,"cwd":"/work/tree","sessionId":"` + testSessionID + `","transcriptPath":"` + transcriptPath + `","stopReason":"end_turn"}`,
+		HookNameSessionEnd:          `{"timestamp":1771480085500,"cwd":"/work/tree","sessionId":"` + testSessionID + `","transcriptPath":"` + transcriptPath + `"}`,
+	}
+	for hook, input := range cases {
+		t.Run(hook, func(t *testing.T) {
+			t.Parallel()
+			event, err := (&CopilotCLIAgent{}).ParseHookEvent(context.Background(), hook, strings.NewReader(input))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			require.Equal(t, "/work/tree", event.CWD)
+		})
+	}
+}

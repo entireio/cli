@@ -1446,7 +1446,7 @@ func TestHandleLifecycleSubagentEnd_ScanSkippedMarkerSkipsNewFileDetection(t *te
 
 	// Process A: pre-task capture under a breached budget writes the marker.
 	gitrepo.SetStatusBudgetBreachedForTesting(true)
-	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	require.NoError(t, CapturePreTaskState(ctx, "", toolUseID))
 	gitrepo.SetStatusBudgetBreachedForTesting(false)
 
 	preState, err := LoadPreTaskState(ctx, toolUseID)
@@ -1503,7 +1503,7 @@ func TestHandleClaudeCodePostTodo_ScanSkippedMarkerSkipsNewFileDetection(t *test
 
 	// Process A: pre-task capture under a breached budget writes the marker.
 	gitrepo.SetStatusBudgetBreachedForTesting(true)
-	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	require.NoError(t, CapturePreTaskState(ctx, "", toolUseID))
 	gitrepo.SetStatusBudgetBreachedForTesting(false)
 
 	// The subagent modifies a tracked file during the task, so the incremental

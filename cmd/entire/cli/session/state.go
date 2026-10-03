@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -103,6 +104,12 @@ func (k Kind) IsImported() bool {
 type CondensationAttempt struct {
 	CheckpointID    id.CheckpointID `json:"checkpoint_id"`
 	RecoveryPending bool            `json:"recovery_pending,omitempty"`
+	// Stamped marks a reservation prepare-commit-msg made when it stamped the
+	// trailer, for that commit's post-commit alone. It is never a condensation
+	// attempt: post-commit condenses under it or releases it, one left by a
+	// commit that never landed blocks no later commit, and an eager or doctor
+	// condensation starts a fresh attempt instead of writing under it.
+	Stamped bool `json:"stamped,omitempty"`
 }
 
 // State represents the state of an active session.
@@ -131,6 +138,24 @@ type State struct {
 	// WorktreeID is the internal git worktree identifier (empty for main worktree)
 	// Derived from .git/worktrees/<name>/, stable across git worktree move
 	WorktreeID string `json:"worktree_id,omitempty"`
+
+	// AgentWorktree is the worktree the agent's hook payload last named at a
+	// turn boundary, once a hook acted on it. A payload naming the same tree
+	// again is no evidence the agent moved: an agent that works in another
+	// worktree through `cd` inside its shell keeps reporting its launch
+	// directory, and must not be pulled back there.
+	AgentWorktree string `json:"agent_worktree,omitempty"`
+
+	// TurnWorktreePath is the worktree whose turn-start hook captured the
+	// current turn's baselines. An agent can move between worktrees mid-turn,
+	// so the end hook finds them there rather than in its own tree.
+	TurnWorktreePath string `json:"turn_worktree_path,omitempty"`
+
+	// PendingContentWorktree is the worktree whose hooks recorded the session's
+	// uncondensed files and task records, or PendingContentInSeveralWorktrees.
+	// Re-homing consults it: content recorded in the tree a session moves to
+	// does not pin the session to its old home.
+	PendingContentWorktree string `json:"pending_content_worktree,omitempty"`
 
 	// AdoptedIntoWorktreePath marks a source-side tombstone left behind after
 	// `entire session adopt` moves this session into another repository/worktree.
@@ -750,6 +775,30 @@ func (s *State) HasTaskContent() bool {
 	return len(s.TaskRecords) > 0
 }
 
+// PendingContentInSeveralWorktrees marks pending content recorded by hooks in
+// more than one worktree. It is never an absolute path, so no tree matches it.
+const PendingContentInSeveralWorktrees = "several"
+
+// NotePendingContentAt records that worktree's hooks just added pending
+// content; hadContent reports whether any was pending before. A stale value
+// left by an earlier condensation is replaced rather than merged.
+func (s *State) NotePendingContentAt(worktree string, hadContent bool) {
+	switch {
+	case worktree == "":
+		s.PendingContentWorktree = PendingContentInSeveralWorktrees
+	case !hadContent:
+		s.PendingContentWorktree = worktree
+	case !paths.SameDir(s.PendingContentWorktree, worktree):
+		s.PendingContentWorktree = PendingContentInSeveralWorktrees
+	}
+}
+
+// PendingContentRecordedOnlyIn reports whether every pending file and task
+// record came from worktree's hooks.
+func (s *State) PendingContentRecordedOnlyIn(worktree string) bool {
+	return paths.SameDir(s.PendingContentWorktree, worktree)
+}
+
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
 // i.e. still in flight. In-flight consumers (the SessionEnd sweep's "any
 // in-flight work?" check) must use this rather than the raw TaskRecords
@@ -885,6 +934,18 @@ func (s *State) PendingCondensationID() id.CheckpointID {
 // BeginCondensationAttempt records a checkpoint ID before its persistent write.
 func (s *State) BeginCondensationAttempt(checkpointID id.CheckpointID) {
 	s.CondensationAttempt = &CondensationAttempt{CheckpointID: checkpointID}
+}
+
+// ReserveStampedCheckpoint records the checkpoint ID prepare-commit-msg
+// stamped on a commit for this session, before anything is written under it.
+func (s *State) ReserveStampedCheckpoint(checkpointID id.CheckpointID) {
+	s.CondensationAttempt = &CondensationAttempt{CheckpointID: checkpointID, Stamped: true}
+}
+
+// StampedReservationFor reports whether the pending attempt is only
+// prepare-commit-msg's reservation of checkpointID, with nothing written.
+func (s *State) StampedReservationFor(checkpointID id.CheckpointID) bool {
+	return s.CondensationAttempt != nil && s.CondensationAttempt.Stamped && s.CondensationAttempt.CheckpointID == checkpointID
 }
 
 // RequireCondensationRecovery keeps legacy orphan reconciliation enabled for

@@ -407,3 +407,25 @@ func ExtractSessionIDFromTranscriptPath(transcriptPath string) string {
 	}
 	return ""
 }
+
+// Canonical returns the symlink-resolved form of p, or p itself when it cannot
+// be resolved (for example it does not exist yet), so callers always get a
+// comparable value. An empty path stays empty.
+func Canonical(p string) string {
+	if p == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
+}
+
+// SameDir reports whether a and b name the same directory once symlinks are
+// resolved. Two empty paths are not the same directory.
+func SameDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(Canonical(a)) == filepath.Clean(Canonical(b))
+}

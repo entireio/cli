@@ -2,20 +2,30 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
-	"path/filepath"
+	"os"
+	"slices"
+	"strings"
 
+	"github.com/go-git/go-git/v6"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 // findSessionsForCommitLinking resolves which sessions a commit belongs to:
-// the union of the worktree-matched set (a commit captures the worktree's
-// content, so every session with pending content here belongs in it —
-// concurrent sessions interleave by design) and the identity-matched session
-// when the committing process's ancestry names one that worktree matching
-// missed. There is no precedence between the two — an identity hit must
+// the union of the sessions homed in this worktree (a commit captures the
+// worktree's content, so every session with pending content here belongs in
+// it — concurrent sessions interleave by design) and the identity-matched
+// session when the committing process's ancestry names one. Without an
+// identity match, the other-worktree fallback stands in for the homed set. There is no precedence between the two — an identity hit must
 // never suppress worktree matches, or concurrent same-worktree sessions
 // would drop out of the commit. The identity union is what makes an
 // agent-made commit immune to worktree bookkeeping drift: an agent
@@ -29,21 +39,422 @@ import (
 // linked", and amend/post-rewrite paths (which call findSessionsForWorktree
 // directly) stay silent.
 func (s *ManualCommitStrategy) findSessionsForCommitLinking(ctx context.Context, worktreePath string) ([]*SessionState, error) {
+	linking, err := s.findCommitLinkingSet(ctx, worktreePath, id.EmptyCheckpointID)
+	return linking.sessions, err
+}
+
+// commitLinkingSet is findSessionsForCommitLinking's result with provenance:
+// which session process ancestry identified, and the full listing it came from.
+type commitLinkingSet struct {
+	sessions      []*SessionState
+	ancestryGuest string          // session whose owner is an ancestor of this hook, or ""
+	all           []*SessionState // the listing, for sessionsIncludingReservedFor
+}
+
+// sessionsIncludingReservedFor adds every session whose pending condensation is
+// checkpointID: the reservation prepare-commit-msg made when it stamped the
+// trailer, which survives when paths and ancestry differ between the two hooks.
+// Adopted-away tombstones are skipped; adoption retires them and clears the
+// live copy's reservation.
+func (l commitLinkingSet) sessionsIncludingReservedFor(checkpointID id.CheckpointID) []*SessionState {
+	sessions := l.sessions
+	if checkpointID == id.EmptyCheckpointID {
+		return sessions
+	}
+	for _, state := range l.all {
+		if state.Kind.IsImported() || state.AdoptedIntoWorktreePath != "" || linkingSetContains(sessions, state.SessionID) {
+			continue
+		}
+		if state.PendingCondensationID() == checkpointID {
+			sessions = append(sessions, state)
+		}
+	}
+	return sessions
+}
+
+// findCommitLinkingSet resolves the sessions a commit links to. stampedTrailer
+// is the commit's Entire-Checkpoint ID in post-commit (its reservation is a
+// third identity, see sessionsIncludingReservedFor) and empty in
+// prepare-commit-msg, the only hook that announces an unlinked commit.
+func (s *ManualCommitStrategy) findCommitLinkingSet(ctx context.Context, worktreePath string, stampedTrailer id.CheckpointID) (commitLinkingSet, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		// Identity matching below needs the same listing, so nothing can
 		// rescue this; report it to the caller (hooks log and skip).
-		return nil, err
+		return commitLinkingSet{}, err
 	}
-	sessions, ambiguous := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
-	if guest := s.findSessionByCommitAncestry(ctx, allStates); guest != nil && !linkingSetContains(sessions, guest.SessionID) {
+	var sessions, declined []*SessionState
+	var ancestryGuest string
+	guest := s.findSessionByCommitAncestry(ctx, allStates)
+	if guest != nil && !ownerSharedByAnotherLiveSession(guest, allStates) {
+		// The committing agent is known, so the fallback that guesses from
+		// other worktrees has nothing to add: agents launched together from
+		// one checkout are all still homed there until their first turn ends,
+		// and the fallback would hand every one of them this commit. Only
+		// sessions actually homed in this worktree join the identified one.
+		ancestryGuest = guest.SessionID
+		sessions = exactWorktreeMatches(allStates, worktreePath)
+	} else {
+		// No agent identified, or one owner process hosts several live
+		// sessions (the Codex app-server daemon): ancestry then ties between
+		// them and the match fell to a recency tie-break (#2612). Such a match
+		// still links as before, but is not treated as identified: no re-home,
+		// no skipped fallback.
+		sessions, declined = s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	}
+	if guest != nil && !linkingSetContains(sessions, guest.SessionID) {
 		sessions = append(sessions, guest)
 	}
-	if ambiguous && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
-		fmt.Fprintln(stderrWriter,
-			"[entire] Agent sessions in several other worktrees could match this commit; none was linked. Run 'entire session adopt' in this worktree to link future commits to your session.")
+	linking := commitLinkingSet{sessions: sessions, ancestryGuest: ancestryGuest, all: allStates}
+	if stampedTrailer != id.EmptyCheckpointID {
+		linking.sessions = linking.sessionsIncludingReservedFor(stampedTrailer)
+	} else if len(declined) > 0 && len(sessions) == 0 && !isGitSequenceOperation(ctx) {
+		s.announceIfCommitHoldsTheirWork(ctx, declined)
 	}
-	return sessions, nil
+	return linking, nil
+}
+
+// ownerSharedByAnotherLiveSession reports whether a live session other than
+// matched records the same owner process. Ancestry then ties between them at
+// equal depth and cannot name the committing one.
+func ownerSharedByAnotherLiveSession(matched *SessionState, states []*SessionState) bool {
+	for _, state := range states {
+		if state.SessionID == matched.SessionID || state.Owner == nil || state.IsEnded() || state.Kind.IsImported() {
+			continue
+		}
+		o, m := state.Owner, matched.Owner
+		if o.PID == m.PID && o.Start == m.Start && o.Host == m.Host && o.Boot == m.Boot {
+			return true
+		}
+	}
+	return false
+}
+
+// announceIfCommitHoldsTheirWork announces the declined candidates only when at
+// least one has new content in this commit: a human commit touching none of
+// their work is unrelated to them, and a notice there would be a nag.
+func (s *ManualCommitStrategy) announceIfCommitHoldsTheirWork(ctx context.Context, declined []*SessionState) {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
+	if withWork := s.filterSessionsWithNewContent(ctx, repo, declined); len(withWork) > 0 {
+		announceUnlinkedCommit(withWork)
+	}
+}
+
+// announceUnlinkedCommit names the candidate sessions so the user can
+// `session attach` afterwards. It writes to the controlling terminal because the
+// hook wrappers discard hook stderr; stderr stays for tests and direct callers.
+func announceUnlinkedCommit(candidates []*SessionState) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[entire] Commit not linked to an agent session: %d sessions in other worktrees could match it, and this worktree has none of its own.\n", len(candidates))
+	for _, state := range candidates {
+		fmt.Fprintf(&b, "  %s", state.SessionID)
+		if state.AgentType != "" {
+			fmt.Fprintf(&b, "  (%s)", state.AgentType)
+		}
+		fmt.Fprintf(&b, "  %s\n", state.WorktreePath)
+	}
+	b.WriteString("To link this commit to one of them afterwards: entire session attach <session-id>\n")
+	notice := b.String()
+
+	fmt.Fprint(stderrWriter, notice)
+	if interactive.UnderTest() || !interactive.CanPromptInteractively() {
+		return
+	}
+	tty, err := interactive.OpenPromptTTY()
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+	fmt.Fprint(tty, "\n"+notice)
+}
+
+// rehomeSessionAfterOwnCommit moves a session to the worktree its own agent just
+// committed in. Sessions are homed where their first turn-start hook ran and
+// hooks run where the agent was launched, so an agent that moves into a
+// worktree stayed homed in the parent. Only the ancestry-identified session
+// qualifies, only once this commit condensed it, and only when the old home
+// holds nothing pending; otherwise it stays guest-linked.
+func (s *ManualCommitStrategy) rehomeSessionAfterOwnCommit(ctx context.Context, repo *git.Repository, state *SessionState, worktreePath, newHead string, condensed bool, ancestryGuest string) bool {
+	if !condensed || ancestryGuest == "" || state.SessionID != ancestryGuest {
+		return false
+	}
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	if worktreePath == "" || isSessionHomeWorktree(worktreePath, state) {
+		return false
+	}
+	removed := homeWorktreeRemoved(state)
+	if (removed && removedHomeHoldsSteps(ctx, state)) || (!removed && homeHoldsPendingContent(state, worktreePath)) {
+		logging.Debug(logCtx, "post-commit: session committed outside its home worktree but the home holds pending content; staying guest-linked",
+			slog.String("session_id", state.SessionID),
+			slog.String("home_worktree", state.WorktreePath),
+			slog.String("commit_worktree", worktreePath))
+		return false
+	}
+	return rehomeSession(ctx, repo, state, worktreePath, newHead, "its agent committed there")
+}
+
+type agentWorkingTreeKey struct{}
+
+// WithAgentWorkingTree marks ctx as running in the tree the agent's hook
+// payload named; only such a hook may re-home a session.
+func WithAgentWorkingTree(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentWorkingTreeKey{}, true)
+}
+
+// AgentWorkingTreeConfirmed reports whether WithAgentWorkingTree marked ctx.
+func AgentWorkingTreeConfirmed(ctx context.Context) bool {
+	return ctx.Value(agentWorkingTreeKey{}) == true
+}
+
+// rehomeSessionToCurrentWorktree moves a session whose hook runs in another
+// worktree of the same repository, when the recorded home holds nothing pending
+// and the hook has a strong signal that the agent works here: the payload named
+// this tree or the hook captured edits in it. A hook that merely runs in the
+// launch directory never moves a session.
+func (s *ManualCommitStrategy) rehomeSessionToCurrentWorktree(ctx context.Context, repo *git.Repository, state *SessionState, editedHere bool) {
+	reported := AgentWorkingTreeConfirmed(ctx)
+	if !editedHere && !reported {
+		return
+	}
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil || current == "" || state.WorktreePath == "" {
+		return
+	}
+	if reported {
+		// The hook runs in the tree the payload named. Record it once the
+		// session is homed there, and treat a repeat of the last recorded tree
+		// as no evidence of a move (see SessionState.AgentWorktree).
+		defer func() {
+			if isSessionHomeWorktree(current, state) {
+				state.AgentWorktree = current
+			}
+		}()
+		if !editedHere && state.AgentWorktree != "" && paths.SameDir(state.AgentWorktree, current) {
+			return
+		}
+	}
+	if isSessionHomeWorktree(current, state) {
+		return
+	}
+	why := "its agent's hooks now run there"
+	if homeWorktreeRemoved(state) {
+		// The session's home was deleted (a disposable agent worktree, cleaned
+		// up after its work merged). Files and task records recorded there can
+		// no longer be committed from it, so they must not strand the session:
+		// every later commit elsewhere would fail to link it. The state was
+		// loaded from this repository's session store, so current is its
+		// repository. Shadow-branch steps still hold it (see
+		// removedHomeHoldsSteps).
+		if removedHomeHoldsSteps(ctx, state) {
+			return
+		}
+		why = "its old worktree was removed"
+	} else {
+		if homeHoldsPendingContent(state, current) {
+			return
+		}
+		homeCommon := gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath)
+		if homeCommon == "" || homeCommon != gitCommonDirForWorktreeOrEmpty(ctx, current) {
+			return // relocated or another repository: reconcileWorktreePathForResumedTurn's territory
+		}
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return
+	}
+	rehomeSession(ctx, repo, state, current, head.Hash().String(), why)
+}
+
+// removedHomeHoldsSteps reports whether a session whose home was removed still
+// has uncondensed shadow-branch steps. The shadow branch is named from
+// BaseCommit and WorktreeID, which re-homing rewrites without moving the ref,
+// so such a session stays put: moving it would lose track of those steps.
+func removedHomeHoldsSteps(ctx context.Context, state *SessionState) bool {
+	if state.StepCount == 0 {
+		return false
+	}
+	logging.Warn(logging.WithComponent(ctx, "checkpoint"), "session's home worktree was removed with uncondensed checkpoints; it stays homed there",
+		slog.String("session_id", state.SessionID),
+		slog.String("home_worktree", state.WorktreePath),
+		slog.Int("steps", state.StepCount))
+	return true
+}
+
+// homeWorktreeRemoved reports whether the session's recorded home directory no
+// longer exists. Any other stat failure is not proof of removal.
+func homeWorktreeRemoved(state *SessionState) bool {
+	if state.WorktreePath == "" {
+		return false
+	}
+	_, err := os.Lstat(state.WorktreePath)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// rehomeSessionAtTurnEnd re-homes at a turn end that saved no step, such as
+// one whose only work was a subagent's; SaveStep already re-homed the others.
+func (s *ManualCommitStrategy) rehomeSessionAtTurnEnd(ctx context.Context, state *SessionState) {
+	if !AgentWorkingTreeConfirmed(ctx) {
+		return
+	}
+	if current, err := paths.WorktreeRoot(ctx); err != nil || isSessionHomeWorktree(current, state) {
+		return
+	}
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return
+	}
+	defer repo.Close()
+	s.rehomeSessionToCurrentWorktree(ctx, repo, state, false)
+}
+
+// recordTurnWorktree notes where this turn-start hook captures the turn's
+// baselines, so an end hook the agent has since moved away from finds them.
+func recordTurnWorktree(ctx context.Context, state *SessionState) {
+	if current, err := paths.WorktreeRoot(ctx); err == nil {
+		state.TurnWorktreePath = current
+	}
+}
+
+// homeHoldsPendingContent reports whether moving the session to worktree would
+// orphan content at its current home. Shadow-branch steps are keyed to the home
+// worktree and always hold it; files and task records hold it unless every one
+// was recorded by hooks running in worktree.
+func homeHoldsPendingContent(state *SessionState, worktree string) bool {
+	if state.StepCount > 0 {
+		return true
+	}
+	if !hasPendingFilesOrTasks(state) {
+		return false
+	}
+	return !state.PendingContentRecordedOnlyIn(worktree)
+}
+
+func hasPendingFilesOrTasks(state *SessionState) bool {
+	return len(state.FilesTouched) > 0 || state.HasTaskContent()
+}
+
+// pendingContentSnapshot is what a mutation started from, so the outermost
+// MutateSessionState frame can tell whether it added pending content. It keeps
+// the FilesTouched slice header and a digest of the task records rather than
+// copies: it runs on every mutation, PostToolUse included, and must not
+// allocate there.
+type pendingContentSnapshot struct {
+	had       bool
+	files     []string
+	taskCount int
+	taskFiles int
+	taskIDs   uint64 // XOR of the records' ToolUseID hashes
+}
+
+func snapshotPendingContent(state *SessionState) pendingContentSnapshot {
+	count, files, ids := taskDigest(state.TaskRecords)
+	return pendingContentSnapshot{
+		had:       hasPendingFilesOrTasks(state),
+		files:     state.FilesTouched,
+		taskCount: count,
+		taskFiles: files,
+		taskIDs:   ids,
+	}
+}
+
+func taskDigest(records []session.TaskRecord) (count, files int, ids uint64) {
+	for _, rec := range records {
+		files += len(rec.Files)
+		ids ^= fnv64a(rec.ToolUseID)
+	}
+	return len(records), files, ids
+}
+
+// fnv64a is FNV-1a over s, inline so the digest does not allocate.
+func fnv64a(s string) uint64 {
+	h := uint64(14695981039346656037)
+	for i := range len(s) {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return h
+}
+
+// notePendingContentGrowth attributes content a mutation added to the worktree
+// the hook runs in. Every writer goes through MutateSessionState, so none can
+// add content without it being located.
+func notePendingContentGrowth(ctx context.Context, before pendingContentSnapshot, state *SessionState) {
+	if !pendingContentGrew(before, state) {
+		return
+	}
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		current = ""
+	}
+	state.NotePendingContentAt(current, before.had)
+}
+
+func pendingContentGrew(before pendingContentSnapshot, state *SessionState) bool {
+	count, files, ids := taskDigest(state.TaskRecords)
+	if count > before.taskCount || files > before.taskFiles || (count == before.taskCount && ids != before.taskIDs) {
+		return true
+	}
+	return filesGrew(before.files, state.FilesTouched)
+}
+
+// filesGrew reports whether after holds a path before did not. Writers replace
+// FilesTouched rather than edit it in place, so an unchanged prefix of equal
+// length is the common case and needs no allocation.
+func filesGrew(before, after []string) bool {
+	if len(after) == 0 {
+		return false
+	}
+	if len(after) > len(before) {
+		return true
+	}
+	if slices.Equal(before[:len(after)], after) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(before))
+	for _, f := range before {
+		seen[f] = struct{}{}
+	}
+	for _, f := range after {
+		if _, ok := seen[f]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// rehomeSession re-derives every worktree-coupled field together so
+// WorktreePath and WorktreeID never disagree.
+func rehomeSession(ctx context.Context, repo *git.Repository, state *SessionState, worktreePath, newBase, why string) bool {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	if err != nil {
+		logging.Warn(logCtx, "cannot resolve worktree ID for re-homing; session keeps its home",
+			slog.String("session_id", state.SessionID),
+			slog.String("worktree", worktreePath),
+			slog.String("error", err.Error()))
+		return false
+	}
+	old := state.WorktreePath
+	state.WorktreePath = worktreePath
+	state.WorktreeID = worktreeID
+	state.BaseCommit = newBase
+	state.RealignAttributionBase(newBase)
+	// Re-baseline untracked files against the new tree (best-effort).
+	if untracked, untrackedErr := collectUntrackedFiles(ctx); untrackedErr == nil {
+		state.UntrackedFilesAtStart = untracked
+	}
+	captureSessionBranch(repo, state)
+	logging.Info(logCtx, "session re-homed: "+why,
+		slog.String("session_id", state.SessionID),
+		slog.String("from", old),
+		slog.String("to", worktreePath),
+		slog.String("worktree_id", worktreeID),
+		slog.String("base_commit", truncateHash(newBase)))
+	return true
 }
 
 func linkingSetContains(states []*SessionState, id string) bool {
@@ -159,8 +570,34 @@ func isNearerOwner(depth, bestDepth int, state, best *SessionState) bool {
 // pure comparison by design: an earlier version re-resolved the worktree
 // here and read resolution failure as "home", which would have mutated a
 // guest session's state in exactly the way the gate exists to prevent.
+// ErrSessionHomedElsewhere is returned by SaveStep and SaveTaskStep when the
+// hook runs in a worktree the session could not be re-homed to: the step is
+// not written, and the caller should treat this turn's capture as degraded.
+var ErrSessionHomedElsewhere = errors.New("session is homed in another worktree that still holds its work")
+
+// sessionHomedHere reports whether the session is homed in the worktree this
+// hook runs in. A hook that followed its agent into another worktree whose
+// session could not be re-homed (the home still holds a step) must not write
+// a step: the session's shadow branch is the home's, keyed to the home's HEAD,
+// and this tree's files do not belong on it. When the tree cannot be
+// resolved, the step proceeds as it always has.
+func sessionHomedHere(ctx context.Context, state *SessionState) bool {
+	current, err := paths.WorktreeRoot(ctx)
+	if err != nil || current == "" || state.WorktreePath == "" {
+		return true
+	}
+	if isSessionHomeWorktree(current, state) {
+		return true
+	}
+	logging.Info(logging.WithComponent(ctx, "checkpoint"), "skipping step: the session is homed in another worktree that still holds its work",
+		slog.String("session_id", state.SessionID),
+		slog.String("home", state.WorktreePath),
+		slog.String("here", current))
+	return false
+}
+
 func isSessionHomeWorktree(worktreePath string, state *SessionState) bool {
-	return worktreePath != "" && state.WorktreePath != "" && filepath.Clean(state.WorktreePath) == filepath.Clean(worktreePath)
+	return paths.SameDir(state.WorktreePath, worktreePath)
 }
 
 func interactedAfter(a, b *SessionState) bool {

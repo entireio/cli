@@ -465,6 +465,13 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.Phase = session.PhaseActive
 	adopted.EndedAt = nil
 	adopted.FilesTouched = filesTouched
+	// The source's turn and pending-content locations name its own worktree;
+	// what adoption carries over is pending here now.
+	adopted.TurnWorktreePath = ""
+	adopted.PendingContentWorktree = ""
+	if len(filesTouched) > 0 || adopted.HasTaskContent() {
+		adopted.PendingContentWorktree = worktreeRoot
+	}
 
 	// Reset target-local checkpoint bookkeeping. Source checkpoint IDs can point
 	// at metadata in another repository or checkpoint branch; carrying them into

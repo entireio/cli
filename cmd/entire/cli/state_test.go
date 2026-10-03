@@ -316,12 +316,12 @@ func TestFindActivePreTaskFile(t *testing.T) {
 	}
 
 	// Test with no pre-task files
-	taskID, found := FindActivePreTaskFile(context.Background())
+	taskID, found := FindActivePreTaskFile(context.Background(), "")
 	if found {
-		t.Error("FindActivePreTaskFile(context.Background()) should return false when no pre-task files exist")
+		t.Error("FindActivePreTaskFile() should return false when no pre-task files exist")
 	}
 	if taskID != "" {
-		t.Errorf("FindActivePreTaskFile(context.Background()) taskID = %v, want empty", taskID)
+		t.Errorf("FindActivePreTaskFile() taskID = %v, want empty", taskID)
 	}
 
 	// Create a pre-task file
@@ -331,12 +331,12 @@ func TestFindActivePreTaskFile(t *testing.T) {
 	}
 
 	// Test with one pre-task file
-	taskID, found = FindActivePreTaskFile(context.Background())
+	taskID, found = FindActivePreTaskFile(context.Background(), "")
 	if !found {
-		t.Error("FindActivePreTaskFile(context.Background()) should return true when pre-task file exists")
+		t.Error("FindActivePreTaskFile() should return true when pre-task file exists")
 	}
 	if taskID != "toolu_abc123" {
-		t.Errorf("FindActivePreTaskFile(context.Background()) taskID = %v, want toolu_abc123", taskID)
+		t.Errorf("FindActivePreTaskFile() taskID = %v, want toolu_abc123", taskID)
 	}
 }
 

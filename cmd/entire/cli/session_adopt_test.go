@@ -1108,6 +1108,34 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 	}
 }
 
+// The source's turn and pending-content locations name a worktree of the
+// source repository; adoption moves the pending content here.
+func TestSessionAdopt_LocatesPendingContentInTarget(t *testing.T) {
+	targetRepo := setupAdoptRepo(t)
+	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+	t.Chdir(targetRepo)
+
+	adopted, _, err := buildAdoptedSessionState(context.Background(), &session.State{
+		SessionID:              "test-adopt-locations",
+		AgentType:              agent.AgentTypeClaudeCode,
+		StartedAt:              time.Now().Add(-5 * time.Minute),
+		Phase:                  session.PhaseActive,
+		BaseCommit:             "source-head",
+		WorktreePath:           "/source/repo",
+		TurnWorktreePath:       "/source/repo",
+		PendingContentWorktree: "/source/repo",
+	})
+	if err != nil {
+		t.Fatalf("buildAdoptedSessionState failed: %v", err)
+	}
+	if adopted.TurnWorktreePath != "" {
+		t.Errorf("TurnWorktreePath = %q, want empty", adopted.TurnWorktreePath)
+	}
+	if !adopted.PendingContentRecordedOnlyIn(adopted.WorktreePath) {
+		t.Errorf("PendingContentWorktree = %q, want the target %q", adopted.PendingContentWorktree, adopted.WorktreePath)
+	}
+}
+
 // TestSessionAdopt_RebaselinesSubagentTokens pins finding 019f5ebf-dc42: cross-repo
 // adoption opens a fresh target-local checkpoint window (StepCount=0,
 // CheckpointTokenUsage=nil), but the cloned TokenUsage carries the SOURCE

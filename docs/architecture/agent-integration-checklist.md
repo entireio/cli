@@ -43,6 +43,7 @@ Store transcripts in the **agent's native format**. Any transformation or normal
 
 See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [TranscriptAnalyzer](agent-guide.md#transcriptanalyzer), [TranscriptPreparer](agent-guide.md#transcriptpreparer)
 
+- [ ] **Working directory on every lifecycle event**: populate `Event.CWD` from the hook payload (Claude Code, Codex, Copilot, Factory Droid and pi all send one), including subagent and tool-use events. Hooks run where the agent was launched; the dispatcher follows `CWD` into another worktree of the same repository and the session re-homes there, so an agent that moves into a worktree keeps linking without process ancestry. Without `CWD` the session still follows the agent's own commits and the edits its turn-end hook captures, but never a hook that merely runs in the launch directory
 - [ ] **Full transcript on every turn**: At turn-end, capture the complete session transcript, not just events since the last checkpoint
 - [ ] **Resumed session handling**: When a user resumes an existing session, the transcript must include all historical messages, not just new ones since the plugin/hook loaded
 - [ ] **Use agent's canonical export**: Prefer the agent's native export command (e.g., reading Claude's JSONL file, Cursor's JSONL, Factory AI Droid's JSONL, Copilot CLI's JSONL, OpenCode's `opencode export` JSON, Pi's JSONL session file, Antigravity's brain-dir transcript_full.jsonl) over manually reconstructing from events

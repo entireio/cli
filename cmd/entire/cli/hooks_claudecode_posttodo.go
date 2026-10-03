@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -39,6 +40,20 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 		return fmt.Errorf("failed to get agent: %w", err)
 	}
 
+	// This hook bypasses DispatchLifecycleEvent, so follow the subagent into
+	// the worktree its payload reports here: the task baseline, git status and
+	// the shadow branch all belong to that tree. A tool-use event never re-homes
+	// the parent session.
+	launchLogger := logging.LoggerFromContext(ctx)
+	ctx = followAgentWorkingDirectory(ctx, ag, &agent.Event{Type: agent.ToolUse, CWD: input.CWD})
+	defer closeFollowedLogger(ctx, launchLogger)
+
+	// Get the session ID from the transcript path or input
+	sessionID := input.SessionID
+	if sessionID == "" {
+		sessionID = paths.ExtractSessionIDFromTranscriptPath(input.TranscriptPath)
+	}
+
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "hooks"), ag.Name())
 	logging.Info(logCtx, "post-todo",
 		slog.String("hook", "post-todo"),
@@ -49,7 +64,7 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 	)
 
 	// Check if we're in a subagent context by looking for an active pre-task file
-	taskToolUseID, found := FindActivePreTaskFile(ctx)
+	taskToolUseID, found := FindActivePreTaskFile(ctx, sessionID)
 	if !found {
 		// Not in subagent context - this is a main agent TodoWrite, skip
 		return nil
@@ -74,11 +89,13 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 	// baseline, and the nil baseline above classifies EVERY untracked file as
 	// New — so pre-existing untracked files would be claimed by this
 	// incremental checkpoint.
-	if preState, preErr := LoadPreTaskState(ctx, taskToolUseID); preErr != nil {
+	preState, preErr := LoadSessionPreTaskState(ctx, sessionID, taskToolUseID)
+	if preErr != nil {
 		logging.Warn(logCtx, "failed to load pre-task state",
 			slog.String("error", preErr.Error()))
-	} else if preState != nil && preState.UntrackedScanSkipped {
-		logging.Warn(logCtx, "skipping new-file detection: pre-task untracked scan was skipped")
+	}
+	if preState.NewFilesUndetectable() {
+		logging.Warn(logCtx, "skipping new-file detection: no readable pre-task untracked baseline")
 		changes.New = nil
 	}
 
@@ -98,12 +115,6 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 
 	// Get the active strategy
 	strat := GetStrategy(ctx)
-
-	// Get the session ID from the transcript path or input, then transform to Entire session ID
-	sessionID := input.SessionID
-	if sessionID == "" {
-		sessionID = paths.ExtractSessionIDFromTranscriptPath(input.TranscriptPath)
-	}
 
 	// Get next checkpoint sequence
 	seq := GetNextCheckpointSequence(ctx, sessionID, taskToolUseID)

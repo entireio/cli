@@ -22,6 +22,7 @@ type SubagentCheckpointHookInput struct {
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolInput      json.RawMessage `json:"tool_input"`
 	ToolResponse   json.RawMessage `json:"tool_response"`
+	CWD            string          `json:"cwd"`
 }
 
 // parseSubagentCheckpointHookInput parses PostToolUse hook input for subagent

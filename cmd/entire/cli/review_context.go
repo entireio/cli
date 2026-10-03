@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -192,14 +191,14 @@ func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) str
 	// from, which on macOS frequently differs from `paths.WorktreeRoot`
 	// only by the /var → /private/var symlink. Comparing canonical forms
 	// avoids missing matches that string equality would drop.
-	worktreeCanon := canonicalisePath(worktreeRoot)
+	worktreeCanon := paths.Canonical(worktreeRoot)
 
 	var lines []string
 	for _, st := range states {
 		if st == nil {
 			continue
 		}
-		if canonicalisePath(st.WorktreePath) != worktreeCanon {
+		if paths.Canonical(st.WorktreePath) != worktreeCanon {
 			continue
 		}
 		if st.BaseCommit != headSHA {
@@ -221,19 +220,6 @@ func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) str
 		return ""
 	}
 	return "In-progress session context (uncommitted):\n" + strings.Join(lines, "\n")
-}
-
-// canonicalisePath returns the symlink-resolved absolute form of p. Falls
-// back to p itself when EvalSymlinks fails (e.g., the path doesn't exist
-// yet) so callers always get a usable comparable value.
-func canonicalisePath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	return p
 }
 
 // formatReviewSessionLine renders one entry of the in-progress section.
