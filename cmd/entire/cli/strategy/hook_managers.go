@@ -64,7 +64,8 @@ func detectHookManagers(repoRoot string) []hookManager {
 
 // hookManagerWarning builds a warning string for detected hook managers.
 // cmdPrefix is the CLI command prefix (e.g., "entire" or an absolute binary path).
-func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
+// huskyV9 selects the wording for Entire chained over Husky v9's .husky/_.
+func hookManagerWarning(managers []hookManager, cmdPrefix string, huskyV9 bool) string {
 	if len(managers) == 0 {
 		return ""
 	}
@@ -77,8 +78,14 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 		if m.OverwritesHooks {
 			fmt.Fprintf(&b, "Warning: %s detected (%s)\n", m.Name, m.ConfigPath)
 			fmt.Fprintf(&b, "\n")
-			fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire on npm install.\n", m.Name)
-			fmt.Fprintf(&b, "  To make Entire hooks permanent, add these lines to your %s hook files:\n", m.Name)
+			if huskyV9 {
+				fmt.Fprintf(&b, "  Entire's hooks run first, then %s's.\n", m.Name)
+				fmt.Fprintf(&b, "  npm install re-creates %s's hooks and removes Entire's until the next agent turn or 'entire enable'.\n", m.Name)
+				fmt.Fprintf(&b, "  Adding these lines to your %s hook files keeps Entire's hooks running regardless, and does not run them twice:\n", m.Name)
+			} else {
+				fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire on npm install.\n", m.Name)
+				fmt.Fprintf(&b, "  To make Entire hooks permanent, add these lines to your %s hook files:\n", m.Name)
+			}
 			fmt.Fprintf(&b, "\n")
 
 			// Use the config path as the hook directory prefix for hook files.
@@ -137,9 +144,29 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath boo
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return
 	}
-	warning := hookManagerWarning(managers, cmdPrefix)
+	warning := hookManagerWarning(managers, cmdPrefix, hooksDirIsHuskyV9(ctx, repoRoot))
 	if warning != "" {
 		fmt.Fprintln(w)
 		fmt.Fprint(w, warning)
 	}
+}
+
+// hooksDirIsHuskyV9 reports whether git's hooks directory is <repo>/.husky/_,
+// where Husky v9 points core.hooksPath.
+func hooksDirIsHuskyV9(ctx context.Context, repoRoot string) bool {
+	hooksDir, err := GetHooksDir(ctx)
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(hooksDir)
+	if err != nil {
+		return false
+	}
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	return resolve(abs) == resolve(filepath.Join(repoRoot, ".husky", "_"))
 }

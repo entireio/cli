@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestDetectHookManagers_None(t *testing.T) {
@@ -317,7 +319,7 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", true)
 
 	// Should contain all 4 hook file references
 	for _, hook := range gitHookNames {
@@ -339,12 +341,22 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 		}
 	}
 
-	// Should mention Husky by name and warn about overwriting
-	if !strings.Contains(warning, "Warning: Husky detected") {
-		t.Error("warning should start with 'Warning: Husky detected'")
+	// Should mention Husky by name and say what runs, what npm install
+	// undoes and until when, and that adding the lines does not run Entire twice.
+	for _, want := range []string{
+		"Warning: Husky detected",
+		"Entire's hooks run first, then Husky's",
+		"npm install re-creates Husky's hooks and removes Entire's until the next agent turn or 'entire enable'",
+		"keeps Entire's hooks running regardless, and does not run them twice",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning should contain %q, got:\n%s", want, warning)
+		}
 	}
-	if !strings.Contains(warning, "may overwrite hooks") {
-		t.Error("warning should mention 'may overwrite hooks'")
+
+	// Without core.hooksPath=.husky/_ the v9 chain does not apply: keep the old text.
+	if other := hookManagerWarning(managers, "entire", false); !strings.Contains(other, huskyOverwriteWarning) {
+		t.Errorf("non-v9 Husky warning should keep %q, got:\n%s", huskyOverwriteWarning, other)
 	}
 }
 
@@ -355,7 +367,7 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", false)
 
 	// Category B: should be a Note, not a Warning
 	if !strings.Contains(warning, "Note: Lefthook detected") {
@@ -374,12 +386,12 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 func TestHookManagerWarning_Empty(t *testing.T) {
 	t.Parallel()
 
-	warning := hookManagerWarning(nil, "entire")
+	warning := hookManagerWarning(nil, "entire", false)
 	if warning != "" {
 		t.Errorf("expected empty string for nil managers, got %q", warning)
 	}
 
-	warning = hookManagerWarning([]hookManager{}, "entire")
+	warning = hookManagerWarning([]hookManager{}, "entire", false)
 	if warning != "" {
 		t.Errorf("expected empty string for empty managers, got %q", warning)
 	}
@@ -397,7 +409,7 @@ func TestHookManagerWarning_AbsolutePathPrefix(t *testing.T) {
 	// warning must quote it verbatim so the command it tells the user to add is
 	// the one Entire actually installs.
 	const prefix = "'/opt/homebrew/bin/entire'"
-	warning := hookManagerWarning(managers, prefix)
+	warning := hookManagerWarning(managers, prefix, false)
 
 	if !strings.Contains(warning, prefix+" hooks git") {
 		t.Errorf("warning should use the resolved command prefix, got %q", warning)
@@ -412,7 +424,7 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
 	}
 
-	warning := hookManagerWarning(managers, "entire")
+	warning := hookManagerWarning(managers, "entire", false)
 
 	if !strings.Contains(warning, "Warning: Husky detected") {
 		t.Error("should contain Husky warning")
@@ -495,5 +507,42 @@ func TestCheckAndWarnHookManagers_WithHusky(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Warning: Husky detected") {
 		t.Errorf("expected warning output, got %q", output)
+	}
+}
+
+const huskyOverwriteWarning = "Husky may overwrite hooks installed by Entire on npm install."
+
+// TestCheckAndWarnHookManagers_HuskyV9WordingFollowsHooksPath: the v9 wording
+// describes the chain over .husky/_, so it applies only when git uses it.
+func TestCheckAndWarnHookManagers_HuskyV9WordingFollowsHooksPath(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		hooksPath func(repo string) string
+		v9        bool
+	}{
+		{"default hooks dir", nil, false},
+		{"relative .husky/_", func(string) string { return ".husky/_" }, true},
+		{"absolute .husky/_", func(repo string) string { return filepath.Join(repo, ".husky", "_") }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := initHooksTestRepo(t)
+			if err := os.MkdirAll(filepath.Join(repo, ".husky", "_"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.hooksPath != nil {
+				testutil.RunGit(t, repo, "config", "--local", "core.hooksPath", tc.hooksPath(repo))
+			}
+			ClearHooksDirCache()
+			t.Cleanup(ClearHooksDirCache)
+
+			var buf bytes.Buffer
+			CheckAndWarnHookManagers(context.Background(), &buf, false)
+			if got := strings.Contains(buf.String(), "Entire's hooks run first"); got != tc.v9 {
+				t.Errorf("v9 wording = %v, want %v:\n%s", got, tc.v9, buf.String())
+			}
+			if got := strings.Contains(buf.String(), huskyOverwriteWarning); got == tc.v9 {
+				t.Errorf("old wording = %v, want %v:\n%s", got, !tc.v9, buf.String())
+			}
+		})
 	}
 }

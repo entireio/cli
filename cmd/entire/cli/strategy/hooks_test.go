@@ -1302,7 +1302,7 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 
 	hook := findHookSpec(t, buildHookSpecs("entire"), "commit-msg")
 	hookPath := filepath.Join(tempDir, "commit-msg")
-	content := generateChainedContent(hook.content, "commit-msg")
+	content := generateChainedContent(hook.content, "commit-msg", chainExec)
 	if err := os.WriteFile(hookPath, []byte(content), 0o755); err != nil {
 		t.Fatalf("failed to write hook: %v", err)
 	}
@@ -1625,7 +1625,7 @@ func TestGenerateChainedContent(t *testing.T) {
 	t.Parallel()
 
 	base := "#!/bin/sh\n# Entire CLI hooks\nentire hooks git pre-push \"$1\" || true\n"
-	result := generateChainedContent(base, "pre-push")
+	result := generateChainedContent(base, "pre-push", chainExec)
 
 	// Should start with the base content
 	if !strings.HasPrefix(result, base) {
@@ -1659,7 +1659,7 @@ func TestGenerateChainedContent_PostRewritePreservesStdinForBackup(t *testing.T)
 	t.Parallel()
 
 	base := "#!/bin/sh\n# Entire CLI hooks\n# Post-rewrite hook: remap session linkage after amend/rebase rewrites\nentire hooks git post-rewrite \"$1\" 2>/dev/null || true\n"
-	result := generateChainedContent(base, "post-rewrite")
+	result := generateChainedContent(base, "post-rewrite", chainExec)
 
 	if !strings.Contains(result, `_entire_stdin="$(mktemp "${TMPDIR:-/tmp}/entire-post-rewrite.XXXXXX")"`) {
 		t.Fatalf("post-rewrite chained content should create temp stdin copy, got:\n%s", result)

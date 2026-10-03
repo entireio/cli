@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
@@ -101,6 +102,14 @@ func newHooksGitCmd() *cobra.Command {
 		Hidden: true, // Internal command, not for direct user use
 		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
 			ctx := cmd.Context()
+			// Entire's generated hook already ran this hook before sourcing the
+			// Husky wrapper that is now calling it again; see strategy.chainCall.
+			if os.Getenv(strategy.ChainedHookEnvVar) == cmd.Name() {
+				logging.Debug(ctx, "git hook already run by Entire's chained hook; skipping",
+					slog.String("hook", cmd.Name()))
+				gitHooksDisabled = true
+				return
+			}
 			// Check if Entire is set up and enabled before doing any work.
 			// This prevents global git hooks from doing anything in repos where
 			// Entire was never enabled or has been disabled.

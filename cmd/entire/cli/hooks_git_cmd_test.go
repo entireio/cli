@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/spf13/cobra"
@@ -203,6 +204,47 @@ func TestHooksGitCmd_ExposesPostRewriteSubcommand(t *testing.T) {
 	}
 	if found.Use != "post-rewrite <rewrite-type>" {
 		t.Fatalf("post-rewrite Use = %q, want %q", found.Use, "post-rewrite <rewrite-type>")
+	}
+}
+
+// TestHooksGitCmd_SkipsChainedHook pins the other half of the Husky no-double-run
+// contract (strategy.TestHuskyChain_NoDoubleRun): Entire's generated hook has
+// already run `entire hooks git <hook>` when it sources the Husky wrapper with
+// ENTIRE_CHAINED_HOOK=<hook>, so the same call from the user's .husky/<hook>
+// must do nothing. A different hook name, e.g. a `git commit` run by a pre-push
+// script, still runs.
+func TestHooksGitCmd_SkipsChainedHook(t *testing.T) {
+	for _, tc := range []struct {
+		marker   string
+		wantSkip bool
+	}{
+		{marker: "post-commit", wantSkip: true},
+		{marker: "pre-push", wantSkip: false},
+	} {
+		t.Run(tc.marker, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			testutil.InitRepo(t, tmpDir)
+			clearCallerSessionEnv(t)
+			enableEntire(t, tmpDir)
+			t.Setenv(strategy.ChainedHookEnvVar, tc.marker)
+			gitHooksDisabled = false
+			t.Cleanup(func() { gitHooksDisabled = false })
+
+			gitCmd := newHooksGitCmd()
+			postCommit, _, err := gitCmd.Find([]string{"post-commit"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := context.Background()
+			postCommit.SetContext(base)
+			gitCmd.PersistentPreRun(postCommit, nil)
+
+			skipped := postCommit.Context() == base && gitHooksDisabled
+			if skipped != tc.wantSkip {
+				t.Errorf("%s=%s: post-commit skipped = %v, want %v", strategy.ChainedHookEnvVar, tc.marker, skipped, tc.wantSkip)
+			}
+		})
 	}
 }
 
