@@ -126,15 +126,22 @@ func pushMigratedRefs(ctx context.Context, out io.Writer, repo *git.Repository, 
 
 	pushed, pushDisabled, err := strategy.PushQueuedCheckpointRefs(ctx, repo, pushRemote)
 	if err != nil {
+		// Partial success is now reachable: refs that already carried the OPF
+		// trailer ship even when a sibling is still being redacted or the push
+		// itself failed part-way. Report what landed before the error, or the
+		// user is told their push failed and never learns what did arrive.
+		if pushed > 0 {
+			fmt.Fprintf(out, "Pushed %d checkpoint ref(s).\n", pushed)
+		}
 		if errors.Is(err, context.Canceled) {
 			return NewSilentError(err)
 		}
 		// Ctrl-C at the OPF prompt is the same gesture as declining the push
-		// prompt, and lands in the same place: nothing shipped, refs still
-		// queued. confirmDoctorFix reports that as a clean decline, so this
-		// must not report it as a failure.
+		// prompt, and lands in the same place for the refs OPF had not reached:
+		// nothing more shipped, they stay queued. confirmDoctorFix reports that
+		// as a clean decline, so this must not report it as a failure.
 		if errors.Is(err, strategy.ErrOPFAbortedByUser) {
-			fmt.Fprintln(out, "OPF cancelled; refs stay queued for the next push.")
+			fmt.Fprintln(out, "OPF cancelled; the remaining refs stay queued for the next push.")
 			return nil
 		}
 		return fmt.Errorf("push migrated refs: %w", err)

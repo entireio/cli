@@ -460,6 +460,29 @@ func TestSumProseLeafBytes_CountsAcrossBlobShapes(t *testing.T) {
 	}
 }
 
+// TestSumProseLeafBytes_DedupsRepeatedLeafAcrossBlobs pins the cap
+// measurement to what BatchBytesWithPrivacyFilter actually sends to
+// OPF. A checkpoint ref's ancestry commonly repeats the same
+// full.jsonl blob across several commits; the batch call dedups by
+// leaf text, so counting the repeat again here would charge the cap
+// for inference the runtime never performs.
+func TestSumProseLeafBytes_DedupsRepeatedLeafAcrossBlobs(t *testing.T) {
+	t.Parallel()
+	const leaf = "the quick brown fox jumps"
+	repeated := `{"role":"user","content":"` + leaf + `"}` + "\n"
+	inputs := []NamedBlob{
+		{Name: "0/full.jsonl", Content: []byte(repeated)},
+		{Name: "1/full.jsonl", Content: []byte(repeated)}, // byte-identical blob, different path
+	}
+
+	got := SumProseLeafBytes(inputs)
+	if want := len(leaf); got != want {
+		t.Errorf("SumProseLeafBytes with a leaf repeated across blobs = %d, want %d "+
+			"(identical leaf text must be counted once, matching what "+
+			"BatchBytesWithPrivacyFilter sends to OPF)", got, want)
+	}
+}
+
 // TestBatchBytesWithPrivacyFilter_NoEnabledCategoriesFailsClosed
 // covers the misconfiguration where OPF is enabled but the effective
 // category set is empty (empty map, all-false, or omitted). The model

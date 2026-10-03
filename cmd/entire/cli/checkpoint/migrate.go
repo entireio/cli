@@ -115,7 +115,7 @@ func migrateBranchToRefs(
 			return nil
 		}
 		if alreadyImported {
-			if err := queue.Enqueue(refName); err != nil {
+			if err := queue.EnqueueRef(repo, refName); err != nil {
 				return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
 			}
 			result.Skipped++
@@ -164,7 +164,7 @@ func migrateBranchToRefs(
 
 		// The migration's queued-for-push contract is guaranteed for both new
 		// and already-imported refs. Duplicates collapse on Drain.
-		if err := queue.Enqueue(refName); err != nil {
+		if err := queue.EnqueueRef(repo, refName); err != nil {
 			return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
 		}
 		if migrated {
