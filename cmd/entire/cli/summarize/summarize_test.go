@@ -900,6 +900,31 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeUserAndAssistant(t *testing.T
 	}
 }
 
+// TestBuildCondensedTranscriptFromBytes_OpenCodeSkipsInjectedTaskResult: a
+// background task's result reaches the parent as a user message of synthetic
+// text. It must not be shown as something the user said.
+func TestBuildCondensedTranscriptFromBytes_OpenCodeSkipsInjectedTaskResult(t *testing.T) {
+	t.Parallel()
+	ocExportJSON := `{"info":{"id":"s"},"messages":[` +
+		`{"info":{"id":"m1","role":"user"},"parts":[{"type":"text","text":"Create red.md in the background"}]},` +
+		`{"info":{"id":"m2","role":"user"},"parts":[{"type":"text","synthetic":true,"text":"<task id=\"c\" state=\"completed\">done</task>"}]},` +
+		`{"info":{"id":"m3","role":"assistant"},"parts":[{"type":"text","text":"Created docs/red.md."}]}]}`
+
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(ocExportJSON)), agent.AgentTypeOpenCode)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected the prompt and the reply only, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Type != EntryTypeUser || entries[0].Content != "Create red.md in the background" {
+		t.Errorf("entry 0: %+v", entries[0])
+	}
+	if entries[1].Type != EntryTypeAssistant {
+		t.Errorf("entry 1: %+v", entries[1])
+	}
+}
+
 func TestBuildCondensedTranscriptFromBytes_OpenCodeToolCalls(t *testing.T) {
 	// OpenCode export JSON format with tool calls
 	ocExportJSON := `{

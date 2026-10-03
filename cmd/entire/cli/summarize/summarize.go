@@ -314,6 +314,10 @@ func buildCondensedTranscriptFromOpenCode(redacted redact.RedactedBytes) ([]Entr
 	for _, msg := range session.Messages {
 		switch msg.Info.Role {
 		case "user":
+			// A background task's injected result is OpenCode's, not the user's.
+			if opencode.OnlySyntheticText(msg.Parts) {
+				continue
+			}
 			text := opencode.ExtractTextFromParts(msg.Parts)
 			if text != "" {
 				entries = append(entries, Entry{

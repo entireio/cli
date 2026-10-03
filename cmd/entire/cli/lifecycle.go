@@ -1471,7 +1471,9 @@ func condenseEndedSession(ctx context.Context, sessionID string, condenseDeadlin
 	}
 }
 
-// handleLifecycleSubagentStart handles subagent start: captures pre-task state.
+// handleLifecycleSubagentStart handles subagent start: it captures pre-task
+// state, or records a deferred launch marker (Event.DeferredCompletion), or
+// registers a Codex child — exactly one of the three, depending on the event.
 func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "subagent started",
@@ -1504,6 +1506,10 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 			logging.Warn(logCtx, "best-effort codex pre-task capture failed", slog.String("error", err.Error()))
 		}
 		return nil
+	}
+
+	if event.DeferredCompletion {
+		return recordDeferredTaskLaunch(logCtx, event)
 	}
 
 	// Capture pre-task state
@@ -1592,36 +1598,69 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{ensureSessionState: true})
 }
 
-// recordInFlightTaskLaunch handles a background Task launch. It records an
-// in-flight marker on session state and completes nothing yet;
-// the real capture happens at SubagentStop (handleSubagentStopFinal), which
-// is the first point that sees the subagent's actual work. Tolerates
-// strategy.ErrStateNotFound the way the completion producers tolerate a launch
-// event arriving before session state exists.
+// recordInFlightTaskLaunch handles a background Task launch (Claude Code's
+// run_in_background post-task stub). The real capture happens at
+// SubagentStop (handleSubagentStopFinal), which is the first point that sees
+// the subagent's actual work.
 func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error {
 	logging.Debug(logCtx, "background subagent launch detected; deferring capture to subagent-stop",
 		slog.String("session_id", event.SessionID),
 		slog.String("tool_use_id", event.ToolUseID),
 		slog.String("agent_id", event.SubagentID),
 	)
+	return recordTaskLaunchMarker(logCtx, event, func(state *strategy.SessionState, rec session.TaskRecord) {
+		state.AddTaskRecord(rec)
+	})
+}
 
+// recordDeferredTaskLaunch handles a start hook that already carries full
+// identity and whose completion is a later Final event
+// (Event.DeferredCompletion). EnsureTaskRecord rather than AddTaskRecord: a
+// start replayed after the Final completed the record must enrich, never
+// overwrite, so a completed record is never reopened.
+func recordDeferredTaskLaunch(logCtx context.Context, event *agent.Event) error {
+	logging.Debug(logCtx, "deferred-completion subagent start detected; deferring capture to subagent-stop",
+		slog.String("session_id", event.SessionID),
+		slog.String("tool_use_id", event.ToolUseID),
+		slog.String("agent_id", event.SubagentID),
+	)
+	return recordTaskLaunchMarker(logCtx, event, func(state *strategy.SessionState, rec session.TaskRecord) {
+		_ = state.EnsureTaskRecord(rec)
+	})
+}
+
+// taskStartedAt is the task record's StartedAt: the agent's own call start when
+// it reports one, else now.
+func taskStartedAt(event *agent.Event) time.Time {
+	if !event.SubagentStartedAt.IsZero() {
+		return event.SubagentStartedAt
+	}
+	return time.Now()
+}
+
+// recordTaskLaunchMarker writes the launch-time task record through mutate.
+// Tolerates strategy.ErrStateNotFound the way the completion producers do: a
+// launch can arrive before session state exists, and the Final capture
+// creates the record itself in that case.
+func recordTaskLaunchMarker(logCtx context.Context, event *agent.Event, mutate func(*strategy.SessionState, session.TaskRecord)) error {
+	rec := session.TaskRecord{
+		ToolUseID:       event.ToolUseID,
+		AgentID:         event.SubagentID,
+		StartedAt:       taskStartedAt(event),
+		SubagentType:    event.SubagentType,
+		TaskDescription: event.TaskDescription,
+	}
 	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
-		state.AddTaskRecord(session.TaskRecord{
-			ToolUseID:       event.ToolUseID,
-			AgentID:         event.SubagentID,
-			StartedAt:       time.Now(),
-			SubagentType:    event.SubagentType,
-			TaskDescription: event.TaskDescription,
-		})
+		mutate(state, rec)
 		return nil
 	})
 	switch {
 	case errors.Is(mutErr, strategy.ErrStateNotFound):
-		logging.Info(logCtx, "no session state to record in-flight marker on; background task will not be captured",
+		logging.Info(logCtx, "no session state to record task launch marker on",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID))
 	case mutErr != nil:
-		logging.Warn(logCtx, "failed to record in-flight task marker",
+		logging.Warn(logCtx, "failed to record task launch marker",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID),
 			slog.String("error", mutErr.Error()))
@@ -1723,16 +1762,11 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		event.SubagentID = marker.AgentID
 	}
 
-	// analyzerFilesOnly: true because reaching this point means a live marker
-	// WAS found above — every Final capture that runs through this function is
-	// a background task (foreground tasks complete immediately at launch and
-	// are never marked in-flight), so the worktree-wide DetectFileChanges scan
-	// would risk sweeping in the parent's or another agent's later edits. See
-	// subagentCaptureOptions.analyzerFilesOnly.
+	// analyzerFilesOnly: every capture reaching here is Final (marker or CompletionWithoutLaunch); see subagentCaptureOptions.analyzerFilesOnly.
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
 		bypassNoChangesSkip: true,
 		analyzerFilesOnly:   true,
-		eventFilesOnly:      event.CompletionWithoutLaunch,
+		eventFilesOnly:      event.SubagentTranscriptUnavailable,
 	})
 	if captureErr != nil {
 		return captureErr
@@ -1797,14 +1831,19 @@ type subagentCaptureOptions struct {
 	// analyzerFilesOnly, when true, skips the whole-worktree
 	// LoadPreTaskState/DetectFileChanges merge in completeSubagentTaskRecord and
 	// captures only event.ModifiedFiles plus the transcript-analyzer-extracted
-	// files. Set ONLY for background Final (SubagentStop) captures — see the
-	// comment on that skip in completeSubagentTaskRecord for the attribution
-	// rationale. Never set for the foreground launch-time path, which keeps
-	// its original (correct, worktree-scan-based) behavior unchanged.
+	// files. Set ONLY for any Final capture whose launch was recorded in flight
+	// or learned at stop time (SubagentStop) — see the comment on that skip in
+	// completeSubagentTaskRecord for the attribution rationale. Never set for
+	// the foreground launch-time path, which keeps its original (correct,
+	// worktree-scan-based) behavior unchanged.
 	analyzerFilesOnly bool
 
-	// eventFilesOnly means the adapter already derived child-scoped files from
-	// a shared parent transcript. Do not resolve or scan a child transcript.
+	// eventFilesOnly means the agent has no standalone child transcript at all
+	// (Event.SubagentTranscriptUnavailable) — its child activity lives only in
+	// a shared parent transcript. Do not resolve or scan a child transcript;
+	// rely solely on event.ModifiedFiles. Keyed on transcript unavailability,
+	// not on CompletionWithoutLaunch: a completion whose identity was learned
+	// at stop time can still declare a real child transcript worth scanning.
 	eventFilesOnly bool
 
 	// ensureSessionState, when true, creates missing session state before
@@ -1812,6 +1851,44 @@ type subagentCaptureOptions struct {
 	// Set only for the foreground path; the Final path must never resurrect a
 	// swept session (handleSubagentStopFinal's zombie guard).
 	ensureSessionState bool
+}
+
+// fetchSubagentTranscriptForCapture asks an agent whose subagents are
+// re-exportable sessions (SubagentTranscriptFetcher) for the child transcript
+// when nothing declared or resolved one: OpenCode's subagent-stop, which
+// declares no path, or a record still in flight when SessionEnd completes it. Without it the
+// record completes with no files, and condensation's later fetch restores the
+// transcript but not the attribution. On success the event is updated to
+// match — transcript declared, available, and token usage filled when the hook
+// had none. Returns "" when the agent cannot fetch or the fetch fails.
+func fetchSubagentTranscriptForCapture(logCtx context.Context, ag agent.Agent, event *agent.Event) string {
+	fetcher, ok := agent.AsSubagentTranscriptFetcher(ag)
+	if !ok || event.SubagentID == "" {
+		return ""
+	}
+	path, err := fetcher.FetchSubagentTranscript(logCtx, event.SubagentID, event.ToolUseID, event.SubagentStartedAt, time.Time{})
+	if err != nil {
+		logging.Warn(logCtx, "could not fetch subagent transcript for capture; completing the task without it",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", err.Error()))
+		// The child's transcript lives only in the agent's store, so no
+		// generic layout path can stand in for it; condensation fetches again.
+		event.SubagentTranscriptUnavailable = true
+		return ""
+	}
+	event.SubagentTranscriptPath = path
+	event.SubagentTranscriptUnavailable = false
+	if event.TokenUsage == nil {
+		if calc, ok := agent.AsTokenCalculator(ag); ok {
+			if data, rerr := ag.ReadTranscript(path); rerr == nil {
+				if usage, cerr := calc.CalculateTokenUsage(data, 0); cerr == nil {
+					event.TokenUsage = usage
+				}
+			}
+		}
+	}
+	return path
 }
 
 // subagentTranscriptAndFiles selects the capture's trusted file source. Some
@@ -1828,6 +1905,12 @@ func subagentTranscriptAndFiles(
 		transcriptPath = declaredSubagentTranscript(logCtx, event)
 		if transcriptPath == "" {
 			transcriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+		}
+	}
+	if transcriptPath == "" {
+		if fetched := fetchSubagentTranscriptForCapture(logCtx, ag, event); fetched != "" {
+			transcriptPath = fetched
+			opts.eventFilesOnly = false
 		}
 	}
 
@@ -1986,7 +2069,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	rec := session.TaskRecord{
 		ToolUseID:              event.ToolUseID,
 		AgentID:                event.SubagentID,
-		StartedAt:              time.Now(),
+		StartedAt:              taskStartedAt(event),
 		SubagentType:           event.SubagentType,
 		TaskDescription:        event.TaskDescription,
 		DeclaredTranscriptPath: subagentTranscriptPath,
@@ -2070,8 +2153,10 @@ func captureInFlightTaskFinal(logCtx context.Context, ag agent.Agent, sessionID,
 		SubagentID:      task.AgentID,
 		SubagentType:    task.SubagentType,
 		TaskDescription: task.TaskDescription,
-		Final:           true,
-		Timestamp:       time.Now(),
+		// The record's start scopes a re-export to this call (OpenCode).
+		SubagentStartedAt: task.StartedAt,
+		Final:             true,
+		Timestamp:         time.Now(),
 	}
 	if err := handleSubagentStopFinal(logCtx, ag, event); err != nil {
 		logging.Warn(logCtx, "failed to finalize in-flight task at session end",

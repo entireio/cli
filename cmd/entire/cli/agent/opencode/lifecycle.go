@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,7 +23,10 @@ import (
 var runOpenCodeExportToFileFn = runOpenCodeExportToFile
 
 // Compile-time assertion that OpenCode can inject context into the model.
-var _ agent.ContextInjector = (*OpenCodeAgent)(nil)
+var (
+	_ agent.ContextInjector           = (*OpenCodeAgent)(nil)
+	_ agent.SubagentTranscriptFetcher = (*OpenCodeAgent)(nil)
+)
 
 // InjectionEvent reports that OpenCode injects model context at TurnStart. The
 // embedded plugin reads the turn-start hook's stdout and applies the injection
@@ -46,11 +50,13 @@ func (a *OpenCodeAgent) RenderContextInjection(inj agent.ContextInjection) ([]by
 
 // Hook name constants — these become CLI subcommands under `entire hooks opencode`.
 const (
-	HookNameSessionStart = "session-start"
-	HookNameSessionEnd   = "session-end"
-	HookNameTurnStart    = "turn-start"
-	HookNameTurnEnd      = "turn-end"
-	HookNameCompaction   = "compaction"
+	HookNameSessionStart  = "session-start"
+	HookNameSessionEnd    = "session-end"
+	HookNameTurnStart     = "turn-start"
+	HookNameTurnEnd       = "turn-end"
+	HookNameCompaction    = "compaction"
+	HookNameSubagentStart = "subagent-start"
+	HookNameSubagentStop  = "subagent-stop"
 )
 
 // HookNames returns the hook verbs this agent supports.
@@ -61,6 +67,8 @@ func (a *OpenCodeAgent) HookNames() []string {
 		HookNameTurnStart,
 		HookNameTurnEnd,
 		HookNameCompaction,
+		HookNameSubagentStart,
+		HookNameSubagentStop,
 	}
 }
 
@@ -136,9 +144,91 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 			Timestamp: time.Now(),
 		}, nil
 
+	case HookNameSubagentStart:
+		raw, parentRef, err := a.parseSubagentPayload(ctx, stdin)
+		if err != nil {
+			return nil, err
+		}
+		return &agent.Event{
+			Type:               agent.SubagentStart,
+			SessionID:          raw.SessionID,
+			SessionRef:         parentRef,
+			ToolUseID:          raw.ToolUseID,
+			SubagentID:         raw.SubagentID,
+			SubagentType:       raw.SubagentType,
+			TaskDescription:    raw.TaskDescription,
+			SubagentStartedAt:  raw.startedAt(),
+			DeferredCompletion: true,
+			Timestamp:          time.Now(),
+		}, nil
+
+	case HookNameSubagentStop:
+		raw, parentRef, err := a.parseSubagentPayload(ctx, stdin)
+		if err != nil {
+			return nil, err
+		}
+		event := &agent.Event{
+			Type:              agent.SubagentEnd,
+			SessionID:         raw.SessionID,
+			SessionRef:        parentRef,
+			ToolUseID:         raw.ToolUseID,
+			SubagentID:        raw.SubagentID,
+			SubagentType:      raw.SubagentType,
+			TaskDescription:   raw.TaskDescription,
+			SubagentStartedAt: raw.startedAt(),
+			Timestamp:         time.Now(),
+			// Final: the plugin sends this at true completion — tool.execute.after
+			// for a foreground task, the child's own idle for a background one.
+			// CompletionWithoutLaunch: a plugin restarted mid-task never saw the start.
+			Final:                   true,
+			CompletionWithoutLaunch: true,
+		}
+		// No export here: the capture exports the child through
+		// FetchSubagentTranscript, after the checks that can still discard
+		// this event, so a stop pays for at most one export.
+		return event, nil
+
 	default:
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action for unknown hooks
 	}
+}
+
+// validateSubagentIdentity checks the three IDs an OpenCode subagent payload
+// must carry. The child ID becomes an `opencode export` argument and a file
+// name under .entire/tmp; the tool-use ID becomes tasks/<id>/ in the
+// checkpoint. ValidateToolUseID accepts the empty string, so the explicit
+// emptiness check is load-bearing.
+func validateSubagentIdentity(parentID, toolUseID, childID string) error {
+	if err := validation.ValidateSessionID(parentID); err != nil {
+		return fmt.Errorf("invalid parent session ID: %w", err)
+	}
+	if toolUseID == "" {
+		return errors.New("opencode subagent payload missing tool_use_id")
+	}
+	if err := validation.ValidateToolUseID(toolUseID); err != nil {
+		return fmt.Errorf("invalid tool_use_id: %w", err)
+	}
+	if err := validation.ValidateSessionID(childID); err != nil {
+		return fmt.Errorf("invalid subagent session ID: %w", err)
+	}
+	return nil
+}
+
+// parseSubagentPayload reads a subagent-start or subagent-stop payload,
+// validates its identity fields, and resolves the parent's transcript path.
+func (a *OpenCodeAgent) parseSubagentPayload(ctx context.Context, stdin io.Reader) (*subagentRaw, string, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentRaw](stdin)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := validateSubagentIdentity(raw.SessionID, raw.ToolUseID, raw.SubagentID); err != nil {
+		return nil, "", err
+	}
+	parentRef, err := sessionTranscriptPath(ctx, raw.SessionID)
+	if err != nil {
+		return nil, "", err
+	}
+	return raw, parentRef, nil
 }
 
 // PrepareTranscript ensures the OpenCode transcript file is up-to-date by calling `opencode export`.
@@ -176,6 +266,13 @@ func (a *OpenCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string
 // sessions spawned by an external host, where no hook ever cached an export.
 func (a *OpenCodeAgent) FetchTranscript(ctx context.Context, sessionID string) (string, error) {
 	return a.fetchAndCacheExport(ctx, sessionID)
+}
+
+// FetchSubagentTranscript exports a task record's child session, scoped to
+// that call like the stop hook's export. The record's AgentID is the child
+// session ID, which `opencode export` accepts directly.
+func (a *OpenCodeAgent) FetchSubagentTranscript(ctx context.Context, agentID, toolUseID string, startedAt, completedAt time.Time) (string, error) {
+	return a.exportSubagent(ctx, agentID, toolUseID, startedAt, completedAt)
 }
 
 // sessionTranscriptPath validates the session ID and returns the expected transcript path.

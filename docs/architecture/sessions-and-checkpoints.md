@@ -383,6 +383,24 @@ for task work; the payload is materialized at condensation (below).
 - **Factory Droid Workers** upsert (`UpsertCompletedTaskRecord`): a worker
   spans multiple turns, so repeat completions merge files into the same record
   instead of claiming exactly-once.
+- **OpenCode task tool**: `subagent-start` (parent task part bound to the child
+  session) records the in-flight marker via `DeferredCompletion`;
+  `subagent-stop` (`tool.execute.after`) completes the record through the
+  Final path with `CompletionWithoutLaunch`, so a start the plugin never saw
+  still completes. It declares no transcript: the capture exports the child
+  through `agent.SubagentTranscriptFetcher` (`opencode export`) after its skip
+  checks, declares it, and takes exact tokens from it — one export per stop. Child sessions fire no
+  lifecycle hooks of their own. A child resumed through the task tool's
+  `task_id` backs one record per call: the plugin's call start
+  (`Event.SubagentStartedAt`, which becomes the record's `StartedAt`) cuts the
+  declared export to that call's messages, so earlier calls' files and tokens
+  are not attributed twice. A background task (`background: true`) fires its
+  `subagent-stop` from the child's own idle rather than from the tool hook,
+  which returns at launch; nested calls (`subagent_depth > 1`) are recorded on
+  the top-level session. The SessionEnd sweep's capture of a task still in
+  flight fetches the same way, so that record keeps its files and tokens; a
+  failed fetch completes it transcript-unavailable and condensation tries
+  again.
 
 **Exactly-once completion.** Completion goes through
 `strategy.CompleteTaskRecord`: one `MutateSessionState` closure marks
@@ -402,7 +420,10 @@ still reaches a permanent checkpoint.
 
 **Materialization (condensation).** `materializeTaskRecords`
 (`manual_commit_condensation.go`) resolves each record's transcript — declared
-path first, agent-layout fallback — runs the same sanitize → externalize →
+path first, agent-layout fallback, and last an agent re-export through
+`agent.SubagentTranscriptFetcher` for agents whose subagents are fetchable
+sessions (OpenCode: an in-flight task, or a stop hook whose export failed) —
+runs the same sanitize → externalize →
 redact pipeline the session transcript gets
 (`prepareTaskTranscriptForStorage`), and writes
 `tasks/<tool-use-id>/{agent-<agent-id>.jsonl, task.json}` inside the parent

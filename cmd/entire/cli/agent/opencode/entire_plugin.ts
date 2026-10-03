@@ -19,6 +19,32 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   // One-time model-context injection captured from the turn-start hook's stdout,
   // applied on the next LLM call via experimental.chat.system.transform.
   let pendingInjection: string | null = null
+  // Child (subagent) sessions. OpenCode's task tool runs each subagent as a
+  // real session, so without this set a child would register as the user's
+  // session: its write would take the checkpoint and the parent would log
+  // "no files modified". Learned from session.* events' `parentID`, and from the child
+  // ID surfaced in the parent's task part / tool.execute.after — the latter
+  // two also cover a child session resumed via `task_id` from an earlier
+  // process, whose own session.created predates this plugin instance. These
+  // sets live for the process and are cleared only on server.instance.disposed.
+  const childSessions = new Set<string>()
+  // child session ID -> the top-level (user's) session it descends from. With
+  // subagent_depth > 1 a child can itself call the task tool; that
+  // grandchild's task is recorded on the top-level session, the only one
+  // Entire tracks, keyed by its own callID like any other task.
+  const rootOf = new Map<string, string>()
+  // task callIDs already announced via subagent-start (the running part
+  // update repeats).
+  const announcedTasks = new Set<string>()
+  // task callID -> Date.now() at tool.execute.before, sent as started_at. A
+  // child resumed via `task_id` holds every earlier call's messages too; this
+  // is what lets the CLI keep only the ones this call produced.
+  const taskStartedAt = new Map<string, number>()
+  // Background children (OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS, or a
+  // foreground task promoted to the background): child ID -> subagent-stop
+  // payloads held back until the child's own session goes idle. A list, since
+  // a running background child resumed via `task_id` absorbs another call.
+  const backgroundTasks = new Map<string, Record<string, unknown>[]>()
 
   /**
    * Build the shell command for a hook invocation.
@@ -113,6 +139,51 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
     }
   }
 
+  // trackChild records a child and the top-level session it descends from.
+  function trackChild(childID: string, parentID: string) {
+    childSessions.add(childID)
+    if (!rootOf.has(childID)) rootOf.set(childID, rootOf.get(parentID) ?? parentID)
+  }
+
+  // topLevelSession maps a session to the top-level session it belongs to.
+  function topLevelSession(sessionID: string): string {
+    return rootOf.get(sessionID) ?? sessionID
+  }
+
+  // announceTask fires subagent-start the first time a task part is running
+  // with its child bound (state.metadata.sessionId). tool.execute.before fires
+  // earlier but has no child ID yet, and session.created for the child can
+  // interleave with a sibling's, so neither is a safe join. The running update
+  // repeats, hence once per callID. Called for task parts in child sessions
+  // too, so a nested subagent is announced on the top-level session.
+  function announceTask(part: any) {
+    if (!(part?.type === "tool" && part.tool === "task" && part.callID &&
+          part.state?.status === "running" && part.state?.metadata?.sessionId)) return
+    if (announcedTasks.has(part.callID)) return
+    const sessionID = part.sessionID ?? currentSessionID
+    if (!sessionID) return
+    announcedTasks.add(part.callID)
+    trackChild(part.state.metadata.sessionId, sessionID)
+    callHookSync("subagent-start", {
+      session_id: topLevelSession(sessionID),
+      tool_use_id: part.callID,
+      subagent_id: part.state.metadata.sessionId,
+      subagent_type: part.state?.input?.subagent_type ?? "",
+      task_description: part.state?.input?.description ?? "",
+      started_at: taskStartedAt.get(part.callID) ?? 0,
+    })
+  }
+
+  // finishBackgroundTask fires the held subagent-stop for a background child
+  // that went idle: its work finished, failed, or was aborted (`opencode run`
+  // exiting with the child still running). Each case ends the task.
+  function finishBackgroundTask(childID: string) {
+    const payloads = backgroundTasks.get(childID)
+    if (!payloads) return
+    backgroundTasks.delete(childID)
+    for (const payload of payloads) callHookSync("subagent-stop", payload)
+  }
+
   function resetSessionTracking(sessionID: string) {
     if (currentSessionID === sessionID) {
       return false
@@ -130,17 +201,71 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
   return {
     // Apply the one-time Entire context injection captured at turn-start by
     // appending it to the system prompt for this LLM call.
-    "experimental.chat.system.transform": async (_input: unknown, output: { system: string[] }) => {
+    "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
+      if (input?.sessionID && childSessions.has(input.sessionID)) return
       if (pendingInjection && Array.isArray(output.system)) {
         output.system.push(pendingInjection)
         pendingInjection = null
       }
     },
+    // Subagent call start. No child ID exists yet, so this only records the
+    // time; subagent-start fires from the running task part below.
+    "tool.execute.before": async (input) => {
+      try {
+        if (input.tool !== "task") return
+        taskStartedAt.set(input.callID, Date.now())
+      } catch {
+        // Silently ignore — plugin failures must not crash OpenCode
+      }
+    },
+    // Subagent completion. tool.execute.after for the task tool fires once, with
+    // the child session ID in output.metadata: at true completion for a
+    // foreground task, immediately for a background one (metadata.background),
+    // whose stop is held until the child goes idle. Synchronous: `opencode run`
+    // exits on the parent's idle right after this, and an async hook would be
+    // killed before it finished.
+    "tool.execute.after": async (input, output) => {
+      try {
+        if (input.tool !== "task") return
+        const childID = output?.metadata?.sessionId
+        if (!childID) return
+        trackChild(childID, input.sessionID)
+        const startedAt = taskStartedAt.get(input.callID) ?? 0
+        taskStartedAt.delete(input.callID)
+        // A child's own task call (subagent_depth > 1) is recorded on the
+        // top-level session: the child has no Entire session of its own.
+        const payload = {
+          session_id: topLevelSession(input.sessionID),
+          tool_use_id: input.callID,
+          subagent_id: childID,
+          subagent_type: input.args?.subagent_type ?? "",
+          task_description: input.args?.description ?? "",
+          started_at: startedAt,
+        }
+        if (output?.metadata?.background === true) {
+          backgroundTasks.set(childID, [...(backgroundTasks.get(childID) ?? []), payload])
+          return
+        }
+        callHookSync("subagent-stop", payload)
+      } catch {
+        // Silently ignore — plugin failures must not crash OpenCode
+      }
+    },
     event: async ({ event }) => {
       try {
+        const props = (event as any).properties
+        const info = props?.info
+        if (event.type.startsWith("session.") && info?.parentID && info?.id) trackChild(info.id, info.parentID)
+        if (event.type === "message.part.updated") announceTask(props?.part)
+        if (event.type === "session.status" && props?.status?.type === "idle" && props?.sessionID) {
+          finishBackgroundTask(props.sessionID)
+        }
+        const eventSessionID: string | undefined =
+          props?.sessionID ?? info?.sessionID ?? info?.id ?? props?.part?.sessionID
+        if (eventSessionID && childSessions.has(eventSessionID)) return
         switch (event.type) {
           case "session.created": {
-            const session = (event as any).properties?.info
+            const session = info
             if (!session?.id) break
             // Reset per-session tracking state when switching sessions.
             if (resetSessionTracking(session.id)) {
@@ -152,7 +277,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
           }
 
           case "message.updated": {
-            const msg = (event as any).properties?.info
+            const msg = info
             if (!msg) break
 
             if (msg.sessionID && resetSessionTracking(msg.sessionID)) {
@@ -186,7 +311,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
           }
 
           case "message.part.updated": {
-            const part = (event as any).properties?.part
+            const part = props?.part
             if (!part?.messageID) break
 
             // Fire turn-start on the first text part of a new user message
@@ -195,20 +320,23 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
               seenUserMessages.add(msg.id)
               const sessionID = msg.sessionID ?? currentSessionID
               if (sessionID) {
+                // A synthetic part is OpenCode writing, not the user: a
+                // background task's result arrives this way. The parent does
+                // take a turn on it, so the turn still starts, with no prompt.
                 fireTurnStart({
                   session_id: sessionID,
-                  prompt: part.text ?? "",
+                  prompt: part.synthetic === true ? "" : (part.text ?? ""),
                   model: currentModel ?? "",
                 })
               }
             }
+
             break
           }
 
           case "session.status": {
             // session.status fires in both TUI and non-interactive (run) mode.
             // session.idle is deprecated and not reliably emitted in run mode.
-            const props = (event as any).properties
             if (props?.status?.type !== "idle") break
             const sessionID = props?.sessionID ?? currentSessionID
             if (!sessionID) break
@@ -222,7 +350,7 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
           }
 
           case "session.compacted": {
-            const sessionID = (event as any).properties?.sessionID
+            const sessionID = props?.sessionID
             if (!sessionID) break
             await callHook("compaction", {
               session_id: sessionID,
@@ -231,12 +359,16 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
           }
 
           case "session.deleted": {
-            const session = (event as any).properties?.info
+            const session = info
             if (!session?.id) break
             seenUserMessages.clear()
             messageStore.clear()
             currentSessionID = null
             pendingInjection = null
+            // childSessions/announcedTasks are NOT cleared here: a child's own
+            // deletion never reaches this case (the guard above returns first),
+            // so this only ever fires for an unrelated top-level session, and
+            // clearing here would drop a live child back to top-level mid-task.
             // Use sync variant: session-end may fire during shutdown.
             callHookSync("session-end", {
               session_id: session.id,
@@ -254,6 +386,13 @@ export const EntirePlugin: Plugin = async ({ directory }) => {
             messageStore.clear()
             currentSessionID = null
             pendingInjection = null
+            childSessions.clear()
+            rootOf.clear()
+            announcedTasks.clear()
+            taskStartedAt.clear()
+            // A background child still running here is ended by the Go side's
+            // SessionEnd sweep, which completes every live task record.
+            backgroundTasks.clear()
             // Use sync variant: this is the last event before process exit.
             callHookSync("session-end", {
               session_id: sessionID,
