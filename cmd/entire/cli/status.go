@@ -70,7 +70,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if err != nil {
 		settingsPath = EntireSettingsFile
 	}
-	localSettingsPath, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
+	localSettingsPath, localInherited, err := settings.LocalSettingsPath(ctx)
 	if err != nil {
 		localSettingsPath = EntireSettingsLocalFile
 	}
@@ -89,7 +89,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	sty := newStatusStyles(w)
 
 	if detailed {
-		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
+		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, localInherited, projectExists, localExists)
 	}
 
 	// Short output: just show the effective/merged state
@@ -133,7 +133,7 @@ func writeAgentHelpHint(w io.Writer, sty statusStyles) {
 }
 
 // runStatusDetailed shows the effective status plus detailed status for each settings file.
-func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, settingsPath, localSettingsPath string, projectExists, localExists bool) error {
+func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, settingsPath, localSettingsPath string, localInherited, projectExists, localExists bool) error {
 	// First show the effective/merged status
 	effectiveSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
@@ -190,8 +190,13 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 			return fmt.Errorf("failed to load local settings: %w", err)
 		}
 		label := "Local"
+		if localInherited {
+			// A linked worktree with no local file of its own uses the main
+			// worktree's; say whose file this is.
+			label = "Local (inherited from the main worktree)"
+		}
 		if effectiveSettings.LocalLayerRejection() != "" {
-			label = "Local (ignored)"
+			label += " (ignored)"
 		}
 		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
 		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {

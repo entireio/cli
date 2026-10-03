@@ -12,7 +12,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 
@@ -423,7 +422,9 @@ func validateSummaryProvider(provider string) error {
 // caller can surface a one-time notice. The flag is written to local because
 // the provider choice is already machine-specific (depends on $PATH).
 func persistSummaryProviderSelection(ctx context.Context, provider types.AgentName, model string, origin summarySelectionOrigin) (flagFlipped bool, err error) {
-	targetFileAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	// The file this worktree uses, which a linked worktree may inherit from
+	// the main one; the save below resolves the same way.
+	targetFileAbs, _, err := settings.LocalSettingsPath(ctx)
 	if err != nil {
 		targetFileAbs = settings.EntireSettingsLocalFile
 	}

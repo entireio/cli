@@ -1486,7 +1486,7 @@ func summaryProviderSourceLayer(ctx context.Context, merged *settings.EntireSett
 	if merged.LocalLayerRejection() != "" {
 		return settings.EntireSettingsFile, false
 	}
-	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	localAbs, _, err := settings.LocalSettingsPath(ctx)
 	if err != nil {
 		return settings.EntireSettingsFile, false
 	}

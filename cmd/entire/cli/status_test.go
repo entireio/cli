@@ -3392,7 +3392,7 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	var out bytes.Buffer
 	sty := statusStyles{colorEnabled: false, width: 80}
 	if err := runStatusDetailed(t.Context(), &out, sty, projectPath,
-		filepath.Join(entireDir, "settings.local.json"), true, false); err != nil {
+		filepath.Join(entireDir, "settings.local.json"), false, true, false); err != nil {
 		t.Fatalf("runStatusDetailed: %v", err)
 	}
 
@@ -3402,5 +3402,36 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	}
 	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
 		t.Errorf("status does not name where the setting must live:\n%s", got)
+	}
+}
+
+// `entire enable --local` in the main tree leaves only a gitignored local file,
+// which a linked worktree does not get. The worktree reported "not set up" and
+// captured nothing; it now uses the main worktree's file and says so.
+func TestRunStatus_LinkedWorktreeUsesMainLocalSettings(t *testing.T) {
+	mainRoot := t.TempDir()
+	testutil.InitRepo(t, mainRoot)
+	testutil.WriteFile(t, mainRoot, "f.txt", "x")
+	testutil.RunGit(t, mainRoot, "add", "f.txt")
+	testutil.RunGit(t, mainRoot, "commit", "-q", "-m", "init")
+	testutil.WriteFile(t, mainRoot, settings.EntireSettingsLocalFile, testSettingsEnabled)
+	linked := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-q", "-b", "feature", linked)
+	t.Chdir(linked)
+
+	var short bytes.Buffer
+	if err := runStatus(context.Background(), &short, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	if strings.Contains(short.String(), "not set up") || !strings.Contains(short.String(), "Enabled") {
+		t.Errorf("linked worktree should be enabled by the main worktree's local file, got: %s", short.String())
+	}
+
+	var detailed bytes.Buffer
+	if err := runStatus(context.Background(), &detailed, true, false); err != nil {
+		t.Fatalf("runStatus(detailed) error = %v", err)
+	}
+	if !strings.Contains(detailed.String(), "Local (inherited from the main worktree)") {
+		t.Errorf("detailed status should label the inherited local file, got: %s", detailed.String())
 	}
 }
