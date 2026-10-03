@@ -65,6 +65,9 @@ const (
 	rolloutLineTypeSessionMeta  = "session_meta"
 	rolloutLineTypeEventMsg     = "event_msg"
 	eventMsgTypeTokenCount      = "token_count"
+	// itemTypeAgentMessage is the type of a multi-agent message item, both as a
+	// rollout response_item payload and as a `codex exec --json` event item.
+	itemTypeAgentMessage = "agent_message"
 )
 
 // rolloutClassification identifies whether a rollout belongs to a root thread
@@ -853,9 +856,10 @@ func SanitizePortableTranscript(data []byte) []byte {
 
 // sanitizeMarkers are the substrings that gate every transformation
 // sanitizeRolloutLine performs: dropping "compaction"/"compaction_summary" items,
-// rewriting "compacted" lines, and deleting "encrypted_content" from "reasoning"
-// items. A transcript containing none of them cannot be altered, so one scan lets
-// us skip unmarshalling every line.
+// rewriting "compacted" lines, deleting "encrypted_content" from "reasoning"
+// items, and dropping "encrypted_content" parts from "agent_message" items. A
+// transcript containing none of them cannot be altered, so one scan lets us skip
+// unmarshalling every line.
 //
 // Deliberately over-broad ("compact" covers compacted/compaction/
 // compaction_summary): a false positive just falls through to the full pass, while
@@ -917,6 +921,14 @@ func sanitizeRolloutLine(lineData []byte) ([]byte, bool) {
 		// are still removed outright (see sanitizeHistoryItems): those are array
 		// elements within a single line, so removing them cannot shift line numbers.
 		delete(payload, "encrypted_content")
+	case itemTypeAgentMessage:
+		// Multi-agent messages carry their plaintext as input_text parts and a
+		// session-bound Fernet ciphertext as an "encrypted_content" part. Drop
+		// only that part; the line and its readable parts stay, so line numbering
+		// is unchanged. Untouched lines keep their original bytes.
+		if !stripEncryptedContentParts(payload) {
+			return lineData, true
+		}
 	default:
 		return lineData, true
 	}
@@ -974,6 +986,8 @@ func sanitizeHistoryItems(items []any) []any {
 		switch itemType {
 		case "reasoning":
 			delete(itemMap, "encrypted_content")
+		case itemTypeAgentMessage:
+			stripEncryptedContentParts(itemMap)
 		case "compaction", "compaction_summary":
 			continue
 		}
@@ -981,6 +995,27 @@ func sanitizeHistoryItems(items []any) []any {
 		sanitized = append(sanitized, itemMap)
 	}
 	return sanitized
+}
+
+// stripEncryptedContentParts removes every {"type":"encrypted_content"} element
+// from item's "content" array and reports whether it removed any.
+func stripEncryptedContentParts(item map[string]any) bool {
+	parts, ok := item["content"].([]any)
+	if !ok {
+		return false
+	}
+	kept := make([]any, 0, len(parts))
+	for _, part := range parts {
+		if partMap, ok := part.(map[string]any); ok && partMap["type"] == "encrypted_content" {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) == len(parts) {
+		return false
+	}
+	item["content"] = kept
+	return true
 }
 
 func mustMarshalRolloutLine(line rolloutLine) []byte {

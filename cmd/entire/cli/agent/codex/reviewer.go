@@ -274,7 +274,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
 				}
 			case "item.completed":
-				if env.Item.Type == "agent_message" && env.Item.Text != "" {
+				if env.Item.Type == itemTypeAgentMessage && env.Item.Text != "" {
 					out <- reviewtypes.AssistantText{Text: env.Item.Text}
 				}
 				// command_execution completion is intentionally swallowed —
