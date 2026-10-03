@@ -4487,3 +4487,47 @@ func TestCodexSessionEndPersistsEndedBeforeInventoryRead(t *testing.T) {
 	ag.agentType = agent.AgentTypeCodex
 	require.NoError(t, handleLifecycleSessionEnd(ctx, ag, &agent.Event{SessionID: id}))
 }
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_RecordsSubagentTokenUsage pins
+// that a completed task record carries the subagent's own token usage when
+// the stop payload has none, as Claude Code's never does: the subagent's
+// transcript is the source.
+func TestHandleLifecycleSubagentEnd_SubagentStop_RecordsSubagentTokenUsage(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "stop-tokens-session"
+	toolUseID := "toolu_tokens1"
+	agentID := "agent-tokens1"
+
+	saveInFlightSession(ctx, t, sessionID, headHash, session.TaskRecord{
+		ToolUseID: toolUseID,
+		AgentID:   agentID,
+		StartedAt: time.Now(),
+	})
+
+	mainTranscript, subagentTranscript := writeSubagentTranscripts(t, agentID)
+	require.NoError(t, os.WriteFile(subagentTranscript, []byte(
+		`{"type":"user","message":{"content":"subagent task"}}`+"\n"+
+			`{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":120,"cache_read_input_tokens":30,"cache_creation_input_tokens":0,"output_tokens":40}}}`+"\n"+
+			`{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":80,"cache_read_input_tokens":0,"cache_creation_input_tokens":10,"output_tokens":5}}}`+"\n",
+	), 0o600))
+
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	require.NoError(t, err)
+	event := finalSubagentEvent(sessionID, toolUseID, agentID)
+	event.SessionRef = mainTranscript
+	event.SubagentTranscriptPath = subagentTranscript
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, event))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	rec := state.FindTaskRecord(toolUseID)
+	require.NotNil(t, rec)
+	require.NotNil(t, rec.TokenUsage, "completed record must carry the subagent's token usage")
+	assert.Equal(t, 200, rec.TokenUsage.InputTokens)
+	assert.Equal(t, 45, rec.TokenUsage.OutputTokens)
+	assert.Equal(t, 30, rec.TokenUsage.CacheReadTokens)
+	assert.Equal(t, 10, rec.TokenUsage.CacheCreationTokens)
+	assert.Equal(t, 2, rec.TokenUsage.APICallCount)
+}

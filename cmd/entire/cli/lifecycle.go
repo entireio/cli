@@ -32,6 +32,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
 )
@@ -1315,6 +1316,90 @@ func finalizeCodexObservedAtSessionEnd(ctx context.Context, sessionID string) {
 // potentially slow filesystem analysis outside its lock, then applies only
 // path enrichment and terminal evidence if no new child observation raced it.
 // It never manufactures an exact-empty result for an unknown/legacy ledger.
+// refreshCodexInventoriesBeforeCommit reconciles every Codex session that
+// still has in-flight task records before post-commit condensation stores
+// them. Codex's subagent-stop is provisional, and otherwise only the parent's
+// turn end or session end reads the child rollouts; a parent that waits for a
+// child and commits before its own turn ends would store the child's record
+// as still in flight, without its files or tokens.
+//
+// Only a commit carrying an Entire-Checkpoint trailer condenses, and the
+// session store is shared across worktrees, so the refresh is limited to
+// trailered commits and to sessions that live in this worktree (or whose
+// worktree is unknown): an unresolved child rollout can cost a bounded
+// fallback scan, which unrelated sessions must not add to every commit.
+func refreshCodexInventoriesBeforeCommit(ctx context.Context) {
+	if !headHasCheckpointTrailer(ctx) {
+		return
+	}
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		logging.Debug(ctx, "codex inventory refresh skipped: cannot resolve worktree",
+			slog.String("error", err.Error()))
+		return
+	}
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		logging.Debug(ctx, "codex inventory refresh skipped: cannot list sessions",
+			slog.String("error", err.Error()))
+		return
+	}
+	var ag agent.Agent
+	for _, state := range states {
+		if state.AgentType != agent.AgentTypeCodex || len(state.LiveTaskRecords()) == 0 {
+			continue
+		}
+		// Session end already ran this refresh.
+		if state.Phase == session.PhaseEnded || state.EndedAt != nil {
+			continue
+		}
+		if state.WorktreePath != "" && filepath.Clean(state.WorktreePath) != filepath.Clean(worktreeRoot) {
+			continue
+		}
+		if ag == nil {
+			if ag, err = agent.GetByAgentType(agent.AgentTypeCodex); err != nil {
+				logging.Debug(ctx, "codex inventory refresh skipped: codex agent unavailable",
+					slog.String("error", err.Error()))
+				return
+			}
+		}
+		// The refresh only stores child evidence and subagent counters, so the
+		// parent's offset does not matter. Child completion needs only the
+		// child rollouts, so an unreadable parent still refreshes, as session
+		// end does with no parent at all.
+		var parent []byte
+		if state.TranscriptPath != "" {
+			if parent, err = ag.ReadTranscript(state.TranscriptPath); err != nil {
+				logging.Debug(ctx, "codex inventory refresh: parent transcript unreadable",
+					slog.String("session_id", state.SessionID),
+					slog.String("error", err.Error()))
+				parent = nil
+			}
+		}
+		refreshCodexInventory(ctx, ag, state.SessionID, parent, 0)
+	}
+}
+
+// headHasCheckpointTrailer reports whether HEAD's message carries an
+// Entire-Checkpoint trailer. Any failure to read HEAD reports false.
+func headHasCheckpointTrailer(ctx context.Context) bool {
+	repo, err := gitrepo.OpenCurrent(ctx)
+	if err != nil {
+		return false
+	}
+	defer repo.Close()
+	head, err := repo.Head()
+	if err != nil {
+		return false
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return false
+	}
+	_, ok := trailers.ParseCheckpoint(commit.Message)
+	return ok
+}
+
 func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string, parent []byte, fromOffset int) (*agent.TokenUsage, *uint64) {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil || state == nil || state.SubagentInventoryComplete == nil {
@@ -1881,6 +1966,24 @@ func subagentTranscriptAndFiles(
 	return transcriptPath, mergeUnique(modifiedFiles, files), nil
 }
 
+// subagentTokenUsage computes a subagent's own token usage from its
+// transcript, for agents whose stop payload carries none (Claude Code). nil
+// when there is no transcript or the agent cannot compute usage from one.
+func subagentTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event, transcriptPath string) *agent.TokenUsage {
+	if transcriptPath == "" {
+		return nil
+	}
+	data, err := ag.ReadTranscript(transcriptPath)
+	if err != nil {
+		logging.Warn(ctx, "failed to read subagent transcript for token usage",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	return agent.CalculateTokenUsage(ctx, ag, data, 0, "")
+}
+
 // completeSubagentTaskRecord detects a completed subagent invocation's changes
 // and completes its durable task record (#2058): files, labels, tokens, and the
 // declared transcript path land on the record; condensation later materializes
@@ -1997,6 +2100,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	}
 
 	files := mergeUnique(mergeUnique(relModifiedFiles, relNewFiles), relDeletedFiles)
+	tokenUsage := event.TokenUsage
+	if tokenUsage == nil {
+		tokenUsage = subagentTokenUsage(logCtx, ag, event, subagentTranscriptPath)
+	}
 	rec := session.TaskRecord{
 		ToolUseID:              event.ToolUseID,
 		AgentID:                event.SubagentID,
@@ -2006,7 +2113,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		DeclaredTranscriptPath: subagentTranscriptPath,
 		TranscriptUnavailable:  event.SubagentTranscriptUnavailable,
 		Files:                  files,
-		TokenUsage:             event.TokenUsage,
+		TokenUsage:             tokenUsage,
 	}
 	// Exactly-once needs an identity to be "once" about. Copilot CLI's
 	// SubagentEnd carries no correlation ID at all, so every one of its
