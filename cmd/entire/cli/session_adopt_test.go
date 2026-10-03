@@ -976,6 +976,7 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 		UntrackedFilesAtStart:    []string{"source-only.txt"},
 		PromptWindowBase:         3,
 		PromptWindowResetPending: true,
+		PendingSubagentFiles:     map[string]string{"src/feature.go": ""},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1007,6 +1008,9 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	}
 	if adopted.StepCount != 0 {
 		t.Fatalf("StepCount = %d, want 0 for first target checkpoint", adopted.StepCount)
+	}
+	if len(adopted.PendingSubagentFiles) != 0 {
+		t.Fatalf("PendingSubagentFiles = %v, want none: the source's baselines describe another worktree", adopted.PendingSubagentFiles)
 	}
 	if adopted.CheckpointTranscriptStart != 0 {
 		t.Fatalf("CheckpointTranscriptStart = %d, want 0", adopted.CheckpointTranscriptStart)

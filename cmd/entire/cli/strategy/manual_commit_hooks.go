@@ -1887,6 +1887,9 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	state.PromptAttributions = nil
 	state.PendingPromptAttribution = nil
 	state.FilesTouched = nil
+	for path := range committedFiles {
+		delete(state.PendingSubagentFiles, path)
+	}
 
 	// NOTE: filesystem prompt.txt is NOT cleared here. The caller (PostCommit handler)
 	// decides whether to clear it based on carry-forward: if remaining files exist,
@@ -3145,8 +3148,9 @@ func captureSessionOwner(state *SessionState) {
 }
 
 // calculatePromptAttributionAtStart calculates attribution at prompt start (before agent runs).
-// This captures user changes since the last checkpoint - no filtering needed since
-// the agent hasn't made any changes yet.
+// This captures user changes since the last checkpoint. The only agent changes it
+// can see are subagent edits no snapshot holds yet (state.PendingSubagentFiles),
+// which it measures from their observed content instead of the snapshot.
 //
 // IMPORTANT: This reads from the worktree (not staging area) to match what WriteTemporary
 // captures in checkpoints. If we read staged content but checkpoints capture worktree content,
@@ -3259,7 +3263,13 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	}
 
 	// Use CalculatePromptAttribution from manual_commit_attribution.go
-	result = CalculatePromptAttribution(baseTree, lastCheckpointTree, changedFiles, nextCheckpointNum)
+	// A subagent wrote these files after the last snapshot; their content
+	// when the edit was observed is the reference, so only later changes
+	// count as user edits.
+	references := pendingSubagentBaselineContents(ctx, repo, state.PendingSubagentFiles, func(path string) string {
+		return changedFiles[path]
+	})
+	result = CalculatePromptAttribution(baseTree, lastCheckpointTree, changedFiles, nextCheckpointNum, references)
 
 	return result
 }

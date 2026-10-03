@@ -3846,3 +3846,50 @@ func TestMarshalPromptAttributionsIncludingPending(t *testing.T) {
 		})
 	}
 }
+
+// TestSaveStep_SkippedStepClearsSnapshottedPendingSubagentFiles pins that a
+// pending subagent file is cleared even when SaveStep skips because the tree
+// already matches the last snapshot. A pending file left behind would keep
+// crediting later user edits to that file to the agent.
+func TestSaveStep_SkippedStepClearsSnapshottedPendingSubagentFiles(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "# repo\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "pending-subagent-skip"
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"go"}}`+"\n"), 0o644))
+	testutil.WriteFile(t, dir, "sub.md", "written by a subagent\n")
+
+	step := StepContext{
+		SessionID:     sessionID,
+		NewFiles:      []string{"sub.md"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}
+	require.NoError(t, s.SaveStep(context.Background(), step))
+
+	pendingPA := &PromptAttribution{CheckpointNumber: 2, UserLinesAdded: 1}
+	require.NoError(t, MutateSessionState(context.Background(), sessionID, func(state *SessionState) error {
+		state.PendingSubagentFiles = map[string]string{"sub.md": ""}
+		state.PendingPromptAttribution = pendingPA
+		return nil
+	}))
+
+	step.NewFiles = nil
+	step.ModifiedFiles = []string{"sub.md"}
+	require.NoError(t, s.SaveStep(context.Background(), step))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, state.StepCount, "unchanged tree must not add a step")
+	assert.Empty(t, state.PendingSubagentFiles, "snapshotted pending file must be cleared")
+	assert.Equal(t, pendingPA, state.PendingPromptAttribution, "a skipped step must not consume the pending prompt attribution")
+}

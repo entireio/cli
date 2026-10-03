@@ -494,6 +494,8 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.UntrackedFilesAtStart = untrackedFiles
 	adopted.PromptAttributions = nil
 	adopted.PendingPromptAttribution = nil
+	// Pending subagent baselines describe the source worktree's files.
+	adopted.PendingSubagentFiles = nil
 	// Preserve cumulative turn/context metrics for the continuing agent session,
 	// but start the target checkpoint prompt window at the current turn count so
 	// the first adopted checkpoint only counts target-side turns.

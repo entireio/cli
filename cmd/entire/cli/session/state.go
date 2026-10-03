@@ -437,6 +437,18 @@ type State struct {
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 
+	// PendingSubagentFiles maps files a subagent wrote that no shadow
+	// snapshot holds yet to the git blob hash of their content when the
+	// subagent's edit was observed ("" when the file was absent). A background
+	// subagent can finish after the parent's turn ended, and its completion
+	// writes no snapshot, so without this the next turn-start prompt
+	// attribution would count its lines as user work. The baseline stands in
+	// for the stale snapshot: turn-start attribution and commit-time
+	// attribution count only changes since it as user work. The next SaveStep
+	// snapshots these files and removes them; condensation drops the ones it
+	// committed.
+	PendingSubagentFiles map[string]string `json:"pending_subagent_files,omitempty"`
+
 	// SubagentInventory retains Codex child identities independently of task
 	// records so follow-up turns remain discoverable after materialization.
 	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
@@ -515,6 +527,12 @@ type TaskRecord struct {
 	// TokenUsage is this subagent's token usage, when the completing hook
 	// payload provided one. nil when unavailable.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// ScannedTranscriptLines is how many lines of the subagent's transcript
+	// have had their file edits captured, as pending subagent files or in a
+	// shadow snapshot. Scans of a still-running subagent resume here so an
+	// edit already captured is not marked pending again.
+	ScannedTranscriptLines int `json:"scanned_transcript_lines,omitempty"`
 
 	// CompletedAt is when this record was completed (CompleteTaskRecord).
 	// Zero means the record is still in flight. See the type doc comment.
