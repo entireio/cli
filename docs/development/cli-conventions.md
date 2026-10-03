@@ -22,6 +22,11 @@ child)` instead of `parent.AddCommand(child)`. Gating only controls visibility â
 the commands are always runnable in every build.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
+  `attach` captures the current transcript on HEAD, including when the same
+  session was attached to earlier commits. A repeat on a checkpoint already
+  containing that session is a no-op, determined from stored metadata even
+  when local session state is absent. Later commits get fresh snapshots; an
+  existing HEAD checkpoint with other sessions receives an additional session.
   `resume` with a branch arg switches to it and resumes its session; with no arg
   it opens an interactive picker of stopped sessions (across all worktrees),
   resolving each to its branch and pointing at the owning worktree when the

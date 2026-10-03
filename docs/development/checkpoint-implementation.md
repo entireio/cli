@@ -131,6 +131,40 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **A tracked `.entire/settings.local.json` is ignored wholesale**: the local layer's premise is that it is per-clone and per-developer (it is gitignored, `entire enable --local` writes it, and `CheckpointRemoteIsLocalOnly` treats presence there as proof the developer chose it). `.gitignore` does not apply to an already-tracked path, so a committed one arrives by cloning and would override project settings for everyone. `loadMergedSettings` drops the layer when the file is **proven** tracked, records `EntireSettings.LocalLayerRejection()`, and the redaction consumer prints it with the `git rm --cached` fix. It never errors — one committed file must not brick `status`/`doctor`. Two deliberately opposite failure directions, expressed as the three-state `localTrust` (`localUnverifiable` is the zero value so a forgotten assignment fails safe): an *unverifiable* repo keeps the layer (losing all local settings is worse than the risk) but still drops the exec-bearing settings, OPF `command` and `external_agents` (being wrong there means running someone else's binary); *no* repository counts as proof of locality. `CheckpointRemoteIsLocalOnly` reads the raw file outside the loader, so it repeats the check itself.
 - Safe to use on main/master since it never modifies commit history
 
+#### Manual attachment
+
+Manual `session attach` uses HEAD's checkpoint membership for idempotency;
+`LastCheckpointID` is only the previous session snapshot, not a permanent link
+to reuse on every later commit. Each new attachment stores the full current
+transcript. For append-only JSONL, a verified complete-line prefix from the
+previous stored snapshot establishes `CheckpointTranscriptStart` and scopes
+checkpoint tokens to later messages, while session-state tokens remain cumulative.
+Prior-snapshot read failures warn and fall back to a full snapshot; cancellation
+and deadlines still stop attach. This fallback applies only to prefix evidence,
+not to membership or availability checks for a checkpoint referenced by HEAD.
+Missing prior content, rewritten transcripts, changed redaction, and OpenCode's
+whole-document JSON export use a full snapshot with offset zero. Repeating attach
+on an already-attached HEAD leaves its stored transcript and metadata unchanged,
+including review sessions. An ordinary snapshot cannot be converted into a review
+in place, but a later commit can capture a new review snapshot. Subsequent attaches
+without `--review` preserve the session's review kind, skills, and prompt.
+
+A session already checkpointed by hooks (`LastCheckpointCommitHash` non-empty or
+`CheckpointTranscriptStart > 0`) cannot be captured again by attach: hooks own
+its transcript and token window. The membership check precedes this guard so
+reattaching an existing snapshot stays a no-op. `AttachedManually` is not an
+ownership signal because it also marks sessions imported before hooks took over.
+
+A manual attach receipt binds the saved checkpoint to the pre-amend HEAD. If
+attach only printed a trailer, or amending failed, retrying on that same HEAD
+reuses the snapshot and offers to link it again. A different HEAD never reuses
+that receipt. If the pending snapshot is absent locally, discard the receipt
+and create a fresh ID with a full snapshot. Never recreate the missing snapshot
+under its old ID or relax the availability gate for checkpoints linked by HEAD.
+External agent token calculators receive the byte offset of the
+new messages in the **raw** transcript, converted from the stored line boundary;
+redacted byte lengths must not be used as protocol offsets.
+
 #### Key Files
 
 - `strategy.go` - Shared types only, no behaviour: the sentinel errors (`ErrNoMetadata`, `ErrNoSession`, `ErrNotTaskCheckpoint`, `ErrEmptyRepository`), the argument and result structs (`SessionInfo`, `PendingCheckpoint`, `StepContext`, `TaskStepContext`, `TaskCheckpoint`, `SubagentCheckpoint`, `RestoredSession`), and `TaskMetadataDir()`. The strategy type itself and its constructor live in `manual_commit.go`.

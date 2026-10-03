@@ -1284,8 +1284,8 @@ func TestAttach_ReviewWithExistingCheckpointErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when review-attaching a session that already has a checkpoint")
 	}
-	if !strings.Contains(err.Error(), "already has checkpoint") {
-		t.Errorf("error should mention 'already has checkpoint'; got: %v", err)
+	if !strings.Contains(err.Error(), "already recorded in checkpoint") {
+		t.Errorf("error should mention 'already recorded in checkpoint'; got: %v", err)
 	}
 }
 
