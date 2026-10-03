@@ -14,11 +14,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/codesearch"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/search"
-	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/spf13/cobra"
@@ -190,27 +190,12 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 				return errors.New("query required when using --json, accessible mode, or piped output. Usage: entire search <query>")
 			}
 
-			// Get the repo's GitHub remote URL
-			repo, err := strategy.OpenRepository(ctx)
+			// Default scope is the current repo, named with its forge like the
+			// --code path, so an Entire-native clone (et/) searches as itself.
+			// With an explicit scope the origin is not needed at all.
+			forge, owner, repoName, err := resolveDefaultSearchRepo(ctx, allRepos || len(filterRepoWildcards(repos)) > 0)
 			if err != nil {
-				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run this command from within a git repository.")
-				return NewSilentError(err)
-			}
-			defer repo.Close()
-
-			remote, err := repo.Remote("origin")
-			if err != nil {
-				return fmt.Errorf("could not find 'origin' remote: %w", err)
-			}
-			urls := remote.Config().URLs
-			if len(urls) == 0 {
-				return errors.New("origin remote has no URLs configured")
-			}
-
-			owner, repoName, err := search.ParseGitHubRemote(urls[0])
-			if err != nil {
-				return fmt.Errorf("parsing remote URL: %w", err)
+				return err
 			}
 
 			// Semantic search goes to the v4 query-serve path (entire-api
@@ -221,6 +206,7 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 			searcher := instrumentSemanticSearcher(cmd.CommandPath(), newSemanticSearcher(insecureHTTPAuth))
 
 			searchCfg := search.Config{
+				Forge:    forge,
 				Owner:    owner,
 				Repo:     repoName,
 				Repos:    repos,
@@ -342,6 +328,27 @@ branch:<name>, repo:<owner/name>, and repo:* to search all accessible repos.`,
 	cmd.RegisterFlagCompletionFunc("repo", completeRepoFlag) //nolint:errcheck,gosec // only fails if the flag isn't defined; defined directly above
 
 	return cmd
+}
+
+// resolveDefaultSearchRepo derives the current repo's forge-qualified
+// coordinates from the origin remote for the default (current-repo) scope,
+// mirroring the --code path: native (et/) and GitHub (gh/) repos keep their
+// forge so same-named repos across forges cannot be conflated. When the
+// caller supplied an explicit scope (--repo, repo:, --all-repos), an
+// unreadable origin is not an error — the search does not need the current
+// repo — and empty coordinates are returned.
+func resolveDefaultSearchRepo(ctx context.Context, explicitScope bool) (forge, owner, repo string, err error) {
+	forge, owner, repo, err = gitremote.ResolveRemoteRepo(ctx, "origin")
+	if err == nil && (owner == "" || repo == "") {
+		err = errors.New("origin remote names no owner/repo")
+	}
+	if err != nil {
+		if explicitScope {
+			return "", "", "", nil
+		}
+		return "", "", "", fmt.Errorf("could not determine current repository for search (use --repo or --all-repos): %w", err)
+	}
+	return forge, owner, repo, nil
 }
 
 // completeRepoFlag returns shell-completion suggestions for the search
