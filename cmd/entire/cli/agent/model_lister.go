@@ -29,12 +29,8 @@ type ModelLister interface {
 
 // AsModelLister returns the agent as a ModelLister if it implements the
 // capability. Unlike AsTextGenerator this does not consult CapabilityDeclarer:
-// the model list is advisory only, so a plain type assertion is sufficient and
+// the model list is advisory only, so it resolves through builtinCapability and
 // keeps the external-agent capability protocol unchanged.
 func AsModelLister(ag Agent) (ModelLister, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	ml, ok := ag.(ModelLister)
-	return ml, ok
+	return builtinCapability[ModelLister](ag)
 }
