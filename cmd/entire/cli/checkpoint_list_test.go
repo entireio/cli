@@ -13,6 +13,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -157,6 +159,124 @@ func TestCheckpointListCmd_SessionWithPendingErrors(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "--session cannot be combined with --pending")
+}
+
+// TestCheckpointPendingListHuman_PrintsCheckpointID is the regression test for
+// the `--pending` text view dropping the checkpoint identifier: it rendered
+// eight leading spaces where the ID column belongs, so plain-text readers got a
+// date and a message they could not act on while `--pending --json` carried the
+// `id` all along. The two views must agree on identity (CLAUDE.md,
+// "Agent-Safe CLI Fallbacks").
+func TestCheckpointPendingListHuman_PrintsCheckpointID(t *testing.T) {
+	seedPendingCheckpoint(t)
+
+	// The JSON view is the reference for what identity exists.
+	var pending []pendingCheckpointJSON
+	require.NoError(t, json.Unmarshal([]byte(runListCmd(t, "--pending", "--json")), &pending))
+	require.Len(t, pending, 1, "seed must produce exactly one pending checkpoint")
+	require.NotEmpty(t, pending[0].ID, "seeded pending checkpoint must carry an id")
+
+	out := runListCmd(t, "--pending")
+	require.NotContains(t, out, "No pending checkpoints found.",
+		"seed must light up the pending dataset, or the assertions below pass vacuously")
+	require.Contains(t, out, pending[0].ID[:7],
+		"the --pending text view must print the checkpoint identifier the --pending --json view reports; got:\n%s", out)
+	require.True(t, strings.HasPrefix(strings.TrimRight(out, "\n"), pending[0].ID[:7]),
+		"the identifier belongs in the leading ID column, not buried mid-line; got:\n%s", out)
+}
+
+// TestPendingCheckpointLabel_RendersIdentityColumn pins the renderer itself:
+// every shape that HAS an identifier prints it in the leading column, and the
+// one shape that has none (a task record, which owns no commit) keeps the
+// column blank so rows stay aligned.
+func TestPendingCheckpointLabel_RendersIdentityColumn(t *testing.T) {
+	t.Parallel()
+
+	when := time.Date(2026, 9, 15, 19, 58, 0, 0, time.UTC)
+
+	tests := []struct {
+		name  string
+		point strategy.PendingCheckpoint
+		want  string
+	}{
+		{
+			name:  "shadow checkpoint prints its short sha",
+			point: strategy.PendingCheckpoint{ID: "6671c3028a10da9179896af8b1539babe8479d1b", Message: "Hi", Date: when},
+			want:  "6671c30 (2026-09-15 19:58) Hi",
+		},
+		{
+			name:  "logs-only point keeps its short sha",
+			point: strategy.PendingCheckpoint{ID: "abc123def4567890", Message: "user commit", Date: when, IsLogsOnly: true},
+			want:  "abc123d (2026-09-15 19:58) user commit",
+		},
+		{
+			name:  "task checkpoint with a sha prints it",
+			point: strategy.PendingCheckpoint{ID: "0f1e2d3c4b5a69788796a5b4c3d2e1f001234567", Message: "task step", Date: when, IsTaskCheckpoint: true},
+			want:  "0f1e2d3 (2026-09-15 19:58) [Task] task step",
+		},
+		{
+			name:  "task record without a commit keeps the column blank",
+			point: strategy.PendingCheckpoint{Message: "running subagent", Date: when, IsTaskCheckpoint: true},
+			want:  "        (2026-09-15 19:58) [Task] running subagent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, pendingCheckpointLabel(tt.point, false))
+		})
+	}
+
+	// The blank column is exactly as wide as a rendered identifier, so a mixed
+	// listing stays in one column.
+	withID := pendingCheckpointLabel(strategy.PendingCheckpoint{ID: "6671c3028a10da91", Message: "m", Date: when}, false)
+	withoutID := pendingCheckpointLabel(strategy.PendingCheckpoint{Message: "m", Date: when, IsTaskCheckpoint: true}, false)
+	require.Equal(t,
+		strings.Index(withID, "(2026"),
+		strings.Index(withoutID, "(2026"),
+		"rows with and without an identifier must align")
+}
+
+// seedPendingCheckpoint builds an enabled repo holding one live shadow-branch
+// checkpoint that `strategy.ListPendingCheckpoints` can see. That needs BOTH a
+// checkpoint in the ephemeral store AND session state pinned to the same base
+// commit — a raw ephemeral seed alone leaves the pending dataset empty.
+func seedPendingCheckpoint(t *testing.T) {
+	t.Helper()
+	repo, tmpDir := setupCheckpointListRepo(t)
+
+	const sessionID = "2026-09-15-pending-id-session"
+	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", sessionID)
+	require.NoError(t, os.MkdirAll(metadataDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, paths.PromptFileName), []byte("Hi"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644))
+
+	head, err := repo.Head()
+	require.NoError(t, err)
+	baseCommit := head.Hash().String()
+
+	store := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs())
+	_, err = store.Write(context.Background(), checkpoint.Step{
+		SessionID:         sessionID,
+		BaseCommit:        baseCommit,
+		ModifiedFiles:     []string{"test.txt"},
+		MetadataDir:       ".entire/metadata/" + sessionID,
+		CommitMessage:     "Hi",
+		AuthorName:        "Test",
+		AuthorEmail:       "test@test.com",
+		IsFirstCheckpoint: true,
+	})
+	require.NoError(t, err)
+
+	state := &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: baseCommit,
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+		StepCount:  1,
+	}
+	require.NoError(t, strategy.SaveSessionState(context.Background(), state))
 }
 
 // runListCmd executes `checkpoint list <args>` via the real cobra command and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -114,6 +115,27 @@ func hasMultipleSessions(points []strategy.PendingCheckpoint) bool {
 	return len(sessionIDs) > 1
 }
 
+// pendingIDColumnWidth is the width of the leading identifier column in the
+// `checkpoint list --pending` human view: a 7-character short sha plus one
+// separating space, so rows with and without an identifier stay aligned.
+const pendingIDColumnWidth = 8
+
+// pendingIDColumn renders the leading identifier column for one pending
+// checkpoint. Every point that HAS an identifier prints it — a plain-text row
+// with no identifier cannot be acted on (the agent-safe fallback rule in
+// CLAUDE.md), and the `--pending --json` view has always carried this same `id`.
+// Only a task record, which has no commit of its own, leaves the column blank.
+func pendingIDColumn(p strategy.PendingCheckpoint) string {
+	shortID := p.ID
+	if shortID == "" {
+		return strings.Repeat(" ", pendingIDColumnWidth)
+	}
+	if len(shortID) >= 7 {
+		shortID = shortID[:7]
+	}
+	return fmt.Sprintf("%-*s", pendingIDColumnWidth, shortID)
+}
+
 // pendingCheckpointLabel renders a single pending checkpoint as a display label for the
 // `checkpoint list --pending` human view. When hasMultipleSessions is true, a
 // sanitized session prompt is appended to help disambiguate concurrent
@@ -126,19 +148,16 @@ func pendingCheckpointLabel(p strategy.PendingCheckpoint, hasMultipleSessions bo
 		sessionLabel = fmt.Sprintf(" [%s]", tuiutil.SanitizeTerminalLabel(p.SessionPrompt))
 	}
 
-	switch {
-	case p.IsLogsOnly:
-		// Committed checkpoint - show commit sha (this is the real user commit)
-		shortID := p.ID
-		if len(shortID) >= 7 {
-			shortID = shortID[:7]
-		}
-		return fmt.Sprintf("%s (%s) %s%s", shortID, timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
-	case p.IsTaskCheckpoint:
-		// Task checkpoint (uncommitted) - no sha shown
-		return fmt.Sprintf("        (%s) [Task] %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
-	default:
-		// Shadow checkpoint (uncommitted) - no sha shown (internal commit)
-		return fmt.Sprintf("        (%s) %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
+	taskLabel := ""
+	if p.IsTaskCheckpoint {
+		taskLabel = "[Task] "
 	}
+
+	return fmt.Sprintf("%s(%s) %s%s%s",
+		pendingIDColumn(p),
+		timestamp,
+		taskLabel,
+		tuiutil.SanitizeTerminalLabel(p.Message),
+		sessionLabel,
+	)
 }

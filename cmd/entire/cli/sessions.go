@@ -704,10 +704,16 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 		fmt.Fprintf(w, "Turns:       %d\n", state.SessionTurnCount)
 	}
 
-	fmt.Fprintf(w, "Checkpoints: %d\n", state.StepCount)
+	// These two lines carry different meanings and must not share the word
+	// "checkpoint" unqualified: StepCount counts the checkpoints this session
+	// has saved that are NOT yet condensed (a commit resets it to 0), while
+	// LastCheckpointID names the most recent checkpoint that WAS condensed.
+	// Labelled "Checkpoints:" / "Checkpoint:" they read as a contradiction
+	// ("Checkpoints: 0" directly above "Checkpoint: <id>").
+	fmt.Fprintf(w, "Uncondensed: %s\n", pluralCheckpoints(state.StepCount))
 
 	if state.LastCheckpointID != "" {
-		fmt.Fprintf(w, "Checkpoint:  %s\n", state.LastCheckpointID)
+		fmt.Fprintf(w, "Condensed:   %s (most recent)\n", state.LastCheckpointID)
 	}
 
 	if t := totalTokens(state.TokenUsage); t > 0 {
