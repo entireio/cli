@@ -727,9 +727,9 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	// Listed commands appear with their audience.
 	for _, want := range []string{
 		"status", "trail", "checkpoint", "session", "why", "search",
-		"read-only except: explain",                     // checkpoint, one line
-		"read-only except: adopt, attach, resume, stop", // session, one line
-		"read-only: approvals, list, show, watch",       // trail: minority side named
+		"read-only except: explain",                       // checkpoint, one line
+		"read-only except: adopt, attach, resume, stop",   // session, one line
+		"read-only: approvals, list, show, status, watch", // trail: minority side named
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("listing missing %q:\n%s", want, out)

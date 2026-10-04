@@ -89,6 +89,8 @@ func newTrailCmd() *cobra.Command {
 	cmd.AddCommand(newTrailResumeCmd())
 	cmd.AddCommand(newTrailDeleteCmd())
 	cmd.AddCommand(newTrailFindingCmd())
+	cmd.AddCommand(newTrailStatusCmd())
+	cmd.AddCommand(newTrailLoopCmd())
 	cmd.AddCommand(newTrailWatchCmd())
 	cmd.AddCommand(newTrailApproveCmd())
 	cmd.AddCommand(newTrailRequestChangesCmd())
@@ -257,6 +259,8 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 		}
 	}
 	var mergeability *api.TrailMergeability
+	var monitors []api.TrailMonitor
+	var runners []api.TrailRunner
 	if detail != nil {
 		// A successful fetch means we authoritatively consulted the
 		// description, but it only supersedes the seeded list body when it
@@ -275,6 +279,18 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 		} else {
 			fmt.Fprintf(errW, "Warning: could not read trail mergeability: %v\n", merr)
 		}
+		// Monitors and runners are best-effort too: an undecodable value is
+		// left out with a warning rather than failing the command.
+		if mo, merr := detail.DecodeMonitors(); merr == nil {
+			monitors = mo
+		} else {
+			fmt.Fprintf(errW, "Warning: could not read trail monitors: %v\n", merr)
+		}
+		if ru, rerr := detail.DecodeRunners(); rerr == nil {
+			runners = ru
+		} else {
+			fmt.Fprintf(errW, "Warning: could not read trail runners: %v\n", rerr)
+		}
 	}
 	// The list body is the weaker source; carry the resolved description on the
 	// metadata so JSON callers read the same text the human view renders.
@@ -287,13 +303,18 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 		// detail-only mergeability snapshot is the one addition.
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(trailShowJSON{Metadata: m, Mergeability: toTrailMergeabilityJSON(mergeability)}); err != nil {
+		if err := enc.Encode(trailShowJSON{
+			Metadata:     m,
+			Mergeability: toTrailMergeabilityJSON(mergeability),
+			Monitors:     mapSlice(monitors, toTrailMonitorJSON),
+			Runners:      runners,
+		}); err != nil {
 			return fmt.Errorf("failed to encode JSON: %w", err)
 		}
 		return nil
 	}
 
-	printTrailDetails(w, m, m.URL, mergeability, trailDescriptionForDisplay(bodyText, descriptionLoaded))
+	printTrailDetails(w, m, m.URL, mergeability, monitors, trailDescriptionForDisplay(bodyText, descriptionLoaded))
 	return nil
 }
 
@@ -329,7 +350,7 @@ func resolveTrailBySelectorAtPath(ctx context.Context, client *api.Client, baseP
 
 // printTrailDetails renders the human `trail show` view. A nil mergeability
 // means the detail could not be loaded, and renders as unknown.
-func printTrailDetails(w io.Writer, m *trail.Metadata, webURL string, mergeability *api.TrailMergeability, bodyText string) {
+func printTrailDetails(w io.Writer, m *trail.Metadata, webURL string, mergeability *api.TrailMergeability, monitors []api.TrailMonitor, bodyText string) {
 	// Color the same fields as the list view (STATUS/PHASE/AUTHOR); everything
 	// else stays plain. Values are pre-colored, so alignment is unaffected.
 	styles := newStatusStyles(w)
@@ -388,6 +409,7 @@ func printTrailDetails(w io.Writer, m *trail.Metadata, webURL string, mergeabili
 	fmt.Fprintf(w, "  %s%s\n", label("Created: "), m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	fmt.Fprintf(w, "  %s%s\n", label("Updated: "), m.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	printTrailMergeability(w, styles, label, mergeability)
+	printTrailMonitors(w, styles, label, monitors)
 	if strings.TrimSpace(bodyText) != "" {
 		fmt.Fprintf(w, "\n%s\n%s\n", label("Description:"), bodyText)
 	}

@@ -157,6 +157,10 @@ func main() {
 		}
 
 		cancel()
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) && coded.ExitCode() > 0 {
+			os.Exit(coded.ExitCode())
+		}
 		os.Exit(1)
 	}
 	cancel() // Cleanup on successful exit

@@ -229,6 +229,23 @@ type trailShowJSON struct {
 	*trail.Metadata
 
 	Mergeability *trailMergeabilityJSON `json:"mergeability"`
+	// Monitors and Runners are detail-only; null when the detail could not be
+	// loaded or the server did not serve them.
+	Monitors []trailMonitorJSON `json:"monitors"`
+	Runners  []api.TrailRunner  `json:"runners"`
+}
+
+// trailMonitorJSON is one monitor plus its quality bucket (success, warning,
+// danger, neutral), computed with the web app's rule so scripts don't have to
+// re-implement it.
+type trailMonitorJSON struct {
+	api.TrailMonitor
+
+	Quality string `json:"quality"`
+}
+
+func toTrailMonitorJSON(v api.TrailMonitor) trailMonitorJSON {
+	return trailMonitorJSON{TrailMonitor: v, Quality: v.Quality()}
 }
 
 type trailMergeabilityJSON struct {

@@ -171,6 +171,10 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		}
 		// Lifecycle event — use the generic dispatcher
 		hookErr = DispatchLifecycleEvent(ctx, ag, event)
+		// Opt-in only: a no-op unless the user ran `entire trail loop`.
+		if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNameStop {
+			maybeBlockStopForTrailLoop(ctx, cmd.OutOrStdout(), event.SessionID, defaultTrailLoopDeps())
+		}
 	} else if agentName == agent.AgentNameClaudeCode && hookName == claudecode.HookNamePostTodo {
 		// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
 		hookErr = handleClaudeCodePostTodo(ctx)
