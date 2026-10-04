@@ -98,12 +98,14 @@ func TestReviewCheckpointContext_UsesTargetRepoCheckpointRemotes(t *testing.T) {
 
 	localRef := "refs/heads/" + paths.MetadataBranchName
 	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "rev-parse", localRef)
+	cmd.Env = testutil.GitIsolatedEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	testutil.GitUpdateRef(t, repoRoot, "refs/remotes/upstream/"+paths.MetadataBranchName, strings.TrimSpace(string(out)))
 	cmd = exec.CommandContext(t.Context(), "git", "-C", repoRoot, "update-ref", "-d", localRef)
+	cmd.Env = testutil.GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("delete local checkpoint ref: %v\n%s", err, out)
 	}
