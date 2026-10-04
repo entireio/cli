@@ -37,6 +37,11 @@ const (
 // disk (`entire upgrade` → entire-upgrade).
 const selfUpdatePluginName = "upgrade"
 
+// investigatePluginName is the plugin that used to be a built-in command here
+// (`entire investigate` → entire-investigate), which is why the dispatcher
+// offers to install it rather than reporting an unknown command.
+const investigatePluginName = "investigate"
+
 // onDemandInstallPluginNames are the missing plugins the dispatcher offers to
 // install rather than falling through to Cobra's unknown-command path. Kept
 // beside the other plugin names the dispatcher special-cases, so the set is
@@ -55,7 +60,7 @@ const selfUpdatePluginName = "upgrade"
 // into a failure that the fall-through would have reported more plainly.
 //
 //nolint:gochecknoglobals // package-level set; a slice because there is no const slice in Go.
-var onDemandInstallPluginNames = []string{"graph", "investigate"}
+var onDemandInstallPluginNames = []string{"graph", investigatePluginName}
 
 // offersOnDemandInstall reports whether a missing plugin by this name should
 // be offered for installation.
