@@ -184,7 +184,9 @@ worktree.Reset(&git.ResetOptions{
 cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
 ```
 
-See `CheckoutBranch()` in `git_operations.go` for an example.
+See `CheckoutBranch()` in `git_operations.go` for an example. Branch checkout
+must pass `--no-overwrite-ignore` so a target tree cannot silently replace an
+ignored, untracked local path.
 
 #### Branch-name validation
 
