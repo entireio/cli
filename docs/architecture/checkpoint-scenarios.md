@@ -532,8 +532,12 @@ sequenceDiagram
     Note over G: PostCommit hook
     G->>SB: Read accumulated shadow state
     G->>R: Commit checkpoint subtree at refs/.../<shard>/<id>
-    G->>PQ: Enqueue the ref (best-effort)
-    G->>SB: Delete shadow branch
+    G->>PQ: Enqueue the ref
+    alt enqueue succeeds
+        G->>SB: Delete shadow branch
+    else enqueue fails after local ref update
+        G-->>U: Report partial failure; preserve retryable session state
+    end
 
     Note over U: Later...
     U->>G: git push
@@ -550,7 +554,7 @@ sequenceDiagram
 
 ### Key Points
 - Condensation writes one commit per checkpoint under `refs/entire/checkpoints/<shard>/<id>`; there is no shared branch tip to serialize on.
-- Enqueue is best-effort — a checkpoint that lands locally but fails to enqueue is still correct locally and re-enqueues on its next write.
+- A queue failure after the ref update is reported as a partial failure: the checkpoint remains correct and readable locally, retryable session state is preserved, and the next write to that checkpoint re-enqueues it.
 - Pushes are never forced; a diverged ref is recovered by fetch + replay so the remote commit is preserved as an ancestor.
 - Failed or interrupted pushes leave refs queued for the next pre-push — the queue degrades toward "will retry", never toward silent loss.
 - Reads route by ID kind across both backends, so a repo mid-migration reads hex (branch) and ULID (refs) checkpoints transparently.
