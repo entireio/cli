@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -98,6 +100,12 @@ func reviewTrailFindingInputs(profileName, verdict string) []api.TrailReviewComm
 	}
 	items := splitReviewVerdictFindings(verdict)
 	if len(items) == 0 {
+		// A clean verdict is review metadata, not a finding. Posting it as a
+		// severity-less whole-change comment makes the Trail show an
+		// "Unspecified finding" even though the review found nothing.
+		if isCleanReviewVerdict(verdict) {
+			return nil
+		}
 		// The verdict spans the whole change, so it uses "verdict" kind:
 		// the API requires a valid granularity and rejects an empty value.
 		return []api.TrailReviewCommentInput{reviewTrailFindingInputWithKind(profileName, verdict, "verdict")}
@@ -109,6 +117,27 @@ func reviewTrailFindingInputs(profileName, verdict string) []api.TrailReviewComm
 		inputs = append(inputs, input)
 	}
 	return inputs
+}
+
+func isCleanReviewVerdict(verdict string) bool {
+	line := strings.ToLower(strings.TrimSpace(lastNonEmptyLine(verdict)))
+	line = strings.TrimSpace(strings.TrimLeft(line, "#>"))
+	line = strings.TrimLeft(line, "*_`")
+	rest, ok := strings.CutPrefix(line, "approve")
+	if !ok {
+		return false
+	}
+	if rest != "" {
+		first, _ := utf8.DecodeRuneInString(rest)
+		if !unicode.IsSpace(first) && !unicode.IsPunct(first) && !unicode.IsSymbol(first) {
+			return false
+		}
+	}
+
+	rest = strings.TrimLeftFunc(rest, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
+	})
+	return !strings.HasPrefix(rest, "with nits")
 }
 
 func reviewTrailFindingInputsFromJSON(verdict string) ([]api.TrailReviewCommentInput, bool) {

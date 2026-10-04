@@ -139,13 +139,47 @@ func TestReviewTrailFindingInputsAcceptsRunnerStyleJSONLastLine(t *testing.T) {
 	}
 }
 
-func TestReviewTrailFindingInputsSingleVerdictUnchanged(t *testing.T) {
-	inputs := reviewTrailFindingInputs("general", "APPROVE - no actionable findings.")
-	if len(inputs) != 1 {
-		t.Fatalf("inputs = %d, want 1", len(inputs))
+func TestReviewTrailFindingInputsCleanVerdictProducesNoFindings(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"single verdict":        "APPROVE - no actionable findings.",
+		"agent fallback":        "## codex\n\nI checked the scoped diff and all call sites.\napprove — no actionable defects found.",
+		"period separator":      "approve. no actionable findings.",
+		"plain-language reason": "approve with no actionable findings",
+		"bold verdict":          "**approve** — no actionable findings.",
+		"punctuation boundary":  "approve! looks good.",
 	}
-	if inputs[0].Body == nil || !strings.Contains(*inputs[0].Body, "Review verdict (profile: general)") {
-		t.Fatalf("single body = %v, want verdict/profile header", inputs[0].Body)
+	for name, verdict := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if inputs := reviewTrailFindingInputs("general", verdict); len(inputs) != 0 {
+				t.Fatalf("inputs = %d, want 0 for a clean review", len(inputs))
+			}
+		})
+	}
+}
+
+func TestReviewTrailFindingInputsPreservesUnstructuredNonCleanVerdict(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"request changes":          "REQUEST CHANGES - missing input validation.",
+		"approve with nits":        "APPROVE WITH NITS - rename the confusing variable.",
+		"punctuated approve nits":  "APPROVE: WITH NITS - rename the confusing variable.",
+		"non-verdict approve word": "APPROVED pending another review.",
+	}
+	for name, verdict := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			inputs := reviewTrailFindingInputs("general", verdict)
+			if len(inputs) != 1 {
+				t.Fatalf("inputs = %d, want 1", len(inputs))
+			}
+			if inputs[0].Body == nil || !strings.Contains(*inputs[0].Body, "Review verdict (profile: general)") {
+				t.Fatalf("single body = %v, want verdict/profile header", inputs[0].Body)
+			}
+		})
 	}
 }
 
