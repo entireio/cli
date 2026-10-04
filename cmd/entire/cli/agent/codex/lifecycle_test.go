@@ -178,6 +178,7 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.Equal(t, "test-uuid", event.SessionID)
 	require.Equal(t, rolloutPath, event.SessionRef)
 	require.Equal(t, "gpt-4.1", event.Model)
+	require.Equal(t, "Done creating file.", event.TaskDescription)
 }
 
 func TestParseHookEvent_TurnHooksIgnoreChildRollout(t *testing.T) {
@@ -505,6 +506,7 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 		"the subagent's own rollout")
 	require.True(t, ev.ProvisionalSubagentStop)
 	require.False(t, ev.Final)
+	require.Equal(t, "done", ev.TaskDescription)
 }
 
 // TestParseHookEvent_SubagentStop_NullTranscripts covers the nullable fields: Codex
@@ -532,4 +534,5 @@ func TestParseHookEvent_SubagentStop_NullTranscripts(t *testing.T) {
 	require.NotNil(t, ev)
 	require.Empty(t, ev.SessionRef, "a null transcript_path must not become \"null\"")
 	require.Empty(t, ev.SubagentTranscriptPath, "a null agent_transcript_path must not become \"null\"")
+	require.Empty(t, ev.TaskDescription, "a null last_assistant_message must not become \"null\"")
 }
