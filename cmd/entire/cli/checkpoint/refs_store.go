@@ -143,20 +143,62 @@ func (s *gitRefsStore) Write(ctx context.Context, req WriteRequest) error {
 // pre-fetches and verifies the ref's presence itself (refreshCheckpoint)
 // before writing, so the local-only probe is safe there too.
 func (s *gitRefsStore) refBase(cid id.CheckpointID) (plumbing.Hash, *object.Tree, error) {
-	refName, err := RefName(cid)
-	if err != nil {
-		return plumbing.ZeroHash, nil, err
-	}
-	ref, err := s.repo.Reference(refName, true)
+	ref, err := s.resolveLocalRef(cid)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
 		return plumbing.ZeroHash, nil, nil // no ref yet → new checkpoint (orphan)
 	}
 	if err != nil {
 		// A real lookup failure (IO/corruption), not an absent ref: surface it
 		// rather than silently starting a fresh orphan history over the ref.
-		return plumbing.ZeroHash, nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+		return plumbing.ZeroHash, nil, err
 	}
 	return s.refTip(cid, ref)
+}
+
+// resolveLocalRef resolves cid's checkpoint ref from LOCAL refs alone, trying
+// the canonical RefName spelling first and then the case-folded one.
+//
+// The fallback is not defensive tidying. On a case-insensitive-but-case-
+// preserving filesystem a ref is written THROUGH the canonical name but STORED
+// under whichever spelling already named its shard bucket, and the two agree
+// only while the ref is loose, because there the filesystem resolves the
+// canonical name onto the folded directory for us. git pack-refs — which git gc
+// --auto runs on its own — then moves the ref into packed-refs under its
+// stored, folded name, where lookup is an exact string match and the canonical
+// name stops resolving. Without the fallback the checkpoint reads as absent:
+// Read reports ErrCheckpointNotFound for an intact checkpoint, and refBase
+// hands the writer a ZeroHash parent, restarting the checkpoint's history as an
+// orphan under a second ref. See FoldedRefName for why exactly one extra
+// lookup is exhaustive rather than a heuristic.
+//
+// It reports plumbing.ErrReferenceNotFound only when NEITHER spelling resolves,
+// so callers keep distinguishing absence from an IO failure.
+func (s *gitRefsStore) resolveLocalRef(cid id.CheckpointID) (*plumbing.Reference, error) {
+	refName, err := RefName(cid)
+	if err != nil {
+		return nil, err
+	}
+	ref, err := s.repo.Reference(refName, true)
+	if err == nil {
+		return ref, nil
+	}
+	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+	}
+	folded, ok := FoldedRefName(cid)
+	if !ok {
+		return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
+	}
+	foldedRef, foldedErr := s.repo.Reference(folded, true)
+	if foldedErr == nil {
+		return foldedRef, nil
+	}
+	if !errors.Is(foldedErr, plumbing.ErrReferenceNotFound) {
+		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", folded, foldedErr)
+	}
+	// Absent under both spellings: report the canonical miss, so the error
+	// names the ref the caller asked for.
+	return nil, err //nolint:wrapcheck // absent; caller distinguishes via errors.Is
 }
 
 // refBaseForBackfill resolves like refBase, but a ref missing locally is
@@ -221,21 +263,74 @@ func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.Refe
 	}
 }
 
+// writeRefName is the ref spelling a write must target: the one an existing ref
+// already uses — which may be the case-folded shard, see resolveLocalRef — and
+// the canonical RefName for a checkpoint that has none.
+//
+// Writing through the canonical name unconditionally is what forks a folded
+// checkpoint in two once packing has taken away the filesystem's case-
+// insensitive resolution: refBase finds the old ref and hands back its tip,
+// while the CAS update creates a SECOND ref at the canonical spelling. The
+// compare-and-swap cannot succeed there either, since git resolves the expected
+// old value under the name being updated and that name holds nothing.
+//
+// A resolution failure falls back to the canonical name rather than failing the
+// write: the checkpoint write is the operation that matters, and a real IO
+// problem resurfaces immediately in updatePersistentRef's CAS.
+//
+// The push queue is enqueued with the name this returns, which is deliberate:
+// it is the spelling that actually resolves locally, so the refspec works, and
+// another clone reads whichever spelling arrives back through the same fallback.
+func (s *gitRefsStore) writeRefName(cid id.CheckpointID) (plumbing.ReferenceName, error) {
+	canonical, err := RefName(cid)
+	if err != nil {
+		return "", err
+	}
+	ref, err := s.resolveLocalRef(cid)
+	if err != nil {
+		return canonical, nil //nolint:nilerr // absent or unreadable → write the canonical name
+	}
+	return ref.Name(), nil
+}
+
 func (s *gitRefsStore) updateCheckpointRef(
 	ctx context.Context,
 	cid id.CheckpointID,
 	base func() (plumbing.Hash, *object.Tree, error),
 	build func(parentHash plumbing.Hash, existing *object.Tree) (plumbing.Hash, error),
 ) error {
-	refName, err := RefName(cid)
+	// base() can FETCH. The backfill paths pass refBaseForBackfill, which pulls
+	// a checkpoint that exists only on the remote and materializes its ref
+	// locally under whichever spelling the remote publishes — so the write name
+	// has to be chosen AFTER it, not before. Chosen before, writeRefName finds
+	// nothing locally and picks the canonical spelling; the CAS then targets a
+	// name the fetch never populated while expecting the fetched ref's tip, so
+	// every retry misses and the backfill dies with the budget exhausted.
+	//
+	// The primed result is carried into the builder instead of re-read, so this
+	// costs no extra fetch — it matters because a genuinely absent checkpoint
+	// pays a remote probe per spelling, and re-reading would double it. Taking
+	// it before the lock is safe because the CAS is what makes it safe: a ref
+	// that moved in between fails the compare, and the retry re-reads under the
+	// lock like every attempt after the first.
+	primedHash, primedTree, err := base()
 	if err != nil {
 		return err
 	}
+	refName, err := s.writeRefName(cid)
+	if err != nil {
+		return err
+	}
+	primeUsed := false
 	err = updatePersistentRef(ctx, s.repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
-		parentHash, existing, baseErr := base()
-		if baseErr != nil {
-			return plumbing.ZeroHash, plumbing.ZeroHash, baseErr
+		parentHash, existing := primedHash, primedTree
+		if primeUsed {
+			var baseErr error
+			if parentHash, existing, baseErr = base(); baseErr != nil {
+				return plumbing.ZeroHash, plumbing.ZeroHash, baseErr
+			}
 		}
+		primeUsed = true
 		newHash, buildErr := build(parentHash, existing)
 		return newHash, parentHash, buildErr
 	})
@@ -381,15 +476,15 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 	if err != nil {
 		return nil, err
 	}
-	ref, err := s.repo.Reference(refName, true)
+	ref, err := s.resolveLocalRef(cid)
 	if err == nil {
 		return ref, nil
 	}
 	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil, fmt.Errorf("resolve checkpoint ref %s: %w", refName, err)
+		return nil, err
 	}
 	if s.refFetcher == nil {
-		return nil, err //nolint:wrapcheck // genuinely absent; caller maps ErrReferenceNotFound to ErrCheckpointNotFound
+		return nil, err
 	}
 	s.fetchFailureMu.Lock()
 	priorFailure := s.fetchFailure
@@ -399,14 +494,40 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 		// of this operation, remembered so the outage is paid once.
 		return nil, fmt.Errorf("fetch checkpoint ref %s: skipped, an earlier checkpoint-ref fetch already failed in this operation: %w", refName, priorFailure)
 	}
-	if fetchErr := s.refFetcher(ctx, refName); fetchErr != nil {
+	// Both spellings are asked for, canonical first, because the REMOTE can
+	// hold either one. batchPushRefs pushes <ref>:<ref>, keeping the local and
+	// remote spellings deliberately identical, so a machine whose shard bucket
+	// was folded publishes the checkpoint under the folded name — and a clone
+	// that has neither spelling locally (a fresh one, or any case-sensitive
+	// filesystem) would otherwise ask only for the canonical name, be told
+	// "absent", and never see an intact checkpoint. It also strands a
+	// remote-list discovery stub, which ParseRef accepts from the folded remote
+	// name and which then has nothing to hydrate from.
+	//
+	// The second ask costs one extra round-trip on a genuine miss, which is why
+	// it runs on the absence signal alone: a transport failure still returns
+	// immediately, and is still memoized so an outage is paid once.
+	candidates := []plumbing.ReferenceName{refName}
+	if folded, ok := FoldedRefName(cid); ok {
+		candidates = append(candidates, folded)
+	}
+	for _, candidate := range candidates {
+		fetchErr := s.refFetcher(ctx, candidate)
+		if fetchErr == nil {
+			// Re-resolve after a successful fetch. ErrReferenceNotFound here
+			// means the remote genuinely has no such checkpoint; anything else
+			// is a real error. The re-resolve is tolerant for the same reason
+			// the first one is: the fetch writes through the name it asked for
+			// and lands in the folded bucket like any other write.
+			return s.resolveLocalRef(cid)
+		}
 		if errors.Is(fetchErr, plumbing.ErrReferenceNotFound) {
-			// The fetcher probed the remote and it genuinely lacks this ref
-			// (remote.FetchCheckpointRef's absence signal) — absence, not a
-			// failure, and per-ref, so it is not memoized.
+			// The fetcher probed the remote and it genuinely lacks this
+			// spelling (remote.FetchCheckpointRef's absence signal) — absence,
+			// not a failure, and per-ref, so it is not memoized.
 			logging.Debug(ctx, "git-refs: remote has no such checkpoint ref",
-				slog.String("ref", refName.String()))
-			return nil, plumbing.ErrReferenceNotFound
+				slog.String("ref", candidate.String()))
+			continue
 		}
 		// Memoize only network verdicts: a cancellation originating from the
 		// CALLER's context says nothing about the remote and must not poison
@@ -419,16 +540,10 @@ func (s *gitRefsStore) resolveRefMaybeFetch(ctx context.Context, cid id.Checkpoi
 			s.fetchFailureMu.Unlock()
 		}
 		logging.Debug(ctx, "git-refs: on-demand checkpoint ref fetch failed",
-			slog.String("ref", refName.String()), slog.String("error", fetchErr.Error()))
-		return nil, fmt.Errorf("fetch checkpoint ref %s: %w", refName, fetchErr)
+			slog.String("ref", candidate.String()), slog.String("error", fetchErr.Error()))
+		return nil, fmt.Errorf("fetch checkpoint ref %s: %w", candidate, fetchErr)
 	}
-	// Re-resolve after a successful fetch. ErrReferenceNotFound here means the
-	// remote genuinely has no such checkpoint; anything else is a real error.
-	ref, err = s.repo.Reference(refName, true)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // ErrReferenceNotFound (absent) or a real error; caller distinguishes via errors.Is
-	}
-	return ref, nil
+	return nil, plumbing.ErrReferenceNotFound
 }
 
 // sessionTree resolves the FetchingTree for one session within a checkpoint ref.
@@ -513,10 +628,27 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	defer refs.Close()
 
 	var checkpoints []CheckpointInfo
-	seen := make(map[id.CheckpointID]struct{})
+	// indexByID's keys are exactly the checkpoint IDs in checkpoints, and its
+	// values index them. Both halves are relied on: the keys answer "is this
+	// checkpoint already listed" for the folded-spelling collapse below and for
+	// remote discovery, and the index lets a canonical ref replace the entry a
+	// folded one contributed. Keeping that in one map is deliberate — a
+	// separate presence set has to be written on exactly the paths that append,
+	// and the two drifting apart lists a checkpoint twice.
+	indexByID := make(map[id.CheckpointID]int)
 	err = refs.ForEach(func(ref *plumbing.Reference) error {
 		cid, ok := ParseRef(ref.Name())
 		if !ok {
+			return nil
+		}
+		// One checkpoint can be named by two refs — the canonical spelling and
+		// the case-folded one — in a repo a pre-fix CLI forked before
+		// resolveLocalRef and writeRefName existed. Both parse to this same ID,
+		// so list it once, preferring the canonical spelling because that is
+		// the one resolveLocalRef tries first: a listing that disagreed with
+		// the read would show one commit and explain another.
+		prior, dup := indexByID[cid]
+		if dup && !isCanonicalRefName(cid, ref.Name()) {
 			return nil
 		}
 		commit, commitErr := s.repo.CommitObject(ref.Hash())
@@ -527,8 +659,13 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 		if treeErr != nil {
 			return nil //nolint:nilerr // skip unreadable refs, keep listing
 		}
-		checkpoints = append(checkpoints, readCommittedInfoFromCheckpointTree(cid, tree))
-		seen[cid] = struct{}{}
+		info := readCommittedInfoFromCheckpointTree(cid, tree)
+		if dup {
+			checkpoints[prior] = info
+			return nil
+		}
+		indexByID[cid] = len(checkpoints)
+		checkpoints = append(checkpoints, info)
 		return nil
 	})
 	if err != nil {
@@ -536,7 +673,7 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 	}
 
 	if s.remoteRefLister != nil && remoteListDiscoveryEnabled(ctx) {
-		checkpoints = s.appendRemoteDiscovered(ctx, checkpoints, seen)
+		checkpoints = s.appendRemoteDiscovered(ctx, checkpoints, indexByID)
 	}
 
 	sortCheckpointInfosByRecency(checkpoints)
@@ -544,13 +681,15 @@ func (s *gitRefsStore) List(ctx context.Context) ([]CheckpointInfo, error) {
 }
 
 // appendRemoteDiscovered enumerates checkpoint refs on the configured checkpoint
-// remote and appends any that are not present locally (tracked in seen) as
-// not-yet-hydrated CheckpointInfos. It never fetches objects: the ref name
+// remote and appends any that are not present locally (tracked in indexByID) as
+// not-yet-hydrated CheckpointInfos. A remote listing both spellings of one
+// checkpoint's shard is deduplicated by the same map, so the second is skipped
+// exactly as a locally-present one is. It never fetches objects: the ref name
 // yields the checkpoint ID, and a ULID ID yields its creation time, so a
 // discovered checkpoint sorts and displays correctly before its first read
 // hydrates the rest. Best-effort: an enumeration failure logs, warns on stderr,
 // and returns the unchanged local list.
-func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints []CheckpointInfo, seen map[id.CheckpointID]struct{}) []CheckpointInfo {
+func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints []CheckpointInfo, indexByID map[id.CheckpointID]int) []CheckpointInfo {
 	remoteRefs, err := s.remoteRefLister(ctx)
 	if err != nil {
 		logging.Warn(ctx, "git-refs: remote checkpoint enumeration failed; listing local refs only",
@@ -565,10 +704,10 @@ func (s *gitRefsStore) appendRemoteDiscovered(ctx context.Context, checkpoints [
 		if !ok {
 			continue
 		}
-		if _, dup := seen[cid]; dup {
+		if _, dup := indexByID[cid]; dup {
 			continue
 		}
-		seen[cid] = struct{}{}
+		indexByID[cid] = len(checkpoints)
 		checkpoints = append(checkpoints, remoteDiscoveredInfo(cid))
 	}
 	return checkpoints
@@ -683,13 +822,9 @@ func (s *gitRefsStore) GetCheckpointAuthor(ctx context.Context, checkpointID id.
 	if err := ctx.Err(); err != nil {
 		return Author{}, err //nolint:wrapcheck // Propagating context cancellation
 	}
-	refName, err := RefName(checkpointID)
+	ref, err := s.resolveLocalRef(checkpointID)
 	if err != nil {
-		return Author{}, nil //nolint:nilerr // invalid ID → unknown author
-	}
-	ref, err := s.repo.Reference(refName, true)
-	if err != nil {
-		return Author{}, nil //nolint:nilerr // no ref → unknown author
+		return Author{}, nil //nolint:nilerr // invalid ID or no ref → unknown author
 	}
 	commit, err := s.repo.CommitObject(ref.Hash())
 	if err != nil {
