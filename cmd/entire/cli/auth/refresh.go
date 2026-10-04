@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/entireio/auth-go/tokenmanager"
@@ -32,13 +33,58 @@ const defaultSavedTokenTTL = time.Hour
 //
 // Access token lives at `service`/`handle` (with the "|<expiry>" encoding
 // the rest of the CLI reads); the refresh token lives raw at
-// `service:refresh`/`handle`.
+// `service:refresh`/`handle`. With Secure Enclave protection on, the access
+// slot instead holds a sealed bundle of both tokens (see protected.go).
 type contextTokenStore struct {
 	service string
 	handle  string
+	issuer  string
+
+	mu sync.Mutex
+	// promptAction names what the caller is doing, for the unseal dialog.
+	promptAction string
+
+	// opMu serializes LoadTokens, SaveTokens and DeleteTokens and guards
+	// lastRefresh, so a save always sees the load that preceded it.
+	opMu sync.Mutex
+	// lastRefresh is the refresh token from the last sealed load, carried
+	// forward when a save omits one ("leave as-is").
+	lastRefresh string
 }
 
-func (s contextTokenStore) LoadTokens(string) (tokens.TokenSet, error) {
+func (s *contextTokenStore) setPromptAction(action string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.promptAction = action
+}
+
+func (s *contextTokenStore) reason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	action := s.promptAction
+	if action == "" {
+		action = defaultPromptAction()
+	}
+	return promptReason(action, s.issuer, s.handle)
+}
+
+// currentRefresh returns the refresh token to carry forward when a save
+// omits one. The slot's current ciphertext is authoritative: if another
+// process rotated it since our load, its bundle is what must survive, and
+// this process only knows that bundle if it already unsealed it. The last
+// loaded value is the fallback. Caller holds opMu.
+func (s *contextTokenStore) currentRefresh() string {
+	if enc, err := tokenstore.Get(s.service, s.handle); err == nil && isSealed(enc) {
+		if b, ok := cachedBundle(enc); ok {
+			return b.Refresh
+		}
+	}
+	return s.lastRefresh
+}
+
+func (s *contextTokenStore) LoadTokens(string) (tokens.TokenSet, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	enc, err := tokenstore.Get(s.service, s.handle)
 	// Map "no credential stored" to auth-go's sentinel so tokenmanager
 	// reports "not logged in" rather than a hard store failure.
@@ -47,6 +93,17 @@ func (s contextTokenStore) LoadTokens(string) (tokens.TokenSet, error) {
 	}
 	if err != nil {
 		return tokens.TokenSet{}, fmt.Errorf("read access token: %w", err)
+	}
+	if isSealed(enc) {
+		b, expiresAt, err := openSealedSlot(enc, s.issuer, s.handle, s.reason())
+		if err != nil {
+			return tokens.TokenSet{}, err
+		}
+		s.lastRefresh = b.Refresh
+		return tokens.TokenSet{AccessToken: b.Access, RefreshToken: b.Refresh, ExpiresAt: expiresAt}, nil
+	}
+	if err := refusePlaintextWhileProtected(); err != nil {
+		return tokens.TokenSet{}, err
 	}
 	access, expiresAt := tokenstore.DecodeTokenWithExpiration(enc)
 	// A missing refresh slot is fine (login predating offline_access) — treat
@@ -64,15 +121,44 @@ func (s contextTokenStore) LoadTokens(string) (tokens.TokenSet, error) {
 	}, nil
 }
 
-func (s contextTokenStore) SaveTokens(_ string, t tokens.TokenSet) error {
+func (s *contextTokenStore) SaveTokens(_ string, t tokens.TokenSet) error {
 	if t.AccessToken == "" {
 		return errors.New("save tokens: empty access token")
 	}
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	expiresIn := int64(defaultSavedTokenTTL.Seconds())
 	if !t.ExpiresAt.IsZero() {
 		if secs := int64(time.Until(t.ExpiresAt).Seconds()); secs > 0 {
 			expiresIn = secs
 		}
+	}
+	// Protected: seal both tokens into the access slot (no prompt) and keep
+	// the refresh slot empty. A key that exists but cannot load fails the
+	// save rather than falling back to plaintext.
+	sl, err := protection.sealer()
+	if err == nil {
+		refresh := t.RefreshToken
+		if refresh == "" {
+			refresh = s.currentRefresh()
+		}
+		enc, err := sealSlot(sl, tokenBundle{Issuer: s.issuer, Handle: s.handle, Access: t.AccessToken, Refresh: refresh}, expiresIn)
+		if err != nil {
+			return err
+		}
+		// Clear any plaintext refresh token before writing the bundle that
+		// carries it, matching storeLoginTokens and sealContext: a crash
+		// between the two must not leave a token usable without the dialog.
+		if err := tokenstore.Delete(tokenstore.RefreshService(s.service), s.handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("clear refresh slot: %w", err)
+		}
+		if err := tokenstore.Set(s.service, s.handle, enc); err != nil {
+			return fmt.Errorf("store sealed tokens: %w", err)
+		}
+		return nil
+	}
+	if !errors.Is(err, ErrProtectionOff) {
+		return err
 	}
 	// Persist the rotated refresh token BEFORE the access token. The server
 	// single-use-rotates refresh tokens, so a partial write must never leave
@@ -98,7 +184,10 @@ func (s contextTokenStore) SaveTokens(_ string, t tokens.TokenSet) error {
 	return nil
 }
 
-func (s contextTokenStore) DeleteTokens(string) error {
+func (s *contextTokenStore) DeleteTokens(string) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.lastRefresh = ""
 	_ = tokenstore.Delete(tokenstore.RefreshService(s.service), s.handle) //nolint:errcheck // best-effort; the access-token delete below is what matters
 	if err := tokenstore.Delete(s.service, s.handle); err != nil {
 		return fmt.Errorf("delete access token: %w", err)
@@ -115,27 +204,28 @@ func (s contextTokenStore) DeleteTokens(string) error {
 //
 // transport carries the caller's TLS configuration; allowInsecureHTTP permits
 // an http:// core/resource for loopback/dev.
-func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, allowInsecureHTTP bool) (*tokenmanager.Manager, error) {
+func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, allowInsecureHTTP bool) (*tokenmanager.Manager, *contextTokenStore, error) {
 	if c == nil {
-		return nil, errors.New("nil context")
+		return nil, nil, errors.New("nil context")
 	}
 	if c.KeychainService == "" || c.Handle == "" {
-		return nil, fmt.Errorf("context %q has no keychain slot", c.Name)
+		return nil, nil, fmt.Errorf("context %q has no keychain slot", c.Name)
 	}
+	store := &contextTokenStore{service: c.KeychainService, handle: c.Handle, issuer: c.CoreURL}
 	mgr, err := tokenmanager.New(tokenmanager.Config{
 		Issuer:            strings.TrimRight(c.CoreURL, "/"),
 		ClientID:          oauthClientID,
 		RefreshPath:       oauthTokenPath,
-		Store:             contextTokenStore{service: c.KeychainService, handle: c.Handle},
+		Store:             store,
 		Transport:         transport,
 		AllowInsecureHTTP: allowInsecureHTTP,
 		UserAgent:         oauthClientID,
 		LockDir:           tokenManagerLockDir(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("init token manager for context %q: %w", c.Name, err)
+		return nil, nil, fmt.Errorf("init token manager for context %q: %w", c.Name, err)
 	}
-	return mgr, nil
+	return mgr, store, nil
 }
 
 // tokenManagerLockDir picks the directory holding auth-go's cross-process
@@ -246,20 +336,23 @@ func contextUnreachableError(c *contexts.Context, coreURL string, err error) err
 type RefreshingLoginCredential struct {
 	context *contexts.Context
 	manager *tokenmanager.Manager
+	store   *contextTokenStore
 }
 
 // NewRefreshingLoginCredential returns a refreshable login credential for
 // context c.
 func NewRefreshingLoginCredential(c *contexts.Context, transport http.RoundTripper, allowInsecureHTTP bool) (*RefreshingLoginCredential, error) {
-	mgr, err := newContextTokenManager(c, transport, allowInsecureHTTP)
+	mgr, store, err := newContextTokenManager(c, transport, allowInsecureHTTP)
 	if err != nil {
 		return nil, err
 	}
-	return &RefreshingLoginCredential{context: c, manager: mgr}, nil
+	return &RefreshingLoginCredential{context: c, manager: mgr, store: store}, nil
 }
 
-// Token returns a locally fresh login JWT, refreshing it when needed.
+// Token returns a locally fresh login JWT, refreshing it when needed. A
+// prompt action carried by ctx (WithPromptAction) names the dialog.
 func (c *RefreshingLoginCredential) Token(ctx context.Context) (string, error) {
+	c.store.setPromptAction(promptActionFrom(ctx))
 	tok, err := c.manager.Refresh(ctx)
 	return c.result(tok, err)
 }
@@ -267,6 +360,7 @@ func (c *RefreshingLoginCredential) Token(ctx context.Context) (string, error) {
 // ForceRefresh re-mints the login JWT after staleToken was rejected by the
 // server despite still appearing locally valid.
 func (c *RefreshingLoginCredential) ForceRefresh(ctx context.Context, staleToken string) (string, error) {
+	c.store.setPromptAction(promptActionFrom(ctx))
 	tok, err := c.manager.ForceRefresh(ctx, staleToken)
 	return c.result(tok, err)
 }

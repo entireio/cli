@@ -99,6 +99,12 @@ func run(args []string) int {
 	defer stop()
 
 	skipTLS := os.Getenv("ENTIRE_TLS_SKIP_VERIFY") == "true"
+	if skipTLS && auth.TokensProtected() {
+		// A protected bearer must not cross a verification-free hop: the
+		// env var is agent-settable and a MITM proxy would read the token.
+		skipTLS = false
+		fmt.Fprintln(os.Stderr, "git-remote-entire: ENTIRE_TLS_SKIP_VERIFY ignored: tokens are Secure Enclave protected")
+	}
 
 	nodeCfg := replicas.Resolve(parsedURL)
 
@@ -120,12 +126,19 @@ func run(args []string) int {
 	}
 
 	creds, onUnauthorized, err := resolveCreds(ctx, parsedURL, skipTLS, httpClient)
+	if err == nil && auth.TokensProtected() {
+		// Once this process has passed the dialog, serve its unlock to the
+		// pre-push hook's nested pushes so one push is one dialog.
+		var stopUnlock func()
+		creds, stopUnlock = serveUnlockAfterFirstToken(ctx, creds)
+		defer stopUnlock()
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		return 128
 	}
 
-	setAuth := setAuthWithProvider(creds)
+	setAuth := setAuthWithProvider(creds, parsedURL.Host)
 
 	var onNodeFailed func(string)
 	if nodeCfg.Caching() {
@@ -207,15 +220,20 @@ func refreshingProvider(credential refreshableCredential) (credentialProvider, f
 	return provider, onUnauthorized
 }
 
-func setAuthWithProvider(provider credentialProvider) transport.SetAuthFunc {
+// setAuthWithProvider attaches the bearer to classified git requests.
+// remoteHost is the host from the user's entire:// URL, named in the token
+// dialog; req.URL.Host may be a replica node the transport picked.
+func setAuthWithProvider(provider credentialProvider, remoteHost string) transport.SetAuthFunc {
 	return func(req *http.Request) error {
 		// Refuse to attach credentials to a request we can't classify as a
 		// known git smart-HTTP endpoint. Sending a bearer to an unexpected
 		// endpoint is never right.
-		if gitActionFromRequest(req) == "" {
+		action := gitActionFromRequest(req)
+		if action == "" {
 			return fmt.Errorf("refusing to attach credentials: %s %s is not a recognised git smart-HTTP endpoint", req.Method, req.URL.Path)
 		}
-		token, err := provider(req.Context())
+		// Protected tokens prompt on read; the dialog names this action.
+		token, err := provider(auth.WithPromptAction(req.Context(), gitPromptAction(action, remoteHost)))
 		if err != nil {
 			return fmt.Errorf("resolve git credential: %w", err)
 		}
@@ -412,6 +430,63 @@ func coreTrusted(coreURL string, trusted []string) bool {
 	return false
 }
 
+// serveUnlockAfterFirstToken wraps provider so the first successful token
+// resolution starts the per-push unlock server. The returned stop is safe
+// to call whether or not the server started.
+func serveUnlockAfterFirstToken(ctx context.Context, provider credentialProvider) (credentialProvider, func()) {
+	var (
+		once    sync.Once
+		mu      sync.Mutex
+		stop    = func() {}
+		stopped bool
+	)
+	wrapped := func(reqCtx context.Context) (string, error) {
+		token, err := provider(reqCtx)
+		if err != nil {
+			return "", err
+		}
+		once.Do(func() {
+			// The process context, not the request's: the server outlives
+			// this request and ends with the helper.
+			s, serr := auth.StartUnlockServer(ctx)
+			if serr != nil {
+				debuglog.Printf("per-push unlock not served: %v", serr)
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if stopped {
+				// Shutdown raced the first token: do not leak the server.
+				s()
+				return
+			}
+			stop = s
+		})
+		return token, nil
+	}
+	return wrapped, func() {
+		mu.Lock()
+		stopped = true
+		s := stop
+		mu.Unlock()
+		s()
+	}
+}
+
+// Classified smart-HTTP actions.
+const (
+	gitActionPush = "push"
+	gitActionPull = "pull"
+)
+
+// gitPromptAction phrases a classified action for the token dialog.
+func gitPromptAction(action, host string) string {
+	if action == gitActionPush {
+		return "git push to " + host
+	}
+	return "git fetch from " + host
+}
+
 // gitActionFromRequest classifies a smart-HTTP request as "pull" or "push".
 // The bearer doesn't vary by action, but the classification still gates
 // which endpoints may carry credentials (and labels the timing logs).
@@ -422,17 +497,17 @@ func gitActionFromRequest(req *http.Request) string {
 	case http.MethodPost:
 		switch {
 		case strings.HasSuffix(path, "/git-receive-pack"):
-			return "push"
+			return gitActionPush
 		case strings.HasSuffix(path, "/git-upload-pack"):
-			return "pull"
+			return gitActionPull
 		}
 	case http.MethodGet:
 		if strings.HasSuffix(path, "/info/refs") {
 			switch req.URL.Query().Get("service") {
 			case "git-receive-pack":
-				return "push"
+				return gitActionPush
 			case "git-upload-pack":
-				return "pull"
+				return gitActionPull
 			}
 		}
 	}

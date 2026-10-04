@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -33,6 +34,12 @@ const coreAuthSessionsPath = "/api/auth/tokens"
 // from. Two branches render it — a stored credential and ENTIRE_TOKEN — so it
 // is named once rather than spelled at each.
 const authTokenRowLabel = "token"
+
+// Status row shown when tokens are sealed to the Secure Enclave.
+const (
+	authProtectionRowLabel = "protection"
+	authProtectionValue    = "Secure Enclave (Touch ID on every use)"
+)
 
 // activeSessionsRowLabel labels the session-count row. It says "active" to
 // match the section heading and `logout --everywhere`, which both describe the
@@ -137,6 +144,8 @@ func newAuthCmd() *cobra.Command {
 	cmd.AddCommand(newAuthTokenCmd())
 	cmd.AddCommand(newAuthContextsCmd())
 	cmd.AddCommand(newAuthSwitchCmd())
+	experimental.Register(cmd, newAuthProtectCmd())
+	experimental.Register(cmd, newAuthUnprotectCmd())
 	return cmd
 }
 
@@ -398,8 +407,13 @@ func resolveStatusTarget(ctx context.Context, listContexts contextsProvider, res
 		if c.Name != current || c.CoreURL == "" {
 			continue
 		}
-		if tok, terr := resolveLogin(ctx, c); terr == nil && tok != "" {
+		tok, terr := resolveLogin(ctx, c)
+		if terr == nil && tok != "" {
 			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
+		}
+		if auth.PromptDeclined(terr) {
+			// The user said no once; do not ask again via the raw slot.
+			return statusTarget{}, terr
 		}
 		if tok, terr := auth.LoginTokenForContext(c); terr == nil && tok != "" {
 			return statusTarget{coreURL: c.CoreURL, token: tok, activeContext: c.Name, totalContexts: total, distinctServers: distinct}, nil
@@ -701,6 +715,9 @@ func writeAuthStatusText(w io.Writer, d authStatusData, opts authStatusOptions) 
 		rows = append(rows, authContextsCountRow(sty, t.totalContexts))
 	}
 	rows = append(rows, explainRow{Label: authTokenRowLabel, Value: tokenstore.BackendDescription()})
+	if auth.TokensProtected() {
+		rows = append(rows, explainRow{Label: authProtectionRowLabel, Value: authProtectionValue})
+	}
 	if row, ok := authSessionsRow(sty, d.sessions, d.sessionErr, opts.Sessions, d.current, deadline != ""); ok {
 		rows = append(rows, row)
 	}
@@ -772,7 +789,9 @@ type authStatusJSON struct {
 	// TokenSource is the same description the text view prints; EnvToken is the
 	// field to branch on, since an env bearer has no revocable session.
 	TokenSource string `json:"token_source,omitempty"`
-	EnvToken    bool   `json:"env_token,omitempty"`
+	// TokenProtection names the at-rest guard on stored tokens, when any.
+	TokenProtection string `json:"token_protection,omitempty"`
+	EnvToken        bool   `json:"env_token,omitempty"`
 	// CurrentSessionID and ExpiresAt are present only when the caller's own
 	// session was identified; absent means unidentified, never "no expiry".
 	CurrentSessionID string `json:"current_session_id,omitempty"`
@@ -837,6 +856,9 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 			out.TokenSource = auth.EnvTokenVar + " environment variable"
 		} else {
 			out.TokenSource = tokenstore.BackendDescription()
+			if auth.TokensProtected() {
+				out.TokenProtection = authProtectionValue
+			}
 		}
 	}
 	if d.invalid {
