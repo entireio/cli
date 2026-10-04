@@ -2,18 +2,68 @@ package checkpoint
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 )
+
+// maxCheckpointBlobBytes caps a single git-blob read from a checkpoint tree.
+// It matches agent.MaxChunkSize, the cap the checkpoint store already writes
+// transcripts under, so any blob this store wrote is readable here; a larger
+// blob means the tree was tampered with, mis-chunked, or written by an
+// incompatible producer, and reading it should fail loudly rather than buffer
+// an unbounded, potentially attacker-controlled amount of memory.
+//
+// Checkpoint trees are not always locally authored: they can be fetched from
+// a shared or pushed remote (entire/checkpoints/v1, or a per-checkpoint ref),
+// which any collaborator with checkpoint-push access — or a compromised or
+// malicious remote — controls the bytes of. This mirrors the cap the HTTP
+// checkpoint reader already enforces (checkpoint_api_reader.go's
+// maxAPITranscriptBytes) for the equivalent read over the network.
+const maxCheckpointBlobBytes = agent.MaxChunkSize
+
+// ErrCheckpointBlobTooLarge is returned by readBlobContents when a blob
+// exceeds maxCheckpointBlobBytes. Callers that would otherwise treat a
+// content-read failure as "field absent, keep going" must check for this
+// specific error and fail loudly instead — an oversized blob is a signal a
+// tree was tampered with or corrupted, not a normal missing-file case, and
+// must never be swallowed into an empty/partial result that looks like
+// nothing went wrong.
+var ErrCheckpointBlobTooLarge = errors.New("checkpoint blob exceeds read limit")
+
+// readBlobContents reads file's content as a string, capped at
+// maxCheckpointBlobBytes. It is the checkpoint-tree equivalent of
+// checkpoint_api_reader.go's capped HTTP transcript read: LimitReader+1 so a
+// blob exactly at the cap is not mistaken for an oversized one, and a blob
+// over the cap is rejected with ErrCheckpointBlobTooLarge rather than
+// silently truncated to the first maxCheckpointBlobBytes bytes and returned
+// as if that were the whole file.
+func readBlobContents(file *object.File) (string, error) {
+	r, err := file.Reader()
+	if err != nil {
+		return "", fmt.Errorf("open blob %s: %w", file.Name, err)
+	}
+	defer r.Close()
+
+	data, err := io.ReadAll(io.LimitReader(r, maxCheckpointBlobBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read blob %s: %w", file.Name, err)
+	}
+	if len(data) > maxCheckpointBlobBytes {
+		return "", fmt.Errorf("%w: %s is larger than %d MB", ErrCheckpointBlobTooLarge, file.Name, maxCheckpointBlobBytes>>20)
+	}
+	return string(data), nil
+}
 
 // BlobFetchFunc fetches missing blob objects by hash from a remote.
 type BlobFetchFunc func(ctx context.Context, hashes []plumbing.Hash) error
