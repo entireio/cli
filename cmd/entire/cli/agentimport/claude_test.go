@@ -11,10 +11,13 @@ import (
 func TestClaudeDiscover_LookbackAndFilter(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	repoRoot := t.TempDir()
 	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	// Every file records repoRoot as its cwd (in a Claude transcript line), so only
+	// the lookback and session filters decide what is discovered.
 	writeAged := func(name string, age time.Duration) {
 		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(`{"type":"user","cwd":`+fixtureCwdJSON(t, repoRoot)+`}`+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		mt := now.Add(-age)
@@ -27,7 +30,7 @@ func TestClaudeDiscover_LookbackAndFilter(t *testing.T) {
 	writeAged("skip.txt", 1*time.Hour)
 
 	imp := claudeImporter{}
-	got, err := imp.Discover("", dir, now, nil)
+	got, err := imp.Discover(repoRoot, dir, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +39,7 @@ func TestClaudeDiscover_LookbackAndFilter(t *testing.T) {
 	}
 
 	writeAged("abc123.jsonl", 1*24*time.Hour)
-	got, err = imp.Discover("", dir, now, []string{"abc123"})
+	got, err = imp.Discover(repoRoot, dir, now, []string{"abc123"})
 	if err != nil {
 		t.Fatal(err)
 	}

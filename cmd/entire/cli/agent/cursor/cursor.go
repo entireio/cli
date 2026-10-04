@@ -112,7 +112,7 @@ func (c *CursorAgent) GetSessionDir(repoPath string) (string, error) {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	projectDir := sanitizePathForCursor(repoPath)
+	projectDir := SanitizePathForCursor(repoPath)
 	return filepath.Join(homeDir, ".cursor", "projects", projectDir, "agent-transcripts"), nil
 }
 
@@ -245,10 +245,10 @@ func (c *CursorAgent) FormatResumeCommand(_ string) string {
 	return "Open this project in Cursor."
 }
 
-// sanitizePathForCursor converts a path to Cursor's project directory format.
+// SanitizePathForCursor converts a path to Cursor's project directory format.
 var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
-func sanitizePathForCursor(path string) string {
+func SanitizePathForCursor(path string) string {
 	path = strings.TrimLeft(path, "/")
 	return nonAlphanumericRegex.ReplaceAllString(path, "-")
 }

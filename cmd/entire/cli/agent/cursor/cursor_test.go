@@ -651,7 +651,7 @@ func TestDetectPresence_WithCursorDir(t *testing.T) {
 	}
 }
 
-// --- sanitizePathForCursor ---
+// --- SanitizePathForCursor ---
 
 func TestSanitizePathForCursor(t *testing.T) {
 	t.Parallel()
@@ -671,9 +671,9 @@ func TestSanitizePathForCursor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			result := sanitizePathForCursor(tt.input)
+			result := SanitizePathForCursor(tt.input)
 			if result != tt.expected {
-				t.Errorf("sanitizePathForCursor(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("SanitizePathForCursor(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}

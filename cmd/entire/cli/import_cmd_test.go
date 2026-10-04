@@ -21,7 +21,7 @@ func TestImportClaudeCode_DryRunReportsCounts(t *testing.T) {
 
 	claudeDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(claudeDir, "s.jsonl"),
-		[]byte(`{"type":"user","uuid":"u1","message":{"role":"user","content":"hi"}}`+"\n"), 0o644); err != nil {
+		[]byte(`{"type":"user","uuid":"u1","cwd":`+importFixtureCwdJSON(t, repoDir)+`,"message":{"role":"user","content":"hi"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

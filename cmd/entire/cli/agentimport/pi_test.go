@@ -11,10 +11,13 @@ import (
 func TestPiDiscover_LookbackFilterAndSessionID(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	repoRoot := t.TempDir()
 	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	// Every file records repoRoot as its cwd (in a Pi session header line), so only
+	// the lookback and session filters decide what is discovered.
 	writeAged := func(name string, age time.Duration) {
 		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(`{"type":"session","id":"s0","cwd":`+fixtureCwdJSON(t, repoRoot)+`}`+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		mt := now.Add(-age)
@@ -26,7 +29,7 @@ func TestPiDiscover_LookbackFilterAndSessionID(t *testing.T) {
 	writeAged("2026-06-20T00-00-00-000Z_sessA.jsonl", 5*24*time.Hour)
 	writeAged("2026-04-01T00-00-00-000Z_old.jsonl", 60*24*time.Hour)
 
-	got, err := piImporter{}.Discover("", dir, now, nil)
+	got, err := piImporter{}.Discover(repoRoot, dir, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +37,7 @@ func TestPiDiscover_LookbackFilterAndSessionID(t *testing.T) {
 		t.Fatalf("lookback/session-id wrong: %v", got)
 	}
 
-	got, err = piImporter{}.Discover("", dir, now, []string{"sessA"})
+	got, err = piImporter{}.Discover(repoRoot, dir, now, []string{"sessA"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,8 @@
 package agentimport
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -79,5 +81,49 @@ func jsonlSessionResolver(ext string, deriveID func(stem string) string) session
 		}
 		stem := strings.TrimSuffix(e.Name(), ext)
 		return deriveID(stem), filepath.Join(dir, e.Name()), true
+	}
+}
+
+// repoScopedJSONLResolver is jsonlSessionResolver restricted to transcripts
+// whose recorded cwd places them in repoRoot. Claude Code, Pi, and Factory
+// derive their per-project directory from a lossy path encoding (e.g. both
+// /w/acme/foo-bar and /w/acme-foo/bar become -w-acme-foo-bar), so one
+// directory can hold sessions from several repositories; the directory alone
+// does not prove a transcript belongs to this repo.
+func repoScopedJSONLResolver(ext string, deriveID func(stem string) string, repoRoot string) sessionResolver {
+	resolve := jsonlSessionResolver(ext, deriveID)
+	return func(dir string, e os.DirEntry) (string, string, bool) {
+		sessionID, path, ok := resolve(dir, e)
+		if !ok || !repoMatches(firstRecordedCwd(path), repoRoot) {
+			return "", "", false
+		}
+		return sessionID, path, true
+	}
+}
+
+// firstRecordedCwd returns the first non-empty top-level "cwd" field in a JSONL
+// transcript, or "" when none is found or the file is unreadable (callers then
+// treat the transcript as not belonging to the repo). Claude records cwd on
+// every message line; Pi and Factory record it on their leading session line.
+// Lines are read with bufio.Reader rather than bufio.Scanner because transcript
+// lines have no size bound.
+func firstRecordedCwd(path string) string {
+	f, err := os.Open(path) //nolint:gosec // path discovered under the configured session dir
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	r := bufio.NewReader(f)
+	for {
+		line, readErr := r.ReadBytes('\n')
+		var rec struct {
+			Cwd string `json:"cwd"`
+		}
+		if len(line) > 0 && json.Unmarshal(line, &rec) == nil && rec.Cwd != "" {
+			return rec.Cwd
+		}
+		if readErr != nil {
+			return ""
+		}
 	}
 }

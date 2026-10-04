@@ -353,12 +353,25 @@ func (f fixedDiscoverImporter) Discover(string, string, time.Time, []string) ([]
 	return f.sessions, nil
 }
 
+// importFixtureCwdJSON returns cwd as a JSON string literal for splicing a
+// "cwd" field into hand-written transcript fixtures; json.Marshal escapes
+// Windows backslashes that naive concatenation would leave invalid.
+func importFixtureCwdJSON(t *testing.T, cwd string) string {
+	t.Helper()
+	b, err := json.Marshal(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 // writeImportProgressFixtureSession writes a 2-turn Claude Code transcript
-// fixture, matching the format agentimport's claude importer parses.
-func writeImportProgressFixtureSession(t *testing.T, dir, name string) {
+// fixture, matching the format agentimport's claude importer parses. It
+// records cwd so discovery attributes the session to the repo at cwd.
+func writeImportProgressFixtureSession(t *testing.T, dir, name, cwd string) {
 	t.Helper()
 	content := strings.Join([]string{
-		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"user","uuid":"u1","cwd":` + importFixtureCwdJSON(t, cwd) + `,"timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
 		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
 		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
 	}, "\n") + "\n"
@@ -381,8 +394,8 @@ func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
 	ctx := context.Background()
 
 	sessionsDir := t.TempDir()
-	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
-	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl", dir)
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl", dir)
 
 	var claudeImp agentimport.Importer
 	for _, imp := range agentimport.All() {
@@ -483,8 +496,8 @@ func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
 	ctx := context.Background()
 
 	sessionsDir := t.TempDir()
-	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
-	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl", dir)
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl", dir)
 
 	var claudeImp agentimport.Importer
 	for _, imp := range agentimport.All() {
@@ -550,7 +563,7 @@ func TestRunSelectedImports_InterruptedStopsBeforeNextAgent(t *testing.T) {
 	defer cancel()
 
 	sessionsDir := t.TempDir()
-	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl", dir)
 
 	var claudeImp agentimport.Importer
 	for _, imp := range agentimport.All() {

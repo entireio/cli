@@ -22,14 +22,15 @@ func (piImporter) Name() string { return string(agent.AgentNamePi) }
 func (piImporter) AgentType() types.AgentType { return agent.AgentTypePi }
 
 // Discover returns Pi transcript files for the repo modified within the lookback
-// window. The session ID is the <uuid> suffix of the <timestamp>_<uuid> file
+// window whose session header cwd is inside repoRoot (see
+// repoScopedJSONLResolver). The session ID is the <uuid> suffix of the <timestamp>_<uuid> file
 // stem (Pi timestamps use dashes, so the first underscore is the separator).
 func (piImporter) Discover(repoRoot, overridePath string, now time.Time, sessionFilter []string) ([]SessionFile, error) {
 	dir, err := resolveDir(repoRoot, overridePath, "pi", (&pi.PiAgent{}).GetSessionDir)
 	if err != nil {
 		return nil, err
 	}
-	return discoverSessionFiles(dir, now, sessionFilter, jsonlSessionResolver(".jsonl", piSessionID))
+	return discoverSessionFiles(dir, now, sessionFilter, repoScopedJSONLResolver(".jsonl", piSessionID, repoRoot))
 }
 
 // piSessionID extracts the <uuid> portion of a "<timestamp>_<uuid>" file stem.
