@@ -859,7 +859,7 @@ func TestDeleteTempFiles_ToleratesVanishedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deleted, failed := deleteTempFiles(ctx, []string{"present.json", ".export-ses_x.json-42"})
+	deleted, failed := deleteTempFiles(ctx, []string{"present.json", ".ses_x.json.42.tmp"})
 
 	if len(failed) != 0 {
 		t.Errorf("deleteTempFiles reported %d failure(s) for an already-gone file: %+v", len(failed), failed)
