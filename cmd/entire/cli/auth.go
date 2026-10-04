@@ -424,6 +424,11 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 	if err != nil {
 		return nil, fmt.Errorf("fetch profile: %w", err)
 	}
+	return profileFromMe(me), nil
+}
+
+// profileFromMe reads the caller's identity out of a GET /me response.
+func profileFromMe(me *coreapi.GetMeOutputBody) *authProfile {
 	p := &authProfile{
 		Provider:       me.Auth.Provider,
 		ProviderUserID: me.Auth.ProviderUserId,
@@ -461,7 +466,7 @@ func defaultFetchProfile(ctx context.Context, coreURL, token string) (*authProfi
 		p.DisplayName, _ = reg.DisplayName.Get()
 		p.Email, _ = reg.Email.Get()
 	}
-	return p, nil
+	return p
 }
 
 // defaultListAuthSessions lists the user's active login sessions on coreURL.
