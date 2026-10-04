@@ -457,44 +457,29 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 
 // handleLifecycleTurnStart handles turn start: captures pre-prompt state,
 // ensures strategy setup, initializes session.
-// entireTrailContextInjection is the one-time, model-facing pointer Entire
-// injects on the first turn of a session. It points at `entire agent-help` for
-// the full flag/subcommand surface — fetched on demand so that surface never goes
-// stale here as it grows — and adds only what an agent must know even if it never
-// drills in: commits auto-capture checkpoints, and setup/destructive commands
-// belong to the user. It also names the auto-detected repo (from the
-// already-loaded session scope, no IO) and the standing rule that the agent is
-// inside the repo and must never ask the user for the repo name. Kept terse: it
-// costs context-window tokens on the first turn of every session.
-//
-// Deliberately NOT here: per-task command recommendations. An earlier revision
-// urged `entire why <file>:<line>` and `entire checkpoint search` "before large
-// edits". A census of 963 agent transcripts on a heavy-use machine found zero
-// invocations of either against 25 calls to the agent-help pointer above, so the
-// recommendation only ever cost tokens. It also mis-framed a
-// sometimes-appropriate query as an always-do step. Which commands suit a given
-// task is agent-help's job, where it is pulled on demand and grouped by who
-// should initiate the command (see agentHelpAudience); this string carries only
-// invariants that hold on every turn of every session.
+// entireTrailContextInjection is the one-time, model-facing trail guide Entire
+// injects on the first turn of a session. It explains the current-branch trail
+// workflow, points at trail-specific agent help for the live command surface,
+// and notes that trail commands infer the target repo from origin. It deliberately
+// avoids unrelated Entire features so the injection stays focused on trails.
 func entireTrailContextInjection(scope trailEnablementScope) string {
 	repo := ""
 	if scope.Forge != "" && scope.Owner != "" && scope.Repo != "" {
 		repo = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
 	}
 	var b strings.Builder
-	b.WriteString("Entire is enabled for this repo. Run `entire agent-help` to see what entire does and which subcommand to use, then `entire agent-help <command>` for that command's exact, current flags. ")
-	b.WriteString("Commits automatically capture the AI session as a checkpoint, so never create checkpoints by hand — just commit normally. Leave setup and destructive commands (enable, disable, clean, auth) to the user. ")
+	b.WriteString("Entire Trails is enabled for this repo. A trail ties together the context for a branch. Start with `entire trail show` to inspect the current branch's trail; if none exists, use `entire trail create`. Use `entire trail update` to keep the trail current, `entire trail finding` to manage agent findings, and `entire trail watch` to follow activity. Run `entire agent-help trail` to see all trail commands, then `entire agent-help trail <subcommand>` for exact, current flags. ")
 	// Mirror agentHelpRepoBlock's defense-in-depth: this string is injected raw
 	// into the agent's model context (no escaping), so a repo key carrying control
 	// characters (e.g. an <sessionID>.trail-scope.json cache written by a pre-fix
 	// binary, or tampered) degrades to the generic message rather than reaching
 	// that sink.
 	if repo != "" && strings.IndexFunc(repo, unicode.IsControl) < 0 {
-		b.WriteString("This repo is auto-detected from the git origin remote as ")
+		b.WriteString("Trail commands auto-detect this repo as ")
 		b.WriteString(repo)
-		b.WriteString("; you are already inside it, so never ask the user for the repo name.")
+		b.WriteString(" from the git origin remote; omit `--repo` unless targeting a different repo.")
 	} else {
-		b.WriteString("Entire auto-detects the repo from the git origin remote, so never ask the user for the repo name.")
+		b.WriteString("Trail commands auto-detect the repo from the git origin remote; omit `--repo` unless targeting a different repo.")
 	}
 	return b.String()
 }
