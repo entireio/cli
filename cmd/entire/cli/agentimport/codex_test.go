@@ -110,3 +110,87 @@ func TestCodexSplitTurns_NonUserResponseItemIsNotATurn(t *testing.T) {
 		t.Fatalf("only the user message starts a turn; want 1, got %d", len(turns))
 	}
 }
+
+func TestCodexSplitTurns_ExtractsPairedGitCommitSHAs(t *testing.T) {
+	t.Parallel()
+	full := []byte(codexSession("s1", "/work/myrepo",
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"commit it"}]}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-1","input":"git status && git commit -m 'first'"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":[{"type":"input_text","text":"Process exited with code 0.\nFinal output:"},{"type":"input_text","text":"[topic fe71aa6] first"},{"type":"input_text","text":"exit_code=0"}]}}`,
+		`not valid json {{{`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-2","input":"git -C /work/myrepo commit --amend --no-edit"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-2","output":"[topic aabbccd] first"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}}`,
+	))
+
+	turns, err := codexImporter{}.SplitTurns(SessionFile{Path: filepath.Join(t.TempDir(), "r.jsonl"), SessionID: "s1"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("want 2 turns, got %d", len(turns))
+	}
+	want := []string{"fe71aa6", "aabbccd"}
+	if strings.Join(turns[0].CommitSHAs, ",") != strings.Join(want, ",") {
+		t.Fatalf("turn0 CommitSHAs = %v, want %v", turns[0].CommitSHAs, want)
+	}
+	if len(turns[1].CommitSHAs) != 0 {
+		t.Fatalf("turn1 CommitSHAs = %v, want empty", turns[1].CommitSHAs)
+	}
+}
+
+func TestCodexCommitSHAsInRange_RejectsUnpairedFailedAndUnrelatedHex(t *testing.T) {
+	t.Parallel()
+	raw := splitRawLines([]byte(strings.Join([]string{
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"status","input":"git status"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"status","output":"deadbeef"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"failed","input":"git commit -m failed"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"failed","output":{"exit_code":1,"output":"[topic badc0de] failed"}}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"unpaired","input":"git commit -m unpaired"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"other","output":"[topic cafebabe] wrong call"}}`,
+	}, "\n")))
+	if got := codexCommitSHAsInRange(raw, 0, len(raw)); len(got) != 0 {
+		t.Fatalf("CommitSHAs = %v, want empty", got)
+	}
+}
+
+func TestCodexCommitSHAsInRange_CommandBoundaries(t *testing.T) {
+	t.Parallel()
+	raw := splitRawLines([]byte(strings.Join([]string{
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"quoted-c","input":"git -C '/work/my repo' commit -m ok"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"quoted-c","output":[{"type":"input_text","text":"[topic 1234567] ok"}]}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"word","input":"echo git commit"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"word","output":"[topic 7654321] echoed"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"quoted","input":"printf 'x; git commit -m wrong'"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"quoted","output":"[topic abcdef0] quoted"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"escaped","input":"printf x\\; git commit -m wrong"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"escaped","output":"[topic fedcba0] escaped"}}`,
+	}, "\n")))
+	want := []string{"1234567"}
+	if got := codexCommitSHAsInRange(raw, 0, len(raw)); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("CommitSHAs = %v, want %v", got, want)
+	}
+}
+
+func TestCodexSplitTurns_ExecEnvelopeVariants(t *testing.T) {
+	t.Parallel()
+	full := []byte(codexSession("s1", "/work/myrepo",
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"commit both"}]}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"fn","arguments":"{\"cmd\":\"git commit -m function\"}"}}`,
+		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"fn","output":"Process exited with code 0.\n[topic 1111111] function"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"js","input":"const r = await tools.exec_command({cmd:\"git status && git commit -m wrapped\",workdir:\"/work/myrepo\"}); text(r.output);"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"js","output":[{"type":"input_text","text":"[topic 2222222] wrapped"}]}}`,
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"call_id\":\"dynamic\",\"input\":\"await tools.exec_command({cmd:`git commit -m ${message}`})\"}}",
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"dynamic","output":"[topic 3333333] dynamic"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"other-object","input":"await tools.exec_command({workdir:\"/work/myrepo\"}); const unrelated = {cmd:\"git commit -m wrong\"}"}}`,
+		`{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"other-object","output":"[topic 4444444] wrong"}}`,
+	))
+	turns, err := codexImporter{}.SplitTurns(SessionFile{Path: filepath.Join(t.TempDir(), "r.jsonl"), SessionID: "s1"}, full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"1111111", "2222222"}
+	if len(turns) != 1 || strings.Join(turns[0].CommitSHAs, ",") != strings.Join(want, ",") {
+		t.Fatalf("CommitSHAs = %v, want %v", turns[0].CommitSHAs, want)
+	}
+}
