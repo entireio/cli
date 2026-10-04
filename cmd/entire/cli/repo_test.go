@@ -116,41 +116,6 @@ func TestParseVisibility(t *testing.T) {
 	}
 }
 
-func TestRepoDetailRow(t *testing.T) {
-	t.Parallel()
-
-	t.Run("includes the entire:// remote", func(t *testing.T) {
-		t.Parallel()
-		row := repoDetailRow(coreapi.Repo{
-			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
-			Name:            "web",
-			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
-			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
-			Path:            coreapi.NewOptString("acme/web"),
-			State:           coreapi.NewOptString("active"),
-		})
-		if len(row) != len(repoDetailColumns) {
-			t.Fatalf("row has %d cells, want %d (one per column)", len(row), len(repoDetailColumns))
-		}
-		if want := "entire://aws-us-east-2.entire.io/acme/web"; row[len(row)-1] != want {
-			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], want)
-		}
-	})
-
-	t.Run("shows - when the remote is not yet resolvable", func(t *testing.T) {
-		t.Parallel()
-		row := repoDetailRow(coreapi.Repo{
-			ID:              "01KS6KFJR2XS6PZ188MVYE07AN",
-			Name:            "web",
-			OwningProjectId: "01KS6KFJR2XS6PZ188MVYE07AP",
-			ClusterHost:     coreapi.NewOptString("aws-us-east-2.entire.io"),
-		})
-		if row[len(row)-1] != "-" {
-			t.Errorf("REMOTE cell = %q, want %q", row[len(row)-1], "-")
-		}
-	})
-}
-
 func TestRepoCreateOutput_StampsRemote(t *testing.T) {
 	t.Parallel()
 	repo := &coreapi.Repo{
@@ -513,6 +478,17 @@ func serveProjectRepos(t *testing.T, pages []coreapi.ListProjectReposOutputBody)
 	recCh := make(chan recordedRequest, len(pages))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// A ULID --project needs one GetProject to recover the NAME, which is
+		// what the /et/<project>/<repo> column is built from.
+		if r.URL.Path == "/api/v1/projects/"+testProjectULID {
+			if err := printJSON(w, &coreapi.Project{
+				ID: testProjectULID, Name: "widgets", OwnerId: "01OWNER",
+				OwnerType: coreapi.ProjectOwnerTypeOrg, Region: "us",
+			}); err != nil {
+				t.Errorf("encode project: %v", err)
+			}
+			return
+		}
 		if r.URL.Path != "/api/v1/projects/"+testProjectULID+"/repos" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -732,16 +708,27 @@ func TestRepoList_GroupedFlagHelp(t *testing.T) {
 // Not parallel: swaps the package-level activeCoreClient seam via runCoreCmd.
 func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	const repoULID = "0123456789ABCDEFGHJKMNPQR5"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := printJSON(w, &coreapi.Repo{ID: repoULID, Name: "web", OwningProjectId: ulidProjectWidgets}); err != nil {
-			t.Errorf("encode repo: %v", err)
+		// `repo visibility get` is the vehicle: it still binds --project, and
+		// is a plain read. The cluster/native-mirror cases are kept so the fake
+		// also serves a view if one is added back here.
+		var body any = &coreapi.Repo{ID: repoULID, Name: "web", OwningProjectId: ulidProjectWidgets,
+			Visibility: coreapi.NewOptString("private")}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/native-mirrors"):
+			body = &coreapi.ListNativeMirrorsOutputBody{}
+		case r.URL.Path == testClustersPath:
+			body = &coreapi.ListClustersOutputBody{}
+		}
+		if err := printJSON(w, body); err != nil {
+			t.Errorf("encode response: %v", err)
 		}
 	}))
 	t.Cleanup(srv.Close)
 
 	t.Run("a ULID ref warns that --project is ignored", func(t *testing.T) {
-		stdout, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID, "--project", "not-this-project")
+		stdout, stderr, err := runCoreCmd(t, newRepoVisibilityGetCmd, srv.URL, repoULID, "--project", "not-this-project")
 		require.NoError(t, err, "the command must still succeed")
 		require.Contains(t, stdout, repoULID, "the repo must still be shown")
 		require.Contains(t, stderr, "--project")
@@ -751,13 +738,13 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 	t.Run("an explicit empty --project still warns", func(t *testing.T) {
 		// Changed(), not a non-empty value: --project "" is still the user
 		// saying something about this repo's project, and it is still ignored.
-		_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID, "--project", "")
+		_, stderr, err := runCoreCmd(t, newRepoVisibilityGetCmd, srv.URL, repoULID, "--project", "")
 		require.NoError(t, err)
 		require.Contains(t, stderr, "ignored")
 	})
 
 	t.Run("a ULID ref without the flag says nothing", func(t *testing.T) {
-		_, stderr, err := runCoreCmd(t, newRepoViewCmd, srv.URL, repoULID)
+		_, stderr, err := runCoreCmd(t, newRepoVisibilityGetCmd, srv.URL, repoULID)
 		require.NoError(t, err)
 		require.NotContains(t, stderr, "ignored")
 	})
@@ -767,8 +754,10 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 		// warning rides on bindRepoProjectFlag so it cannot be wired for some
 		// and missed for others. Asserting the PreRunE exists is what pins
 		// that, without standing up a server per command.
+		// `repo view` is deliberately absent: it takes the /et/<project>/<repo>
+		// path and nothing else, so there is no bare name for --project to
+		// scope and no flag to warn about.
 		for name, newCmd := range map[string]func() *cobra.Command{
-			"repo view":              newRepoViewCmd,
 			"repo edit":              newRepoEditCmd,
 			"repo delete":            newRepoDeleteCmd,
 			"repo visibility get":    newRepoVisibilityGetCmd,
@@ -781,6 +770,26 @@ func TestRepoProjectFlagRedundancyWarning(t *testing.T) {
 			require.NotNilf(t, cmd.PreRunE, "%s must carry the redundancy check", name)
 		}
 	})
+}
+
+// TestRepoView_TakesForgeQualifiedRefsOnly pins the grammar `repo view` accepts:
+// a repository is named /<forge>/<a>/<b> and no other way. A ULID identifies a
+// row, not a repository, and a bare name is unique only inside a project — so
+// neither is a name this verb takes, and --project has nothing left to scope.
+func TestRepoView_TakesForgeQualifiedRefsOnly(t *testing.T) {
+	t.Parallel()
+	require.Nil(t, newRepoViewCmd().Flags().Lookup(projectFlagName),
+		"--project scoped a bare name, which this verb no longer takes")
+
+	for _, ref := range []string{"0123456789ABCDEFGHJKMNPQR5", "web", "acme/web"} {
+		cmd := newRepoCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"view", ref})
+		err := cmd.ExecuteContext(t.Context())
+		require.Errorf(t, err, "%q is not a forge-qualified repository reference", ref)
+	}
 }
 
 // TestRepoEdit_Visibility pins `repo edit --visibility`: the value is sent and

@@ -55,6 +55,13 @@ type projectRefClient interface {
 	ListProjects(ctx context.Context, params coreapi.ListProjectsParams) (*coreapi.ListProjectsOutputBody, error)
 }
 
+// projectNameClient adds the ULID→name lookup that resolveProjectRefNamed needs
+// and nothing else does; the by-name path answers with a name already.
+type projectNameClient interface {
+	projectRefClient
+	GetProject(ctx context.Context, params coreapi.GetProjectParams) (*coreapi.Project, error)
+}
+
 type repoRefClient interface {
 	projectRefClient
 	ListProjectRepos(ctx context.Context, params coreapi.ListProjectReposParams) (*coreapi.ListProjectReposOutputBody, error)
@@ -263,6 +270,29 @@ func resolveProjectRefResolved(ctx context.Context, c projectRefClient, ref stri
 func resolveProjectRef(ctx context.Context, c projectRefClient, ref string) (string, error) {
 	r, err := resolveProjectRefResolved(ctx, c, ref)
 	return r.ID, err
+}
+
+// resolveProjectRefNamed resolves a project ref to its id AND its name, for
+// callers that must print a /et/<project>/<repo> path: the repo records carry
+// only the owning project's ULID, and a path built from a ULID is not a ref
+// anything accepts.
+//
+// A name costs nothing — it IS the answer, and resolveProjectByName returns the
+// id for it. Only a ULID needs the extra GetProject, which is the price of one
+// column that a reader can act on; a path that appears for some inputs and not
+// others would be worse than none.
+func resolveProjectRefNamed(ctx context.Context, c projectNameClient, ref string) (id, name string, err error) {
+	if !looksLikeULID(ref) {
+		// The by-name lookup already answers with the server's own spelling,
+		// which is what belongs in a printed path — not the caller's casing.
+		resolved, rerr := resolveProjectByName(ctx, c, ref)
+		return resolved.ID, resolved.Name, rerr
+	}
+	project, err := c.GetProject(ctx, coreapi.GetProjectParams{ProjectId: ref})
+	if err != nil {
+		return "", "", fmt.Errorf("get project %s: %w", ref, err)
+	}
+	return project.ID, project.Name, nil
 }
 
 // resolveProjectByName is the by-name half of resolveProjectRef, for callers
