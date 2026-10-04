@@ -956,6 +956,13 @@ func TestParseTrailRepoShape_GitSuffixIsDroppedOnEveryForge(t *testing.T) {
 		{name: "native drops the suffix", raw: "et/audit1/foo.git", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
 		{name: "native without a suffix", raw: "et/audit1/foo", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
 		{name: "mirror drops the suffix", raw: "gh/acme/app.git", wantForge: "gh", wantOwner: "acme", wantRepo: "app"},
+		// Case is not part of the suffix. This value is typically pasted
+		// from a clone URL, and the server cuts the suffix with EqualFold,
+		// so a case-sensitive drop here forwards "foo.GIT" as a repo
+		// coordinate — a name the trails route cannot match.
+		{name: "native drops an uppercase suffix", raw: "et/audit1/foo.GIT", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
+		{name: "mirror drops a mixed-case suffix", raw: "gh/acme/app.Git", wantForge: "gh", wantOwner: "acme", wantRepo: "app"},
+		{name: "a longer dotted extension survives", raw: "gh/acme/app.gitignore", wantForge: "gh", wantOwner: "acme", wantRepo: "app.gitignore"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -981,6 +988,12 @@ func TestParseTrailRepoShape_RefusesNamesTheTrimManufactures(t *testing.T) {
 		"et/acme/...git", // becomes ".."
 		"gh/acme/.git",
 		"gh/acme/..git",
+		// The manufactured-name guard has to cover every case of the
+		// suffix too, or the case-insensitive cut reopens exactly the hole
+		// the case-sensitive one had closed.
+		"et/acme/.GIT",
+		"et/acme/..GIT",
+		"gh/acme/..Git",
 	} {
 		t.Run(raw, func(t *testing.T) {
 			t.Parallel()

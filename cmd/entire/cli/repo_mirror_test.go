@@ -1135,8 +1135,19 @@ func TestParseMirrorCloneURL(t *testing.T) {
 			wantCluster: "c.entire.io", wantOwner: "octocat", wantRepo: "hello-world"},
 		{name: "trailing .git is trimmed", raw: "entire://c.entire.io/gh/entireio/cli.git",
 			wantCluster: "c.entire.io", wantOwner: "entireio", wantRepo: "cli"},
+		// The suffix is cut BEFORE the name is lowercased. Doing it the other
+		// way round — which is what shipped — left ".GIT" in place for the
+		// case-sensitive cut, then lowercased the whole thing to "cli.git": a
+		// repo spelling no stored mirror can ever match, so the lookup
+		// reported no such mirror for a clone URL git itself resolves.
+		{name: "uppercase .GIT is trimmed, not lowercased into the name", raw: "entire://c.entire.io/gh/EntireIO/CLI.GIT",
+			wantCluster: "c.entire.io", wantOwner: "entireio", wantRepo: "cli"},
+		{name: "mixed-case .Git is trimmed", raw: "entire://c.entire.io/gh/entireio/cli.Git",
+			wantCluster: "c.entire.io", wantOwner: "entireio", wantRepo: "cli"},
 		{name: "interior dots in repo name are kept", raw: "entire://c.entire.io/gh/entirehq/entire-trails.el",
 			wantCluster: "c.entire.io", wantOwner: "entirehq", wantRepo: "entire-trails.el"},
+		{name: "a longer dotted extension is not the suffix", raw: "entire://c.entire.io/gh/entireio/cli.gitignore",
+			wantCluster: "c.entire.io", wantOwner: "entireio", wantRepo: "cli.gitignore"},
 		{name: "wrong scheme", raw: "https://c.entire.io/gh/a/b", wantErr: true},
 		{name: "non-gh provider segment", raw: "entire://c.entire.io/git/a/b", wantErr: true},
 		{name: "missing repo", raw: "entire://c.entire.io/gh/a", wantErr: true},

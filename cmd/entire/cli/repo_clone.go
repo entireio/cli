@@ -137,8 +137,11 @@ func parseNativeCloneRef(ref string) (project, repo string, err error) {
 	project, repo = names[0], names[1]
 	// Drop `.git` before the name is validated, not after: `.git` alone then
 	// fails the shape check as an empty name rather than passing as a dotted
-	// one. See gitDirSuffix for why the suffix is never part of a name.
-	repo = strings.TrimSuffix(repo, gitDirSuffix)
+	// one. See gitDirSuffix for why the suffix is never part of a name, and
+	// cutGitDirSuffix for why the cut ignores case — this grammar admits
+	// uppercase (the server folds it on resolution), so `.GIT` is a ref a
+	// user can actually reach here.
+	repo, _ = cutGitDirSuffix(repo)
 	if !nativeProjectRe.MatchString(project) {
 		return "", "", fmt.Errorf("project %q is not a name the server accepts: 3-32 characters of letters, digits and '-', not starting or ending with '-'", project)
 	}
@@ -305,6 +308,45 @@ func nativePlacements(ctx context.Context, c *coreapi.Client, repo *coreapi.Repo
 // gitremote.splitOwnerRepo.
 const gitDirSuffix = ".git"
 
+// cutGitDirSuffix removes a trailing `.git` in ANY case, reporting whether one
+// was there. Every place in the CLI that asks the `.git` question goes through
+// it, so the answer cannot vary by call site — which it did, in five separate
+// hand-rolled spellings, until this existed.
+//
+// Case-insensitive is the deliberate half of the choice, and it is not what
+// canonical git does everywhere. Git draws the line by PURPOSE. When it is
+// merely guessing a local directory name out of a URL the user pasted, it cuts
+// case-sensitively (git_url_basename in dir.c: `strncmp(end - 4, ".git", 4)`,
+// then one strip_suffix_mem). When the question is instead whether a path IS
+// the reserved `.git` — a safety question, where a miss is a vulnerability —
+// it matches with aggressive case-insensitivity and then some: is_hfs_dotgit
+// (utf8.c) skips Unicode codepoints HFS+ ignores, and is_ntfs_dotgit (path.c)
+// also admits `git~1`, trailing dots and spaces, and NTFS stream suffixes.
+//
+// Both of the CLI's uses fall on the reserved-spelling side of that line.
+// `repo create` asks whether a name collides with a spelling git tooling
+// reserves. The ref parsers ask which repository a path names — and the answer
+// belongs to the server, not to a local directory heuristic. A repo transport
+// path accepts the suffix whatever its case, so a case-sensitive client
+// disagrees with the server it is dialing:
+// `git clone entire://…/et/acme/widgets.GIT` resolves while
+// `entire repo clone /et/acme/widgets.GIT` reports no such repo.
+//
+// The cut happens exactly once, as git's single strip_suffix_mem does, so
+// "widgets.git.git" yields "widgets.git" rather than collapsing every dotted
+// segment. Slicing the last four bytes is safe against a multi-byte final
+// rune: a split rune decodes to RuneError, which never folds equal to ASCII.
+func cutGitDirSuffix(name string) (string, bool) {
+	if len(name) < len(gitDirSuffix) {
+		return name, false
+	}
+	cut := len(name) - len(gitDirSuffix)
+	if !strings.EqualFold(name[cut:], gitDirSuffix) {
+		return name, false
+	}
+	return name[:cut], true
+}
+
 // trimRefPrefix normalizes a ref for segment work: surrounding space gone, one
 // optional leading slash gone. Every place that reads a ref's leading token
 // goes through it, so the parsers and invalidCloneRefError's dispatch cannot
@@ -420,7 +462,12 @@ func parseMirrorCloneRef(ref string) (provider, owner, repo string, err error) {
 	owner, repo = strings.ToLower(m[1]), strings.ToLower(m[2])
 	// Drop `.git` (see gitDirSuffix) BEFORE the dot-only guard, which is
 	// what keeps `..git` — not dot-only as typed — from resolving to a "." repo.
-	repo = strings.TrimSuffix(repo, gitDirSuffix)
+	//
+	// cutGitDirSuffix, not TrimSuffix: the ToLower above happens to make a
+	// case-sensitive cut work here, which is the kind of correctness that
+	// survives only until someone reorders two lines. The sibling parsers
+	// had the same two operations in the other order and were wrong.
+	repo, _ = cutGitDirSuffix(repo)
 	if repo == "" {
 		return "", "", "", fmt.Errorf("repo name is empty once the %s suffix is dropped: %s", gitDirSuffix, ref)
 	}

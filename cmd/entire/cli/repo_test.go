@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -399,12 +400,23 @@ func TestRepoCreate_WarnsOnInvalidServerHost(t *testing.T) {
 //
 // Not parallel: swaps the package-level activeCoreClient seam.
 func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
-	for _, name := range []string{"web.git", "trails.el.git"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range gitSuffixCases {
+		t.Run(tc.in, func(t *testing.T) {
 			bodyCh := serveRepoCreate(t)
-			err := execRepoCreateNamed(t, name)
+			err := execRepoCreateNamed(t, tc.in)
 			require.ErrorContains(t, err, gitDirSuffix)
-			require.ErrorContains(t, err, strings.TrimSuffix(name, gitDirSuffix))
+			if _, stillCarriesSuffix := cutGitDirSuffix(tc.rest); tc.rest == "" || stillCarriesSuffix {
+				// A doubled suffix leaves a remainder this same guard would
+				// refuse, and the suffix alone leaves nothing at all. Neither
+				// is advice, so neither is offered.
+				require.NotContains(t, err.Error(), "(use ")
+			} else {
+				// The refusal earns its round trip only by naming the
+				// spelling to use instead. Assert the whole parenthetical:
+				// a bare substring check passes on the quoted name itself,
+				// which is how a doubled suffix went unnoticed.
+				require.ErrorContains(t, err, `(use "`+tc.rest+`")`)
+			}
 			select {
 			case raw := <-bodyCh:
 				t.Fatalf("no create request expected, got body %s", raw)
@@ -413,13 +425,117 @@ func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
 		})
 	}
 
-	t.Run("a dotted name that does not end in the suffix is accepted", func(t *testing.T) {
-		bodyCh := serveRepoCreate(t)
-		require.NoError(t, execRepoCreateNamed(t, "trails.el"))
-		var body map[string]any
-		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
-		require.Equal(t, "trails.el", body["name"])
-	})
+	// Surrounding whitespace is trimmed before the suffix is looked for, so a
+	// padded name is refused exactly as the bare one is. A shell that expands
+	// an empty variable into the argument is the ordinary way this happens,
+	// and the refusal must not depend on the padding being absent.
+	for _, name := range []string{" web.git", "web.git ", "  web.GIT  ", "\tweb.Git\n"} {
+		t.Run("padded "+strconv.Quote(name), func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			err := execRepoCreateNamed(t, name)
+			require.ErrorContains(t, err, gitDirSuffix)
+			require.ErrorContains(t, err, "web")
+			// The message quotes the trimmed name: echoing the padding back
+			// would show the user a spelling they cannot tell apart from
+			// the one they typed.
+			require.NotContains(t, err.Error(), strconv.Quote(name))
+			select {
+			case raw := <-bodyCh:
+				t.Fatalf("no create request expected, got body %s", raw)
+			default:
+			}
+		})
+	}
+
+	for _, name := range gitSuffixNonCases {
+		t.Run("accepted "+name, func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			require.NoError(t, execRepoCreateNamed(t, name))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+			require.Equal(t, name, body["name"])
+		})
+	}
+}
+
+// TestRepoCreate_SendsTrimmedName pins that the name checked and the name sent
+// are the same string. `repo create` validates the trimmed argument, so
+// putting the raw one on the wire left a seam: the server trims too, which is
+// the only reason it never showed. A check that guards one value while a
+// different value travels is a latent disagreement, not a working design.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_SendsTrimmedName(t *testing.T) {
+	for _, name := range []string{"  web  ", "\tweb\n", "web "} {
+		t.Run(strconv.Quote(name), func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			require.NoError(t, execRepoCreateNamed(t, name))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+			require.Equal(t, "web", body["name"])
+		})
+	}
+}
+
+// TestRepoCreate_SuggestsANameTheServerWouldAccept pins that the parenthetical
+// is advice the user can act on, not just the typed string minus four bytes.
+// It used to be the latter: "WEB.git" was answered with `(use "WEB")`, and the
+// server then refused "WEB" for carrying uppercase — a second refusal, for a
+// reason the first message had not mentioned.
+//
+// The hint is lowercased because `repo create` is the one path where the
+// server does NOT fold case (an uppercase name is refused outright), and it
+// is withheld entirely when the remainder fails the shape the server enforces.
+// Withholding is the safe direction: the check gates whether the CLI speaks,
+// never whether it refuses.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_SuggestsANameTheServerWouldAccept(t *testing.T) {
+	// A well-formed ULID. The server refuses a name of this shape outright,
+	// so proposing one would be proposing a second rejection.
+	const rawULID = "01KS6KFJR2XS6PZ188MVYE07AN"
+
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{name: "already lowercase", in: "web.git", want: "web"},
+		{name: "uppercase is folded", in: "WEB.git", want: "web"},
+		{name: "uppercase name and suffix", in: "WEB.GIT", want: "web"},
+		{name: "mixed case dotted name", in: "Trails.EL.GIT", want: "trails.el"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveRepoCreate(t)
+			err := execRepoCreateNamed(t, tc.in)
+			require.ErrorContains(t, err, `(use "`+tc.want+`")`)
+		})
+	}
+
+	for _, tc := range []struct{ name, in string }{
+		{name: "underscore survives the fold", in: "WEB_1.git"},
+		{name: "consecutive dots", in: "widgets..git"},
+		{name: "trailing dash once the suffix goes", in: "widgets-.git"},
+		{name: "a raw ULID is not a name", in: rawULID + ".git"},
+		{name: "a lowercased raw ULID is still one", in: strings.ToLower(rawULID) + ".GIT"},
+		{name: "too long by one", in: strings.Repeat("a", 65) + ".git"},
+		{name: "the suffix alone", in: ".git"},
+		// A doubled suffix is the case the shape checks alone cannot catch:
+		// nativeRepoRe allows interior dots, so "widgets.git" looks like a
+		// perfectly good name to every check except the one that matters —
+		// the guard immediately above, which refuses it on the next attempt.
+		{name: "doubled suffix", in: "widgets.git.git"},
+		{name: "doubled suffix, mixed case", in: "widgets.GIT.git"},
+		{name: "doubled suffix, uppercase last", in: "widgets.git.GIT"},
+		{name: "tripled suffix", in: "widgets.git.git.git"},
+	} {
+		t.Run("no hint: "+tc.name, func(t *testing.T) {
+			serveRepoCreate(t)
+			err := execRepoCreateNamed(t, tc.in)
+			// Still refused, and still for the suffix — only the advice is
+			// withheld.
+			require.ErrorContains(t, err, gitDirSuffix)
+			require.NotContains(t, err.Error(), "(use ")
+		})
+	}
 }
 
 // TestRepoCreate_HasNoClusterHostFlag pins that a repo's home cluster is not

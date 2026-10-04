@@ -2407,7 +2407,7 @@ func parseTrailRepoShape(raw string) (forge, owner, repo string, err error) {
 		// name as typed, and dropping the suffix can empty it (".git") or turn
 		// it dot-only ("..git" → "."). Either would otherwise be forwarded as a
 		// repo coordinate the suffix manufactured. See dotOnlyRe.
-		repo := strings.TrimSuffix(parts[2], gitDirSuffix)
+		repo, _ := cutGitDirSuffix(parts[2])
 		if repo == "" || dotOnlyRe.MatchString(repo) {
 			return "", "", "", fmt.Errorf("invalid --repo %q: %q is not a repo name once the %s suffix is dropped", raw, parts[2], gitDirSuffix)
 		}

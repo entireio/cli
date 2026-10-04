@@ -108,6 +108,46 @@ func parseObjectFormat(s string) (coreapi.CreateRepoInputBodyObjectFormat, error
 	}
 }
 
+// suggestRepoName returns the name worth recommending in place of one that
+// carried the `.git` suffix, and whether there is one at all. It answers only
+// the question "is this advice the user can act on?".
+//
+// Lowercased, because `repo create` is the one path where the server does NOT
+// fold case: resolution folds (which is why nativeRepoRe accepts uppercase),
+// but an uppercase name is refused outright at create time. So the answer to
+// "WEB.git" is "web". Suggesting "WEB" — the typed string minus four bytes —
+// earned the user a second refusal naming a rule the first message had not
+// mentioned.
+//
+// The shape checks are nativeRepoRe's, which already carries the server's
+// accepted name shape, plus the two rules a regexp cannot: no consecutive
+// dots (RE2 has no negative lookahead, so parseNativeCloneRef checks it
+// separately too) and no raw ULID.
+//
+// This gates only whether the CLI SPEAKS, never whether it refuses, and that
+// is the whole reason it is safe to run locally. nativeRepoRe drifts one way
+// (see its comment): if the server loosens, a local check refuses names that
+// would in fact work. A ref survives that — a ULID or a full entire:// URL
+// gets past it — but a refused `create` has no such escape hatch, so the name
+// itself stays the server's to judge. Going quiet costs a hint; guessing wrong
+// costs a name the user cannot create.
+func suggestRepoName(rest string) (string, bool) {
+	s := strings.ToLower(rest)
+	// A doubled suffix is the one case the shape checks below cannot catch,
+	// because there is nothing malformed about what it leaves. The cut runs
+	// exactly once (see cutGitDirSuffix), so "widgets.git.git" leaves
+	// "widgets.git" — an interior dot, which nativeRepoRe rightly allows.
+	// Recommending it would send the user straight back into the guard that
+	// called this, refused a second time by the rule they had just been told.
+	if _, stillCarriesSuffix := cutGitDirSuffix(s); stillCarriesSuffix {
+		return "", false
+	}
+	if s == "" || !nativeRepoRe.MatchString(s) || strings.Contains(s, "..") || looksLikeULID(s) {
+		return "", false
+	}
+	return s, true
+}
+
 func newRepoCreateCmd() *cobra.Command {
 	var (
 		projectID    string
@@ -143,16 +183,28 @@ and recovery instructions go to stderr.`,
 		},
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Refuse a name that ends in `.git`. The suffix is never part of a
-			// repo name (see gitDirSuffix): every ref parser drops it, so the
-			// name would round-trip to a different string than the one typed.
-			// The server refuses it too; saying so here costs no round trip and
-			// names the spelling to use instead.
-			if name := strings.TrimSpace(args[0]); strings.HasSuffix(name, gitDirSuffix) {
+			// Refuse a name that ends in `.git`, whatever its case. The suffix
+			// is never part of a repo name (see gitDirSuffix): every ref
+			// parser drops it, so the name would round-trip to a different
+			// string than the one typed. The server refuses it too; saying so
+			// here costs no round trip and names the spelling to use instead.
+			//
+			// The case-insensitive cut is what makes that promise hold. A
+			// case-sensitive check let ".GIT" through to the server, which
+			// rejects it for carrying uppercase — a true statement about a
+			// different problem, leaving the user to discover the suffix rule
+			// on a second attempt.
+			//
+			// The trimmed name is what gets checked AND what gets sent
+			// (see body below): a guard reading one value while another
+			// travels is a disagreement waiting for the server to stop
+			// covering for it.
+			name := strings.TrimSpace(args[0])
+			if rest, had := cutGitDirSuffix(name); had {
 				cmd.SilenceUsage = true
-				err := fmt.Errorf("repo name %q must not end in %s: the suffix is never part of a repo name, so Entire could not address the repo by the name you typed", name, gitDirSuffix)
-				if trimmed := strings.TrimSuffix(name, gitDirSuffix); trimmed != "" {
-					err = fmt.Errorf("%w (use %q)", err, trimmed)
+				err := fmt.Errorf("repo name %q must not end in %s, in any case: the suffix is never part of a repo name, so Entire could not address the repo by the name you typed", name, gitDirSuffix)
+				if use, ok := suggestRepoName(rest); ok {
+					err = fmt.Errorf("%w (use %q)", err, use)
 				}
 				return err
 			}
@@ -172,7 +224,7 @@ and recovery instructions go to stderr.`,
 				if err != nil {
 					return err
 				}
-				body := &coreapi.CreateRepoInputBody{Name: args[0], ProjectId: projID}
+				body := &coreapi.CreateRepoInputBody{Name: name, ProjectId: projID}
 				if format != "" {
 					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
 				}

@@ -755,6 +755,15 @@ func TestParseExpertsRepo(t *testing.T) {
 		{name: "a gh name the trim turns dot-only is refused", in: "gh/acme/..git", wantErr: true},
 		{name: "a name the trim turns double-dot is refused", in: "acme/...git", wantErr: true},
 		{name: "a dot-only name as typed is refused", in: "acme/..", wantErr: true},
+		// --repo has to agree with the pair resolveExpertsRepo derives from
+		// origin, and an origin URL is where an uppercase suffix actually
+		// comes from. A case-sensitive drop made the two spellings of the
+		// same repository disagree.
+		{name: "bare pair drops an uppercase suffix", in: "audit1/foo.GIT", want: "audit1/foo"},
+		{name: "gh triple drops a mixed-case suffix", in: "gh/acme/widget.Git", want: "acme/widget"},
+		{name: "a longer dotted extension survives", in: "acme/widget.gitignore", want: "acme/widget.gitignore"},
+		{name: "an uppercase suffix alone is refused", in: "acme/.GIT", wantErr: true},
+		{name: "an uppercase suffix the trim turns dot-only is refused", in: "acme/..GIT", wantErr: true},
 		{name: "a non-gh triple is not a pair", in: "et/audit1/foo", wantErr: true},
 		{name: "one segment is not a pair", in: "widget", wantErr: true},
 		{name: "empty is refused", in: "", wantErr: true},
