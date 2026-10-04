@@ -539,9 +539,14 @@ type clusterListingRow struct {
 var ErrNoCellForJurisdiction = errors.New("no entire-api cell configured for jurisdiction")
 
 // resolveCellAPIBaseURL is the catalog cell resolver: it lists the clusters of
-// the login core at coreURL and picks the apiUrl for `jurisdiction` (default
-// cluster first). It hand-parses GET /api/v1/clusters rather than reusing the
-// generated coreapi.ListClusters() because coreapi imports this (auth) package,
+// the login core at coreURL and picks the apiUrl for `jurisdiction` — the
+// default cluster's, else the single value every cluster agrees on. Since
+// entiredb#4129 clusters in one jurisdiction can advertise different apiUrls
+// (one per cell), and /me data lives in only one of those cells, so an
+// ambiguous catalog fails instead of picking an arbitrary cell: a wrong-cell
+// "success" reads another cell's data with no error. It hand-parses
+// GET /api/v1/clusters rather than reusing the generated
+// coreapi.ListClusters() because coreapi imports this (auth) package,
 // so auth cannot import coreapi without a cycle — the repo-scoped path avoids
 // this by resolving the cell in the cli layer (see resolveRepoCellTarget).
 func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction string, httpClient *http.Client) (string, error) {
@@ -595,14 +600,21 @@ func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction 
 		// slug or another context, and the message should say which.
 		return "", fmt.Errorf("%w %q at %s (jurisdictions with a cell: %s)", ErrNoCellForJurisdiction, jurisdiction, coreURL, servedJurisdictions(listing.Clusters))
 	}
-	chosen := matches[0]
+	// The default cluster marks the jurisdiction's home cell. Without one,
+	// clusters agreeing on one apiUrl are still unambiguous; distinct values
+	// fail closed rather than routing /me reads to an arbitrary cell.
 	for _, row := range matches {
 		if row.IsDefault {
-			chosen = row
-			break
+			return strings.TrimRight(row.APIURL, "/"), nil
 		}
 	}
-	return strings.TrimRight(chosen.APIURL, "/"), nil
+	chosen := strings.TrimRight(matches[0].APIURL, "/")
+	for _, row := range matches[1:] {
+		if strings.TrimRight(row.APIURL, "/") != chosen {
+			return "", fmt.Errorf("jurisdiction %q at %s has clusters in different cells and no default cluster; cannot pick its home cell", jurisdiction, coreURL)
+		}
+	}
+	return chosen, nil
 }
 
 // servedJurisdictions renders the jurisdictions a cluster catalog has a cell

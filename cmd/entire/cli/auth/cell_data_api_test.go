@@ -600,6 +600,74 @@ func TestCellClientFactory_UnknownJurisdictionNamesEnvironment(t *testing.T) {
 	}
 }
 
+// TestCellClientFactory_MultiCellJurisdictionHomePick: since entiredb#4129 two
+// clusters in one jurisdiction can advertise different apiUrls (one per cell).
+// The home pick takes the default cluster's cell; with no default it accepts
+// clusters that agree on one apiUrl and fails closed when they differ, because
+// an arbitrary pick would read another cell's /me data with no error.
+func TestCellClientFactory_MultiCellJurisdictionHomePick(t *testing.T) {
+	usTwoCells := func(defaultFlag string) string {
+		return `{"clusters":[` +
+			`{"slug":"royalcanin","jurisdiction":"us","isDefault":` + defaultFlag + `,"apiUrl":"https://aws-us-west-2.api.partial.to"},` +
+			`{"slug":"purina","jurisdiction":"us","apiUrl":"https://aws-us-east-2.api.partial.to"}]}`
+	}
+	for _, tc := range []struct {
+		name    string
+		listing string
+		want    string
+		wantErr string
+	}{
+		{
+			name:    "default cluster marks the home cell",
+			listing: usTwoCells("true"),
+			want:    "https://aws-us-west-2.api.partial.to",
+		},
+		{
+			name:    "no default with distinct cells fails closed",
+			listing: usTwoCells("false"),
+			wantErr: "no default cluster",
+		},
+		{
+			name: "no default with one agreed apiUrl resolves",
+			listing: `{"clusters":[` +
+				`{"slug":"royalcanin","jurisdiction":"us","apiUrl":"https://aws-us-west-2.api.partial.to"},` +
+				`{"slug":"waltham","jurisdiction":"us","apiUrl":"https://aws-us-west-2.api.partial.to/"}]}`,
+			want: "https://aws-us-west-2.api.partial.to",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := isolateCellClientEnv(t, "")
+			seedProdAndStagingContexts(t, configDir, stagingFixture.name)
+			rt := &catalogTransport{coreHost: stagingFixture.coreHost(), listing: tc.listing}
+			t.Cleanup(SetCellExchangeTransportForTest(t, rt))
+
+			factory, err := NewEntireAPICellClientFactory(context.Background(), false)
+			if err != nil {
+				t.Fatalf("NewEntireAPICellClientFactory: %v", err)
+			}
+			got, err := factory.cellBaseURLFor(context.Background(), &CellTarget{Jurisdiction: "us"})
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("cellBaseURLFor = %q, want an ambiguity error", got)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error missing %q:\n%s", tc.wantErr, err)
+				}
+				if errors.Is(err, ErrNoCellForJurisdiction) {
+					t.Errorf("ambiguity must not unwrap to ErrNoCellForJurisdiction (callers fall back on it): %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("cellBaseURLFor: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("cell base URL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCellClientFactory_NoActiveContextIsNotLoggedIn: with no ENTIRE_API_BASE_URL
 // and no selected login, the cell path reports "not logged in" exactly as
 // `--to core` does, instead of discovering a login against the production host.
