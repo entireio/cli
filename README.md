@@ -368,7 +368,6 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `entire blame`       | Show which lines came from Entire checkpoints             |
 | `entire why`         | Show why a line exists                                   |
 | `entire experts`     | Rank agent provenance for code scopes                    |
-| `entire import`      | Import pre-existing agent history into Entire            |
 | `entire runner`      | Set up and tune trail runners for this repository        |
 
 `entire blame <file>` shows which current file lines came from an Entire checkpoint (`--long` for the full agent, model, author, and session table), and `entire why <file>:<line>` jumps from a specific line back to the prompt, session, and checkpoint that created it.
@@ -386,7 +385,7 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `--local`                                   | Write settings to `.entire/settings.local.json` instead of `.entire/settings.json`                                |
 | `--project`                                 | Write settings to `.entire/settings.json` even if it already exists                                               |
 | `--absolute-git-hook-path`                  | Embed the full binary path in git hooks (for GUI git clients that don't source shell profiles)                    |
-| `--import-history`                          | During first-time setup, import the selected agents' existing session history (last 30 days) without prompting     |
+| `--import-history`                          | Deprecated, has no effect: history import is currently unavailable                                                |
 | `--search-skill`                            | Install the optional Entire search skill for the selected agent(s)                                                |
 | `--agent-help-skill`                        | Install the Entire agent-help skill (points agents at `entire agent-help`) for the selected agent(s)              |
 | `--telemetry=false`                         | Disable anonymous usage analytics                                                                                 |

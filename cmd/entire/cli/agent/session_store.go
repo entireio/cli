@@ -76,8 +76,7 @@ func OpenSessionStore(ag SessionLocator, repoPath string) (*SessionStore, error)
 }
 
 // OpenSessionStoreAt is OpenSessionStore for a session directory the caller
-// already resolved — the cross-project fallbacks that scan sibling directories,
-// and agentimport, which is handed one.
+// already resolved — the cross-project fallbacks that scan sibling directories.
 func OpenSessionStoreAt(ag SessionLocator, dir string) (*SessionStore, error) {
 	if dir == "" {
 		return nil, errors.New("session directory is required")

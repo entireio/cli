@@ -72,48 +72,6 @@ func TestGenerateULID(t *testing.T) {
 	}
 }
 
-func TestDeriveULID(t *testing.T) {
-	t.Parallel()
-	at := time.Date(2026, 6, 20, 10, 30, 0, 123_000_000, time.UTC)
-
-	a, err := DeriveULID(at, []byte("sess/turn-1"))
-	if err != nil {
-		t.Fatalf("DeriveULID() error = %v", err)
-	}
-	if a.Kind() != KindULID {
-		t.Errorf("Kind() = %v, want KindULID for %q", a.Kind(), a)
-	}
-	if got, ok := a.Time(); !ok || !got.Equal(at) {
-		t.Errorf("Time() = %v, %v; want %v, true", got, ok, at)
-	}
-
-	again, err := DeriveULID(at, []byte("sess/turn-1"))
-	if err != nil {
-		t.Fatalf("DeriveULID() error = %v", err)
-	}
-	if again != a {
-		t.Errorf("not deterministic: %q != %q", again, a)
-	}
-
-	other, err := DeriveULID(at, []byte("sess/turn-2"))
-	if err != nil {
-		t.Fatalf("DeriveULID() error = %v", err)
-	}
-	if other == a {
-		t.Errorf("distinct seeds derived the same id %q", a)
-	}
-
-	for _, pre := range []time.Time{{}, time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC)} {
-		cid, err := DeriveULID(pre, []byte("sess/turn-1"))
-		if err != nil {
-			t.Fatalf("DeriveULID(%v) error = %v", pre, err)
-		}
-		if got, ok := cid.Time(); !ok || got.UnixMilli() != 0 {
-			t.Errorf("DeriveULID(%v).Time() = %v, %v; want the epoch, true", pre, got, ok)
-		}
-	}
-}
-
 func TestCheckpointID_DisplayShort(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

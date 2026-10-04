@@ -139,7 +139,7 @@ t.Chdir(tmpDir)                                 // redirect CWD-based git resolu
 
 An isolated temp repo is not the same as an isolated git *config*. `testutil.InitRepo` writes repo-local settings, but `~/.gitconfig` still applies on top of them, so a host that sets `commit.gpgSign`, `tag.gpgSign` or `transfer.fsckObjects` can decide test outcomes. Isolation has two layers, and most packages need both:
 
-- **In-process go-git reads.** Register an empty `ConfigLoader` plugin in `TestMain` (see `checkpoint`, `strategy`, `cli`, `agentimport` `global_test.go`). Without it go-git resolves global scope through its `Auto` loader, which reads all of git's global sources.
+- **In-process go-git reads.** Register an empty `ConfigLoader` plugin in `TestMain` (see `checkpoint`, `strategy`, `cli` `global_test.go`). Without it go-git resolves global scope through its `Auto` loader, which reads all of git's global sources.
 - **Git subprocesses.** The plugin does nothing for children. Production code under test shells out to git (remote fetches, hooks), and those children read the host config unless the environment is isolated:
 
 | Helper | Use for |

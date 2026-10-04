@@ -95,13 +95,8 @@ type EnableOptions struct {
 	// presentation of the final state (commit, push, done).
 	SuppressDoneMessage bool
 	Yes                 bool
-	// ImportHistory opts into importing the selected agents' pre-existing
-	// session history during first-time setup. Deliberately NOT implied by
-	// Yes: ingesting a month of local transcripts is not a setup default (see
-	// maybeOfferSessionImport).
-	ImportHistory  bool
-	SearchSkill    bool
-	AgentHelpSkill bool
+	SearchSkill         bool
+	AgentHelpSkill      bool
 }
 
 // applyStrategyOptions sets strategy_options on settings from CLI flags.
@@ -1070,8 +1065,15 @@ publish the repository yourself when you're ready.`,
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
 	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
-	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git and commit; then enable all agents and accept telemetry).")
+	// --import-history opted into importing pre-existing agent history on
+	// first-time setup. History import is withdrawn until it is redesigned; the
+	// flag stays so scripts that pass it keep working, and has no effect.
+	var deprecatedImportHistory bool
+	cmd.Flags().BoolVar(&deprecatedImportHistory, flagImportHistory, false, "Deprecated: has no effect")
+	if err := cmd.Flags().MarkDeprecated(flagImportHistory, "history import is currently unavailable; the flag has no effect"); err != nil {
+		panic(fmt.Sprintf("deprecate %s flag: %v", flagImportHistory, err))
+	}
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
 
 	// Bootstrap flags for non-git-repo folders.
@@ -1359,11 +1361,6 @@ func runEnableOnConfiguredRepoWithPreflight(ctx context.Context, cmd *cobra.Comm
 		preflight = nil
 		return fn()
 	}
-	// This path is by definition not a first run, so it never reaches the
-	// import offer. Say so rather than dropping the flag silently.
-	if opts.ImportHistory {
-		noteImportHistoryNotApplicable(w)
-	}
 	usedSetupFlow := enableUsesSetupFlow(cmd, "")
 	if usedSetupFlow {
 		// Agent management runs before the strategy and checkpoint-backend
@@ -1478,8 +1475,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return err
 	}
 	// Capture first-run status before we write any settings: setupEntireDirectory
-	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
-	// uses this so the import offer only fires on the very first enable.
+	// and saveSettings below make IsSetUpAny report true.
 	firstRun := !settings.IsSetUpAny(ctx)
 
 	// Uninstall hooks for agents that were previously active but are no longer selected
@@ -1618,10 +1614,6 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := strategy.EnsureSetup(strategy.WithCheckpointRemoteBootstrap(ctx)); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
-
-	// Offer to import pre-existing agent history for the just-selected agents.
-	// First-run only; best-effort (never fails enable).
-	maybeOfferSessionImport(ctx, w, agents, opts, firstRun)
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary after
@@ -2359,10 +2351,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err := strategy.EnsureSetup(strategy.WithCheckpointRemoteBootstrap(ctx)); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
-
-	// Offer to import pre-existing history for the just-configured agent.
-	// First-run only; best-effort (never fails enable).
-	maybeOfferSessionImport(ctx, w, []agent.Agent{ag}, opts, firstRun)
 
 	if opts.SuppressDoneMessage {
 		// Bootstrap finalize will print its own completion summary.

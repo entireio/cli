@@ -60,8 +60,8 @@ const (
 	// flag keeps covering them.
 	KindAgentInvestigate Kind = "agent_investigate"
 
-	// KindImported tags a checkpoint created by `entire import` from a
-	// pre-existing agent transcript. Imported checkpoints are read-only and
+	// KindImported tags a checkpoint created by the (since withdrawn)
+	// `entire import` from a pre-existing agent transcript. Imported checkpoints are read-only and
 	// commit-less; they live on the v1 metadata branch and push like any other
 	// checkpoint.
 	KindImported Kind = "imported"
@@ -88,7 +88,7 @@ func (k Kind) IsInvestigate() bool {
 }
 
 // IsImported reports whether this Kind is a read-only session reconstructed by
-// `entire import` from a pre-existing transcript. Imported sessions are exempt
+// the (since withdrawn) `entire import` from a pre-existing transcript. Imported sessions are exempt
 // from lifecycle management (staleness, orphan cleanup) and are not
 // resumable. Centralized here so those call sites don't couple to
 // the string literal across packages.

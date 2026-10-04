@@ -95,16 +95,13 @@ type WriteOptions struct {
 
 	// CommitSHA links this checkpoint to an existing commit without a trailer.
 	// It is an anchor — "imported at this point in time" — not attribution.
-	// Set only on the import path — the `entire import` command and `entire
-	// enable`'s optional history import: imported history has no
+	// Set only by history import (`entire import` and `entire enable`'s
+	// optional history import, both since withdrawn): imported history has no
 	// Entire-Checkpoint trailer (we never rewrite existing commits), so import
-	// stamps the resolved anchor commit here. Per turn that is the commit the
-	// transcript recorded when one resolves and is reachable (see
-	// turnAnchorResolver), otherwise the resolved head fallback (see
-	// resolveImportLinkCommitSHA for the order). An import that can resolve no
-	// anchor at all is refused before it writes, so an import written by a
-	// current CLI always carries one; imports predating that enforcement may
-	// not, so readers must still handle empty.
+	// stamped the anchor commit here, either the commit the transcript
+	// recorded for the turn or the default branch's head. Imports written
+	// before anchors were enforced may lack one, so readers must still handle
+	// empty.
 	// Empty for all other writers, which is why the field is omitempty. This
 	// comment is the canonical description; Metadata.CommitSHA and
 	// CheckpointSummary.CommitSHA point back here.

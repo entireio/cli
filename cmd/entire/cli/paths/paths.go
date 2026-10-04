@@ -371,8 +371,8 @@ func SessionMetadataDirFromSessionID(sessionID string) string {
 // transcripts in: <transcriptDir>/<sessionID>/subagents.
 //
 // This layout lives here, in the leaf paths package, because it is needed on both
-// sides of the import graph — the lifecycle dispatcher and the strategy, review,
-// and agentimport packages all resolve it, and those cannot import each other.
+// sides of the import graph — the lifecycle dispatcher and the strategy and
+// review packages all resolve it, and those cannot import each other.
 // Before it was named it existed as five copies of the same filepath.Join, which
 // is how the SubagentEnd path came to disagree with the turn-end path about where
 // subagent transcripts live.

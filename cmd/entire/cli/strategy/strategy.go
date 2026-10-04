@@ -110,10 +110,6 @@ type PendingCheckpoint struct {
 	// SessionPrompts contains the first prompt for each session (parallel to SessionIDs).
 	// Used to display context when showing resume commands for multi-session checkpoints.
 	SessionPrompts []string
-
-	// Imported indicates this point is a read-only imported (commit-less)
-	// checkpoint on the v1 metadata branch. Imported points are read-only.
-	Imported bool
 }
 
 // StepContext contains all information needed for saving a step checkpoint.

@@ -67,9 +67,8 @@ type Stores struct {
 	// Persistent is the committed store that serves permanent reads and writes.
 	Persistent PersistentStore
 
-	ephemeral     EphemeralStore
-	refs          PersistentRefs
-	primaryIsRefs bool
+	ephemeral EphemeralStore
+	refs      PersistentRefs
 }
 
 // Open resolves the checkpoint storage topology and constructs the backing
@@ -124,10 +123,9 @@ func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores,
 	}
 
 	return &Stores{
-		Persistent:    newKindRoutingStore(writer, branchStore, refsStore, primaryType),
-		ephemeral:     newEphemeralStore(repo, refs),
-		refs:          refs,
-		primaryIsRefs: primaryType == BackendTypeGitRefs,
+		Persistent: newKindRoutingStore(writer, branchStore, refsStore, primaryType),
+		ephemeral:  newEphemeralStore(repo, refs),
+		refs:       refs,
 	}, nil
 }
 
@@ -227,9 +225,3 @@ func (s *Stores) Ephemeral() EphemeralStore { return s.ephemeral }
 
 // Refs returns the resolved committed-ref topology.
 func (s *Stores) Refs() PersistentRefs { return s.refs }
-
-// PrimaryIsRefs reports whether these stores write new checkpoints to the git-refs
-// primary, i.e. whether a new checkpoint ID must be a ULID (see
-// GenerateCheckpointID). It reflects the config Open resolved, so a caller that
-// derives its own IDs matches the store it writes to.
-func (s *Stores) PrimaryIsRefs() bool { return s.primaryIsRefs }

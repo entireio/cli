@@ -619,11 +619,9 @@ type branchCheckpointJSON struct {
 // filtered by session ID prefix (mirrors the prose list view). The cap
 // defaults to branchCheckpointsLimit; pass listLimit > 0 to override.
 //
-// Truncation detection: getBranchCheckpoints reports whether it hit its scan
-// budget (the authoritative signal — it applies the cap internally). We also
-// hard-cap the flat array at `limit` for the JSON contract, flagging
-// truncation if that slice drops anything. The JSON shape stays a flat array
-// so jq pipelines don't have to unwrap.
+// Truncation detection: getBranchCheckpoints applies the cap and reports
+// whether it dropped anything. The JSON shape stays a flat array so jq
+// pipelines don't have to unwrap.
 func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter string, listLimit int) error {
 	repo, err := openRepository(ctx)
 	if err != nil {
@@ -646,14 +644,6 @@ func runExplainListJSON(ctx context.Context, w, errW io.Writer, sessionFilter st
 		// a real diagnostic instead of silently degraded output.
 		return fmt.Errorf("failed to list checkpoints: %w", err)
 	}
-	// getBranchCheckpoints budgets the live and imported lists independently,
-	// so it can return up to 2*limit entries. Hard-cap the combined array to
-	// the requested limit for the JSON contract.
-	if len(points) > limit {
-		points = points[:limit]
-		truncated = true
-	}
-
 	out := make([]branchCheckpointJSON, 0, len(points))
 	for _, p := range points {
 		if sessionFilter != "" && !checkpointMatchesSessionFilter(p, sessionFilter) {

@@ -2505,12 +2505,8 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 //   - On default branch (main/master): show all checkpoints in history (up to limit)
 //   - Includes both committed checkpoints (entire/checkpoints/v1) and temporary checkpoints (shadow branches)
 //
-// The second return value is true when either the live (commit-linked +
-// temporary) or imported budget hit `limit`, i.e. older checkpoints were
-// dropped. This is the authoritative truncation signal: the budgets are
-// applied here, so callers cannot reconstruct it from the returned length
-// (the two budgets are independent, so the slice can hold up to 2*limit
-// entries without anything being dropped).
+// The second return value is true when the list hit `limit`, i.e. older
+// checkpoints were dropped.
 func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.PendingCheckpoint, bool, error) {
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected(ctx)
@@ -2653,8 +2649,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 
 	truncated := false
 
-	// Sort live points (commit-linked + temporary) and apply the limit FIRST, so
-	// a large historical import can't evict recent commit-linked checkpoints.
+	// Sort points (commit-linked + temporary) and apply the limit.
 	sort.Slice(points, func(i, j int) bool {
 		return points[i].Date.After(points[j].Date)
 	})
@@ -2666,19 +2661,6 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Hydrate remote-discovered stubs only for the truncated display set (not
 	// the full commit walk). Session filter runs later in formatBranchCheckpoints.
 	hydrateListedBranchCheckpoints(ctx, store, points, committedByID)
-
-	// Append imported (read-only, commit-less) checkpoints after the live points,
-	// bounded by the same limit so a one-month import doesn't produce an
-	// unbounded list. They get their own budget and never displace live points.
-	imported := getImportedPendingCheckpoints(ctx, repo)
-	sort.Slice(imported, func(i, j int) bool {
-		return imported[i].Date.After(imported[j].Date)
-	})
-	if len(imported) > limit {
-		imported = imported[:limit]
-		truncated = true
-	}
-	points = append(points, imported...)
 
 	return points, truncated, nil
 }
@@ -2739,45 +2721,6 @@ func hydrateListedBranchCheckpoints(
 	if hydrationFailed > 0 {
 		fmt.Fprintf(os.Stderr, "[entire] Warning: could not load session metadata for %d remote checkpoint(s); they may be missing from --session filters.\n", hydrationFailed)
 	}
-}
-
-// getImportedPendingCheckpoints returns read-only imported checkpoints (Kind
-// "imported", flagged Imported) as PendingCheckpoint entries. They live on the v1
-// metadata branch but carry no commit trailer, so the commit-driven branch
-// walk never surfaces them. Best-effort: returns nil on read failure.
-func getImportedPendingCheckpoints(ctx context.Context, repo *git.Repository) []strategy.PendingCheckpoint {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
-	if err != nil {
-		return nil
-	}
-	infos, err := stores.Persistent.List(ctx)
-	if err != nil {
-		return nil
-	}
-	points := make([]strategy.PendingCheckpoint, 0)
-	for _, info := range infos {
-		// Imported checkpoints live on v1 alongside normal ones but have no
-		// commit trailer, so the commit-driven walk above never surfaces them.
-		// Add only the imported ones here.
-		if !info.Imported {
-			continue
-		}
-		point := strategy.PendingCheckpoint{
-			ID:           info.CheckpointID.String(),
-			Message:      readLatestCommittedSessionPrompt(ctx, stores.Persistent, info.CheckpointID, info.SessionCount),
-			Date:         info.CreatedAt,
-			IsLogsOnly:   true,
-			Imported:     true,
-			CheckpointID: info.CheckpointID,
-			SessionID:    info.SessionID,
-			SessionCount: info.SessionCount,
-			SessionIDs:   info.SessionIDs,
-			Agent:        info.Agent,
-		}
-		point.SessionPrompt = point.Message
-		points = append(points, point)
-	}
-	return points
 }
 
 func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.SessionReader, cpID id.CheckpointID, sessionCount int) string {
@@ -2927,15 +2870,6 @@ func runExplainBranchWithFilter(ctx context.Context, w, errW io.Writer, noPager 
 	// reports whether it hit its budget; we render everything it returns (it
 	// already enforces the cap internally) and only surface a note when older
 	// checkpoints were actually dropped.
-	//
-	// Note this prose view and the --json list path (runExplainListJSON)
-	// truncate differently on purpose: getBranchCheckpoints budgets the live
-	// and imported lists independently, so it can return up to 2*limit entries.
-	// This grouped view renders them all and only notes when a budget was hit;
-	// the JSON path hard-caps the flat array at limit (its array contract). So
-	// e.g. 60 live + 60 imported shows 120 rows with no note here, but 100
-	// entries with a note under --json. The `--limit` help text ("Only meaningful with --json")
-	// reflects that the cap is a JSON-path concept.
 	points, truncated, err := getBranchCheckpoints(ctx, repo, branchCheckpointsLimit)
 	if err != nil {
 		// If context was cancelled (e.g. user hit Ctrl+C), exit silently
@@ -3183,7 +3117,6 @@ type checkpointGroup struct {
 	prompt       string
 	isTemporary  bool // true if any commit is not logs-only (can be rewound)
 	isTask       bool // true if this is a task checkpoint
-	imported     bool // true for read-only imported (commit-less) checkpoints
 	commits      []commitEntry
 }
 
@@ -3224,7 +3157,6 @@ func groupByCheckpointID(points []strategy.PendingCheckpoint) []checkpointGroup 
 				prompt:       point.SessionPrompt,
 				isTemporary:  !point.IsLogsOnly,
 				isTask:       point.IsTaskCheckpoint,
-				imported:     point.Imported,
 			}
 			groupMap[cpID] = group
 			order = append(order, cpID)
@@ -3299,9 +3231,6 @@ func formatCheckpointGroup(sb *strings.Builder, group checkpointGroup, styles st
 	}
 	if group.isTemporary && cpID != "temporary" {
 		indicators = append(indicators, "[temporary]")
-	}
-	if group.imported {
-		indicators = append(indicators, "[imported]")
 	}
 
 	// Prompt cascade: SessionPrompt → latest commit message → dimmed placeholder.
