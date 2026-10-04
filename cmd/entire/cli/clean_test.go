@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -529,6 +531,40 @@ func TestCleanCmd_All_ForceMode(t *testing.T) {
 	}
 }
 
+func TestCleanCmd_All_ActiveSessionGuard(t *testing.T) {
+	_, commitHash := setupCleanTestRepo(t)
+
+	if err := strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID:  "active-session",
+		BaseCommit: commitHash.String(),
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseActive,
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	cmd := newCleanCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--all"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("clean --all error = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "Active sessions detected") {
+		t.Fatalf("expected active-session warning, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	states, err := strategy.ListSessionStates(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("active session should be preserved, got %d states", len(states))
+	}
+}
+
 func TestCleanCmd_All_SessionsBranchPreserved(t *testing.T) {
 	repo, commitHash := setupCleanTestRepo(t)
 
@@ -770,6 +806,40 @@ func TestRunCleanAllWithItems_AllFailures(t *testing.T) {
 	errOutput := stderr.String()
 	if !strings.Contains(errOutput, "Failed to delete 2 items:") {
 		t.Errorf("Stderr should show 'Failed to delete 2 items:', got: %s", errOutput)
+	}
+}
+
+func TestRunCleanAllWithItems_SkippedLockFilesDoNotFail(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+
+	lockID := filepath.Join("entire-shadow-locks", "held.lock")
+	lockPath := filepath.Join(dir, ".git", lockID)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatalf("mkdir lock dir: %v", err)
+	}
+	release, err := flock.Acquire(lockPath)
+	if err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+	defer release()
+
+	items := []strategy.CleanupItem{
+		{Type: strategy.CleanupTypeLockFile, ID: lockID, Reason: "test"},
+	}
+
+	cmd, stdout, stderr := newTestCleanCmd(t)
+	err = runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runCleanAllWithItems() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Skipped 1 active item") {
+		t.Fatalf("expected skipped lock output, got: %s", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr, got: %s", stderr.String())
 	}
 }
 
