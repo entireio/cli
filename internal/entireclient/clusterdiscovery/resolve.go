@@ -42,37 +42,6 @@ import (
 //
 // debugf is optional; nil suppresses debug output.
 func ResolveContextForCluster(ctx context.Context, configDir, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*contexts.Context, error) {
-	a, err := resolveClusterAuth(ctx, configDir, cacheDir, clusterHost, false, httpClient, debugf)
-	if err != nil {
-		return nil, err
-	}
-	return a.Context, nil
-}
-
-// ClusterAuth is ResolveClusterAuth's result: the selected login context
-// plus the cluster facts a caller needs to mint credentials for it.
-type ClusterAuth struct {
-	Context *contexts.Context
-	// JurisdictionAudience is the cluster's jurisdiction-token audience; empty
-	// when the cluster doesn't advertise one.
-	JurisdictionAudience string
-	// JurisdictionCoreURL is the advertised core minting for that audience —
-	// the cross-jurisdiction exchange endpoint.
-	JurisdictionCoreURL string
-}
-
-// ResolveClusterAuth is ResolveContextForCluster plus the cluster's
-// advertised jurisdiction metadata, sharing the same cache and single
-// /.well-known fetch. Because its callers cannot proceed without the
-// jurisdiction audience, resolution requires one (see resolveCachedCores).
-func ResolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*ClusterAuth, error) {
-	return resolveClusterAuth(ctx, configDir, cacheDir, clusterHost, true, httpClient, debugf)
-}
-
-// resolveClusterAuth is the shared body of ResolveContextForCluster and
-// ResolveClusterAuth: load contexts, resolve the cluster's cores entry,
-// select the login context.
-func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost string, requireAudience bool, httpClient *http.Client, debugf DebugFunc) (*ClusterAuth, error) {
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
@@ -86,38 +55,28 @@ func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost st
 		return nil, fmt.Errorf("load contexts: %w", err)
 	}
 
-	entry, err := resolveClusterCores(ctx, cacheDir, clusterHost, requireAudience, httpClient, debugf)
+	entry, err := resolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debugf)
 	if err != nil {
 		return nil, err
 	}
 
-	selected, err := selectLoginContext(f, "cluster "+clusterHost, clusterHost,
+	return selectLoginContext(f, "cluster "+clusterHost, clusterHost,
 		loginTargets{coreURLs: entry.CoreURLs, loginURL: entry.LoginURL, autoSelect: true}, debugf)
-	if err != nil {
-		return nil, err
-	}
-	return &ClusterAuth{
-		Context:              selected,
-		JurisdictionAudience: entry.JurisdictionAudience,
-		JurisdictionCoreURL:  entry.JurisdictionCoreURL,
-	}, nil
 }
 
 // ResolveClusterCores returns the cluster's discovery entry — the trusted
-// control-plane core URLs that front clusterHost plus its advertised
-// jurisdiction audience/core — using the same cache-then-/.well-known
-// discovery as ResolveContextForCluster (see resolveClusterCores). Exported
-// for callers that need the cluster facts without account selection — e.g.
-// the ENTIRE_TOKEN path validates that the env token's audience is one of
-// the advertised cores before exchanging it, so an unverified JWT can't
-// redirect the token exchange to an attacker-chosen host. Its sole caller
-// mints jurisdiction tokens, so the audience-requiring cache semantics
-// apply (see resolveCachedCores).
+// control-plane core URLs that front clusterHost — using the same
+// cache-then-/.well-known discovery as ResolveContextForCluster (see
+// resolveClusterCores). Exported for callers that need the cluster facts
+// without account selection — e.g. the ENTIRE_TOKEN path validates that the
+// env token's audience is one of the advertised cores before presenting it,
+// so an unverified JWT can't redirect the request to an attacker-chosen
+// host.
 func ResolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*discovery.CoresEntry, error) {
 	if debugf == nil {
 		debugf = func(string, ...any) {}
 	}
-	return resolveClusterCores(ctx, cacheDir, normalizeClusterHost(clusterHost), true, httpClient, debugf)
+	return resolveClusterCores(ctx, cacheDir, normalizeClusterHost(clusterHost), httpClient, debugf)
 }
 
 // normalizeClusterHost folds a cluster host to its canonical form for use as a
@@ -145,16 +104,7 @@ func normalizeClusterHost(clusterHost string) string {
 // why a cores entry poisoned on disk (a hand-edited or planted cache file) is
 // rejected on read instead of trusted for a TTL. Gating the fetch as well
 // keeps a hostile document from ever landing in the cache. Only CoreURLs is
-// gated: LoginURL is display-only and never eligible (see Response.LoginURL),
-// and JurisdictionCoreURL is carried but dialled by no caller today.
-//
-// requireAudience marks callers that cannot proceed without the entry's
-// jurisdiction audience (both git auth paths). For them, an entry
-// cached before the cluster advertised an audience is treated as stale so
-// the upgrade is picked up immediately instead of after the 24h TTL — and
-// an audience-less entry is NOT used as the discovery-failure fallback:
-// returning it would make the caller misdiagnose a transient discovery
-// failure as "this cluster doesn't do jurisdiction tokens".
+// gated: LoginURL is display-only and never eligible (see Response.LoginURL).
 //
 // An entry written against an older discovery.CoresSchemaVersion is stale for
 // every caller, because a field this client knows about cannot be told apart
@@ -165,7 +115,6 @@ func normalizeClusterHost(clusterHost string) string {
 // and caches normally even when the field is genuinely absent.
 func resolveCachedCores(
 	cacheDir, host, label string,
-	requireAudience bool,
 	load func(string) (discovery.ClusterCoresCache, error),
 	modify func(string, func(discovery.ClusterCoresCache) error) error,
 	discover func() (discovery.CoresEntry, error),
@@ -181,9 +130,8 @@ func resolveCachedCores(
 	var stale *discovery.CoresEntry
 	if cache != nil {
 		if entry, fresh, ok := cache.GetEntry(host); ok {
-			preAudience := requireAudience && entry.JurisdictionAudience == ""
 			outdated := entry.SchemaVersion < discovery.CoresSchemaVersion
-			if fresh && !preAudience && !outdated {
+			if fresh && !outdated {
 				if err := requireSameSiteIssuers(label, host, entry.CoreURLs); err != nil {
 					return nil, err
 				}
@@ -191,14 +139,14 @@ func resolveCachedCores(
 				return entry, nil
 			}
 			stale = entry
-			debugf("%s %s cores cache expired, pre-audience, or schema v%d < v%d; re-fetching /.well-known",
+			debugf("%s %s cores cache expired or schema v%d < v%d; re-fetching /.well-known",
 				label, host, entry.SchemaVersion, discovery.CoresSchemaVersion)
 		}
 	}
 
 	fetched, err := discover()
 	if err != nil {
-		if stale != nil && (!requireAudience || stale.JurisdictionAudience != "") {
+		if stale != nil {
 			if gateErr := requireSameSiteIssuers(label, host, stale.CoreURLs); gateErr != nil {
 				return nil, gateErr
 			}
@@ -222,12 +170,10 @@ func resolveCachedCores(
 }
 
 // resolveClusterCores returns the control-plane core URLs that front
-// clusterHost plus its advertised jurisdiction audience/core, from
-// cluster_cores.json when fresh, otherwise via a live /.well-known fetch
-// (cached, with stale fallback on failure). requireAudience: see
-// resolveCachedCores.
-func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requireAudience bool, httpClient *http.Client, debugf DebugFunc) (*discovery.CoresEntry, error) {
-	return resolveCachedCores(cacheDir, clusterHost, "cluster", requireAudience,
+// clusterHost, from cluster_cores.json when fresh, otherwise via a live
+// /.well-known fetch (cached, with stale fallback on failure).
+func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, httpClient *http.Client, debugf DebugFunc) (*discovery.CoresEntry, error) {
+	return resolveCachedCores(cacheDir, clusterHost, "cluster",
 		discovery.LoadClusterCores, discovery.ModifyClusterCores,
 		func() (discovery.CoresEntry, error) {
 			body, err := Discover(ctx, clusterHost, httpClient, debugf)
@@ -235,10 +181,8 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 				return discovery.CoresEntry{}, formatDiscoveryError(clusterHost, err)
 			}
 			return discovery.CoresEntry{
-				CoreURLs:             body.CoreURLs,
-				JurisdictionAudience: body.JurisdictionAudience,
-				JurisdictionCoreURL:  body.JurisdictionCoreURL,
-				LoginURL:             body.LoginURL,
+				CoreURLs: body.CoreURLs,
+				LoginURL: body.LoginURL,
 			}, nil
 		}, debugf)
 }

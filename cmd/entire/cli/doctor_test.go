@@ -878,46 +878,43 @@ func writeCodexHooksForDiagnosticTest(t *testing.T, root, contents string) {
 }
 
 // TestCheckCodexHookTrust_OKWhenAllTrusted prints "✓ Codex hook trust: OK"
-// when every event declared in hooks.json has a matching state entry.
+// when every event declared in hooks.json has a matching state entry, whether
+// Codex wrote the keys as TOML basic strings (Unix) or literal strings
+// (Windows, where the path contains backslashes).
 func TestCheckCodexHookTrust_OKWhenAllTrusted(t *testing.T) {
-	dir := setupGitRepoForPhaseTest(t)
-	t.Chdir(dir)
+	for _, style := range []struct {
+		name   string
+		header func(key string) string
+	}{
+		{"double-quoted", func(key string) string {
+			return `[hooks.state."` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(key) + `"]`
+		}},
+		{"single-quoted", func(key string) string { return `[hooks.state.'` + key + `']` }},
+	} {
+		t.Run(style.name, func(t *testing.T) {
+			dir := setupGitRepoForPhaseTest(t)
+			t.Chdir(dir)
 
-	codexDir := filepath.Join(dir, ".codex")
-	require.NoError(t, os.MkdirAll(codexDir, 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(codexDir, "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
+			codexDir := filepath.Join(dir, ".codex")
+			require.NoError(t, os.MkdirAll(codexDir, 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(codexDir, "hooks.json"), []byte(canonicalCodexHooksJSON()), 0o600))
 
-	hooksPath := resolvedHooksPath(t, dir)
-	codexHome := filepath.Join(t.TempDir(), "codex-home")
-	require.NoError(t, os.MkdirAll(codexHome, 0o750))
-	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
-trusted_hash = "sha256:aaa"
+			hooksPath := resolvedHooksPath(t, dir)
+			codexHome := filepath.Join(t.TempDir(), "codex-home")
+			require.NoError(t, os.MkdirAll(codexHome, 0o750))
+			var configTOML strings.Builder
+			for _, ev := range []string{"session_start", "session_end", "user_prompt_submit", "stop", "post_tool_use", "subagent_start", "subagent_stop"} {
+				configTOML.WriteString(style.header(hooksPath+":"+ev+":0:0") + "\ntrusted_hash = \"sha256:aaa\"\n\n")
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML.String()), 0o600))
+			t.Setenv("CODEX_HOME", codexHome)
 
-[hooks.state."` + hooksPath + `:session_end:0:0"]
-trusted_hash = "sha256:eee"
-
-[hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
-trusted_hash = "sha256:bbb"
-
-[hooks.state."` + hooksPath + `:stop:0:0"]
-trusted_hash = "sha256:ccc"
-
-[hooks.state."` + hooksPath + `:post_tool_use:0:0"]
-trusted_hash = "sha256:ddd"
-
-[hooks.state."` + hooksPath + `:subagent_start:0:0"]
-trusted_hash = "sha256:eee"
-
-[hooks.state."` + hooksPath + `:subagent_stop:0:0"]
-trusted_hash = "sha256:fff"
-`
-	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
-	t.Setenv("CODEX_HOME", codexHome)
-
-	cmd, stdout := newTestCmd(t)
-	checkCodexHookTrust(cmd)
-	require.Contains(t, stdout.String(), "✓ Codex hooks: INSTALLED")
-	require.Contains(t, stdout.String(), "✓ Codex hook approval records: PRESENT")
+			cmd, stdout := newTestCmd(t)
+			checkCodexHookTrust(cmd)
+			require.Contains(t, stdout.String(), "✓ Codex hooks: INSTALLED")
+			require.Contains(t, stdout.String(), "✓ Codex hook approval records: PRESENT")
+		})
+	}
 }
 
 // TestCheckCodexHookTrust_ListsMissingEvents prints the gap list when a
@@ -935,16 +932,16 @@ func TestCheckCodexHookTrust_ListsMissingEvents(t *testing.T) {
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
 	// Trust all but one — PostToolUse is the gap.
-	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
+	configTOML := `[hooks.state.'` + hooksPath + `:session_start:0:0']
 trusted_hash = "sha256:aaa"
 
-[hooks.state."` + hooksPath + `:session_end:0:0"]
+[hooks.state.'` + hooksPath + `:session_end:0:0']
 trusted_hash = "sha256:eee"
 
-[hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
+[hooks.state.'` + hooksPath + `:user_prompt_submit:0:0']
 trusted_hash = "sha256:bbb"
 
-[hooks.state."` + hooksPath + `:stop:0:0"]
+[hooks.state.'` + hooksPath + `:stop:0:0']
 trusted_hash = "sha256:ccc"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))
@@ -1327,13 +1324,13 @@ func TestCheckCodexHookTrust_FlagsStaleHooksFile(t *testing.T) {
 	require.NoError(t, os.MkdirAll(codexHome, 0o750))
 	// Trust the three legacy events so the trust check itself stays quiet —
 	// only the stale-file finding should fire.
-	configTOML := `[hooks.state."` + hooksPath + `:session_start:0:0"]
+	configTOML := `[hooks.state.'` + hooksPath + `:session_start:0:0']
 trusted_hash = "sha256:aaa"
 
-[hooks.state."` + hooksPath + `:user_prompt_submit:0:0"]
+[hooks.state.'` + hooksPath + `:user_prompt_submit:0:0']
 trusted_hash = "sha256:bbb"
 
-[hooks.state."` + hooksPath + `:stop:0:0"]
+[hooks.state.'` + hooksPath + `:stop:0:0']
 trusted_hash = "sha256:ccc"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(configTOML), 0o600))

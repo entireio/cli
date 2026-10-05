@@ -34,10 +34,10 @@ func TestParseExplainRepoFlag(t *testing.T) {
 		{name: "native leading slash", in: "/et/acme/widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "native clone url", in: "entire://aws-us-east-2.entire.io/et/Acme/Widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "mirror clone url", in: "entire://aws-us-east-2.entire.io/gh/Acme/Widgets", forge: "gh", owner: "acme", repo: "widgets"},
-		// `.git` is part of a native repo's name, not decoration, so it must
-		// survive parsing on both the bare-ref and clone-URL spellings.
-		{name: "native git suffix", in: "et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets.git"},
-		{name: "native clone url git suffix", in: "entire://aws-us-east-2.entire.io/et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets.git"},
+		// `.git` is decoration on either spelling, so both forms of the native
+		// ref name the suffix-free repo.
+		{name: "native git suffix", in: "et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets"},
+		{name: "native clone url git suffix", in: "entire://aws-us-east-2.entire.io/et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "empty", in: "", wantErr: "--repo requires a value"},
 		{name: "missing forge", in: "acme/widgets", wantErr: "forge prefix is required"},
 		{name: "bare word", in: "widgets", wantErr: "forge prefix is required"},
@@ -111,12 +111,10 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"))
 	assert.False(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"), "same-named GitHub repo is distinct")
 
-	// `.git` is part of a native repo's name, not decoration: an origin named
-	// "widgets.git" must not match a --repo naming "widgets", and must match one
-	// that spells the suffix out.
+	// `.git` is decoration on a native origin too, so it is dropped on the way
+	// in and the origin is the repo named "widgets".
 	setOrigin(t, "entire://aws-us-east-2.entire.io/et/acme/widgets.git")
-	assert.False(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"), "the suffix is part of the name, not decoration to strip")
-	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets.git"))
+	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"))
 
 	// A non-GitHub origin with a coincidentally matching owner/name must not
 	// count as the current GitHub repo.
@@ -186,6 +184,16 @@ func (s *stubCrossRepoReader) ReadSessionContent(ctx context.Context, cid id.Che
 	return &checkpoint.SessionContent{Metadata: *meta, Transcript: s.transcript, Prompts: prompts}, nil
 }
 
+// The task tier answers like the real API reader: the cell does not serve
+// task records.
+func (s *stubCrossRepoReader) ListTasks(ctx context.Context, cid id.CheckpointID) ([]checkpoint.TaskEntry, error) {
+	return (&apiCheckpointReader{ownerRepo: "gh/acme/widgets"}).ListTasks(ctx, cid)
+}
+
+func (s *stubCrossRepoReader) ReadTaskTranscript(ctx context.Context, cid id.CheckpointID, toolUseID string) ([]byte, error) {
+	return (&apiCheckpointReader{ownerRepo: "gh/acme/widgets"}).ReadTaskTranscript(ctx, cid, toolUseID)
+}
+
 func (s *stubCrossRepoReader) GetCheckpointAuthor(context.Context, id.CheckpointID) (checkpoint.Author, error) {
 	return checkpoint.Author{Name: "Foreign Author"}, nil
 }
@@ -253,6 +261,29 @@ func TestRunCrossRepoExplain_JSON(t *testing.T) {
 	assert.Equal(t, testAPICheckpointID.String(), envelope.CheckpointID)
 	assert.Equal(t, 2, envelope.SessionCount)
 	assert.False(t, envelope.Partial, "a complete read must not be flagged partial")
+
+	// The API does not serve subagent task records: the key is omitted rather
+	// than reported as an empty list, and that is not a partial export.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &raw))
+	assert.NotContains(t, raw, "tasks")
+	assert.NotContains(t, raw, "tasks_error")
+}
+
+func TestRunCrossRepoExplain_TaskTranscriptIsUnsupported(t *testing.T) {
+	withStubCrossRepoReader(t, &stubCrossRepoReader{})
+
+	var out, errOut bytes.Buffer
+	err := runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
+		repoFlag:     "gh/acme/widgets",
+		target:       testAPICheckpointID.String(),
+		sessionIndex: -1,
+		transcript:   true,
+		task:         "toolu_x",
+	})
+	require.ErrorIs(t, err, checkpoint.ErrTaskRecordsUnsupported)
+	assert.Contains(t, err.Error(), "gh/acme/widgets")
+	assert.Empty(t, out.String())
 }
 
 func TestRunCrossRepoExplain_NativeRepoThreadsForge(t *testing.T) {

@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -27,6 +29,7 @@ import (
 func NewReviewer() *reviewtypes.ReviewerTemplate {
 	return &reviewtypes.ReviewerTemplate{
 		AgentName: "codex",
+		Prepare:   prepareCodexReview,
 		BuildCmd:  buildCodexReviewCmd,
 		Parser:    parseCodexOutput,
 	}
@@ -49,20 +52,98 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 // leaving no channel for Entire's scope enumeration, per-run prompt, and
 // checkpoint context. Plain `codex exec -` with the composed prompt on stdin
 // runs the same skill while carrying our arguments.
+//
+// A `--target` review runs in a worktree of a branch someone else may
+// control. Codex loads that checkout's .codex/config.toml (mcp_servers
+// included) when the project is trusted, and it resolves trust for a linked
+// worktree to the main repo root, so trusting a repo also trusts every
+// `entire review --target` worktree inside it. On a target run the checkout
+// is therefore marked untrusted (untrustedProjectOverride). That switches off
+// codex's whole project layer, .codex/hooks.json included, so project hooks,
+// Entire's among them, do not run there; they never did at that path, since
+// codex trusts hooks per path. The user's own config.toml still applies.
+//
+// A plain `entire review` runs in the user's own checkout and keeps codex's
+// normal trust: there codex behaves as it would if the user ran it, and
+// marking the checkout untrusted would stop Entire's hooks from tagging the
+// review session.
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	promptCfg := cfg
 	promptCfg.Skills = codexNativeSkillInvocations(cfg.Skills)
 	args := []string{codexExecCommand, "--skip-git-repo-check", "--json"}
+	targetRoot := ""
+	if review.IsTargetReview() {
+		root, err := reviewCheckoutRoot(ctx)
+		if err != nil {
+			// prepareCodexReview already failed the run for this; a nil command
+			// stops Start rather than spawning codex with the checkout trusted.
+			return nil
+		}
+		args = append(args, "-c", untrustedProjectOverride(root))
+		targetRoot = root
+	}
 	args = review.AppendModelFlag(args, cfg.Model)
 	args = append(args, "-")
 	prompt := review.ComposeReviewPrompt(promptCfg)
 	cmd := exec.CommandContext(ctx, "codex", args...)
+	if targetRoot != "" {
+		// Codex keys trust on its own working directory, so a target run runs
+		// from exactly the directory the override names. Left to inherit the
+		// process cwd, a reviewer started from a subdirectory would key trust
+		// on a path the override does not match and fall back to the trusted
+		// repo. A plain review keeps the inherited cwd.
+		cmd.Dir = targetRoot
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "codex", cfg, prompt)
 	return cmd
 }
 
 const codexExecCommand = "exec"
+
+// untrustedProjectOverride returns a `-c` value marking root untrusted. Codex
+// checks the working directory's own trust entry before the repo root's, so
+// this wins over a trusted parent repo. It must be the inline-table form:
+// codex silently ignores the dotted `projects."<path>".trust_level` spelling.
+// The path is JSON-quoted, which is also a valid TOML basic string.
+func untrustedProjectOverride(root string) string {
+	quoted, err := json.Marshal(root)
+	if err != nil {
+		quoted = []byte(`""`)
+	}
+	return "projects={" + string(quoted) + `={trust_level="untrusted"}}`
+}
+
+// prepareCodexReview fails a target review before anything is spawned when
+// the checkout's canonical root cannot be resolved: without it the untrusted
+// override would name the wrong path, and codex would load the branch's
+// project config as trusted.
+func prepareCodexReview(ctx context.Context) error {
+	if !review.IsTargetReview() {
+		return nil
+	}
+	if _, err := reviewCheckoutRoot(ctx); err != nil {
+		return fmt.Errorf("resolve the review checkout for codex: %w", err)
+	}
+	return nil
+}
+
+// reviewCheckoutRoot returns the checkout the reviewer runs in, spelled the
+// way codex keys trust: codex canonicalizes its working directory, so an
+// entry under a symlinked spelling (/tmp vs /private/tmp) would not match.
+// Any failure is returned; a guessed or uncanonicalized path would produce an
+// override that silently matches nothing.
+func reviewCheckoutRoot(ctx context.Context) (string, error) {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("worktree root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize %s: %w", root, err)
+	}
+	return resolved, nil
+}
 
 // codexNativeSkillInvocations rewrites slash-form skill invocations (the
 // agent-portable form profiles are configured with) into codex's native
@@ -193,7 +274,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
 				}
 			case "item.completed":
-				if env.Item.Type == "agent_message" && env.Item.Text != "" {
+				if env.Item.Type == itemTypeAgentMessage && env.Item.Text != "" {
 					out <- reviewtypes.AssistantText{Text: env.Item.Text}
 				}
 				// command_execution completion is intentionally swallowed —

@@ -131,6 +131,11 @@ type Event struct {
 	// narrow final-event shape whose identity becomes available only at stop.
 	Final bool
 
+	// SubagentLaunch is how the agent reports it ran the subagent, on a
+	// launch-time (non-Final) SubagentEnd. Unknown means the agent did not say,
+	// and the lifecycle falls back to tool_input.run_in_background.
+	SubagentLaunch SubagentLaunchMode
+
 	// CompletionWithoutLaunch marks a true completion whose stable identity was
 	// learned at completion time rather than from a correlated start hook.
 	// Shared lifecycle may create the task record only when the parent session
@@ -212,6 +217,21 @@ type Event struct {
 	// may not read directly).
 	SuppressIfSessionActive bool
 }
+
+// SubagentLaunchMode is how an agent ran a subagent, as reported by the agent
+// itself when the launching tool returns.
+type SubagentLaunchMode int
+
+const (
+	// SubagentLaunchUnknown means the agent did not report a mode.
+	SubagentLaunchUnknown SubagentLaunchMode = iota
+	// SubagentLaunchForeground means the launching tool returned after the
+	// subagent finished.
+	SubagentLaunchForeground
+	// SubagentLaunchBackground means the launching tool returned while the
+	// subagent keeps running; its completion arrives as a later Final event.
+	SubagentLaunchBackground
+)
 
 // ReadAndParseHookInput decodes a single JSON hook payload from stdin into the
 // given type. This is a shared helper for agent ParseHookEvent implementations.

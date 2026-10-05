@@ -66,7 +66,7 @@ func (factoryImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 				return nil, nil
 			}
 			prompt, _ := factoryPromptText(rawLines[start])
-			return &Turn{UUID: env.ID, Prompt: prompt, Model: model, CreatedAt: createdAt, Tokens: tokens}, nil
+			return &Turn{UUID: env.ID, Prompt: prompt, Model: model, CreatedAt: createdAt, CreatedAtFromModTime: true, Tokens: tokens}, nil
 		})
 }
 

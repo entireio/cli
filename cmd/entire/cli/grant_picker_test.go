@@ -46,7 +46,7 @@ type holder struct {
 // members, and who already holds the target.
 type pickerFixture struct {
 	ownerType coreapi.ProjectOwnerType
-	members   []coreapi.Membership
+	members   []coreapi.OrgMemberListItem
 	held      []holder // accounts holding the target directly
 	// viaProject holds the grantees a repo carries through its project. Listing
 	// returns them alongside the direct rows, and the add pool must NOT subtract
@@ -60,14 +60,14 @@ type pickerFixture struct {
 
 // inactive is a member who has not joined, so no provider identity resolves for
 // them and they cannot be granted anything.
-func inactive(handle, accountID string) coreapi.Membership {
+func inactive(handle, accountID string) coreapi.OrgMemberListItem {
 	m := member(handle, accountID)
 	m.Status = "invited"
 	return m
 }
 
-func member(handle, accountID string) coreapi.Membership {
-	return coreapi.Membership{
+func member(handle, accountID string) coreapi.OrgMemberListItem {
+	return coreapi.OrgMemberListItem{
 		AccountId: accountID,
 		Handle:    coreapi.NewOptString(handle),
 		Provider:  coreapi.NewOptString(providerGitHub),
@@ -269,7 +269,7 @@ func handles(cs []grantCandidate) []string {
 //
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_ExcludesDirectHoldersButOffersInheritedOnes(t *testing.T) {
-	members := []coreapi.Membership{
+	members := []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"),
 		member("github:bob", "acct-b"),
 		member("github:carol", "acct-c"),
@@ -339,7 +339,7 @@ func TestGrantPicker_AnEmptyPoolSucceeds(t *testing.T) {
 	}{
 		"everyone already holds a direct grant": {
 			pickerFixture{
-				members: []coreapi.Membership{member("github:alice", "acct-a")},
+				members: []coreapi.OrgMemberListItem{member("github:alice", "acct-a")},
 				held:    []holder{{"acct-a", "github:alice"}},
 			},
 			"every member of the org owning project " + pickerProjULID + " already has a grant on it",
@@ -349,7 +349,7 @@ func TestGrantPicker_AnEmptyPoolSucceeds(t *testing.T) {
 			"project " + pickerProjULID + " has no org members to choose from",
 		},
 		"no member can be addressed": {
-			pickerFixture{members: []coreapi.Membership{inactive("github:alice", "acct-a")}},
+			pickerFixture{members: []coreapi.OrgMemberListItem{inactive("github:alice", "acct-a")}},
 			"no member of the org owning project " + pickerProjULID + " can be granted access here",
 		},
 	} {
@@ -379,7 +379,7 @@ func TestGrantPicker_AnEmptyPoolSucceeds(t *testing.T) {
 func TestGrantPicker_EmptyPoolWithJSONStaysParseable(t *testing.T) {
 	var grants []string
 	srv := pickerServer(t, pickerFixture{
-		members: []coreapi.Membership{member("github:alice", "acct-a")},
+		members: []coreapi.OrgMemberListItem{member("github:alice", "acct-a")},
 		held:    []holder{{"acct-a", "github:alice"}},
 	}, &grants, nil)
 	t.Cleanup(srv.Close)
@@ -404,7 +404,7 @@ func TestGrantPicker_EmptyPoolWithJSONStaysParseable(t *testing.T) {
 func TestGrantPicker_SelectingNobodyIsACleanStop(t *testing.T) {
 	var grants []string
 	srv := pickerServer(t, pickerFixture{
-		members: []coreapi.Membership{member("github:alice", "acct-a")},
+		members: []coreapi.OrgMemberListItem{member("github:alice", "acct-a")},
 	}, &grants, nil)
 	t.Cleanup(srv.Close)
 	capturePicker(t, func([]grantCandidate, []string, string) ([]grantSelection, error) {
@@ -430,7 +430,7 @@ func TestGrantPicker_UngrantableMembersAreDropped(t *testing.T) {
 	invited.Status = "invited"
 
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"), noHandle, invited,
 	}}, &grants, nil)
 	t.Cleanup(srv.Close)
@@ -450,7 +450,7 @@ func TestGrantPicker_UngrantableMembersAreDropped(t *testing.T) {
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_PerGranteeRoles(t *testing.T) {
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"), member("github:bob", "acct-b"),
 	}}, &grants, nil)
 	t.Cleanup(srv.Close)
@@ -477,7 +477,7 @@ func TestGrantPicker_PerGranteeRoles(t *testing.T) {
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_FixedRoleIsNotPrompted(t *testing.T) {
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"), member("github:bob", "acct-b"),
 	}}, &grants, nil)
 	t.Cleanup(srv.Close)
@@ -507,7 +507,7 @@ func TestGrantPicker_FixedRoleIsNotPrompted(t *testing.T) {
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_PartialFailureStopsAndReports(t *testing.T) {
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"), member("github:bob", "acct-b"), member("github:carol", "acct-c"),
 	}}, &grants, func(i int) int {
 		if i == 1 {
@@ -539,7 +539,7 @@ func TestGrantPicker_PartialFailureStopsAndReports(t *testing.T) {
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_PartialFailureIsReportedInJSONToo(t *testing.T) {
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"), member("github:bob", "acct-b"),
 	}}, &grants, func(i int) int {
 		if i == 1 {
@@ -664,7 +664,7 @@ func runPickerCmd(t *testing.T, newCmd func() *cobra.Command, srvURL, ref string
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantPicker_SoleCandidateIsStillOffered(t *testing.T) {
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{member("github:alice", "acct-a")}}, &grants, nil)
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{member("github:alice", "acct-a")}}, &grants, nil)
 	t.Cleanup(srv.Close)
 	opened := false
 	capturePicker(t, func(cs []grantCandidate, _ []string, _ string) ([]grantSelection, error) {
@@ -706,7 +706,7 @@ func TestGrantAdd_JSONShapeFollowsTheInvocation(t *testing.T) {
 
 	t.Run("a picked set is an array", func(t *testing.T) {
 		var grants []string
-		srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+		srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 			member("github:alice", "acct-a"), member("github:bob", "acct-b"),
 		}}, &grants, nil)
 		t.Cleanup(srv.Close)
@@ -728,7 +728,7 @@ func TestGrantAdd_JSONShapeFollowsTheInvocation(t *testing.T) {
 
 	t.Run("a picker that granted one is still an array", func(t *testing.T) {
 		var grants []string
-		srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+		srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 			member("github:alice", "acct-a"),
 		}}, &grants, nil)
 		t.Cleanup(srv.Close)
@@ -754,7 +754,7 @@ func TestRemovePicker_OrgHasAPoolToo(t *testing.T) {
 	require.NotNil(t, orgGrantTarget.holders, "remove has a pool where add has none")
 
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"), member("github:bob", "acct-b"),
 	}}, &grants, nil)
 	t.Cleanup(srv.Close)
@@ -963,7 +963,7 @@ func TestGrantRemove_ConfirmationIsSkippedWithoutATerminal(t *testing.T) {
 // Not parallel: swaps the activeCoreClient and grantPicker seams.
 func TestGrantAdd_TypedGranteeIsOnlyAskedForARole(t *testing.T) {
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		member("github:alice", "acct-a"), member("github:bob", "acct-b"),
 	}}, &grants, nil)
 	t.Cleanup(srv.Close)
@@ -994,7 +994,7 @@ func TestGrantAdd_TypedGranteeIsOnlyAskedForARole(t *testing.T) {
 // Not parallel: swaps the activeCoreClient and removePicker seams.
 func TestRemovePicker_DropsMembersTheRoutesCannotAddress(t *testing.T) {
 	var grants []string
-	srv := pickerServer(t, pickerFixture{members: []coreapi.Membership{
+	srv := pickerServer(t, pickerFixture{members: []coreapi.OrgMemberListItem{
 		inactive("github:pending", "acct-p"),
 		member("github:alice", "acct-a"),
 	}}, &grants, nil)
@@ -1063,7 +1063,7 @@ func TestGrantRemove_ATypedGranteeIsNeverPrompted(t *testing.T) {
 // budget can end the walk. row builds the member at each position, which is
 // what tells the truncation cases apart: grantable rows fill the pool, and
 // ungrantable ones leave it empty while the org plainly has more.
-func endlessOrgMembersServer(t *testing.T, row func(page, i int) coreapi.Membership) (*httptest.Server, *int) {
+func endlessOrgMembersServer(t *testing.T, row func(page, i int) coreapi.OrgMemberListItem) (*httptest.Server, *int) {
 	t.Helper()
 	pages := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1072,7 +1072,7 @@ func endlessOrgMembersServer(t *testing.T, row func(page, i int) coreapi.Members
 			return
 		}
 		pages++
-		members := make([]coreapi.Membership, budgetTestPageSize)
+		members := make([]coreapi.OrgMemberListItem, budgetTestPageSize)
 		for i := range members {
 			members[i] = row(pages, i)
 		}
@@ -1105,7 +1105,7 @@ const budgetTestPageSize = 600
 //
 // Not parallel: swaps the activeCoreClient and removePicker seams.
 func TestRemovePicker_APoolLongerThanTheBudgetIsDisclosed(t *testing.T) {
-	srv, requested := endlessOrgMembersServer(t, func(page, i int) coreapi.Membership {
+	srv, requested := endlessOrgMembersServer(t, func(page, i int) coreapi.OrgMemberListItem {
 		return member(fmt.Sprintf("github:u%d-%d", page, i), fmt.Sprintf("acct-%d-%d", page, i))
 	})
 
@@ -1171,7 +1171,7 @@ func TestGrantPicker_ATruncatedPoolSaysSoOnTheScreen(t *testing.T) {
 // Not parallel: swaps the activeCoreClient and removePicker seams.
 func TestRemovePicker_ATruncatedEmptyPoolSaysSo(t *testing.T) {
 	// Nobody addressable, so the window is full and the pool empty.
-	srv, _ := endlessOrgMembersServer(t, func(page, i int) coreapi.Membership {
+	srv, _ := endlessOrgMembersServer(t, func(page, i int) coreapi.OrgMemberListItem {
 		return inactive(fmt.Sprintf("github:u%d-%d", page, i), fmt.Sprintf("acct-%d-%d", page, i))
 	})
 	captureRemovePicker(t, func([]grantCandidate) []grantCandidate {
@@ -1256,7 +1256,7 @@ func truncatedAddPoolServer(t *testing.T, held []coreapi.ProjectGrant) *httptest
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/members") && strings.Contains(r.URL.Path, "/orgs/"):
 			memberPages++
-			members := make([]coreapi.Membership, budgetTestPageSize)
+			members := make([]coreapi.OrgMemberListItem, budgetTestPageSize)
 			for i := range members {
 				members[i] = member(fmt.Sprintf("github:u%d-%d", memberPages, i), fmt.Sprintf("acct-%d-%d", memberPages, i))
 			}
@@ -1306,4 +1306,56 @@ func TestRevokeConfirmed_ACancelledContextIsNotADecline(t *testing.T) {
 	require.False(t, proceed, "nothing was confirmed")
 	require.ErrorIs(t, err, context.Canceled, "main.go keys the quiet signal exit off this")
 	require.Empty(t, render.String(), "an interruption is not the user being told they declined")
+}
+
+// An org member is offered under the name the server sends, so a Google
+// account reads as a person; the grant still goes by handle.
+func TestMemberCandidate_LabelCarriesTheDisplayName(t *testing.T) {
+	t.Parallel()
+
+	named := member("google:google-1001", "acct-g")
+	named.DisplayName = coreapi.NewOptString("Victor Gutierrez")
+	c := memberCandidate("google:google-1001", named)
+	require.Equal(t, "google:google-1001", c.ref)
+	require.Equal(t, "google:1001 · Victor Gutierrez", c.label)
+
+	c.role = "writer"
+	require.Equal(t, "google:1001 · Victor Gutierrez (writer)", c.option())
+
+	unnamed := memberCandidate("github:alice", member("github:alice", "acct-a"))
+	require.Equal(t, "github:alice", unnamed.label)
+}
+
+// A project or repo grant is offered for revoking under the display name the
+// server sends, like an org member; the revoke itself still goes by ULID.
+func TestGrantHolders_LabelCarriesTheDisplayName(t *testing.T) {
+	t.Parallel()
+
+	// Each target maps its rows through its own function, so each is checked:
+	// a mapper that dropped DisplayName would lose the name on that target only.
+	assertHolders := func(t *testing.T, holders []grantCandidate) {
+		t.Helper()
+		require.Len(t, holders, 2)
+		require.Equal(t, "acct-g", holders[0].ref)
+		require.True(t, holders[0].byID)
+		require.Equal(t, "google:1001 · Victor Gutierrez (writer)", holders[0].option())
+		require.Equal(t, "acct-a", holders[1].ref)
+		require.Equal(t, "github:alice (reader)", holders[1].option())
+	}
+
+	t.Run("project", func(t *testing.T) {
+		t.Parallel()
+		assertHolders(t, grantHolders(mapRows([]coreapi.ProjectGrant{
+			{GranteeId: "acct-g", GranteeType: granteeTypeAccount, GranteeName: coreapi.NewOptString("google:google-1001"), DisplayName: coreapi.NewOptString("Victor Gutierrez"), Role: "writer", Source: grantSourceDirect},
+			{GranteeId: "acct-a", GranteeType: granteeTypeAccount, GranteeName: coreapi.NewOptString("github:alice"), Role: "reader", Source: grantSourceDirect},
+		}, projectGrantRowOf)))
+	})
+
+	t.Run("repo", func(t *testing.T) {
+		t.Parallel()
+		assertHolders(t, grantHolders(mapRows([]coreapi.RepoGrant{
+			{GranteeId: "acct-g", GranteeType: granteeTypeAccount, GranteeName: coreapi.NewOptString("google:google-1001"), DisplayName: coreapi.NewOptString("Victor Gutierrez"), Role: "writer", Source: grantSourceDirect},
+			{GranteeId: "acct-a", GranteeType: granteeTypeAccount, GranteeName: coreapi.NewOptString("github:alice"), Role: "reader", Source: grantSourceDirect},
+		}, repoGrantRowOf)))
+	})
 }

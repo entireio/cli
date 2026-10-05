@@ -52,6 +52,104 @@
         ],
         "type": "object"
       },
+      "AccountIdentity": {
+        "additionalProperties": true,
+        "properties": {
+          "avatarUrl": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "handles": {
+            "items": {
+              "$ref": "#/components/schemas/AccountProfileHandle"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "handles"
+        ],
+        "type": "object"
+      },
+      "AccountProfile": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/AccountProfile.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "handles": {
+            "items": {
+              "$ref": "#/components/schemas/AccountProfileHandle"
+            },
+            "type": "array"
+          },
+          "organizations": {
+            "items": {
+              "$ref": "#/components/schemas/AccountProfileOrganization"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "accountId",
+          "handles",
+          "organizations"
+        ],
+        "type": "object"
+      },
+      "AccountProfileHandle": {
+        "additionalProperties": true,
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "isPrimary": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "handle",
+          "isPrimary"
+        ],
+        "type": "object"
+      },
+      "AccountProfileOrganization": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
       "AddOrgMemberInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -1074,7 +1172,7 @@
             "type": "string"
           },
           "attributeFilter": {
-            "description": "Exact-match key/value map; empty filter matches any token."
+            "description": "Canonical attribute name → required value; at least one pin."
           },
           "providerId": {
             "minLength": 1,
@@ -1206,6 +1304,56 @@
           "email",
           "role"
         ],
+        "type": "object"
+      },
+      "CreatePluginInstallationInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreatePluginInstallationInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "Existing installation (ins_<ULID>) to retry",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "Entire org the installation belongs to. Deprecated: use project_id",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Entire project the installation belongs to",
+            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "type": "string"
+          },
+          "repository_ids": {
+            "description": "Public repository ids (repo_<ULID>) when repository_selection is selected",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          "repository_selection": {
+            "description": "Project installations: all repositories in the project, or only repository_ids",
+            "enum": [
+              "all",
+              "selected"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "description": "Opaque state interpreted by the selected plugin profile",
+            "maxLength": 1024,
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "CreateProjectInputBody": {
@@ -1616,6 +1764,9 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/RepoCandidate"
           },
           "capabilities": {
             "$ref": "#/components/schemas/RepoCapabilities"
@@ -2336,7 +2487,15 @@
             "description": "Account ID that used the token. Empty until the invitation is accepted.",
             "type": "string"
           },
+          "acceptedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for AcceptedBy. Absent when it cannot be resolved."
+          },
           "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "declinedAt": {
             "format": "date-time",
             "type": "string"
           },
@@ -2352,8 +2511,12 @@
             "type": "string"
           },
           "invitedBy": {
-            "description": "Account ID of the manager who created the invitation.",
+            "description": "Account ID of the manager who created the invitation. Empty when that account has been erased.",
             "type": "string"
+          },
+          "invitedByIdentity": {
+            "$ref": "#/components/schemas/AccountIdentity",
+            "description": "Resolved identity for InvitedBy. Absent when it cannot be resolved."
           },
           "revokedAt": {
             "format": "date-time",
@@ -2373,7 +2536,8 @@
               "open",
               "accepted",
               "revoked",
-              "expired"
+              "expired",
+              "declined"
             ],
             "type": "string"
           }
@@ -2715,7 +2879,7 @@
           },
           "members": {
             "items": {
-              "$ref": "#/components/schemas/Membership"
+              "$ref": "#/components/schemas/OrgMemberListItem"
             },
             "type": "array"
           },
@@ -2740,6 +2904,13 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "invitations": {
+            "description": "Outstanding (open and expired) invitations, only on the first page of an unfiltered request and only when the caller passes the SSO check. They are never joined to an account.",
+            "items": {
+              "$ref": "#/components/schemas/Invitation"
+            },
+            "type": "array"
           },
           "items": {
             "items": {
@@ -2818,6 +2989,58 @@
         },
         "type": "object"
       },
+      "ListPluginInstallationsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListPluginInstallationsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PluginInstallationView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "ListProjectCollaboratorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListProjectCollaboratorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "collaborators": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectCollaborator"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collaborators"
+        ],
+        "type": "object"
+      },
       "ListProjectMembersOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -2857,6 +3080,9 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "candidatesIncomplete": {
+            "type": "boolean"
           },
           "nextPageToken": {
             "description": "Pass back to fetch the next page; empty when no more entries.",
@@ -3255,6 +3481,10 @@
           "createdAt": {
             "description": "When the account was created (accounts.created_at).",
             "format": "date-time",
+            "type": "string"
+          },
+          "displayName": {
+            "description": "The account-level Display Name: provider-asserted, not user-editable. Null until seeded. Distinct from regional.displayName, the free-editable provider-login mirror.",
             "type": "string"
           },
           "handle": {
@@ -3952,7 +4182,7 @@
         "additionalProperties": true,
         "properties": {
           "canChangeOwners": {
-            "description": "Whether the caller holds the direct organization owner relation. Individual mutations still enforce all guards.",
+            "description": "Whether this surface permits the caller to change organization owners. Individual mutations still enforce all guards.",
             "type": "boolean"
           },
           "canCreateProject": {
@@ -3973,6 +4203,67 @@
         ],
         "type": "object"
       },
+      "OrgMemberListItem": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "description": "Public avatar URL.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "displayName": {
+            "description": "Account-level public display name.",
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "description": "Membership lifecycle status.",
+            "enum": [
+              "active",
+              "inactive",
+              "pending"
+            ],
+            "type": "string"
+          },
+          "workosOrgMembershipId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "accountId",
+          "orgId",
+          "role",
+          "status",
+          "createdAt"
+        ],
+        "type": "object"
+      },
       "OrgPerson": {
         "additionalProperties": true,
         "properties": {
@@ -3989,6 +4280,9 @@
             "type": "string"
           },
           "avatarUrl": {
+            "type": "string"
+          },
+          "displayName": {
             "type": "string"
           },
           "grants": {
@@ -4140,6 +4434,9 @@
           "avatarUrl": {
             "type": "string"
           },
+          "displayName": {
+            "type": "string"
+          },
           "handle": {
             "type": "string"
           },
@@ -4191,6 +4488,90 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "PluginInstallation": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/PluginInstallation.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "description": "Provider account for this installation (ins-<ulid>)",
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "Installation id (ins_<ULID>) the plugin stores",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "Entire org that owns the installation, or the project's owning org",
+            "type": "string"
+          },
+          "profile": {
+            "additionalProperties": {},
+            "description": "Opaque output from the selected static plugin profile",
+            "type": "object"
+          },
+          "project_id": {
+            "description": "Entire project the installation belongs to",
+            "type": "string"
+          },
+          "repository_selection": {
+            "description": "all or selected; empty for an org installation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "installation_id",
+          "account",
+          "profile"
+        ],
+        "type": "object"
+      },
+      "PluginInstallationView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/PluginInstallationView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "installation_id": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "repository_selection": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "installation_id",
+          "account",
+          "created_at"
+        ],
         "type": "object"
       },
       "PreviewInvitationInputBody": {
@@ -4306,9 +4687,34 @@
         ],
         "type": "object"
       },
+      "ProjectCollaborator": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId"
+        ],
+        "type": "object"
+      },
       "ProjectGrant": {
         "additionalProperties": true,
         "properties": {
+          "displayName": {
+            "description": "The account's public display name, when it has one. Absent for non-account grantees.",
+            "type": "string"
+          },
           "granteeId": {
             "type": "string"
           },
@@ -4397,6 +4803,9 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/RepoCandidate"
           },
           "capabilities": {
             "$ref": "#/components/schemas/RepoCapabilities"
@@ -4590,6 +4999,10 @@
       "RepoGrant": {
         "additionalProperties": true,
         "properties": {
+          "displayName": {
+            "description": "The account's public display name, when it has one. Absent for non-account grantees.",
+            "type": "string"
+          },
           "granteeId": {
             "type": "string"
           },
@@ -5144,7 +5557,15 @@
           "directGrant": {
             "$ref": "#/components/schemas/ResourcePersonDirectGrant"
           },
+          "displayName": {
+            "type": "string"
+          },
           "handle": {
+            "type": "string"
+          },
+          "joinedAt": {
+            "description": "Earliest known effective-access time for the selected project. Organization-derived dates use membership activation, not invitation creation. Omitted for repositories and access without a known timestamp.",
+            "format": "date-time",
             "type": "string"
           },
           "provider": {
@@ -5331,6 +5752,40 @@
           "status",
           "systemManaged",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "SetPluginInstallationRepositoriesInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/SetPluginInstallationRepositoriesInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "repository_ids": {
+            "description": "Public repository ids (repo_<ULID>) when selected",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          "repository_selection": {
+            "description": "all repositories in the project, or only repository_ids",
+            "enum": [
+              "all",
+              "selected"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository_selection"
         ],
         "type": "object"
       },
@@ -5607,6 +6062,129 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/accounts/{accountId}": {
+      "get": {
+        "operationId": "getAccountProfile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountProfile"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get the viewer-scoped profile of an account",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
     "/audit": {
       "get": {
         "operationId": "listAuditEvents",
@@ -6199,7 +6777,8 @@
                       "enum": [
                         "revoked",
                         "used",
-                        "expired"
+                        "expired",
+                        "declined"
                       ],
                       "type": "string"
                     }
@@ -8101,12 +8680,13 @@
             }
           },
           {
-            "description": "Optional: exact-match org name (case-insensitive).",
+            "description": "Deprecated: exact org name among the caller's own orgs, case-insensitive. List orgs and match client-side instead.",
             "explode": false,
             "in": "query",
             "name": "name",
             "schema": {
-              "description": "Optional: exact-match org name (case-insensitive).",
+              "deprecated": true,
+              "description": "Deprecated: exact org name among the caller's own orgs, case-insensitive. List orgs and match client-side instead.",
               "type": "string"
             }
           },
@@ -9462,7 +10042,7 @@
     },
     "/orgs/{orgId}/ci/depot/connection": {
       "post": {
-        "description": "Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because nothing can verify a Depot organisation id. Depot hands Entire no credential, so there is no token to store and no API to check the id against; the operator vouches for it. Records the Depot organisation id the org's repositories enrol against. Returns 201 on a fresh connection and 200 when the same pair is already connected.",
+        "description": "Operator-only: requires platform#admin because nothing can verify a Depot organization ID. Depot gives Entire no credential, so the operator vouches for the connection. Repositories subscribe through the connected Depot organization. Returns 201 for a new connection and 200 when the same pair is already connected.",
         "operationId": "connectOrgCIDepotOrganization",
         "parameters": [
           {
@@ -9599,7 +10179,7 @@
     },
     "/orgs/{orgId}/ci/depot/connection/{account}": {
       "delete": {
-        "description": "Operator-only: requires platform#admin, mirroring the connect, because withdrawing an operator's vouch is at least as privileged as granting it. Provider-scoped on ci-webhooks, so it removes only the depot row and never a Buildkite credential of the same name. Removing a connection a subscription still names is allowed and logged; those subscriptions stop dispatching.",
+        "description": "Operator-only: requires platform#admin. The operation removes only the Depot connection and never a Buildkite credential with the same name. Repositories subscribe through the connected Depot organization. Active subscriptions stop dispatching when the connection is removed.",
         "operationId": "disconnectOrgCIDepotOrganization",
         "parameters": [
           {
@@ -9718,7 +10298,7 @@
     },
     "/orgs/{orgId}/ci/depot/connections": {
       "get": {
-        "description": "Requires org#manage, like the Buildkite credential list. A Depot connection holds no secret: it is the Depot organisation id this org's repositories enrol against.",
+        "description": "Requires org#manage. A Depot connection holds no secret. Repositories subscribe through the connected Depot organization.",
         "operationId": "listOrgCIDepotOrganizations",
         "parameters": [
           {
@@ -9835,7 +10415,7 @@
     },
     "/orgs/{orgId}/ci/github-actions/credential": {
       "post": {
-        "description": "Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because GitHub Actions has no enrolment path yet and a credential minted here cannot be used. Mints the inbound webhook credential for one GitHub account: a fresh webhook secret (returned once, in this 201) and the endpoint URL to configure the GitHub webhook with, plus optionally the outbound dispatch api_token (write-only, never returned; has_api_token confirms storage). With api_token, an already-minted github-actions row gets the token stored/rotated instead (200, no secret re-issued).",
+        "description": "Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because GitHub Actions has no subscription path yet and a credential minted here cannot be used. Mints the inbound webhook credential for one GitHub account: a fresh webhook secret (returned once, in this 201) and the endpoint URL to configure the GitHub webhook with, plus optionally the outbound dispatch api_token (write-only, never returned; has_api_token confirms storage). With api_token, an already-minted github-actions row gets the token stored/rotated instead (200, no secret re-issued).",
         "operationId": "mintOrgCIGitHubActionsCredential",
         "parameters": [
           {
@@ -10019,6 +10599,7 @@
                 "accepted",
                 "revoked",
                 "expired",
+                "declined",
                 "all"
               ],
               "type": "string"
@@ -10457,6 +11038,36 @@
             }
           },
           {
+            "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. role orders by membership role, owner first, then by name; collaborators come last. status orders active, pending, inactive, then people without a membership. joined orders by membership creation, oldest first; people without a membership come last.",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. role orders by membership role, owner first, then by name; collaborators come last. status orders active, pending, inactive, then people without a membership. joined orders by membership creation, oldest first; people without a membership come last.",
+              "enum": [
+                "name",
+                "role",
+                "status",
+                "joined"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name sort, and people without a membership stay last on joined.",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name sort, and people without a membership stay last on joined.",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "in": "path",
             "name": "orgId",
             "required": true,
@@ -10683,6 +11294,122 @@
       }
     },
     "/orgs/{orgId}/members/{membershipId}": {
+      "delete": {
+        "operationId": "removeOrgMemberByMembershipID",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "membershipId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Remove an organization member by membership ID",
+        "tags": [
+          "orgs"
+        ]
+      },
       "patch": {
         "operationId": "updateOrgMemberRole",
         "parameters": [
@@ -10946,7 +11673,7 @@
     },
     "/orgs/{orgId}/people": {
       "get": {
-        "description": "Requires organization management permission, not repository pull permission. Returns one row per account with membership metadata and recorded accessScopes, without grant details or editing capabilities. Grants retain each distinct role and origin (membership, direct, team, or github), without inherited expansion or strongest-role collapsing. Repository IDs identify published logical repo groups, not placements. Membership grants include pending and inactive memberships; membership.status describes their lifecycle. GitHub grants use the collaborator read model and can differ from live SpiceDB permissions during reconciliation. This is a roster read model, not an authorization check or complete SpiceDB audit. Management does not imply Git read permission. Snapshot readiness uses the shared GitHub discovery eligibility and 15-minute grace policy. Detached, suspended, sync-blocked, sync-banned, and wholly suspended mirror targets do not block readiness; recorded edges still serve. Overdue eligible snapshots or missing mirror mappings return 503. Filters select people by recorded grants, not inherited roles. Load /people/{accountId}/access when opening an editor; it returns that person's grants and fresh editing capabilities. The list has no full mode. Filters and totalCount apply before cursor pagination; results are ordered by account ID.",
+        "description": "Requires organization management permission, not repository pull permission. Returns one row per account with membership metadata and recorded accessScopes, without grant details or editing capabilities. Grants retain each distinct role and origin (membership, direct, team, or github), without inherited expansion or strongest-role collapsing. Repository IDs identify published logical repo groups, not placements. Membership grants include pending and inactive memberships; membership.status describes their lifecycle. GitHub grants use the collaborator read model and can differ from live SpiceDB permissions during reconciliation. This is a roster read model, not an authorization check or complete SpiceDB audit. Management does not imply Git read permission. Snapshot readiness uses the shared GitHub discovery eligibility and 15-minute grace policy. Detached, suspended, sync-blocked, sync-banned, and wholly suspended mirror targets do not block readiness; recorded edges still serve. Overdue eligible snapshots or missing mirror mappings return 503. Filters select people by recorded grants, not inherited roles. Load /people/{accountId}/access when opening an editor; it returns that person's grants and fresh editing capabilities. The list has no full mode. Filters and totalCount apply before cursor pagination; sort and order select the order, name by default. Outstanding invitations are keyed by email and never joined to an account. They appear only on an unfiltered first page. Only the organization's home core serves this list; other cores answer 421.",
         "operationId": "listOrgPeople",
         "parameters": [
           {
@@ -10969,6 +11696,36 @@
             "name": "pageToken",
             "schema": {
               "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. role orders by membership role, owner first, then by name; collaborators come last. status orders active, pending, inactive, then people without a membership. joined orders by membership creation, oldest first; people without a membership come last.",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. role orders by membership role, owner first, then by name; collaborators come last. status orders active, pending, inactive, then people without a membership. joined orders by membership creation, oldest first; people without a membership come last.",
+              "enum": [
+                "name",
+                "role",
+                "status",
+                "joined"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name sort, and people without a membership stay last on joined.",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name sort, and people without a membership stay last on joined.",
+              "enum": [
+                "asc",
+                "desc"
+              ],
               "type": "string"
             }
           },
@@ -10997,23 +11754,23 @@
             }
           },
           {
-            "description": "Case-insensitive substring of account ID, public handle, or resource name.",
+            "description": "Case-insensitive substring of account ID, public handle, or public display name.",
             "explode": false,
             "in": "query",
             "name": "search",
             "schema": {
-              "description": "Case-insensitive substring of account ID, public handle, or resource name.",
+              "description": "Case-insensitive substring of account ID, public handle, or public display name.",
               "maxLength": 200,
               "type": "string"
             }
           },
           {
-            "description": "member includes non-pending memberships; invited means pending; collaborator means no direct membership.",
+            "description": "member includes non-pending memberships; invited means a WorkOS membership with status pending, not an email invitation; collaborator means no direct membership.",
             "explode": false,
             "in": "query",
             "name": "membership",
             "schema": {
-              "description": "member includes non-pending memberships; invited means pending; collaborator means no direct membership.",
+              "description": "member includes non-pending memberships; invited means a WorkOS membership with status pending, not an email invitation; collaborator means no direct membership.",
               "enum": [
                 "member",
                 "invited",
@@ -11114,6 +11871,16 @@
             },
             "description": "Not Found"
           },
+          "421": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Misdirected Request"
+          },
           "422": {
             "content": {
               "application/problem+json": {
@@ -11159,7 +11926,7 @@
             "sessionAuth": []
           }
         ],
-        "summary": "List organization members, invitations, and collaborators with scope summaries",
+        "summary": "List organization people with scope summaries and outstanding invitations",
         "tags": [
           "orgs"
         ]
@@ -11437,6 +12204,662 @@
         ]
       }
     },
+    "/plugins/{plugin}/installations": {
+      "get": {
+        "description": "Requires project#manage with project_id, or org#manage with org_id.",
+        "operationId": "listPluginInstallations",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Entire org",
+            "explode": false,
+            "in": "query",
+            "name": "org_id",
+            "schema": {
+              "description": "Entire org",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Entire project",
+            "explode": false,
+            "in": "query",
+            "name": "project_id",
+            "schema": {
+              "description": "Entire project",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPluginInstallationsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a project's or an org's plugin installations on this core",
+        "tags": [
+          "plugins"
+        ]
+      },
+      "post": {
+        "description": "Requires project#manage with project_id, or org#manage with org_id. Without installation_id, creates an installation (201). With one the project or org owns on this core, refreshes the selected static profile output (200).",
+        "operationId": "createPluginInstallation",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePluginInstallationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginInstallation"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Install a plugin on a project or an org, or refresh its profile output",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/plugins/{plugin}/installations/{id}": {
+      "delete": {
+        "description": "Requires project#manage on the installation's project.",
+        "operationId": "deletePluginInstallation",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plugin installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Uninstall a plugin",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/plugins/{plugin}/installations/{id}/repositories/{repository_id}": {
+      "delete": {
+        "description": "Requires project#manage on the installation's project.",
+        "operationId": "removePluginInstallationRepository",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plugin installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public repository id",
+            "in": "path",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "description": "Public repository id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Remove a repository from a plugin installation",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/plugins/{plugin}/installations/{id}/repository-selection": {
+      "put": {
+        "description": "Requires project#manage on the installation's project. Grants follow the new selection before the response.",
+        "operationId": "setPluginInstallationRepositories",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Installation (ins_<ULID>)",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Installation (ins_<ULID>)",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPluginInstallationRepositoriesInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginInstallationView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Replace a project plugin installation's repository selection",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
     "/projects": {
       "get": {
         "operationId": "listProjects",
@@ -11701,7 +13124,7 @@
     },
     "/projects/resolve/{host}/{project}": {
       "get": {
-        "description": "Case-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project inspect permission, including platform administrators. Missing and inaccessible projects both return 404.",
+        "description": "Case-insensitive lookup by native project name (et) or GitHub owner namespace (gh). Uses project inspect permission, including platform administrators. An existing native (et) project the caller cannot inspect returns 403, so a creator can tell a taken name from a free one. Missing projects, and inaccessible GitHub (gh) namespaces, return 404.",
         "operationId": "resolveProject",
         "parameters": [
           {
@@ -12045,6 +13468,175 @@
           }
         ],
         "summary": "Get a project by id",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/collaborators": {
+      "get": {
+        "description": "Without repoId, returns people who can manage or write the project, plus source-managed members of a forge project. Requires project inspect. With repoId, returns people who can manage or push the repository's logical group, including project-level authority. Requires non-public list access to that repository. Readers and organization members without write access are excluded. Returns approved human accounts with public profile fields, ordered by account ID. Search and eligibility apply before pagination. Assignment writes must authorize independently. Staff authority does not bypass these requirements.",
+        "operationId": "listProjectCollaborators",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional repository placement ID owned by this project. Adds people granted on that logical repository.",
+            "explode": false,
+            "in": "query",
+            "name": "repoId",
+            "schema": {
+              "description": "Optional repository placement ID owned by this project. Adds people granted on that logical repository.",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring of account ID, active public handle, or public display name.",
+            "explode": false,
+            "in": "query",
+            "name": "search",
+            "schema": {
+              "description": "Case-insensitive substring of account ID, active public handle, or public display name.",
+              "maxLength": 200,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListProjectCollaboratorsOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "oauth2": []
+          },
+          {
+            "oidc": []
+          },
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List project collaborators for a picker",
         "tags": [
           "projects"
         ]
@@ -12561,7 +14153,7 @@
     },
     "/projects/{projectId}/people": {
       "get": {
-        "description": "Requires project roster-view permission, held by project managers and source-managed forge members but not ordinary native readers or writers. Returns one account per row with its effective role and merged access sources. Grant managers also receive the mutable direct grant. Search and role filters run before cursor pagination. Results are ordered by effective role (owner, admin, mirror_source_admin, writer, reader, member), then by handle without the provider prefix, ignoring case, then by account ID. Accounts without a handle come last within their role.",
+        "description": "Requires project roster-view permission, held by project managers and source-managed forge members but not ordinary native readers or writers. Returns one account per row with its effective role and merged access sources. Grant managers also receive the mutable direct grant. Search and role filters run before cursor pagination. Results are ordered by name, the public display name else the GitHub handle, unless sort selects another order; a page token only continues the order that issued it.",
         "operationId": "listProjectPeople",
         "parameters": [
           {
@@ -12588,12 +14180,12 @@
             }
           },
           {
-            "description": "Case-insensitive substring of account ID or public handle.",
+            "description": "Case-insensitive substring of account ID, public handle, or public display name.",
             "explode": false,
             "in": "query",
             "name": "search",
             "schema": {
-              "description": "Case-insensitive substring of account ID or public handle.",
+              "description": "Case-insensitive substring of account ID, public handle, or public display name.",
               "maxLength": 200,
               "type": "string"
             }
@@ -12612,6 +14204,36 @@
                 "reader",
                 "writer",
                 "mirror_source_admin"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. handle orders by GitHub handle ignoring case, people without one last. role orders strongest first, then by name. access orders by the listed sources, then by name.",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. handle orders by GitHub handle ignoring case, people without one last. role orders strongest first, then by name. access orders by the listed sources, then by name.",
+              "enum": [
+                "name",
+                "handle",
+                "role",
+                "access"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name and handle sorts.",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name and handle sorts.",
+              "enum": [
+                "asc",
+                "desc"
               ],
               "type": "string"
             }
@@ -12765,6 +14387,21 @@
             }
           },
           {
+            "description": "onboarded (default): the project's repos in Entire. all: also lists the GitHub owner's unmirrored repos that the caller can access on GitHub, after all published repos. Only a GitHub mirrors project has such repos. Ignored when name is set.",
+            "explode": false,
+            "in": "query",
+            "name": "scope",
+            "schema": {
+              "default": "onboarded",
+              "description": "onboarded (default): the project's repos in Entire. all: also lists the GitHub owner's unmirrored repos that the caller can access on GitHub, after all published repos. Only a GitHub mirrors project has such repos. Ignored when name is set.",
+              "enum": [
+                "onboarded",
+                "all"
+              ],
+              "type": "string"
+            }
+          },
+          {
             "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write.",
             "explode": false,
             "in": "query",
@@ -12911,22 +14548,22 @@
             }
           },
           {
-            "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored, but the fact filters below still apply (a repo whose facts don't match returns empty).",
+            "description": "Optional: up to 100 comma-separated names: gh/owner/repo (GitHub only), et/project/repo (Entire-native only), or legacy owner/repo (both namespaces). Exact matching is case-insensitive; deduplication includes the forge. Unknown prefixes or malformed names return 400. Returns authorized onboarded repos with consolidated placements. Missing repos are omitted. Pagination, scope, and sorting are ignored; fact filters and projectId still apply. A single name remains supported.",
             "explode": false,
             "in": "query",
             "name": "filter",
             "schema": {
-              "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored, but the fact filters below still apply (a repo whose facts don't match returns empty).",
+              "description": "Optional: up to 100 comma-separated names: gh/owner/repo (GitHub only), et/project/repo (Entire-native only), or legacy owner/repo (both namespaces). Exact matching is case-insensitive; deduplication includes the forge. Unknown prefixes or malformed names return 400. Returns authorized onboarded repos with consolidated placements. Missing repos are omitted. Pagination, scope, and sorting are ignored; fact filters and projectId still apply. A single name remains supported.",
               "type": "string"
             }
           },
           {
-            "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write. Requires filter.",
+            "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write. Requires a single filter name. A non-empty token with multiple supplied names returns 400, including duplicate names.",
             "explode": false,
             "in": "query",
             "name": "commitToken",
             "schema": {
-              "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write. Requires filter.",
+              "description": "Optional: opaque commit token from a create, to read a snapshot that contains that write. Requires a single filter name. A non-empty token with multiple supplied names returns 400, including duplicate names.",
               "pattern": "^$|^[A-Za-z0-9_-]{60,512}$",
               "type": "string"
             }
@@ -13173,6 +14810,12 @@
             },
             "description": "Created",
             "headers": {
+              "Retry-After": {
+                "schema": {
+                  "description": "Seconds to wait before reading the repo again. Present only while state is \"provisioning\".",
+                  "type": "string"
+                }
+              },
               "X-Entire-Commit-Token": {
                 "schema": {
                   "description": "Opaque token to pass as commitToken on the next repo resolve, so this repo resolves immediately.",
@@ -13854,6 +15497,16 @@
             },
             "description": "Not Found"
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "421": {
             "content": {
               "application/problem+json": {
@@ -13935,6 +15588,17 @@
               "description": "Require the repo's regional lifecycle state. A local repo is unaffected. A repo homed in another jurisdiction redirects with 421. This core reports 503 when it cannot route the read. Provisioning and failed states still return 200.",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Optional: opaque commit token from this repo's create, to read at a snapshot that contains that write. The lifecycle state, the placements, and a provisioning failure are always read fresh.",
+            "explode": false,
+            "in": "query",
+            "name": "commitToken",
+            "schema": {
+              "description": "Optional: opaque commit token from this repo's create, to read at a snapshot that contains that write. The lifecycle state, the placements, and a provisioning failure are always read fresh.",
+              "pattern": "^$|^[A-Za-z0-9_-]{60,512}$",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -13946,7 +15610,15 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "description": "Seconds to wait before reading the repo again. Present only while state is \"provisioning\".",
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -16672,7 +18344,7 @@
     },
     "/repos/{repoId}/people": {
       "get": {
-        "description": "Returns one account per row with its effective role and merged access sources. Grant managers also receive the mutable direct grant. Search and role filters run before cursor pagination. Results are ordered by effective role (owner, admin, mirror_source_admin, writer, reader, member), then by handle without the provider prefix, ignoring case, then by account ID. Accounts without a handle come last within their role.",
+        "description": "Returns one account per row with its effective role and merged access sources. Grant managers also receive the mutable direct grant. Search and role filters run before cursor pagination. Results are ordered by name, the public display name else the GitHub handle, unless sort selects another order; a page token only continues the order that issued it.",
         "operationId": "listRepoPeople",
         "parameters": [
           {
@@ -16699,12 +18371,12 @@
             }
           },
           {
-            "description": "Case-insensitive substring of account ID or public handle.",
+            "description": "Case-insensitive substring of account ID, public handle, or public display name.",
             "explode": false,
             "in": "query",
             "name": "search",
             "schema": {
-              "description": "Case-insensitive substring of account ID or public handle.",
+              "description": "Case-insensitive substring of account ID, public handle, or public display name.",
               "maxLength": 200,
               "type": "string"
             }
@@ -16723,6 +18395,36 @@
                 "reader",
                 "writer",
                 "mirror_source_admin"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. handle orders by GitHub handle ignoring case, people without one last. role orders strongest first, then by name. access orders by the listed sources, then by name.",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "description": "Sort column, name when omitted. name orders by public display name, else GitHub handle; people without either come last. handle orders by GitHub handle ignoring case, people without one last. role orders strongest first, then by name. access orders by the listed sources, then by name.",
+              "enum": [
+                "name",
+                "handle",
+                "role",
+                "access"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name and handle sorts.",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "asc (default) or desc. desc reverses the order, but people without a name stay last on the name and handle sorts.",
+              "enum": [
+                "asc",
+                "desc"
               ],
               "type": "string"
             }

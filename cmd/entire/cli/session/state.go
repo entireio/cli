@@ -437,6 +437,17 @@ type State struct {
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 
+	// ClaimsSinceCommit is the shadow snapshot (or, with none yet, the base
+	// commit) this session measures the files its window changed from: the
+	// newest snapshot when its current turn started, moved forward by each
+	// of its own snapshots. Sessions in a worktree share the shadow branch:
+	// what another session snapshotted while this one was idle is not in its
+	// window, and what this session wrote while another snapshotted is.
+	// ClaimsSinceBaseCommit is the base commit it belongs to; it is ignored
+	// once BaseCommit has moved.
+	ClaimsSinceCommit     string `json:"claims_since_commit,omitempty"`
+	ClaimsSinceBaseCommit string `json:"claims_since_base_commit,omitempty"`
+
 	// SubagentInventory retains Codex child identities independently of task
 	// records so follow-up turns remain discoverable after materialization.
 	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
@@ -683,6 +694,36 @@ func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
 	return nil
 }
 
+// FindTaskRecordByAgentID returns the record whose AgentID is agentID, or nil.
+// An empty agentID matches nothing. Used where the completing event names the
+// subagent but not its tool_use_id (Claude Code's SubagentStop).
+//
+// A live (uncompleted) record wins over a completed one, should two records
+// ever share an agent ID before condensation; a completed match is returned
+// only when no live one exists, so a duplicate stop still reaches the
+// exactly-once guard and is skipped. (Claude Code continues a subagent with
+// SendMessage, which reuses the agent ID without a new Agent call, so it does
+// not create a second record.)
+func (s *State) FindTaskRecordByAgentID(agentID string) *TaskRecord {
+	if agentID == "" {
+		return nil
+	}
+	var completed *TaskRecord
+	for i := range s.TaskRecords {
+		rec := &s.TaskRecords[i]
+		if rec.AgentID != agentID {
+			continue
+		}
+		if rec.CompletedAt.IsZero() {
+			return rec
+		}
+		if completed == nil {
+			completed = rec
+		}
+	}
+	return completed
+}
+
 // CompleteTaskRecord marks the record for toolUseID as consumed exactly
 // once: it sets CompletedAt and returns true, or returns false — a no-op —
 // when no record exists for toolUseID or it was already completed
@@ -765,6 +806,12 @@ type PromptAttribution struct {
 	// Without this, global user removals would be subtracted from agent-file-only removals,
 	// incorrectly reducing agent deletion credit when users delete lines in non-agent files.
 	UserRemovedPerFile map[string]int `json:"user_removed_per_file,omitempty"`
+
+	// Incomplete marks a prompt whose user diff could not be computed (the
+	// worktree status failed or breached its budget). Nothing then tells
+	// which of the files the next snapshot changed were the user's, so the
+	// snapshot's changes are not added to FilesTouched for that window.
+	Incomplete bool `json:"incomplete,omitempty"`
 }
 
 // NormalizeAfterLoad applies backward-compatible migrations to state loaded from disk.

@@ -135,12 +135,16 @@ func parseNativeCloneRef(ref string) (project, repo string, err error) {
 		return "", "", fmt.Errorf("expected /%s/<project>/<repo> (2 names after the %s token, got %d)", nativeCloneForge, nativeCloneForge, len(names))
 	}
 	project, repo = names[0], names[1]
+	// Drop `.git` before the name is validated, not after: `.git` alone then
+	// fails the shape check as an empty name rather than passing as a dotted
+	// one. See gitDirSuffix for why the suffix is never part of a name, and
+	// gitremote.CutGitDirSuffix for why the cut ignores case — this grammar
+	// admits uppercase (the server folds it on resolution), so `.GIT` is a ref
+	// a user can actually reach here.
+	repo, _ = gitremote.CutGitDirSuffix(repo)
 	if !nativeProjectRe.MatchString(project) {
 		return "", "", fmt.Errorf("project %q is not a name the server accepts: 3-32 characters of letters, digits and '-', not starting or ending with '-'", project)
 	}
-	// No `.git` trim: on a native ref the suffix is part of the name. A bare
-	// ".git" is still refused, by nativeRepoRe's leading-dot rule rather than
-	// by trimming it to an empty name first.
 	if !nativeRepoRe.MatchString(repo) || strings.Contains(repo, "..") {
 		return "", "", fmt.Errorf("repo %q is not a name the server accepts: 1-64 characters of letters, digits, '.' and '-', not starting or ending with '.' or '-', and with no consecutive dots", repo)
 	}
@@ -160,7 +164,7 @@ func resolveNativeRepo(ctx context.Context, c repoRefClient, project, repoName s
 	if err != nil {
 		return nil, fmt.Errorf("get repo: %w", err)
 	}
-	return repo, nil
+	return &repo.Response, nil
 }
 
 // resolveNativeCloneURL resolves an Entire-native repo (by project and repo
@@ -172,9 +176,8 @@ func resolveNativeRepo(ctx context.Context, c repoRefClient, project, repoName s
 // selectPlacement flow as the /gh/ mirror path (clusterSel honors --cluster;
 // with several placements and no selector it prompts). A native mirror serves
 // the same public path as its data primary (that is the placement's routing
-// path on the target cluster), so only the host varies. repoName arrives
-// exactly as the parser found it: on a native ref `.git` is part of the name,
-// so no suffix is dropped here either.
+// path on the target cluster), so only the host varies. repoName arrives with
+// any `.git` suffix already dropped by the parser (see gitDirSuffix).
 func resolveNativeCloneURL(ctx context.Context, cmd *cobra.Command, c *coreapi.Client, project, repoName, clusterSel string, picker placementPicker) (string, error) {
 	repo, err := resolveNativeRepo(ctx, c, project, repoName)
 	if err != nil {
@@ -285,21 +288,25 @@ func nativePlacements(ctx context.Context, c *coreapi.Client, repo *coreapi.Repo
 	return placements, nil
 }
 
-// mirrorGitDirSuffix is the suffix git tools habitually append to a repo path.
-// It is decoration on a GitHub mirror and nowhere else, so every parser that
-// trims it is a /gh/ grammar.
+// gitDirSuffix is the suffix git tools habitually append to a repo path, and it
+// is never part of a repo name — on either backend. Every ref parser in this
+// package drops it before the name is used, nothing appends it to an Entire
+// path, and `repo create` refuses a name ending in it. `/et/p/foo` and
+// `/et/p/foo.git` therefore address one repository, spelled `foo` everywhere the
+// CLI echoes it back, caches it, or sends it to Entire's API.
 //
-// GitHub rejects a repository name ending in `.git`, so on a mirror path the
-// suffix can only be decoration, and dropping it is what lets a pasted
-// `git clone` URL resolve. A native repo is the opposite case: entiredb permits
-// an interior dot and the data plane resolves /et/ paths verbatim, so trimming
-// there names a different repository. See COR-1892.
+// The rule is one rule, not a per-forge choice. On both, the suffix is an alias
+// the transport accepts, which is what lets a pasted `git clone` URL resolve.
+// Names have to stay free of it because git tooling reserves it: Git LFS, for
+// one, derives its endpoint by appending `.git` to the remote, so a repo
+// literally named `foo.git` is indistinguishable from `foo` to anything that
+// follows the convention — and by the time that bites, renaming someone's
+// repository is the only fix left.
 //
-// gitremote keeps its own copy of the suffix and its own forge check, since it
-// cannot import this package. Both encode one rule — trim for every forge
-// except the native one — so a change here belongs at gitremote.splitOwnerRepo
-// as well.
-const mirrorGitDirSuffix = ".git"
+// The constant and the cut that applies it (gitremote.CutGitDirSuffix) live in
+// gitremote, which this package already imports, so there is one copy of the
+// rule rather than two kept in sync by comments.
+const gitDirSuffix = gitremote.GitDirSuffix
 
 // trimRefPrefix normalizes a ref for segment work: surrounding space gone, one
 // optional leading slash gone. Every place that reads a ref's leading token
@@ -414,13 +421,18 @@ func parseMirrorCloneRef(ref string) (provider, owner, repo string, err error) {
 		return "", "", "", fmt.Errorf("expected gh/<owner>/<repo> (leading slash optional; owner: letters, digits, '-'; repo: letters, digits, '.', '_', '-'), got %q", ref)
 	}
 	owner, repo = strings.ToLower(m[1]), strings.ToLower(m[2])
-	// Drop `.git` (see mirrorGitDirSuffix) BEFORE the dot-only guard, which is
+	// Drop `.git` (see gitDirSuffix) BEFORE the dot-only guard, which is
 	// what keeps `..git` — not dot-only as typed — from resolving to a "." repo.
-	repo = strings.TrimSuffix(repo, mirrorGitDirSuffix)
+	//
+	// gitremote.CutGitDirSuffix, not TrimSuffix: the ToLower above happens to
+	// make a case-sensitive cut work here, which is the kind of correctness
+	// that survives only until someone reorders two lines. The sibling parsers
+	// had the same two operations in the other order and were wrong.
+	repo, _ = gitremote.CutGitDirSuffix(repo)
 	if repo == "" {
-		return "", "", "", fmt.Errorf("repo name is empty once the %s suffix is dropped: %s", mirrorGitDirSuffix, ref)
+		return "", "", "", fmt.Errorf("repo name is empty once the %s suffix is dropped: %s", gitDirSuffix, ref)
 	}
-	if gitHubDotOnlyRe.MatchString(repo) {
+	if dotOnlyRe.MatchString(repo) {
 		return "", "", "", fmt.Errorf("repo cannot be dot-only: %s", ref)
 	}
 	return mirrorCloneProviderGitHub, owner, repo, nil

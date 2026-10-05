@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,3 +72,30 @@ func StatTranscriptFile(filePath string) (os.FileInfo, error) {
 	}
 	return info, nil
 }
+
+// CheckTranscriptReadable reports whether ReadTranscriptFile can be expected
+// to succeed, without reading the transcript: an external path is opened and
+// closed, so a permission failure is caught as well as a missing file, and a
+// directory is rejected. Under .entire it falls back to StatTranscriptFile —
+// those caches are Entire's own, written readable.
+func CheckTranscriptReadable(filePath string) error {
+	if _, _, underEntire := entiredir.Split(filePath); underEntire {
+		_, err := StatTranscriptFile(filePath)
+		return err
+	}
+	f, err := os.Open(filePath) //nolint:gosec // external agent transcript path is the caller's selected input
+	if err != nil {
+		return err //nolint:wrapcheck // os error carries op and path
+	}
+	info, statErr := f.Stat()
+	closeErr := f.Close()
+	if statErr != nil {
+		return statErr //nolint:wrapcheck // os error carries op and path
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s: %w", filePath, errTranscriptIsDirectory)
+	}
+	return closeErr //nolint:wrapcheck // os error carries op and path
+}
+
+var errTranscriptIsDirectory = errors.New("transcript path is a directory")

@@ -1820,3 +1820,72 @@ func TestRestoreResumeSessions_EmptyStoredSessionIDIsNotTampering(t *testing.T) 
 		t.Fatalf("stdout = %q, want the fallback's missing-log message", stdout.String())
 	}
 }
+
+// The unavailable-checkpoint message must name where the checkpoint actually
+// lives. A git-refs checkpoint is its own ref, so blaming (and suggesting a
+// fetch of) the v1 branch is wrong — the branch may well exist.
+func TestCheckRemoteMetadata_MessageNamesCheckpointStorage(t *testing.T) {
+	const ulid = "01M3PWG7BKWYH0XJKS810J0XEX"
+	const ulidRef = "refs/entire/checkpoints/EX/" + ulid
+	const hexRef = "refs/entire/checkpoints/22/aaa111bbb222"
+	tests := []struct {
+		name        string
+		refsPrimary bool
+		checkpoint  string
+		wantPhrase  string
+		wantRefs    []string
+	}{
+		{
+			name:       "ulid under branch primary is its own ref",
+			checkpoint: ulid,
+			wantPhrase: "its metadata is not in the local or remote checkpoint ref " + ulidRef + ".",
+			wantRefs:   []string{ulidRef},
+		},
+		{
+			// Read order is the ref, then the pre-migration v1 branch.
+			name:        "hex under refs primary is its ref or the v1 branch",
+			refsPrimary: true,
+			checkpoint:  "aaa111bbb222",
+			wantPhrase:  "its metadata is not in the local or remote checkpoint ref " + hexRef + " or " + paths.MetadataBranchName + " branch.",
+			wantRefs:    []string{hexRef, paths.MetadataBranchName},
+		},
+		{
+			name:       "hex under branch primary is the v1 branch",
+			checkpoint: "aaa111bbb222",
+			wantPhrase: "its metadata is not in the local or remote " + paths.MetadataBranchName + " branch.",
+			wantRefs:   []string{paths.MetadataBranchName},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.refsPrimary {
+				t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+			}
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			setupResumeTestRepo(t, tmpDir, false)
+			bare := t.TempDir()
+			runGitInDir(t, bare, "init", "--bare")
+			runGitInDir(t, tmpDir, "remote", "add", "origin", bare)
+
+			var errW bytes.Buffer
+			_, err := checkRemoteMetadata(context.Background(), io.Discard, &errW, id.MustCheckpointID(tt.checkpoint), checkpoint.DefaultV1Refs())
+			if err != nil {
+				t.Fatalf("checkRemoteMetadata() error = %v", err)
+			}
+			out := errW.String()
+			if !strings.Contains(out, tt.wantPhrase) {
+				t.Errorf("message should contain %q; got:\n%s", tt.wantPhrase, out)
+			}
+			if got := strings.Count(out, "git fetch "); got != len(tt.wantRefs) {
+				t.Errorf("message should suggest %d fetch(es), got %d:\n%s", len(tt.wantRefs), got, out)
+			}
+			for _, ref := range tt.wantRefs {
+				wantFetch := "git fetch origin " + ref + ":" + ref
+				if !strings.Contains(out, wantFetch) {
+					t.Errorf("message should suggest %q; got:\n%s", wantFetch, out)
+				}
+			}
+		})
+	}
+}

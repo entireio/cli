@@ -2137,6 +2137,7 @@ func TestHooksPathCommand_QuotesWhatAShellWouldSplit(t *testing.T) {
 		{"/tmp/a;rm -rf b", `git config core.hooksPath '/tmp/a;rm -rf b'`},
 		{"/tmp/$(id)", `git config core.hooksPath '/tmp/$(id)'`},
 		{"/tmp/it's", `git config core.hooksPath '/tmp/it'\''s'`},
+		{`/tmp/a\b`, `git config core.hooksPath '/tmp/a\b'`},
 	} {
 		assert.Equal(t, tc.want, HooksPathCommand(tc.in), "input %q", tc.in)
 	}

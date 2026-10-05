@@ -162,9 +162,9 @@ func reportNoProtectionRules(ctx context.Context, cmd *cobra.Command, c *coreapi
 			return err
 		}
 		note = fmt.Sprintf("%s (looking it up failed: %v)", protectionUnknownNote, err)
-	case repo.Provider.Or("") == repoProviderGitHub:
+	case repo.Response.Provider.Or("") == repoProviderGitHub:
 		note = protectionMirrorNote
-	case repo.Provider.Or("") == repoProviderEntire:
+	case repo.Response.Provider.Or("") == repoProviderEntire:
 		note = "" // the one case that positively establishes "native".
 	}
 	if jsonRequested(cmd) {

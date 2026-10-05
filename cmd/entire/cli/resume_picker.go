@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -61,6 +62,9 @@ func (r resumableSession) unresumableReason() string {
 // branch is already checked out in another worktree, points there), restores its
 // checkpoint session log, and offers to start the agent.
 func runResumePicker(ctx context.Context, cmd *cobra.Command, force bool) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	w := cmd.OutOrStdout()
 
 	// The picker is interactive. Without a usable terminal (CI, piped, agent

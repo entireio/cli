@@ -332,10 +332,8 @@ func TestOrgInviteRevoke_IsIdempotentOnAMissingInvitation(t *testing.T) {
 // Not parallel: runCoreCmd swaps the package-level activeCoreClient seam.
 func TestOrgInvite_UnknownOrgNameHintsAtNamesOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/problem+json")
-		w.WriteHeader(http.StatusNotFound)
-		_, err := fmt.Fprint(w, `{"status":404,"detail":"org not found"}`)
-		assert.NoError(t, err)
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, printJSON(w, &coreapi.ListOrgsOutputBody{Orgs: []coreapi.Org{{ID: testOrgULID, Name: "acme"}}}))
 	}))
 	t.Cleanup(srv.Close)
 

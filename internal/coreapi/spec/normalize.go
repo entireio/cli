@@ -237,14 +237,15 @@ func filterSecurityRequirements(reqs []any) ([]any, error) {
 // SetRepoVisibilityInputBody) keep their enums so we still reject a bad
 // value before sending it.
 var readModelEnumFields = map[string][]string{
-	"CreatedRepo":      {"objectFormat", "provider", "state", "visibility"},
-	"Invitation":       {"role", "status"},
-	"Membership":       {"role", "status"},
-	"Repo":             {"objectFormat", "provider", "state", "visibility"},
-	"RepoIDResolution": {"provider"},
-	"RepoIndexEntry":   {"permission", "provider"},
-	"RepoReference":    {"provider"},
-	"RepoResolution":   {"provider"},
+	"CreatedRepo":       {"objectFormat", "provider", "state", "visibility"},
+	"Invitation":        {"role", "status"},
+	"Membership":        {"role", "status"},
+	"OrgMemberListItem": {"role", "status"},
+	"Repo":              {"objectFormat", "provider", "state", "visibility"},
+	"RepoIDResolution":  {"provider"},
+	"RepoIndexEntry":    {"permission", "provider"},
+	"RepoReference":     {"provider"},
+	"RepoResolution":    {"provider"},
 }
 
 // readModelOptionalFields lists response read-model fields the spec marks

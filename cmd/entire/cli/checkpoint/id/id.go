@@ -3,7 +3,9 @@
 package id
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -181,6 +183,24 @@ func GenerateULID() (CheckpointID, error) {
 	u, err := ulid.New(ulid.Now(), rand.Reader)
 	if err != nil {
 		return EmptyCheckpointID, fmt.Errorf("failed to generate ULID checkpoint ID: %w", err)
+	}
+	return CheckpointID(u.String()), nil
+}
+
+// DeriveULID builds a deterministic ULID checkpoint ID: the same t and seed
+// always yield the same ID, for callers that must re-derive an ID instead of
+// minting a fresh one (import's idempotency). The timestamp is t in Unix
+// milliseconds, clamped to 0 for t before the epoch (including the zero time);
+// the entropy is the first 80 bits of SHA-256(seed).
+func DeriveULID(t time.Time, seed []byte) (CheckpointID, error) {
+	var ms uint64
+	if t.After(time.Unix(0, 0)) {
+		ms = ulid.Timestamp(t)
+	}
+	sum := sha256.Sum256(seed)
+	u, err := ulid.New(ms, bytes.NewReader(sum[:10]))
+	if err != nil {
+		return EmptyCheckpointID, fmt.Errorf("failed to derive ULID checkpoint ID: %w", err)
 	}
 	return CheckpointID(u.String()), nil
 }

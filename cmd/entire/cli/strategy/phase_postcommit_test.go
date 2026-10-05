@@ -2529,7 +2529,7 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 }
 
 // TestPostCommit_TaskRecordCondensationScope pins both sides of
-// idleWithTaskContent's overlap-check bypass. Idle+fresh is the incident fix: a
+// idleWithLiveTaskRecord's overlap-check bypass. Idle+fresh is the incident fix: a
 // background subagent commits its own work mid-task, so the session never picks
 // up the FilesTouched overlap a non-active session normally needs, and only the
 // bypass lets the condensation run and materialize the record's
@@ -2667,4 +2667,45 @@ func runEndedLingeringRecordNotCondensed(t *testing.T, s *ManualCommitStrategy, 
 		"BaseCommit must not move for an ended session on an unrelated commit")
 	assert.Len(t, state.TaskRecords, 1,
 		"the lingering record must remain untouched by an unrelated commit")
+}
+
+// TestPostCommit_BeforeCondenseSeesTheCondensedSessions pins that the
+// before-condense hook runs for exactly the sessions PostCommit links to the
+// commit, before they are condensed, and not at all for a commit without a
+// trailer. The cli's Codex refresh relies on it to reconcile child records in
+// the same set PostCommit stores.
+func TestPostCommit_BeforeCondenseSeesTheCondensedSessions(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-postcommit-before-condense"
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	var seen [][]string
+	SetBeforeCondense(func(_ context.Context, sessions []*SessionState) bool {
+		var ids []string
+		for _, st := range sessions {
+			ids = append(ids, st.SessionID)
+		}
+		seen = append(seen, ids)
+		return false
+	})
+	t.Cleanup(func() { SetBeforeCondense(nil) })
+
+	commitWithCheckpointTrailer(t, repo, dir, "b1c2d3e4f5a6")
+	require.NoError(t, s.PostCommit(context.Background()))
+	require.Equal(t, [][]string{{sessionID}}, seen, "the hook must see the session about to be condensed")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain.txt"), []byte("no trailer"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("plain.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("plain commit", &git.CommitOptions{Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()}})
+	require.NoError(t, err)
+	require.NoError(t, s.PostCommit(context.Background()))
+	require.Len(t, seen, 1, "a commit without a trailer condenses nothing, so the hook must not run")
 }

@@ -37,7 +37,7 @@ const requiredCellResolveTimeout = 15 * time.Second
 // An interface (with a swappable constructor) so the resolver is unit-testable
 // against a fake control plane; *coreapi.Client satisfies it.
 type cellCoreClient interface {
-	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
+	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.RepoHeaders, error)
 	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
@@ -91,7 +91,7 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.Ce
 		if err != nil {
 			return nil, cellPlacementError(ctx, ulid, fmt.Errorf("resolve the Entire cell for %s: %w", ulid, err))
 		}
-		clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
+		clusterHost := strings.TrimSpace(repo.Response.ClusterHost.Or(""))
 		if clusterHost == "" {
 			return nil, fmt.Errorf("resolve the Entire cell for %s: repo has no cluster host", ulid)
 		}

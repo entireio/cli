@@ -3,11 +3,14 @@ package codex
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // HookTrustGaps returns the snake_case event labels declared in the hooks.json
@@ -88,15 +91,16 @@ func inspectHookTrustForDeclared(hooksJSONPath string, declared []string) HookTr
 	return inspection
 }
 
+// codexConfigPath returns the user-level config.toml, or "" when the Codex
+// home cannot be resolved, which the caller reads as "trust unknown".
 func codexConfigPath() string {
-	if h := os.Getenv("CODEX_HOME"); h != "" {
-		return filepath.Join(h, "config.toml")
-	}
-	home, err := os.UserHomeDir()
+	codexHome, err := resolveCodexHome()
 	if err != nil {
+		logging.Debug(context.Background(), "codex home unresolved; hook trust is unknown",
+			slog.String("error", err.Error()))
 		return ""
 	}
-	return filepath.Join(home, ".codex", "config.toml")
+	return filepath.Join(codexHome, "config.toml")
 }
 
 // declaredCodexEvents reads hooks.json and returns the snake_case labels
@@ -156,11 +160,19 @@ func MissingEntireHooks(repoRoot string) []string {
 	return missing
 }
 
-// codexTrustStateHeaderRegex matches `[hooks.state."<key>"]` headers in
-// the user's Codex config.toml. Quote-only — Codex's own writer emits
-// quoted keys (codex-rs/tui/src/app/background_requests.rs:874), and
-// looser parsing would invite false matches in user-edited configs.
-var codexTrustStateHeaderRegex = regexp.MustCompile(`(?m)^\[hooks\.state\."([^"]+)"\]`)
+// codexTrustStateHeaderRegex matches `[hooks.state.<key>]` headers in the
+// user's Codex config.toml, where <key> is a TOML quoted key. Codex's writer
+// (toml_edit) emits a double-quoted basic string on Unix and switches to a
+// single-quoted literal string when the key contains a backslash, which every
+// Windows path does:
+//
+//	[hooks.state."/repo/.codex/hooks.json:stop:0:0"]
+//	[hooks.state.'C:\repo\.codex\hooks.json:stop:0:0']
+//
+// Group 1 captures a basic-string body (still escaped), group 2 a literal
+// body. Bare keys are not accepted; looser parsing would invite false matches
+// in user-edited configs.
+var codexTrustStateHeaderRegex = regexp.MustCompile(`(?m)^\[hooks\.state\.(?:"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)')\]`)
 
 func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
 	file, err := os.Open(configPath) //nolint:gosec // path resolved from CODEX_HOME or HOME
@@ -172,11 +184,40 @@ func readCodexTrustedKeys(configPath string) (map[string]struct{}, bool) {
 	if err != nil || len(data) > maxHooksFileBytes {
 		return nil, false
 	}
+	text := string(data)
 	keys := make(map[string]struct{})
-	for _, m := range codexTrustStateHeaderRegex.FindAllStringSubmatch(string(data), -1) {
-		keys[m[1]] = struct{}{}
+	for _, m := range codexTrustStateHeaderRegex.FindAllStringSubmatchIndex(text, -1) {
+		if m[2] < 0 {
+			// Literal string: no escapes, the body is the key.
+			keys[text[m[4]:m[5]]] = struct{}{}
+			continue
+		}
+		key, ok := unescapeTOMLBasicString(text[m[2]:m[3]])
+		if !ok {
+			continue
+		}
+		keys[key] = struct{}{}
 	}
 	return keys, true
+}
+
+// unescapeTOMLBasicString decodes the body of a TOML basic string. TOML's
+// escapes (\b \t \n \f \r \" \\ \uXXXX \UXXXXXXXX) are a subset of Go's
+// double-quoted string syntax, so once every escape is checked against TOML's
+// allowlist, strconv.Unquote decodes the key. Go-only escapes such as \x5c or
+// \a are rejected: Codex would refuse that config, so it must not count as trust.
+func unescapeTOMLBasicString(body string) (string, bool) {
+	for i := 0; i < len(body); i++ {
+		if body[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(body) || !strings.ContainsRune(`btnfr"\uU`, rune(body[i])) {
+			return "", false
+		}
+	}
+	s, err := strconv.Unquote(`"` + body + `"`)
+	return s, err == nil
 }
 
 func codexHasTrustedEvent(keys map[string]struct{}, hooksPath, event string) bool {

@@ -2,8 +2,17 @@ package cli
 
 import (
 	"context"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseSubagentCheckpointHookInput(t *testing.T) {
@@ -156,11 +165,14 @@ func TestParseSubagentTypeAndDescription(t *testing.T) {
 // TestIsBackgroundLaunch pins background-subagent detection: this is the
 // signal handleLifecycleSubagentEnd uses to decide whether a launch-time
 // PostToolUse event should defer capture to SubagentStop (background) or
-// capture immediately (foreground, unchanged legacy behavior).
+// capture immediately (foreground). A launch mode reported by the agent wins;
+// tool_input.run_in_background is only the fallback, and the model sends it
+// as a string as often as a boolean.
 func TestIsBackgroundLaunch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
+		launch    agent.SubagentLaunchMode
 		toolInput string
 		want      bool
 	}{
@@ -172,6 +184,21 @@ func TestIsBackgroundLaunch(t *testing.T) {
 		{
 			name:      "run_in_background false",
 			toolInput: `{"subagent_type": "dev", "run_in_background": false}`,
+			want:      false,
+		},
+		{
+			name:      "run_in_background string true",
+			toolInput: `{"subagent_type": "dev", "run_in_background": "true"}`,
+			want:      true,
+		},
+		{
+			name:      "run_in_background string false",
+			toolInput: `{"subagent_type": "dev", "run_in_background": "false"}`,
+			want:      false,
+		},
+		{
+			name:      "run_in_background unrecognized string",
+			toolInput: `{"subagent_type": "dev", "run_in_background": "later"}`,
 			want:      false,
 		},
 		{
@@ -189,14 +216,60 @@ func TestIsBackgroundLaunch(t *testing.T) {
 			toolInput: `not valid json`,
 			want:      false,
 		},
+		{
+			name:      "reported background without run_in_background",
+			launch:    agent.SubagentLaunchBackground,
+			toolInput: `{"subagent_type": "dev"}`,
+			want:      true,
+		},
+		{
+			name:      "reported foreground overrides run_in_background true",
+			launch:    agent.SubagentLaunchForeground,
+			toolInput: `{"subagent_type": "dev", "run_in_background": true}`,
+			want:      false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := isBackgroundLaunch(context.Background(), []byte(tt.toolInput)); got != tt.want {
-				t.Errorf("isBackgroundLaunch(%q) = %v, want %v", tt.toolInput, got, tt.want)
+			event := &agent.Event{SubagentLaunch: tt.launch, ToolInput: []byte(tt.toolInput)}
+			if got := isBackgroundLaunch(context.Background(), event); got != tt.want {
+				t.Errorf("isBackgroundLaunch(launch=%v, %q) = %v, want %v", tt.launch, tt.toolInput, got, tt.want)
 			}
+		})
+	}
+}
+
+// TestIsBackgroundLaunch_UnrecognizedValueNotLogged pins that an unexpected
+// run_in_background value is reported by JSON type only. The value is
+// model-provided and could carry anything, so it must never reach the log.
+func TestIsBackgroundLaunch_UnrecognizedValueNotLogged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		toolInput string
+		wantType  string
+	}{
+		{name: "string", toolInput: `{"run_in_background": "sk-secret-value"}`, wantType: "string"},
+		{name: "object", toolInput: `{"run_in_background": {"token": "sk-secret-value"}}`, wantType: "map[string]interface {}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			worktree := t.TempDir()
+			logger, err := logging.New(logging.Config{Root: entiredir.OpenerAt(worktree), Dir: logging.LogsName, Level: slog.LevelDebug})
+			require.NoError(t, err)
+
+			got := isBackgroundLaunch(logging.WithLogger(context.Background(), logger), &agent.Event{ToolInput: []byte(tt.toolInput)})
+			require.NoError(t, logger.Close())
+			assert.False(t, got)
+
+			content, err := os.ReadFile(filepath.Join(worktree, logging.LogsDir, logging.LogFileName))
+			require.NoError(t, err)
+			assert.Contains(t, string(content), "unrecognized run_in_background")
+			assert.Contains(t, string(content), `"type":"`+tt.wantType+`"`)
+			assert.NotContains(t, string(content), "sk-secret-value")
 		})
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"slices"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -119,11 +120,16 @@ func checkpointExists(ctx context.Context, store checkpoint.PersistentStore, che
 // squashed commits to post-commit. It lives in the per-worktree git dir, like
 // SQUASH_MSG, and is tied to the commit's parent so a commit that never
 // happened cannot speak for the next one.
+//
+// Both possible parents are recorded: HEAD for an ordinary commit and HEAD's
+// parent for an amend. git's source word cannot tell them apart (`--amend -m`
+// reports "message", `-C <rev>` reports "commit"), and post-commit sees the
+// real parent.
 const inheritedTrailersFile = "entire-inherited-trailers.json"
 
 type inheritedTrailers struct {
-	Parent string            `json:"parent"`
-	IDs    []id.CheckpointID `json:"ids"`
+	Parents []string          `json:"parents"`
+	IDs     []id.CheckpointID `json:"ids"`
 }
 
 // recordInheritedTrailers tells post-commit which trailers this commit
@@ -139,7 +145,10 @@ func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 		_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // absent is the usual case
 		return
 	}
-	marker := inheritedTrailers{IDs: inherited, Parent: headHash(ctx)}
+	writeInheritedTrailers(ctx, root, inheritedTrailers{IDs: inherited, Parents: commitParentCandidates(ctx)})
+}
+
+func writeInheritedTrailers(ctx context.Context, root *os.Root, marker inheritedTrailers) {
 	data, err := json.Marshal(marker)
 	if err != nil {
 		return
@@ -150,19 +159,24 @@ func recordInheritedTrailers(ctx context.Context, inherited []id.CheckpointID) {
 	}
 }
 
-// headHash returns HEAD's commit, the parent the commit being prepared will
-// have; empty before the first commit.
-func headHash(ctx context.Context) string {
+// commitParentCandidates returns the parents the commit being prepared can
+// have: HEAD, and HEAD's first parent if it is an amend. Empty before the
+// first commit.
+func commitParentCandidates(ctx context.Context) []string {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer repo.Close()
 	head, err := repo.Head()
 	if err != nil {
-		return ""
+		return nil
 	}
-	return head.Hash().String()
+	out := []string{head.Hash().String()}
+	if commit, err := repo.CommitObject(head.Hash()); err == nil && len(commit.ParentHashes) > 0 {
+		out = append(out, commit.ParentHashes[0].String())
+	}
+	return out
 }
 
 // stampedTrailersOf returns the checkpoint trailers of commit that
@@ -188,7 +202,7 @@ func takeInheritedTrailers(ctx context.Context, parent string) map[id.Checkpoint
 	}
 	_ = osroot.RemoveNoSymlinks(root, inheritedTrailersFile) //nolint:errcheck // a stale marker is ignored by its parent check
 	var marker inheritedTrailers
-	if json.Unmarshal(data, &marker) != nil || marker.Parent != parent {
+	if json.Unmarshal(data, &marker) != nil || !slices.Contains(marker.Parents, parent) {
 		return nil
 	}
 	out := make(map[id.CheckpointID]bool, len(marker.IDs))

@@ -498,9 +498,10 @@ func TestTryAgentCommitFastPath_SkipsEmptyButAcceptsContentSession(t *testing.T)
 
 // TestTryAgentCommitFastPath_IdleTaskRecordEligibility covers the idle+record
 // eligibility regressions in one table: an IDLE session links only with a
-// fresh task record (the incident fix — six of seven commits on a real
+// fresh in-flight task record (the incident fix — six of seven commits on a real
 // subagent-driven branch went unlinked under the old ACTIVE-only gate), while
-// no-record idle, ENDED-with-record, and stale-record sessions all decline.
+// no-record idle, completed-record, ENDED-with-record, and stale-record
+// sessions all decline.
 func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 	freshRecord := []session.TaskRecord{
 		{ToolUseID: "toolu_01X", AgentID: "a123", StartedAt: time.Now()},
@@ -528,12 +529,13 @@ func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 			wantLinked:  true,
 		},
 		{
-			// A completed record is still unmaterialized until the next
-			// condensation, so it links exactly like an in-flight one.
-			name:        "AcceptsIdleSessionWithCompletedTaskRecord",
+			// A completed subagent can no longer be the committer. Its files
+			// reached FilesTouched at completion, so content detection links
+			// the commit when it carries them; the fast path must not.
+			name:        "DeclinesIdleSessionWithCompletedTaskRecord",
 			phase:       session.PhaseIdle,
 			taskRecords: completedRecord,
-			wantLinked:  true,
+			wantLinked:  false,
 		},
 		{
 			// An idle session with no records is an ordinary post-turn commit
@@ -551,7 +553,7 @@ func TestTryAgentCommitFastPath_IdleTaskRecordEligibility(t *testing.T) {
 			wantLinked:  false,
 		},
 		{
-			// A record older than idleWithTaskContent's 24h freshness bound
+			// A record older than idleWithLiveTaskRecord's 24h freshness bound
 			// must not confer linkage forever.
 			name:        "DeclinesIdleSessionWithStaleTaskRecord",
 			phase:       session.PhaseIdle,

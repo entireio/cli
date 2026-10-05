@@ -110,11 +110,20 @@ func (f *fakeCellCore) waitIfBlocking(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (f *fakeCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.Repo, error) {
+func (f *fakeCellCore) GetRepo(ctx context.Context, _ coreapi.GetRepoParams) (*coreapi.RepoHeaders, error) {
 	if err := f.waitIfBlocking(ctx); err != nil {
 		return nil, err
 	}
-	return f.repo, f.repoErr
+	return repoHeaders(f.repo, f.repoErr)
+}
+
+// repoHeaders wraps a fake's Repo the way the generated client returns it: the
+// body under Response, alongside response headers the fakes never set.
+func repoHeaders(repo *coreapi.Repo, err error) (*coreapi.RepoHeaders, error) {
+	if repo == nil {
+		return nil, err
+	}
+	return &coreapi.RepoHeaders{Response: *repo}, err
 }
 
 func (f *fakeCellCore) ResolveRepos(ctx context.Context, _ *coreapi.ResolveReposInputBody) (*coreapi.ResolveReposResponse, error) {

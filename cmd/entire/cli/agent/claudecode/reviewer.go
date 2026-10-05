@@ -8,7 +8,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"slices"
+	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -19,7 +23,9 @@ const envelopeTypeAssistant = "assistant"
 
 // NewReviewer returns the AgentReviewer for claude-code.
 //
-// Argv shape: claude -p <prompt> --output-format stream-json --verbose.
+// Argv shape: claude -p <prompt> --output-format stream-json --verbose
+// --setting-sources user --settings <Entire hooks JSON> --strict-mcp-config
+// (see buildReviewCmd).
 // The prompt is passed as a command-line argument; stdin is unused.
 // Stdout is newline-delimited JSON envelopes (one event per line), which the
 // parser decodes into the review Event stream. This format gives the parser
@@ -27,21 +33,82 @@ const envelopeTypeAssistant = "assistant"
 // produced) instead of buffering until end-of-run like plain-text -p mode.
 func NewReviewer() *reviewtypes.ReviewerTemplate {
 	return &reviewtypes.ReviewerTemplate{
-		AgentName: "claude-code",
-		BuildCmd:  buildReviewCmd,
-		Parser:    parseClaudeOutput,
+		AgentName:    "claude-code",
+		BuildCmd:     buildReviewCmd,
+		Parser:       parseClaudeOutput,
+		ClassifyExit: classifyReviewExit,
 	}
 }
 
 // buildReviewCmd builds the exec.Cmd for a claude review run.
 // Exposed at package level for test inspection of argv and env.
+//
+// The reviewer runs inside the checkout under review, and `claude -p` loads
+// that checkout's project settings without a workspace-trust prompt. A branch
+// can therefore ship a .claude/settings.json whose hooks, apiKeyHelper, or
+// permissions run commands as the reviewing user, and a .mcp.json whose
+// servers start as processes, before the first model request. So project and
+// local settings are not loaded at all (--setting-sources user); the user's
+// own settings still are. Entire's lifecycle hooks, which normally come from
+// the project file, are passed from the binary instead (--settings), so the
+// review is still captured without trusting the branch's copy of them.
+//
+// The same flag also keeps the checkout's .claude/commands, skills, and agents
+// out: none is discovered under --setting-sources user, so a branch cannot
+// shadow the profile's /review with a command whose `!` lines run shell
+// commands. Checked against Claude Code 2.0.0 through 2.1.286 (the flag's
+// whole range); the user's own commands and skills still resolve.
+//
+// --strict-mcp-config keeps .mcp.json out explicitly. --setting-sources user
+// also stops it on current Claude Code, but that is not documented behavior of
+// the flag, and the review should not depend on it. The cost is that the
+// reviewer does not get the user's own MCP servers either.
 func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
-	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose"}
+	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose",
+		flagSettingSources, "user", "--settings", reviewHookSettings(), "--strict-mcp-config"}
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)
 	return cmd
+}
+
+// reviewIsolationFlags are the flags buildReviewCmd relies on to keep the
+// reviewed checkout's configuration out of the reviewer.
+var reviewIsolationFlags = []string{flagSettingSources, "--settings", "--strict-mcp-config"}
+
+// unknownOptionPattern matches the error Claude Code's option parser prints
+// for a flag it does not know, e.g. "error: unknown option '--setting-sources'".
+var unknownOptionPattern = regexp.MustCompile(`unknown option '(-[^'=\s]+)`)
+
+// classifyReviewExit turns a Claude Code too old for one of the isolation flags
+// into an error that says so. Such a CLI exits before loading anything, so the
+// review already failed closed; without this the user sees only a raw
+// "unknown option" and no remedy. Dropping the flag to make the run succeed is
+// not an option: it is what keeps the checkout's hooks from running.
+func classifyReviewExit(stderr string, err error) error {
+	for _, m := range unknownOptionPattern.FindAllStringSubmatch(stderr, -1) {
+		if slices.Contains(reviewIsolationFlags, m[1]) {
+			return fmt.Errorf("claude-code: this Claude Code does not support %s, which isolated reviews need to keep the reviewed checkout's configuration out of the reviewer; update Claude Code (2.0.0 or later) and retry: %w", m[1], err)
+		}
+	}
+	return nil
+}
+
+// reviewHookSettings returns the settings JSON carrying exactly the hooks
+// `entire enable` installs for Claude Code, built from the binary rather than
+// read from the checkout. Inline rather than a file: it holds no secret, only
+// the fixed `entire hooks claude-code ...` commands.
+func reviewHookSettings() string {
+	rawHooks := make(map[string]json.RawMessage)
+	installHookEntries(rawHooks, false)
+	out, err := jsonutil.MarshalWithNoHTMLEscape(map[string]map[string]json.RawMessage{"hooks": rawHooks})
+	if err != nil {
+		// A map of already-marshaled JSON cannot fail to marshal; an empty
+		// object still keeps the checkout's settings out.
+		return "{}"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // parseClaudeOutput converts claude's --output-format stream-json --verbose

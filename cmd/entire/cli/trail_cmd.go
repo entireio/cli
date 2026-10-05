@@ -75,8 +75,9 @@ func newTrailCmd() *cobra.Command {
 
 	// Target an explicit repository instead of the origin remote, so the trail
 	// commands can drive a repo the caller is not checked out in (e.g. a GUI
-	// backend). Commands that mutate the local clone (create, checkout, finding
-	// apply) reject it via ensureNoTrailRepoOverride.
+	// backend). Commands that mutate the local clone (checkout, finding apply)
+	// reject it via ensureNoTrailRepoOverride; create accepts it in a
+	// remote-only mode that never touches the clone (runTrailCreateForRepo).
 	cmd.PersistentFlags().StringVar(&repoOverride, "repo", "",
 		"Target repository as forge/owner/repo (e.g. gh/acme/app) or a clone URL; defaults to the origin remote")
 
@@ -984,10 +985,19 @@ func newTrailCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a trail for the current, a new, or no branch",
-		Args:  cobra.NoArgs,
+		Long: `Create a trail for the current, a new, or no branch.
+
+With --repo, the trail is created on that repository through the API alone:
+the local clone is not read or changed, nothing is pushed, and nothing is
+prompted. --title, --base and --branch (or --no-branch) are then required, and
+the branch must already exist on that repository.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := ensureNoTrailRepoOverride(cmd, "trail create"); err != nil {
-				return err
+			if repoArg := trailRepoFlag(cmd); repoArg != "" {
+				if err := validateTrailCreateFlagCombos(cmd, checkout, noBranch); err != nil {
+					return err
+				}
+				return runTrailCreateForRepo(cmd, repoArg, title, body, base, branch, status, typeStr, priorityStr, assignees, checkout, noBranch)
 			}
 			return runTrailCreate(cmd, title, body, base, branch, status, typeStr, priorityStr, assignees, checkout, noBranch)
 		},
@@ -1016,15 +1026,8 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	if err := validateTrailCreateFlagCombos(cmd, checkout, noBranch); err != nil {
 		return err
 	}
-	if cmd.Flags().Changed("type") {
-		if !trail.Type(strings.TrimSpace(typeStr)).IsValid() {
-			return fmt.Errorf("invalid type %q: valid values are %s", typeStr, formatValidTypes())
-		}
-	}
-	if cmd.Flags().Changed("priority") {
-		if !trail.Priority(strings.TrimSpace(priorityStr)).IsValid() {
-			return fmt.Errorf("invalid priority %q: valid values are %s", priorityStr, formatValidPriorities())
-		}
+	if err := validateTrailCreateEnums(cmd, typeStr, priorityStr); err != nil {
+		return err
 	}
 
 	repo, err := strategy.OpenRepository(ctx)
@@ -1066,7 +1069,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 		return err
 	}
 
-	createResp, err := postTrailCreate(ctx, client, basePath, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees)
+	createResp, err := postTrailCreate(ctx, client, basePath, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees, true)
 	if err != nil {
 		cleanupCreatedTrailBranch(ctx, repo, pushRemote, branch, branchState.LocalCreated, branchState.RemotePushed, errW)
 		return err
@@ -1080,6 +1083,21 @@ type trailCreateBranchState struct {
 	NeedsCreation bool
 	LocalCreated  bool
 	RemotePushed  bool
+}
+
+// validateTrailCreateEnums checks --type and --priority when they were given.
+func validateTrailCreateEnums(cmd *cobra.Command, typeStr, priorityStr string) error {
+	if cmd.Flags().Changed("type") {
+		if !trail.Type(strings.TrimSpace(typeStr)).IsValid() {
+			return fmt.Errorf("invalid type %q: valid values are %s", typeStr, formatValidTypes())
+		}
+	}
+	if cmd.Flags().Changed("priority") {
+		if !trail.Priority(strings.TrimSpace(priorityStr)).IsValid() {
+			return fmt.Errorf("invalid priority %q: valid values are %s", priorityStr, formatValidPriorities())
+		}
+	}
+	return nil
 }
 
 func validateTrailCreateFlagCombos(cmd *cobra.Command, checkout, noBranch bool) error {
@@ -1204,19 +1222,29 @@ func ensureTrailCreateBranchExists(ctx context.Context, w io.Writer, repo *git.R
 	return nil
 }
 
-func postTrailCreate(ctx context.Context, client *api.Client, basePath, forge, owner, repoName, title, body, branch, base, statusStr, typeStr, priorityStr string, assignees []string) (api.TrailCreateResponse, error) {
+// postTrailCreate creates the trail. updateLocalCache records the outcome in
+// the current clone's trails-enabled cache; it is false when --repo targets a
+// different repository, whose answer must not land under this clone's key (the
+// same skip runAuthenticatedTrailAPI applies).
+func postTrailCreate(ctx context.Context, client *api.Client, basePath, forge, owner, repoName, title, body, branch, base, statusStr, typeStr, priorityStr string, assignees []string, updateLocalCache bool) (api.TrailCreateResponse, error) {
 	createReq := newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priorityStr, assignees)
 	resp, err := client.Post(ctx, basePath, createReq)
 	if err != nil {
-		noteTrailCommandEnablement(ctx, client, err)
+		if updateLocalCache {
+			noteTrailCommandEnablement(ctx, client, err)
+		}
 		return api.TrailCreateResponse{}, fmt.Errorf("failed to create trail: %w", err)
 	}
 	defer resp.Body.Close()
 	if err := checkTrailResponse(resp); err != nil {
-		noteTrailCommandEnablement(ctx, client, err)
+		if updateLocalCache {
+			noteTrailCommandEnablement(ctx, client, err)
+		}
 		return api.TrailCreateResponse{}, err
 	}
-	saveTrailsEnabledForRemoteBestEffort(ctx, forge, owner, repoName, true)
+	if updateLocalCache {
+		saveTrailsEnabledForRemoteBestEffort(ctx, forge, owner, repoName, true)
+	}
 
 	var createResp api.TrailCreateResponse
 	if err := api.DecodeJSON(resp, &createResp); err != nil {
@@ -2348,8 +2376,8 @@ func resolveTrailPushRemote(ctx context.Context, branch string) (string, error) 
 // parseTrailRepoArg parses an explicit --repo value into the forge/owner/repo
 // triple. It accepts the canonical "forge/owner/repo" form (e.g. gh/acme/app)
 // as well as a full clone URL (https://, git@, or entire://) that gitremote
-// can parse. A trailing ".git" on the repo is stripped for every forge except
-// the native one, where it is part of the name.
+// can parse. A trailing ".git" on the repo is stripped, on every forge: the
+// suffix is never part of a name (see gitDirSuffix).
 func parseTrailRepoArg(raw string) (forge, owner, repo string, err error) {
 	return parseTrailRepoShape(raw)
 }
@@ -2375,12 +2403,15 @@ func parseTrailRepoShape(raw string) (forge, owner, repo string, err error) {
 		if !gitremote.IsForgePathToken(parts[0]) {
 			return "", "", "", fmt.Errorf("invalid --repo %q: %q is not a supported forge id (use a forge id like \"gh\", or pass a clone URL such as https://github.com/%s/%s)", raw, parts[0], parts[1], parts[2])
 		}
-		// `.git` is decoration on a mirror and part of the name on a native
-		// repo, so the trim follows the forge the ref named.
-		if parts[0] == gitremote.ForgeNative {
-			return parts[0], parts[1], parts[2], nil
+		// Re-check the repo AFTER the trim: the emptiness check above ran on the
+		// name as typed, and dropping the suffix can empty it (".git") or turn
+		// it dot-only ("..git" → "."). Either would otherwise be forwarded as a
+		// repo coordinate the suffix manufactured. See dotOnlyRe.
+		repo, _ := gitremote.CutGitDirSuffix(parts[2])
+		if repo == "" || dotOnlyRe.MatchString(repo) {
+			return "", "", "", fmt.Errorf("invalid --repo %q: %q is not a repo name once the %s suffix is dropped", raw, parts[2], gitDirSuffix)
 		}
-		return parts[0], parts[1], strings.TrimSuffix(parts[2], mirrorGitDirSuffix), nil
+		return parts[0], parts[1], repo, nil
 	}
 	info, perr := gitremote.ParseURL(raw)
 	if perr != nil {

@@ -167,7 +167,6 @@ func TestTrailRepoOverride_RejectedByLocalCommands(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "create", args: []string{"create", "--repo", "gh/acme/app"}},
 		{name: "checkout", args: []string{"checkout", "--repo", "gh/acme/app"}},
 		{name: "finding apply", args: []string{"finding", "apply", "--repo", "gh/acme/app", "deadbeef"}},
 	}

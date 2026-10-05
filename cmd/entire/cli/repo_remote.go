@@ -109,8 +109,14 @@ func gitStderr(err error) string {
 	if !errors.As(err, &exitErr) {
 		return ""
 	}
+	return redactGitStderr(string(exitErr.Stderr))
+}
+
+// redactGitStderr joins git's non-empty stderr lines with "; ", redacting each
+// embedded URL (see gitStderr for why redaction is per URL, not per line).
+func redactGitStderr(stderr string) string {
 	var parts []string
-	for _, line := range strings.Split(string(exitErr.Stderr), "\n") {
+	for _, line := range strings.Split(stderr, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue

@@ -1009,6 +1009,45 @@ func TestState_TaskRecordAccessors(t *testing.T) {
 		assert.Nil(t, s.FindTaskRecord("does-not-exist"))
 	})
 
+	// Claude Code's SubagentStop payload carries agent_id but no tool_use_id,
+	// so the stop handler can only find the launch record by its AgentID.
+	t.Run("find by agent id", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_1", SubagentType: "reviewer"},
+			{ToolUseID: "toolu_2", AgentID: "a2", SubagentType: "dev"},
+		}}
+
+		got := s.FindTaskRecordByAgentID("a2")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_2", got.ToolUseID)
+
+		assert.Nil(t, s.FindTaskRecordByAgentID("does-not-exist"))
+		// An empty AgentID must not match a record that never learned one.
+		assert.Nil(t, s.FindTaskRecordByAgentID(""))
+	})
+
+	// Should two records share an agent ID before condensation, the stop must
+	// find the live one, not the completed one.
+	t.Run("find by agent id prefers the live record", func(t *testing.T) {
+		t.Parallel()
+		s := &State{TaskRecords: []TaskRecord{
+			{ToolUseID: "toolu_first", AgentID: "a1", CompletedAt: time.Now()},
+			{ToolUseID: "toolu_second", AgentID: "a1"},
+		}}
+
+		got := s.FindTaskRecordByAgentID("a1")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_second", got.ToolUseID)
+
+		// With no live record left, a redelivered stop still finds the
+		// completed one, so the exactly-once guard can skip it.
+		s.TaskRecords[1].CompletedAt = time.Now()
+		got = s.FindTaskRecordByAgentID("a1")
+		require.NotNil(t, got)
+		assert.Equal(t, "toolu_first", got.ToolUseID)
+	})
+
 	t.Run("remove", func(t *testing.T) {
 		t.Parallel()
 		s := &State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}, {ToolUseID: "toolu_2"}}}

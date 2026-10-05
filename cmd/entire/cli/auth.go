@@ -753,10 +753,10 @@ type authStatusJSON struct {
 	// User is the provider-qualified handle. The bare handle and provider are
 	// deliberately not split out: one field beats two a caller has to rejoin.
 	//
-	// It is the spelling `entire grant` takes wherever the provider issues real
-	// usernames. Where one is synthesised from a subject id (Google), the
-	// duplicated provider is dropped for legibility and the result no longer
-	// resolves as a grantee — see authIdentityLabel.
+	// It carries the stored (wire) handle, like every --json listing, so a
+	// script can compare it with `grant … list --json` grantee names directly.
+	// For Google that is `google:google-<subject id>`, where the text view shows
+	// `google:<subject id>` (see providerIdentity); `entire grant` accepts both.
 	User string `json:"user,omitempty"`
 	// DisplayName is the account's human name where the server has one. Spelled
 	// display_name, not name: `sessions[].name` in this same envelope is a
@@ -848,7 +848,9 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 
 	out.ForeignRegion = d.profile.ForeignRegion
 	out.Jurisdiction = d.profile.Jurisdiction
-	out.User = authIdentityLabel(d.profile)
+	if d.profile.Handle != "" {
+		out.User = formatQualifiedHandle(d.profile.Provider, d.profile.Handle)
+	}
 	out.DisplayName = strings.TrimSpace(d.profile.DisplayName)
 
 	if t.envToken {
@@ -902,23 +904,15 @@ func buildAuthStatusJSON(d authStatusData, opts authStatusOptions) authStatusJSO
 // providerUserId out of nowhere: that produces a well-formed string the
 // resolver answers 404 for, so an account naming no handle at all gets no row.
 //
-// A synthetic handle is unqualified first. A provider with no username concept
-// gets one minted as "<provider>-<providerUserId>" (Google), and qualifying
-// that spells the provider twice — `google:google-100164574874856813796`.
-// The prefix is dropped only when what follows it IS the providerUserId, so
-// the handle is provably the minted form: a GitHub user genuinely named
-// `github-foo` keeps their name, since `github-<their id>` is not what they
-// are called.
+// The handle is spelled the way the provider's accounts are shown and typed
+// (see providerIdentity): Google's minted `google-<subject id>` renders as
+// `google:<subject id>` rather than naming the provider twice, and `entire
+// grant` maps it back before resolving.
 func authIdentityLabel(p *authProfile) string {
 	if p.Handle == "" {
 		return ""
 	}
-	handle := p.Handle
-	if p.Provider != "" && p.ProviderUserID != "" &&
-		strings.EqualFold(handle, p.Provider+"-"+p.ProviderUserID) {
-		handle = p.ProviderUserID
-	}
-	return formatQualifiedHandle(p.Provider, handle)
+	return displayQualifiedHandle(p.Provider, p.Handle)
 }
 
 // authProfileRows renders the user identity from GET /me, omitting any field

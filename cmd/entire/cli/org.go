@@ -68,23 +68,27 @@ func newOrgListCmd() *cobra.Command {
 		Short: "List organizations you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runCoreList(cmd, "No organizations found.", orgColumns, orgRow, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
-				return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
-					params := coreapi.ListOrgsParams{}
-					if cursor != "" {
-						params.PageToken = coreapi.NewOptString(cursor)
-					}
-					out, err := c.ListOrgs(ctx, params)
-					if err != nil {
-						return nil, "", err
-					}
-					return out.Response.Orgs, out.Response.NextPageToken.Or(""), nil
-				})
-			})
+			return runCoreList(cmd, "No organizations found.", orgColumns, orgRow, listAllOrgs)
 		},
 	}
 	addJSONFlag(cmd)
 	return cmd
+}
+
+// listAllOrgs walks every page of the caller's org listing. The list is the
+// caller's own orgs, so resolveOrgRef also matches names against it.
+func listAllOrgs(ctx context.Context, c *coreapi.Client) ([]coreapi.Org, error) {
+	return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]coreapi.Org, string, error) {
+		params := coreapi.ListOrgsParams{}
+		if cursor != "" {
+			params.PageToken = coreapi.NewOptString(cursor)
+		}
+		out, err := c.ListOrgs(ctx, params)
+		if err != nil {
+			return nil, "", err
+		}
+		return out.Response.Orgs, out.Response.NextPageToken.Or(""), nil
+	})
 }
 
 func newOrgGetCmd() *cobra.Command {

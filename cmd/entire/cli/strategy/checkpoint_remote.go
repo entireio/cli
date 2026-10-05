@@ -42,6 +42,11 @@ type pushSettings struct {
 	checkpointURL string
 	// pushDisabled is true if push_sessions is explicitly set to false.
 	pushDisabled bool
+	// checkpointRemoteConfigured records that settings NAME a checkpoint_remote,
+	// which checkpointURL alone cannot express: an empty checkpointURL means
+	// either "none configured" or "configured and refused", and only the second
+	// is worth telling the user about.
+	checkpointRemoteConfigured bool
 	// primaryIsRefs records whether the git-refs backend is the configured
 	// primary, resolved once here so the pre-push path does not re-read the
 	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
@@ -90,6 +95,7 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	if config == nil {
 		return ps
 	}
+	ps.checkpointRemoteConfigured = true
 	checkpointURL, enabled, err := remote.PushURL(ctx, pushRemoteName)
 	if err != nil {
 		logging.Warn(ctx, "checkpoint-remote: could not derive URL from push remote",
@@ -189,7 +195,7 @@ func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, lab
 	defer cancel()
 
 	refSpec := fmt.Sprintf("+%s:%s", srcRef, tmpRef)
-	output, fetchErr := remote.Fetch(fetchCtx, remote.FetchOptions{
+	_, fetchErr := remote.Fetch(fetchCtx, remote.FetchOptions{
 		Remote:   remoteURL,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
@@ -200,11 +206,9 @@ func fetchURLIntoTmpRef(ctx context.Context, dir, remoteURL, srcRef, tmpRef, lab
 		return nil
 	}
 
+	// remote.Fetch already folds git's output into fetchErr, redacted and
+	// capped; splicing it again printed the same text twice.
 	redactedURL := remote.RedactURL(remoteURL)
-	msg := strings.TrimSpace(strings.ReplaceAll(string(output), remoteURL, redactedURL))
-	if msg != "" {
-		return fmt.Errorf("fetch %s from %s failed: %s: %w", label, redactedURL, msg, fetchErr)
-	}
 	return fmt.Errorf("fetch %s from %s failed: %w", label, redactedURL, fetchErr)
 }
 

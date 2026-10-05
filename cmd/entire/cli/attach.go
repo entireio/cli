@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -205,6 +206,9 @@ func attachPrompts(meta transcriptMetadata) []string {
 }
 
 func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentName types.AgentName, opts attachOptions) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	// The logger arrives in ctx from the root PersistentPreRun, and main.go
 	// closes it — the only close site, covering every path ExecuteContextC
 	// returns from — so attach neither builds nor closes one, the way
@@ -360,7 +364,11 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		writeOpts.HasReview = true
 	}
 
-	if err := store.Write(ctx, cpkg.Session(writeOpts)); err != nil {
+	// ReservedSession routes by the checkpoint ID's backend, as condensation
+	// does: appending to an existing ULID checkpoint under the git-branch
+	// primary must land in its ref, not on the v1 branch where reads never
+	// look for a ULID. A freshly minted ID already matches the primary.
+	if err := store.Write(ctx, cpkg.ReservedSession(writeOpts)); err != nil {
 		return fmt.Errorf("failed to write checkpoint: %w", err)
 	}
 
@@ -497,8 +505,9 @@ func getHeadCommit(repo *git.Repository) (*object.Commit, error) {
 // which would clobber the remote on push.
 //
 // Fast path: check local storage directly — no network. If missing, fetch from
-// the remote (the whole v1 branch for git-branch, or just this checkpoint's ref
-// for git-refs) and re-check. Returns a possibly-freshly-opened repo handle so
+// the remote (the whole v1 branch for a branch-stored checkpoint, or just this
+// checkpoint's ref for a ref-stored one; see checkpointStorageRefs) and
+// re-check. Returns a possibly-freshly-opened repo handle so
 // go-git sees any newly fetched refs/packfiles.
 func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, isExistingCheckpoint bool) (*git.Repository, error) {
 	if !isExistingCheckpoint {
@@ -509,9 +518,9 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	if err != nil {
 		return repo, fmt.Errorf("resolve checkpoints config: %w", err)
 	}
-	primaryIsRefs := cpkg.PrimaryIsRefs(cfg)
+	storedInRef := isCheckpointRef(checkpointStorageRefsFor(cfg, checkpointID)[0])
 
-	present, readErr := checkpointPresentLocally(ctx, repo, refs, checkpointID, primaryIsRefs)
+	present, readErr := checkpointPresentLocally(ctx, repo, refs, checkpointID, storedInRef)
 	if readErr != nil {
 		return repo, fmt.Errorf("failed to read checkpoint %s: %w", checkpointID, readErr)
 	}
@@ -520,13 +529,13 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 	}
 
 	// Missing locally — fetch from the remote, then re-check.
-	freshRepo, fetchErr := refreshCheckpoint(ctx, checkpointID, primaryIsRefs)
+	freshRepo, fetchErr := refreshCheckpoint(ctx, checkpointID, storedInRef)
 	if fetchErr != nil {
 		logging.Warn(logCtx, "failed to refresh checkpoint metadata before attach; proceeding with local state",
 			slog.String("error", fetchErr.Error()))
 	} else {
 		repo = freshRepo
-		present, readErr = checkpointPresentLocally(ctx, repo, refs, checkpointID, primaryIsRefs)
+		present, readErr = checkpointPresentLocally(ctx, repo, refs, checkpointID, storedInRef)
 		if readErr != nil {
 			return repo, fmt.Errorf("failed to read checkpoint %s after refresh: %w", checkpointID, readErr)
 		}
@@ -535,15 +544,16 @@ func ensureCheckpointAvailable(ctx, logCtx context.Context, repo *git.Repository
 		}
 	}
 
-	return repo, missingCheckpointError(logCtx, checkpointID, primaryIsRefs)
+	return repo, missingCheckpointError(logCtx, checkpointID)
 }
 
 // refreshCheckpoint fetches the checkpoint referenced by HEAD from the remote and
 // returns a freshly-opened repo so go-git sees the newly-fetched refs/packfiles.
-// The fetch is backend-aware: git-refs fetches just this checkpoint's ref, while
-// git-branch fetches the whole v1 metadata branch (the resume-equivalent chain).
-func refreshCheckpoint(ctx context.Context, checkpointID id.CheckpointID, primaryIsRefs bool) (*git.Repository, error) {
-	if !primaryIsRefs {
+// The fetch follows where the checkpoint is stored: a ref-stored checkpoint
+// fetches just its ref, while a branch-stored one fetches the whole v1 metadata
+// branch (the resume-equivalent chain).
+func refreshCheckpoint(ctx context.Context, checkpointID id.CheckpointID, storedInRef bool) (*git.Repository, error) {
+	if !storedInRef {
 		_, repo, err := getMetadataTree(ctx)
 		return repo, err
 	}
@@ -562,19 +572,19 @@ func refreshCheckpoint(ctx context.Context, checkpointID id.CheckpointID, primar
 }
 
 // checkpointPresentLocally reports whether the checkpoint already exists locally
-// under the configured primary store. It reads local-only; the caller's refresh
+// where it is stored (storedInRef: its own ref rather than the v1 branch). It reads local-only; the caller's refresh
 // path is responsible for any remote fetch.
 //
-// For the git-branch backend the checkpoint lives in the v1 branch tree, and the
+// For a branch-stored checkpoint the data lives in the v1 branch tree, and the
 // store would bootstrap a missing local branch from origin's remote-tracking ref
 // (PrimaryAsRead makes reads origin-bootstrappable). Counting that would let a
 // WriteCommitted create a fresh orphan local branch and clobber the remote on
-// push, so gate on the local Primary ref existing first. For the git-refs backend
-// the checkpoint lives at its own ref (the v1 branch is irrelevant) and the store
+// push, so gate on the local Primary ref existing first. A ref-stored checkpoint
+// lives at its own ref (the v1 branch is irrelevant) and the store
 // read here is already local-only — attach wires no ref fetcher — so read it
 // directly.
-func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, primaryIsRefs bool) (bool, error) {
-	if !primaryIsRefs {
+func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, storedInRef bool) (bool, error) {
+	if !storedInRef {
 		if _, err := repo.Reference(refs.Primary, true); err != nil {
 			return false, nil //nolint:nilerr // Missing local branch is the "absent" signal, not an error.
 		}
@@ -592,35 +602,71 @@ func checkpointPresentLocally(ctx context.Context, repo *git.Repository, refs cp
 
 // missingCheckpointError builds the refuse error shown when a HEAD-referenced
 // checkpoint is still absent locally after a refresh attempt. The storage it
-// names and the fetch command it suggests are backend-aware.
-func missingCheckpointError(ctx context.Context, checkpointID id.CheckpointID, primaryIsRefs bool) error {
-	location := "entire/checkpoints/v1 branch"
-	fetchCmd := suggestCheckpointFetchCommand(ctx)
-	if primaryIsRefs {
-		location = "checkpoint refs"
-		fetchCmd = suggestCheckpointRefFetchCommand(ctx, checkpointID)
-	}
+// names and the fetch commands it suggests follow checkpointStorageRefs.
+func missingCheckpointError(ctx context.Context, checkpointID id.CheckpointID) error {
 	return fmt.Errorf(
 		"checkpoint %s referenced by HEAD is missing from the local %s after a refresh attempt. Creating a fresh checkpoint here would overwrite the original session data on push. Run:\n\n    %s\n\nthen re-run attach. If the colleague who made this commit hasn't pushed their checkpoint metadata yet, ask them to do so first",
-		checkpointID.String(), location, fetchCmd,
+		checkpointID.String(),
+		describeCheckpointStorage(checkpointStorageRefs(ctx, checkpointID), "and"),
+		strings.Join(suggestCheckpointStorageFetchCommands(ctx, checkpointID), "\n    "),
 	)
 }
 
-// suggestCheckpointFetchCommand returns a git fetch command the user can paste to
-// pull the missing v1 metadata branch (git-branch backend).
-func suggestCheckpointFetchCommand(ctx context.Context) string {
-	return suggestFetchCommand(ctx, "entire/checkpoints/v1:entire/checkpoints/v1")
+// checkpointStorageRefs returns the refs that can hold checkpointID's committed
+// data, in the order the store reads them (checkpoint.kindRoutingStore
+// readOrder): a ULID only ever lives in its own ref; a hex ID under a git-refs
+// primary is read from its ref, then from the v1 branch it may predate
+// migration on; any other hex ID lives on the v1 branch. An ID that cannot form
+// a ref (e.g. empty) names the v1 branch. An unreadable checkpoints config
+// resolves to the git-branch default, as the store does.
+func checkpointStorageRefs(ctx context.Context, checkpointID id.CheckpointID) []string {
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		cfg = nil
+	}
+	return checkpointStorageRefsFor(cfg, checkpointID)
 }
 
-// suggestCheckpointRefFetchCommand returns a git fetch command the user can paste
-// to pull one missing checkpoint ref (git-refs backend), falling back to the v1
-// branch form when the ID cannot be turned into a ref.
-func suggestCheckpointRefFetchCommand(ctx context.Context, checkpointID id.CheckpointID) string {
+func checkpointStorageRefsFor(cfg *settings.CheckpointsConfig, checkpointID id.CheckpointID) []string {
 	refName, err := cpkg.RefName(checkpointID)
-	if err != nil {
-		return suggestCheckpointFetchCommand(ctx)
+	switch {
+	case err != nil:
+		return []string{paths.MetadataBranchName}
+	case checkpointID.Kind() == id.KindULID:
+		return []string{refName.String()}
+	case cpkg.PrimaryIsRefs(cfg):
+		return []string{refName.String(), paths.MetadataBranchName}
+	default:
+		return []string{paths.MetadataBranchName}
 	}
-	return suggestFetchCommand(ctx, refName.String()+":"+refName.String())
+}
+
+func isCheckpointRef(ref string) bool { return strings.HasPrefix(ref, cpkg.CheckpointRefPrefix) }
+
+// describeCheckpointStorage names refs for a message, joined by conjunction
+// ("or" / "and"): "checkpoint ref <ref>" or "<branch> branch".
+func describeCheckpointStorage(refs []string, conjunction string) string {
+	parts := make([]string, len(refs))
+	for i, ref := range refs {
+		if isCheckpointRef(ref) {
+			parts[i] = "checkpoint ref " + ref
+		} else {
+			parts[i] = ref + " branch"
+		}
+	}
+	return strings.Join(parts, " "+conjunction+" ")
+}
+
+// suggestCheckpointStorageFetchCommands returns one git fetch command per ref
+// checkpointStorageRefs names for checkpointID. They are separate commands
+// because a fetch naming a ref the remote lacks fails as a whole.
+func suggestCheckpointStorageFetchCommands(ctx context.Context, checkpointID id.CheckpointID) []string {
+	refs := checkpointStorageRefs(ctx, checkpointID)
+	cmds := make([]string, len(refs))
+	for i, ref := range refs {
+		cmds[i] = suggestFetchCommand(ctx, ref+":"+ref)
+	}
+	return cmds
 }
 
 // suggestFetchCommand builds a "git fetch <target> <refspec>" hint via

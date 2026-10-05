@@ -3846,3 +3846,275 @@ func TestMarshalPromptAttributionsIncludingPending(t *testing.T) {
 		})
 	}
 }
+
+// TestWorktreeBusy pins which sessions make a worktree busy when a prompt
+// arrives: another session mid-turn, or a live background subagent of any
+// session, unless its owner process is gone (a pause, not an end: the record
+// stays live), the session ended, the turn is stuck, or it lives in another
+// worktree.
+func TestWorktreeBusy(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "# repo\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+
+	alive, ok := proclive.IdentityOf(os.Getpid())
+	if !ok {
+		t.Skip("process liveness is not supported on this platform")
+	}
+	dead := alive
+	dead.Start = alive.Start + "-reused"
+	live := []session.TaskRecord{{ToolUseID: "toolu_live", AgentID: "a1", StartedAt: time.Now()}}
+	recent := time.Now()
+	stale := time.Now().Add(-2 * session.StuckActiveThreshold)
+
+	self := &SessionState{SessionID: "self", WorktreePath: dir, Phase: session.PhaseIdle, Owner: &alive}
+	for _, tt := range []struct {
+		name  string
+		other *SessionState
+		self  *SessionState
+		want  bool
+	}{
+		{name: "nothing else running", want: false},
+		{name: "another session mid-turn", other: &SessionState{SessionID: "other", WorktreePath: dir, Phase: session.PhaseActive, LastInteractionTime: &recent, Owner: &alive}, want: true},
+		{name: "another session stuck mid-turn", other: &SessionState{SessionID: "other", WorktreePath: dir, Phase: session.PhaseActive, LastInteractionTime: &stale, Owner: &alive}, want: false},
+		{name: "another worktree mid-turn", other: &SessionState{SessionID: "other", WorktreePath: filepath.Join(dir, "elsewhere"), Phase: session.PhaseActive, LastInteractionTime: &recent, Owner: &alive}, want: false},
+		{name: "own live subagent", self: &SessionState{SessionID: "self", WorktreePath: dir, Phase: session.PhaseIdle, Owner: &alive, TaskRecords: live}, want: true},
+		{name: "own live subagent, owner gone", self: &SessionState{SessionID: "self", WorktreePath: dir, Phase: session.PhaseIdle, Owner: &dead, TaskRecords: live}, want: false},
+		{name: "other session's live subagent", other: &SessionState{SessionID: "other", WorktreePath: dir, Phase: session.PhaseIdle, Owner: &alive, TaskRecords: live}, want: true},
+		{name: "ended session's live subagent", other: &SessionState{SessionID: "other", WorktreePath: dir, Phase: session.PhaseEnded, Owner: &alive, TaskRecords: live}, want: false},
+		{name: "live subagent, unknown owner, recent interaction", other: &SessionState{SessionID: "other", WorktreePath: dir, Phase: session.PhaseIdle, LastInteractionTime: &recent, TaskRecords: live}, want: true},
+		{name: "live subagent, unknown owner, stale interaction", other: &SessionState{SessionID: "other", WorktreePath: dir, Phase: session.PhaseIdle, LastInteractionTime: &stale, TaskRecords: live}, want: false},
+		{name: "session without a worktree path", other: &SessionState{SessionID: "other", Phase: session.PhaseActive, LastInteractionTime: &recent, Owner: &alive}, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &ManualCommitStrategy{}
+			current := self
+			if tt.self != nil {
+				current = tt.self
+			}
+			require.NoError(t, s.saveSessionState(context.Background(), current))
+			_ = s.clearSessionState(context.Background(), "other") //nolint:errcheck // absent is fine
+			if tt.other != nil {
+				require.NoError(t, s.saveSessionState(context.Background(), tt.other))
+			}
+			busy, err := worktreeBusy(context.Background(), current)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, busy)
+		})
+	}
+}
+
+// TestRefreshSessionOwner pins that a session hook records the current owner
+// process for an existing session (a resumed Codex thread is owned by a new
+// daemon), and is a no-op for a session with no state.
+func TestRefreshSessionOwner(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "# repo\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+	if _, ok := proclive.ResolveOwner(); !ok {
+		t.Skip("process liveness is not supported on this platform")
+	}
+
+	s := &ManualCommitStrategy{}
+	gone := proclive.Identity{PID: 1, Start: "gone"}
+	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+		SessionID:  "resumed",
+		BaseCommit: testutil.GetHeadHash(t, dir),
+		StartedAt:  time.Now(),
+		Phase:      session.PhaseIdle,
+		Owner:      &gone,
+	}))
+	require.NoError(t, RefreshSessionOwner(context.Background(), "resumed"))
+	state, err := s.loadSessionState(context.Background(), "resumed")
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotNil(t, state.Owner)
+	assert.NotEqual(t, gone, *state.Owner, "the owner must be re-resolved from the current process tree")
+
+	require.NoError(t, RefreshSessionOwner(context.Background(), "missing"))
+}
+
+// TestSaveStep_SnapshotLeavesOtherSessionsFilesAlone pins that a snapshot of a
+// worktree shared by two sessions does not add the other session's files to
+// this session's FilesTouched: commit linking would then treat that agent's
+// work as this session's.
+func TestSaveStep_SnapshotLeavesOtherSessionsFilesAlone(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "# repo\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+	head := testutil.GetHeadHash(t, dir)
+
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+		SessionID: "other", BaseCommit: head, WorktreePath: dir, StartedAt: time.Now(),
+		Phase: session.PhaseIdle, FilesTouched: []string{"other.txt"},
+	}))
+	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+		SessionID: "self", BaseCommit: head, WorktreePath: dir, StartedAt: time.Now(),
+		Phase: session.PhaseActive, PendingPromptAttribution: &PromptAttribution{CheckpointNumber: 1},
+	}))
+	testutil.WriteFile(t, dir, "other.txt", "written by the other session\n")
+	testutil.WriteFile(t, dir, "mine.txt", "written by this session\n")
+	metadataDir := ".entire/metadata/self"
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"go"}}`+"\n"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     "self",
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+	state, err := s.loadSessionState(context.Background(), "self")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"mine.txt"}, state.FilesTouched)
+}
+
+// TestSaveStep_ExistingSessionOnly pins that a snapshot taken for an agent
+// stop never recreates a session whose state is gone and never writes to an
+// ended one, judged under the save's own state lock.
+func TestSaveStep_ExistingSessionOnly(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "# repo\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+	testutil.WriteFile(t, dir, "sub.md", "written by a subagent\n")
+
+	s := &ManualCommitStrategy{}
+	step := func(sessionID string) StepContext {
+		return StepContext{
+			SessionID:           sessionID,
+			MetadataDir:         ".entire/metadata/" + sessionID,
+			CommitMessage:       "Subagent finished",
+			AuthorName:          "Test",
+			AuthorEmail:         "test@test.com",
+			SkipWhenUnchanged:   true,
+			ExistingSessionOnly: true,
+		}
+	}
+
+	require.ErrorIs(t, s.SaveStep(context.Background(), step("gone")), ErrStateNotFound)
+	gone, err := s.loadSessionState(context.Background(), "gone")
+	require.NoError(t, err)
+	assert.Nil(t, gone, "a missing session must not be recreated")
+
+	ended := time.Now()
+	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+		SessionID: "ended", BaseCommit: testutil.GetHeadHash(t, dir), WorktreePath: dir,
+		StartedAt: time.Now(), Phase: session.PhaseEnded, EndedAt: &ended,
+	}))
+	require.ErrorIs(t, s.SaveStep(context.Background(), step("ended")), ErrNothingToSnapshot)
+	state, err := s.loadSessionState(context.Background(), "ended")
+	require.NoError(t, err)
+	assert.Zero(t, state.StepCount, "an ended session must not get a snapshot")
+}
+
+// TestSaveStep_SnapshotClaimsAreMeasuredFromTheSessionsOwnSnapshot pins that a
+// session claims the files that changed since its own previous snapshot, not
+// since the newest one on the worktree's shared shadow branch. Otherwise a
+// file session A shell-wrote is claimed by session B when B's turn ends first,
+// and A never claims it: B's snapshot already holds A's content.
+func TestSaveStep_SnapshotClaimsAreMeasuredFromTheSessionsOwnSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "# repo\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+	head := testutil.GetHeadHash(t, dir)
+
+	s := &ManualCommitStrategy{}
+	for _, id := range []string{"a", "b"} {
+		require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+			SessionID: id, BaseCommit: head, WorktreePath: dir, StartedAt: time.Now(),
+			Phase: session.PhaseActive, PendingPromptAttribution: &PromptAttribution{CheckpointNumber: 1},
+		}))
+		metadataDir := ".entire/metadata/" + id
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"go"}}`+"\n"), 0o644))
+	}
+	step := func(id string) {
+		t.Helper()
+		require.NoError(t, s.SaveStep(context.Background(), StepContext{
+			SessionID: id, MetadataDir: ".entire/metadata/" + id, CommitMessage: "Checkpoint",
+			AuthorName: "Test", AuthorEmail: "test@test.com",
+		}))
+	}
+	filesOf := func(id string) []string {
+		t.Helper()
+		state, err := s.loadSessionState(context.Background(), id)
+		require.NoError(t, err)
+		return state.FilesTouched
+	}
+
+	// Each session snapshots once so it has a previous snapshot of its own.
+	testutil.WriteFile(t, dir, "a-first.txt", "a\n")
+	step("a")
+	testutil.WriteFile(t, dir, "b-first.txt", "b\n")
+	step("b")
+
+	// A's shell command writes foo.go; B's turn ends before A's.
+	testutil.WriteFile(t, dir, "foo.go", "package foo\n")
+	step("b")
+	step("a")
+	assert.Contains(t, filesOf("a"), "foo.go", "A wrote foo.go after its own previous snapshot, so A must claim it")
+}
+
+// TestSaveStep_TurnTakingSessionsClaimOnlyTheirOwnFiles pins that two
+// sessions taking turns in one worktree (never at the same time) do not claim
+// each other's files. A session measures its claims from the newest shadow
+// snapshot when its turn started, or its own later snapshot: what another
+// session wrote and snapshotted while this one was idle is not in its window.
+func TestSaveStep_TurnTakingSessionsClaimOnlyTheirOwnFiles(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "# repo\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	turn := func(id, file, content string) {
+		t.Helper()
+		require.NoError(t, s.InitializeSession(context.Background(), id, agent.AgentTypeClaudeCode, "", "go", ""))
+		metadataDir := ".entire/metadata/" + id
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"go"}}`+"\n"), 0o644))
+		testutil.WriteFile(t, dir, file, content)
+		require.NoError(t, s.SaveStep(context.Background(), StepContext{
+			SessionID: id, MetadataDir: metadataDir, CommitMessage: "Checkpoint",
+			AuthorName: "Test", AuthorEmail: "test@test.com",
+		}))
+		require.NoError(t, MutateSessionState(context.Background(), id, func(state *SessionState) error {
+			state.Phase = session.PhaseIdle // the turn ended
+			return nil
+		}))
+	}
+	filesOf := func(id string) []string {
+		t.Helper()
+		state, err := s.loadSessionState(context.Background(), id)
+		require.NoError(t, err)
+		return state.FilesTouched
+	}
+
+	turn("b", "b.txt", "hello from B\n")
+	turn("a", "a.txt", "hello from A\n")
+	turn("b", "b.txt", "hello from B\nsecond\n")
+	turn("a", "a.txt", "hello from A\nsecond\n")
+	turn("b", "b.txt", "hello from B\nsecond\nthird\n")
+
+	assert.Equal(t, []string{"b.txt"}, filesOf("b"))
+	assert.Equal(t, []string{"a.txt"}, filesOf("a"))
+}

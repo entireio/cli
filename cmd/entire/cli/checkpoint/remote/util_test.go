@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -15,12 +16,13 @@ import (
 
 func TestFetchURL(t *testing.T) {
 	tests := []struct {
-		name         string
-		originURL    string
-		settingsJSON string
-		token        string
-		wantURL      string
-		wantErr      bool
+		name              string
+		originURL         string
+		settingsJSON      string
+		settingsLocalJSON string
+		token             string
+		wantURL           string
+		wantErr           bool
 	}{
 		{
 			name:         "checkpoint remote with token and https origin returns https checkpoint url",
@@ -35,6 +37,14 @@ func TestFetchURL(t *testing.T) {
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			token:        "secret-token",
 			wantURL:      "https://github.com/acme/checkpoints.git",
+		},
+		{
+			// Cross-forge, so it must be declared per-clone; see TestPushURL.
+			name:              "github.com origin with gitlab provider reads from gitlab.com",
+			originURL:         "https://github.com/acme/app.git",
+			settingsJSON:      `{"enabled":true}`,
+			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"gitlab","repo":"acme/checkpoints"}}}`,
+			wantURL:           "git@gitlab.com:acme/checkpoints.git",
 		},
 		{
 			name:         "gitlab checkpoint remote with token returns https url on gitlab.com",
@@ -112,6 +122,9 @@ func TestFetchURL(t *testing.T) {
 			testutil.InitRepo(t, repoDir)
 			runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
 			writeSettings(t, repoDir, tt.settingsJSON)
+			if tt.settingsLocalJSON != "" {
+				writeLocalSettings(t, repoDir, tt.settingsLocalJSON)
+			}
 			t.Chdir(repoDir)
 			if tt.token != "" {
 				t.Setenv(CheckpointTokenEnvVar, tt.token)
@@ -586,6 +599,68 @@ func TestPushURL(t *testing.T) {
 			wantEnabled:  true,
 		},
 		{
+			// The owner names match, so the store is adopted; its URL must be
+			// built on the configured provider's host, not on github.com.
+			// Cross-forge, so it must be declared per-clone: a COMMITTED
+			// cross-forge store is refused, because an owner name on one forge
+			// says nothing about the same name on another.
+			name:              "github.com origin with gitlab provider routes to gitlab.com",
+			originURL:         "https://github.com/acme/app.git",
+			pushRemote:        "origin",
+			settingsJSON:      `{"enabled":true}`,
+			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"gitlab","repo":"acme/checkpoints"}}}`,
+			wantURL:           "git@gitlab.com:acme/checkpoints.git",
+			wantEnabled:       true,
+		},
+		{
+			// The credential case: the token is for the provider, so it must
+			// ride to gitlab.com, never to the origin's github.com.
+			// Cross-forge, so it must be declared per-clone: a COMMITTED
+			// cross-forge store is refused, because an owner name on one forge
+			// says nothing about the same name on another.
+			name:              "token with github.com origin and gitlab provider targets gitlab.com",
+			originURL:         "git@github.com:acme/app.git",
+			pushRemote:        "origin",
+			settingsJSON:      `{"enabled":true}`,
+			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"gitlab","repo":"acme/checkpoints"}}}`,
+			token:             "secret-token",
+			wantURL:           "https://gitlab.com/acme/checkpoints.git",
+			wantEnabled:       true,
+		},
+		{
+			// Cross-forge, so it must be declared per-clone: a COMMITTED
+			// cross-forge store is refused, because an owner name on one forge
+			// says nothing about the same name on another.
+			name:              "gitlab.com origin with github provider routes to github.com",
+			originURL:         "git@gitlab.com:acme/app.git",
+			pushRemote:        "origin",
+			settingsJSON:      `{"enabled":true}`,
+			settingsLocalJSON: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:           "git@github.com:acme/checkpoints.git",
+			wantEnabled:       true,
+		},
+		{
+			// Enterprise installations keep their own host: only public forge
+			// hosts are known to belong to one provider.
+			name:         "enterprise host keeps its host for the github provider",
+			originURL:    "https://ghe.example.com/acme/app.git",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://ghe.example.com/acme/checkpoints.git",
+			wantEnabled:  true,
+		},
+		{
+			// A provider with no host of its own cannot be served from github.com
+			// either, so pushes fall back to origin instead of inventing a
+			// github.com checkpoint URL.
+			name:         "github.com origin with unknown provider falls back to origin",
+			originURL:    "https://github.com/acme/app.git",
+			pushRemote:   "origin",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"bitbucket","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://github.com/acme/app.git",
+			wantEnabled:  false,
+		},
+		{
 			name:         "non-derivable origin with unknown provider falls back to origin",
 			originURL:    "entire://app.entire.io/gh/acme/app",
 			pushRemote:   "origin",
@@ -1044,6 +1119,21 @@ func TestDeriveCheckpointURLFromInfo(t *testing.T) {
 			wantDeriveErr:  true,
 		},
 		{
+			// A public forge's host names its provider, so a github
+			// checkpoint_remote must not be derived on gitlab.com. The error
+			// sends callers to the provider's own host.
+			name:           "public forge of another provider over SSH",
+			pushRemoteURL:  "git@gitlab.com:org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			wantDeriveErr:  true,
+		},
+		{
+			name:           "public forge of another provider over HTTPS",
+			pushRemoteURL:  "https://GitLab.com/org/main-repo.git",
+			checkpointRepo: "org/checkpoints",
+			wantDeriveErr:  true,
+		},
+		{
 			name:          "invalid push remote",
 			pushRemoteURL: "not-a-url",
 			wantParseErr:  true,
@@ -1083,6 +1173,107 @@ func TestDeriveCheckpointURLFromInfo(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("deriveCheckpointURLFromInfo(%q) = %q, want %q", tt.pushRemoteURL, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckpointRemoteIsInherited_NoReadableOwnerIsUnprovable pins that absence
+// of evidence never adopts the store: when every identity is present but none
+// yields an owner, the vote is Unprovable, not Ours. Only an identity that
+// parsed and matched may leave the loop without a verdict.
+//
+// Not parallel: CheckpointRemoteIsLocalOnly resolves settings from CWD.
+// TestCheckpointRemoteIsInherited_CrossForgeOwnerProvesNothing pins that a
+// matching owner name on a DIFFERENT public forge cannot vouch for the store.
+// "alice" on github.com and "alice" on gitlab.com are unrelated accounts, and
+// the checkpoint URL is built on the configured provider's host — so comparing
+// names across forges would approve a namespace the identity says nothing
+// about. Unprovable, not Disproved: a real owner still reaches the enable
+// claim prompt.
+// TestCheckpointRemoteIsInherited_CrossForgeNormalizesProvider pins that the
+// cross-forge check normalizes the provider the same way providerHost and
+// checkPublicForgeMatchesProvider do, so a stray space cannot flip the verdict,
+// and that the reason quotes it — the provider is committed-settings text and
+// the reason reaches a terminal through the pre-push warning.
+func TestCheckpointRemoteIsInherited_CrossForgeNormalizesProvider(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	writeSettings(t, repoDir, `{"enabled":true}`)
+	t.Chdir(repoDir)
+
+	config := &settings.CheckpointRemoteConfig{Provider: " github ", Repo: "alice/checkpoints"}
+	verdict, reason := checkpointRemoteIsInherited(context.Background(), config,
+		"https://github.com/alice/app.git", nil)
+	if verdict != OwnershipOurs {
+		t.Fatalf("verdict = %v (%q), want OwnershipOurs: a padded provider is still github", verdict, reason)
+	}
+
+	esc := &settings.CheckpointRemoteConfig{Provider: "gitlab\x1b[31m", Repo: "alice/checkpoints"}
+	verdict, reason = checkpointRemoteIsInherited(context.Background(), esc,
+		"https://github.com/alice/app.git", nil)
+	if verdict != OwnershipUnprovable {
+		t.Fatalf("verdict = %v, want OwnershipUnprovable", verdict)
+	}
+	if strings.Contains(reason, "\x1b[") {
+		t.Fatalf("reason carries a raw escape sequence: %q", reason)
+	}
+}
+
+func TestCheckpointRemoteIsInherited_CrossForgeOwnerProvesNothing(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	writeSettings(t, repoDir, `{"enabled":true}`)
+	t.Chdir(repoDir)
+
+	for _, tc := range []struct {
+		name     string
+		provider string
+		origin   string
+		want     OwnershipVerdict
+	}{
+		{"gitlab store, github origin", "gitlab", "https://github.com/alice/app.git", OwnershipUnprovable},
+		{"github store, gitlab origin", "github", "https://gitlab.com/alice/app.git", OwnershipUnprovable},
+		// Same forge still compares names, both ways.
+		{"same forge, same owner", "github", "https://github.com/alice/app.git", OwnershipOurs},
+		{"same forge, other owner", "github", "https://github.com/bob/app.git", OwnershipDisproved},
+		// A self-managed host is the user's own installation and is trusted to
+		// serve whatever provider they configured.
+		{"self-managed host", "gitlab", "https://git.acme.io/alice/app.git", OwnershipOurs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := &settings.CheckpointRemoteConfig{Provider: tc.provider, Repo: "alice/checkpoints"}
+			verdict, reason := checkpointRemoteIsInherited(context.Background(), config, tc.origin, nil)
+			if verdict != tc.want {
+				t.Fatalf("verdict = %v (%q), want %v", verdict, reason, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckpointRemoteIsInherited_NoReadableOwnerIsUnprovable(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	writeSettings(t, repoDir, `{"enabled":true}`)
+	t.Chdir(repoDir)
+
+	config := &settings.CheckpointRemoteConfig{Provider: "github", Repo: "acme/checkpoints"}
+	for _, tc := range []struct {
+		name   string
+		origin string
+		push   []string
+	}{
+		{"origin_only", "git@selfhosted.example:app.git", nil},
+		{"origin_and_push_remotes", "git@selfhosted.example:app.git", []string{"https://selfhosted.example/app.git", "/srv/git/app.git"}},
+		{"push_remotes_only", "", []string{"git@selfhosted.example:app.git", "https://selfhosted.example/app.git"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verdict, reason := checkpointRemoteIsInherited(context.Background(), config, tc.origin, tc.push)
+			if verdict != OwnershipUnprovable {
+				t.Fatalf("verdict = %v (%q), want OwnershipUnprovable", verdict, reason)
+			}
+			if !strings.Contains(reason, "could not be determined") {
+				t.Fatalf("reason = %q, want an undetermined-owner reason", reason)
 			}
 		})
 	}

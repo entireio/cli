@@ -242,6 +242,12 @@ External commands are arbitrary executables. No SDK, no protocol, no manifest. T
 - **Arguments after the command name pass through verbatim.** `entire pgr --help foo` invokes `entire-pgr` with argv `["--help", "foo"]`. Cobra's flag parsing does not run.
 - **Windows.** On Windows, `exec.LookPath` resolves `.exe`, `.bat`, and `.cmd` extensions automatically. The "found but not executable" path is Unix-only — Windows treats extension match as the only correctness signal.
 
+### Agent help
+
+`entire agent-help <name> [path...]` is answered by the plugin when `<name>` is not a built-in and `entire-<name>` resolves, including from the [managed install directory](#managed-install-directory): the CLI runs `entire-<name> agent-help [path...]`, appending `--json` when it was given (Cobra consumed it as agent-help's own flag). Like the built-in drill-in, it takes a command path, not flags: any other flag is rejected by `agent-help` before the plugin is consulted. A plugin that wants to be documented to agents implements an `agent-help` verb with that shape; stdout, stderr, and the filtered environment are exactly as for a dispatched run, and the plugin's outcome is `agent-help`'s: its exit code verbatim, or the signal that killed it re-raised, exactly as for a dispatched plugin (the command returns `cli.PluginExitError`, which `main.go` exits with instead of the plain 1 other errors get). The CLI prints nothing over the plugin's own stderr.
+
+Resolution is the dispatcher's own (`resolvePlugin`), so built-ins still win, `agent-` names are still refused, and a found-but-not-executable binary is still a launch error. Two things differ on purpose: a missing on-demand plugin is **not** offered for installation, because agents run `agent-help` unprompted and a help lookup must not end in a download; and no plugin-invocation telemetry fires, since the plugin was consulted, not run. `agent-help`'s own post-run still does, as for any lookup: command telemetry (command path and flag names only, so never the plugin's name) and the version notice on stderr. Only the CLI command delegates. The MCP `agent_help` tool does not, because a plugin writes to the process's stdout, which under `entire mcp` is the JSON-RPC stream.
+
 ### Settings are not a plugin extension point
 
 `.entire/settings.json` is decoded with `DisallowUnknownFields`, so a key the CLI does not ship makes the whole settings load fail — and a settings-load failure disables the CLI in that repository, not just the feature that owns the key. A plugin therefore **cannot** put its configuration there: doing so would require the CLI to ship a field for every plugin, which is the coupling external commands exist to avoid.
@@ -318,6 +324,7 @@ Key files:
 - `cmd/entire/cli/plugin_install_remote.go` — remote install/upgrade orchestration
 - `cmd/entire/cli/plugin_index.go` — git-synced index cache, URL precedence
 - `cmd/entire/cli/plugin_deps.go` — dependency planning, remove guard, `plugin doctor`
+- `cmd/entire/cli/agent_help_cmd.go` — `maybeDelegateAgentHelpToPlugin`, the `agent-help <plugin>` hand-off
 - `cmd/entire/cli/plugin_group.go` — `entire plugin install/list/remove/upgrade/search/info/browse/doctor/index` Cobra commands
 - `cmd/entire/cli/telemetry/detached.go` — `BuildPluginEventPayload`, `TrackPluginDetached`
 - `cmd/entire/cli/integration_test/external_command_test.go` — end-to-end coverage of the resolution path

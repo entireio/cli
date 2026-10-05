@@ -109,6 +109,21 @@ func (r *HookRunner) SimulateStop(sessionID, transcriptPath string) error {
 	return r.runHookWithInput("stop", input)
 }
 
+// SimulateStopFailure simulates Claude Code's StopFailure hook, which fires
+// instead of Stop when a turn ends on an API error.
+func (r *HookRunner) SimulateStopFailure(sessionID, transcriptPath, errorType string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcriptPath,
+		"hook_event_name": "StopFailure",
+		"error":           errorType,
+	}
+
+	return r.runHookWithInput("stop-failure", input)
+}
+
 // SimulateSessionEnd simulates the Claude Code session-end hook.
 // This transitions a session from IDLE (or ACTIVE) to ENDED phase.
 func (r *HookRunner) SimulateSessionEnd(sessionID string) error {
@@ -165,52 +180,63 @@ type PostTaskInput struct {
 	TranscriptPath string
 	ToolUseID      string
 	AgentID        string
-	// RunInBackground, when true, sets tool_input.run_in_background so the
-	// hook is parsed as a background subagent launch stub (isBackgroundLaunch)
-	// instead of a foreground completion.
-	RunInBackground bool
+	// Background, when true, sends the response Claude Code returns for an
+	// async launch (status "async_launched", isAsync) instead of a foreground
+	// completion (status "completed"). Real Agent calls rarely carry
+	// run_in_background, so the payload deliberately omits it either way.
+	Background bool
 }
 
 // SimulatePostTask simulates the PostToolUse[Task] hook.
 func (r *HookRunner) SimulatePostTask(input PostTaskInput) error {
 	r.T.Helper()
 
+	toolResponse := map[string]interface{}{
+		"status":  "completed",
+		"agentId": input.AgentID,
+	}
+	if input.Background {
+		toolResponse = map[string]interface{}{
+			"status":  "async_launched",
+			"isAsync": true,
+			"agentId": input.AgentID,
+		}
+	}
 	hookInput := map[string]interface{}{
 		"session_id":      input.SessionID,
 		"transcript_path": input.TranscriptPath,
 		"tool_use_id":     input.ToolUseID,
-		"tool_input": map[string]interface{}{
-			"run_in_background": input.RunInBackground,
-		},
-		"tool_response": map[string]string{
-			"agentId": input.AgentID,
-		},
+		"tool_name":       "Agent",
+		"tool_input":      map[string]interface{}{},
+		"tool_response":   toolResponse,
 	}
 
 	return r.runHookWithInput("post-task", hookInput)
 }
 
-// SubagentStopInput contains the input for the SubagentStop hook.
+// SubagentStopInput contains the input for the SubagentStop hook. There is no
+// ToolUseID: Claude Code's SubagentStop payload never carries one, so the
+// lifecycle must correlate on AgentID.
 type SubagentStopInput struct {
 	SessionID           string // Parent session ID.
 	TranscriptPath      string // Parent session's transcript path.
 	AgentID             string
 	AgentTranscriptPath string // Path to the subagent's own transcript.
-	ToolUseID           string // The Task tool_use_id that launched this subagent.
 }
 
 // SimulateSubagentStop simulates Claude Code's SubagentStop hook: the true
-// completion signal for a subagent, including background subagents that
-// finish long after the launch-time PostToolUse (post-task) stub fired.
+// completion signal for a subagent. For a background subagent it fires long
+// after the launch-time PostToolUse (post-task); for a foreground subagent it
+// fires just BEFORE that PostToolUse.
 func (r *HookRunner) SimulateSubagentStop(input SubagentStopInput) error {
 	r.T.Helper()
 
 	hookInput := map[string]interface{}{
 		"session_id":            input.SessionID,
 		"transcript_path":       input.TranscriptPath,
+		"hook_event_name":       "SubagentStop",
 		"agent_id":              input.AgentID,
 		"agent_transcript_path": input.AgentTranscriptPath,
-		"tool_use_id":           input.ToolUseID,
 	}
 
 	return r.runHookWithInput("subagent-stop", hookInput)
@@ -424,6 +450,13 @@ func (env *TestEnv) SimulateStop(sessionID, transcriptPath string) error {
 	env.T.Helper()
 	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
 	return runner.SimulateStop(sessionID, transcriptPath)
+}
+
+// SimulateStopFailure is a convenience method on TestEnv.
+func (env *TestEnv) SimulateStopFailure(sessionID, transcriptPath, errorType string) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateStopFailure(sessionID, transcriptPath, errorType)
 }
 
 // SimulateSessionEnd is a convenience method on TestEnv.

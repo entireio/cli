@@ -30,6 +30,13 @@ import (
 // agreement when a developer points Pi at a non-default home.
 const piHomeEnvVar = "PI_CODING_AGENT_DIR"
 
+// piSessionStoreEnvVar replaces Pi's session directory outright. Unlike
+// piHomeEnvVar it keeps no per-repo nesting: Pi's SessionManager uses the value
+// as the directory itself and skips getDefaultSessionDir, so every repo's
+// sessions land flat in it. The --session-dir flag outranks it inside Pi, but a
+// flag is per-invocation and invisible to Entire.
+const piSessionStoreEnvVar = "PI_CODING_AGENT_SESSION_DIR"
+
 // piSessionDirEnvVar lets tests redirect Pi's session lookup without
 // touching the real ~/.pi/agent. Mirrors ENTIRE_TEST_<AGENT>_SESSION_DIR
 // used by Codex.
@@ -127,8 +134,10 @@ func (a *PiAgent) GetSessionID(input *agent.HookInput) string {
 //
 // Resolution order:
 //  1. ENTIRE_TEST_PI_SESSION_DIR (test override; no encoding applied)
-//  2. PI_CODING_AGENT_DIR (Pi's own override; encoding still applies)
-//  3. ~/.pi/agent (default)
+//  2. PI_CODING_AGENT_SESSION_DIR (Pi's session-dir override; used as is,
+//     no encoding applied, as Pi does)
+//  3. PI_CODING_AGENT_DIR (Pi's home override; encoding still applies)
+//  4. ~/.pi/agent (default)
 //
 // The .entire/tmp/pi/ cache stays as a hook-internal detail —
 // captureTranscript writes there and the TurnEnd event records that
@@ -138,6 +147,9 @@ func (a *PiAgent) GetSessionID(input *agent.HookInput) string {
 func (a *PiAgent) GetSessionDir(repoPath string) (string, error) {
 	if override := os.Getenv(piSessionDirEnvVar); override != "" {
 		return override, nil
+	}
+	if dir, ok, err := agent.LookupOverride(piSessionStoreEnvVar); err != nil || ok {
+		return dir, err //nolint:wrapcheck // the error already names the override and its value
 	}
 	home, err := resolvePiHome()
 	if err != nil {
@@ -149,8 +161,14 @@ func (a *PiAgent) GetSessionDir(repoPath string) (string, error) {
 // GetSessionBaseDir returns the base directory containing per-project
 // session subdirectories. Used by attach's cross-project fallback
 // (searchTranscriptInProjectDirs) when a session was started from a
-// different cwd than the current worktree root.
+// different cwd than the current worktree root. Under
+// PI_CODING_AGENT_SESSION_DIR every repo shares one flat directory, so that
+// directory is the base; the search probes the base itself as well as its
+// subdirectories.
 func (a *PiAgent) GetSessionBaseDir() (string, error) {
+	if dir, ok, err := agent.LookupOverride(piSessionStoreEnvVar); err != nil || ok {
+		return dir, err //nolint:wrapcheck // the error already names the override and its value
+	}
 	home, err := resolvePiHome()
 	if err != nil {
 		return "", err
@@ -181,16 +199,9 @@ func (a *PiAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 }
 
 // resolvePiHome returns Pi's home directory: $PI_CODING_AGENT_DIR or
-// ~/.pi/agent.
+// ~/.pi/agent. See agent.ResolveHome for the override policy.
 func resolvePiHome() (string, error) {
-	if dir := os.Getenv(piHomeEnvVar); dir != "" {
-		return dir, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user home: %w", err)
-	}
-	return filepath.Join(home, ".pi", "agent"), nil
+	return agent.ResolveHome(piHomeEnvVar, filepath.Join(".pi", "agent")) //nolint:wrapcheck // the error already names the override and its value
 }
 
 // encodeRepoPathForPi encodes an absolute repo path into Pi's

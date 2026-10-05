@@ -280,7 +280,7 @@ func grantEach[Row any](ctx context.Context, cmd *cobra.Command, c *coreapi.Clie
 		}
 		wires = append(wires, wire)
 		if !jsonRequested(cmd) {
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ Granted %s %s access to %s\n", p.handle, granted, pt.describe())
+			fmt.Fprintf(cmd.OutOrStdout(), "✓ Granted %s %s access to %s\n", displayGranteeName(p.handle), granted, pt.describe())
 		}
 	}
 	return emitGrantJSON(cmd, wires, single)
@@ -608,30 +608,48 @@ func revokeGrant(cmd *cobra.Command, subject string, revoke func() error) error 
 // of provenance; project and repo grants include owner and inherited rows,
 // so they add SOURCE and TYPE. No table prints an internal id: the grantee
 // ULID is in the --json output for anyone who needs it.
+//
+// Both also carry NAME, the account's display name where the server sent one:
+// a Google account's handle is only a subject id, so the name is what tells two
+// of them apart. Org and team grantees never have one, and neither does an
+// account the server sent none for; those show "-".
 var (
-	orgMemberColumns = []string{colHeaderGrantee, colHeaderRole, colHeaderStatus}
-	grantColumns     = []string{colHeaderGrantee, colHeaderRole, "SOURCE", "TYPE"}
+	orgMemberColumns = []string{colHeaderGrantee, colHeaderName, colHeaderRole, colHeaderStatus}
+	grantColumns     = []string{colHeaderGrantee, colHeaderName, colHeaderRole, "SOURCE", "TYPE"}
 )
 
-func orgMemberRow(m coreapi.Membership) []string {
-	return []string{granteeName(m.Handle, m.AccountId), m.Role, m.Status}
+func orgMemberRow(m coreapi.OrgMemberListItem) []string {
+	return []string{granteeName(m.Handle, m.AccountId), orDash(granteeDisplayName(m.DisplayName)), m.Role, m.Status}
+}
+
+// granteeDisplayName is the account's display name, or "" when the server sent
+// none. The grant listings fill it best-effort, so its absence never means more
+// than "no name to show".
+func granteeDisplayName(name coreapi.OptString) string {
+	return strings.TrimSpace(name.Or(""))
 }
 
 func projectGrantRow(g coreapi.ProjectGrant) []string {
-	return []string{granteeName(g.GranteeName, g.GranteeId), g.Role, g.Source, g.GranteeType}
+	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
 }
 
 // repoGrantRow mirrors projectGrantRow; RepoGrant and ProjectGrant share the
-// grantee/role/source shape, so both reuse grantColumns.
+// grantee/name/role/source shape, so both reuse grantColumns.
 func repoGrantRow(g coreapi.RepoGrant) []string {
-	return []string{granteeName(g.GranteeName, g.GranteeId), g.Role, g.Source, g.GranteeType}
+	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
 }
 
-// granteeName returns the friendly name when the server resolved one, falling
-// back to the ULID for grantees it couldn't label (e.g. teams).
+// granteeName returns the friendly name when the server resolved one, in the
+// spelling users type (see displayGranteeName), falling back to the ULID for
+// grantees it couldn't label (e.g. teams).
 func granteeName(name coreapi.OptString, granteeID string) string {
-	if n := name.Or(""); n != "" {
-		return n
+	return granteeNameOr(name.Or(""), granteeID)
+}
+
+// granteeNameOr is granteeName for a name already unwrapped from the wire.
+func granteeNameOr(name, granteeID string) string {
+	if name != "" {
+		return displayGranteeName(name)
 	}
 	return granteeID
 }
@@ -673,7 +691,7 @@ func grantAccessBody(provider, providerUserID, role string) *coreapi.GrantAccess
 // orgGrantTarget is org membership: roles owner/admin/member with member as
 // the server default, a target addressed by name or ULID, and no typed-id
 // revoke route — members are removed by their provider identity.
-var orgGrantTarget = grantTarget[coreapi.Membership]{
+var orgGrantTarget = grantTarget[coreapi.OrgMemberListItem]{
 	noun:        cmdOrg,
 	refUsage:    "name or ULID",
 	exampleRef:  "acme",
@@ -694,7 +712,7 @@ var orgGrantTarget = grantTarget[coreapi.Membership]{
 		}
 		return m.Role, m, nil
 	},
-	list: func(ctx context.Context, c *coreapi.Client, id string, pageToken coreapi.OptString) ([]coreapi.Membership, coreapi.OptString, error) {
+	list: func(ctx context.Context, c *coreapi.Client, id string, pageToken coreapi.OptString) ([]coreapi.OrgMemberListItem, coreapi.OptString, error) {
 		out, err := c.ListOrgMembers(ctx, coreapi.ListOrgMembersParams{OrgId: id, PageToken: pageToken})
 		if err != nil {
 			return nil, coreapi.OptString{}, err

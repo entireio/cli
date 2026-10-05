@@ -127,6 +127,60 @@ func TestAddInheritedCheckpointTrailer_StaysAboveGitComments(t *testing.T) {
 		"a message without git comments is unchanged in behaviour")
 }
 
+// An amend that inherits nothing clears a marker an aborted amend left, so the
+// next commit on the same parent is not mistaken for the one prepared.
+func TestRecordInheritedTrailersOnAmend_EmptyClearsStaleMarker(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "base\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "init")
+	testutil.WriteFile(t, dir, "f.txt", "x\n")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "second")
+	t.Chdir(dir)
+	parent := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD~1"))
+	ctx := context.Background()
+
+	recordInheritedTrailers(ctx, []id.CheckpointID{id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J52")})
+	recordInheritedTrailers(ctx, nil)
+	require.Empty(t, takeInheritedTrailers(ctx, parent))
+}
+
+// git reports source "message" for `commit --amend -m` and "commit" for
+// `commit -C <rev>`, so the source word does not say whether the commit will
+// sit on HEAD or on HEAD's parent. The marker must be found either way, or
+// post-commit stops filtering inherited trailers and may condense into one.
+func TestInheritedTrailersMarker_FoundOnEitherParent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := resolvedTempDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "README.md", "base\n")
+	testutil.GitAdd(t, dir, "README.md")
+	testutil.GitCommit(t, dir, "init")
+	testutil.WriteFile(t, dir, "f.txt", "x\n")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "second")
+	t.Chdir(dir)
+	head := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD"))
+	parent := strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "HEAD~1"))
+	ctx := context.Background()
+	cpID := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J53")
+
+	// `commit --amend -m`: prepared as an ordinary commit, lands on HEAD's parent.
+	recordInheritedTrailers(ctx, []id.CheckpointID{cpID})
+	require.True(t, takeInheritedTrailers(ctx, parent)[cpID], "amend with -m")
+
+	// `commit -C <rev>`: prepared as an amend, lands on HEAD.
+	recordInheritedTrailers(ctx, []id.CheckpointID{cpID})
+	require.True(t, takeInheritedTrailers(ctx, head)[cpID], "commit -C")
+
+	// Any other parent is a commit the marker was not prepared for.
+	recordInheritedTrailers(ctx, []id.CheckpointID{cpID})
+	require.Empty(t, takeInheritedTrailers(ctx, strings.Repeat("0", 40)))
+}
+
 // A -m message keeps `#` lines as content: "#42 fix login" is the subject, not
 // git's comment block, so the inherited trailer must not go above it.
 func TestAddInheritedCheckpointTrailer_MessageSourceKeepsHashLines(t *testing.T) {

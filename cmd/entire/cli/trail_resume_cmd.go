@@ -201,6 +201,9 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 }
 
 func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
+	// Restores and looks up agent transcripts from the user's shell, where a
+	// home an agent reads from its own settings is invisible to the environment.
+	agent.EnableHomeProbes()
 	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
@@ -473,9 +476,7 @@ func resolveTrailCheckpointSessions(ctx context.Context, branch string) ([]trail
 	}
 	store := stores.Persistent
 	refs := stores.Refs()
-	if refs.ReadBootstrappableFromRemote() {
-		promoteRemoteTrackingPrimary(ctx, repo, refs)
-	}
+	promoteRemoteTrackingPrimary(ctx, repo, refs)
 
 	sessions := make([]trailResumeSessionContext, 0)
 	skipped := 0

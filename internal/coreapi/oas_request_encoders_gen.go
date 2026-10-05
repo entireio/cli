@@ -136,6 +136,20 @@ func encodeCreateOrgInvitationRequest(
 	return nil
 }
 
+func encodeCreatePluginInstallationRequest(
+	req *CreatePluginInstallationInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeCreateProjectRequest(
 	req *CreateProjectInputBody,
 	r *http.Request,
@@ -320,6 +334,20 @@ func encodeResolveReposRequest(
 
 func encodeSetBranchProtectionRequest(
 	req *BranchProtection,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeSetPluginInstallationRepositoriesRequest(
+	req *SetPluginInstallationRepositoriesInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"

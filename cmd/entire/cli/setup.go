@@ -184,6 +184,11 @@ func updateStrategyOptions(ctx context.Context, w io.Writer, opts EnableOptions)
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	if opts.CheckpointRemote != "" && targetFile == settings.EntireSettingsLocalFile {
+		if rejection := settings.CheckpointRemoteLocalClaimRejection(ctx); rejection != "" {
+			return fmt.Errorf("cannot confirm checkpoint destination: %s", rejection)
+		}
+	}
 
 	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
 	if err != nil {
@@ -1198,6 +1203,14 @@ const (
 // and independent of the trails probe: a failure here (not logged in, network
 // error, backend rejects the URL) must not block that probe.
 func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *gitremote.Info) {
+	// Checked before the client is built, so a repo this report has nothing to
+	// say about costs no auth round trip.
+	reportURL, ok := cleanRemoteURLForReport(info)
+	if !ok {
+		logging.Debug(ctx, "skipping enable report: remote has no upstream forge URL", "forge", info.Forge)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, enableReportBudget)
 	defer cancel()
 
@@ -1207,7 +1220,7 @@ func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *git
 		logging.Debug(ctx, "skipping enable report", "error", err)
 		return
 	}
-	if _, err := client.ReportEnable(ctx, cleanRemoteURLForReport(info)); err != nil {
+	if _, err := client.ReportEnable(ctx, reportURL); err != nil {
 		logging.Debug(ctx, "enable report failed", "error", err)
 	}
 }
@@ -1245,14 +1258,40 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 }
 
 // cleanRemoteURLForReport turns a parsed git remote into a clean,
-// credential-free HTTPS URL safe to send to the backend. The raw remote can
-// carry embedded credentials (https://token@host/...) or query params, so we
-// never forward it verbatim: rebuild from host/owner/repo alone.
-func cleanRemoteURLForReport(info *gitremote.Info) string {
+// credential-free HTTPS clone URL on the repo's UPSTREAM forge host, safe to
+// send to the backend. The raw remote can carry embedded credentials
+// (https://token@host/...) or query params, so we never forward it verbatim:
+// rebuild from host/owner/repo alone.
+//
+// ok is false when no upstream forge host is known, which is decided by
+// transport. A direct remote is reached over a git transport, so its Host IS a
+// git host and it is always reportable — a self-hosted GitHub Enterprise
+// included, which is why this does not simply require a mapped forge.
+//
+// An entire:// remote is the opposite: its Host is a cluster, so a forge clone
+// URL exists only when the forge maps back to an upstream host. Two kinds do
+// not. A native repo mirrors nothing. An unrecognized token does not either —
+// ParseURL preserves ANY non-empty forge it finds in the path, so a
+// `entire://<cluster>/jk/<owner>/<repo>` origin arrives looking just like a
+// mirror. Both would be reported as `https://<cluster>/<owner>/<repo>.git`: a
+// URL that addresses nothing, on a host that serves no such thing, wearing a
+// suffix Entire paths never carry. The report drives the web onboarding's
+// GitHub-App nudge, which has nothing to say about either, so the caller skips
+// it rather than reporting a synthesized URL.
+//
+// Because ok is false in those cases, the host returned here is always a real
+// git host, and the `.git` suffix is always that host's clone convention rather
+// than part of a name (see gitDirSuffix).
+func cleanRemoteURLForReport(info *gitremote.Info) (string, bool) {
+	if info.Protocol == gitremote.ProtocolEntire {
+		if _, known := info.UpstreamHost(); !known {
+			return "", false
+		}
+	}
 	// Use CanonicalHost, not Host: an entire://cluster/gh/owner/repo origin (an
 	// already-mirrored repo) carries the Entire cluster as Host, so reporting
 	// Host verbatim would point the backend at the cluster instead of github.com.
-	return fmt.Sprintf("https://%s/%s/%s.git", info.CanonicalHost(), info.Owner, info.Repo)
+	return fmt.Sprintf("https://%s/%s/%s%s", info.CanonicalHost(), info.Owner, info.Repo, gitDirSuffix), true
 }
 
 func newDisableCmd() *cobra.Command {

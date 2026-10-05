@@ -63,6 +63,14 @@ func (s *fanoutStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpo
 	return s.primary.ReadSessionMetadataAndPrompts(ctx, checkpointID, sessionIndex) //nolint:wrapcheck // pure delegation to primary
 }
 
+func (s *fanoutStore) ListTasks(ctx context.Context, checkpointID id.CheckpointID) ([]TaskEntry, error) {
+	return s.primary.ListTasks(ctx, checkpointID) //nolint:wrapcheck // pure delegation to primary
+}
+
+func (s *fanoutStore) ReadTaskTranscript(ctx context.Context, checkpointID id.CheckpointID, toolUseID string) ([]byte, error) {
+	return s.primary.ReadTaskTranscript(ctx, checkpointID, toolUseID) //nolint:wrapcheck // pure delegation to primary
+}
+
 // Write applies to the primary first; only on primary success does it fan out to
 // each mirror best-effort. A mirror error is logged and dropped.
 func (s *fanoutStore) Write(ctx context.Context, req WriteRequest) error {

@@ -92,11 +92,14 @@ func sweepNativeMirrors(t *testing.T, dir, repoPath string) {
 		return
 	}
 	var row repoDirJSON
-	if !sweepList(t, dir, &row, "repo", "mirror", "get", repoPath, "--json") {
+	if !sweepList(t, dir, &row, "repo", "view", repoPath, "--json") {
 		return
 	}
 	for _, p := range row.Placements {
-		if p.Role != "native_mirror" {
+		// "mirror", the word the view prints and every verb in the subtree
+		// uses. The control plane spells its own equivalent "native_mirror";
+		// that stays on the wire and never reaches this row.
+		if p.Role != "mirror" {
 			continue
 		}
 		// --cluster takes a host, which the placement carries in its clone URL.

@@ -259,6 +259,20 @@ type ClonePreferences struct {
 	// user can re-enable by editing this file or deleting the key.
 	ReviewMigrationDismissed bool `json:"review_migration_dismissed,omitempty"`
 
+	// CheckpointRemoteClaimDeclined records the `provider:repo` the user
+	// declined when `entire enable` offered to claim a refused
+	// checkpoint_remote, so the confirm prompt is asked once per store
+	// instead of on every run. Only the prompt is one-shot: the line saying
+	// the store is being ignored still prints every time, because that is
+	// the condition the user has to be able to discover.
+	//
+	// The declined value rather than a bool, because a repo that later
+	// configures a DIFFERENT store is a new question. Clone preferences
+	// rather than settings.local.json, so declining once covers every
+	// worktree of the clone and so a committed file can never suppress the
+	// prompt.
+	CheckpointRemoteClaimDeclined string `json:"checkpoint_remote_claim_declined,omitempty"`
+
 	// TrailsEnabled caches whether trails are enabled for this repository on the
 	// API. Pointer shape distinguishes "unknown/not refreshed yet" (nil) from a
 	// definitive false. This is clone-local and not committed so hook-time agent
@@ -1951,6 +1965,25 @@ func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
 		return false
 	}
 	return classifyLocalSettingsDeep(ctx, path) == localOwn
+}
+
+// CheckpointRemoteLocalClaimRejection explains why writing a local declaration
+// cannot establish ownership. Check both index and HEAD, even before the local
+// file exists, so a staged removal cannot turn inherited settings into consent.
+func CheckpointRemoteLocalClaimRejection(ctx context.Context) string {
+	path, _, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return "Cannot read .entire/settings.local.json; fix the local settings file before confirming this checkpoint store"
+	}
+	switch classifyLocalSettingsDeep(ctx, path) {
+	case localTracked:
+		return ".entire/settings.local.json is tracked in the index or HEAD, so it is not your own untracked settings file. Untrack it, commit its removal from Git, and keep your local copy ignored before confirming this checkpoint store"
+	case localUnverifiable:
+		return "Cannot verify that .entire/settings.local.json is your own untracked settings file; fix repository access before confirming this checkpoint store"
+	case localOwn:
+		return ""
+	}
+	return ""
 }
 
 // GetCheckpointRemote returns the configured checkpoint remote.

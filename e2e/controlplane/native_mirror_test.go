@@ -24,7 +24,7 @@ import (
 // unused ceiling costs nothing.
 //
 // The CLI is given less than the harness so a stalled seed surfaces as the
-// command's own message ("still being created, check with mirror get") rather
+// command's own message ("still being created, check with repo view") rather
 // than as a killed process with no explanation.
 const (
 	nativeMirrorSeedTimeout = 5 * time.Minute
@@ -38,12 +38,14 @@ type clusterJSON struct {
 }
 
 type placementJSON struct {
-	Cluster  string `json:"cluster"`
-	Status   string `json:"status"`
-	Role     string `json:"role"`
-	Stage    string `json:"stage"`
-	Removing bool   `json:"removing"`
-	CloneURL string `json:"cloneUrl"`
+	Cluster      string `json:"cluster"`
+	ClusterSlug  string `json:"clusterSlug"`
+	Jurisdiction string `json:"jurisdiction"`
+	Status       string `json:"status"`
+	Role         string `json:"role"`
+	Stage        string `json:"stage"`
+	Removing     bool   `json:"removing"`
+	CloneURL     string `json:"cloneUrl"`
 }
 
 type repoDirJSON struct {
@@ -95,13 +97,13 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	repoRef = created.ID
 
 	repo := waitForRepoClonable(t, dir, ref)
-	require.NotEmpty(t, repo.ClusterSlug, "a provisioned repo names its primary cluster")
+	require.NotEmpty(t, repo.primary().ClusterSlug, "a provisioned repo names its primary cluster")
 
 	// A native mirror goes in a region other than the repo's own, so the target
 	// is read from the catalog rather than hardcoded: the account's home region
 	// is not this test's to assume.
 	home, target := pickClusters(t, dir, repo)
-	t.Logf("repo %s is primary on %s (%s); mirroring to %s (%s)", ref, repo.ClusterSlug, repo.Jurisdiction, target.Slug, target.Jurisdiction)
+	t.Logf("repo %s is primary on %s (%s); mirroring to %s (%s)", ref, repo.primary().ClusterSlug, repo.primary().Jurisdiction, target.Slug, target.Jurisdiction)
 
 	// Each phase's own t shadows this one; anything that must outlive a phase
 	// is registered on lifecycle instead.
@@ -115,12 +117,12 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	}
 
 	phase("before: only the primary is listed", func(t *testing.T) {
-		stdout, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		stdout, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, stdout)
 		require.Equal(t, ref, row.Repo)
 		require.Len(t, row.Placements, 1, "a fresh repo has only its primary")
 		require.Equal(t, "primary", row.Placements[0].Role)
-		require.Equal(t, repo.ClusterSlug, row.Placements[0].Cluster)
+		require.Equal(t, home.Host, row.Placements[0].Cluster, "placements name their cluster by host, as --cluster takes it")
 	})
 
 	phase("the forge filter decides which directory the repo is in", func(t *testing.T) {
@@ -175,7 +177,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 	})
 
 	phase("get shows the primary and the mirror, each by role", func(t *testing.T) {
-		stdout, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		stdout, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, stdout)
 		require.Len(t, row.Placements, 2)
 		require.Equal(t, "primary", row.Placements[0].Role)
@@ -183,9 +185,9 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		for _, p := range row.Placements {
 			byCluster[p.Cluster] = p
 		}
-		mirror, ok := byCluster[target.Slug]
+		mirror, ok := byCluster[target.Host]
 		require.True(t, ok, "the mirror is listed under the cluster it was placed on")
-		require.Equal(t, "native_mirror", mirror.Role)
+		require.Equal(t, "mirror", mirror.Role)
 		require.Equal(t, "ready", mirror.Status)
 		require.False(t, mirror.Removing)
 		require.Equal(t, cloneURL, mirror.CloneURL)
@@ -221,7 +223,7 @@ func TestControlPlane_NativeMirrorLifecycle(t *testing.T) {
 		require.Contains(t, stdout, ref)
 		require.Contains(t, stdout, "removed")
 
-		after, _ := mustRunEntire(t, dir, "repo", "mirror", "get", ref, "--json")
+		after, _ := mustRunEntire(t, dir, "repo", "view", ref, "--json")
 		row := decodeJSON[repoDirJSON](t, after)
 		require.Len(t, row.Placements, 1, "only the primary is left")
 		require.Equal(t, "primary", row.Placements[0].Role)
@@ -248,14 +250,14 @@ func pickClusters(t *testing.T, dir string, repo repoJSON) (home, foreign cluste
 	require.NoError(t, json.Unmarshal([]byte(stdout), &clusters), "stdout is not JSON:\n%s", stdout)
 	for _, cl := range clusters {
 		switch {
-		case cl.Slug == repo.ClusterSlug:
+		case cl.Slug == repo.primary().ClusterSlug:
 			home = cl
-		case cl.Jurisdiction != repo.Jurisdiction && cl.Host != "" && foreign.Host == "":
+		case cl.Jurisdiction != repo.primary().Jurisdiction && cl.Host != "" && foreign.Host == "":
 			foreign = cl
 		}
 	}
-	require.NotEmpty(t, home.Host, "the repo's own cluster %s is in the catalog: %s", repo.ClusterSlug, stdout)
-	require.NotEmpty(t, foreign.Host, "a cluster outside %s to mirror into: %s", repo.Jurisdiction, stdout)
+	require.NotEmpty(t, home.Host, "the repo's own cluster %s is in the catalog: %s", repo.primary().ClusterSlug, stdout)
+	require.NotEmpty(t, foreign.Host, "a cluster outside %s to mirror into: %s", repo.primary().Jurisdiction, stdout)
 	return home, foreign
 }
 

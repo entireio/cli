@@ -96,7 +96,7 @@ func TestRepoAuthoritativeCrossRegion(t *testing.T) {
 			for _, state := range []string{"provisioning", "active"} {
 				snapshot, err := c.GetRepo(ctx, GetRepoParams{RepoId: created.ID, Authoritative: NewOptBool(true)})
 				require.NoError(t, err)
-				require.Equal(t, state, snapshot.State.Or(""))
+				require.Equal(t, state, snapshot.Response.State.Or(""))
 			}
 			require.EqualValues(t, 1, creates.Load())
 			require.EqualValues(t, 2, reads.Load())

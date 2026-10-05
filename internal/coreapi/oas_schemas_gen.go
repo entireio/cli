@@ -198,6 +198,291 @@ func (s *AcceptedInvitationAdditional) init() AcceptedInvitationAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/AccountIdentity
+type AccountIdentity struct {
+	AvatarUrl       OptString              `json:"avatarUrl"`
+	DisplayName     OptString              `json:"displayName"`
+	Handles         []AccountProfileHandle `json:"handles"`
+	AdditionalProps AccountIdentityAdditional
+}
+
+// GetAvatarUrl returns the value of AvatarUrl.
+func (s *AccountIdentity) GetAvatarUrl() OptString {
+	return s.AvatarUrl
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *AccountIdentity) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetHandles returns the value of Handles.
+func (s *AccountIdentity) GetHandles() []AccountProfileHandle {
+	return s.Handles
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AccountIdentity) GetAdditionalProps() AccountIdentityAdditional {
+	return s.AdditionalProps
+}
+
+// SetAvatarUrl sets the value of AvatarUrl.
+func (s *AccountIdentity) SetAvatarUrl(val OptString) {
+	s.AvatarUrl = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *AccountIdentity) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetHandles sets the value of Handles.
+func (s *AccountIdentity) SetHandles(val []AccountProfileHandle) {
+	s.Handles = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AccountIdentity) SetAdditionalProps(val AccountIdentityAdditional) {
+	s.AdditionalProps = val
+}
+
+type AccountIdentityAdditional map[string]jx.Raw
+
+func (s *AccountIdentityAdditional) init() AccountIdentityAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/AccountProfile
+type AccountProfile struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                       `json:"$schema"`
+	AccountId       string                       `json:"accountId"`
+	AvatarUrl       OptString                    `json:"avatarUrl"`
+	DisplayName     OptString                    `json:"displayName"`
+	Handles         []AccountProfileHandle       `json:"handles"`
+	Organizations   []AccountProfileOrganization `json:"organizations"`
+	AdditionalProps AccountProfileAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *AccountProfile) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAccountId returns the value of AccountId.
+func (s *AccountProfile) GetAccountId() string {
+	return s.AccountId
+}
+
+// GetAvatarUrl returns the value of AvatarUrl.
+func (s *AccountProfile) GetAvatarUrl() OptString {
+	return s.AvatarUrl
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *AccountProfile) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetHandles returns the value of Handles.
+func (s *AccountProfile) GetHandles() []AccountProfileHandle {
+	return s.Handles
+}
+
+// GetOrganizations returns the value of Organizations.
+func (s *AccountProfile) GetOrganizations() []AccountProfileOrganization {
+	return s.Organizations
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AccountProfile) GetAdditionalProps() AccountProfileAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *AccountProfile) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAccountId sets the value of AccountId.
+func (s *AccountProfile) SetAccountId(val string) {
+	s.AccountId = val
+}
+
+// SetAvatarUrl sets the value of AvatarUrl.
+func (s *AccountProfile) SetAvatarUrl(val OptString) {
+	s.AvatarUrl = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *AccountProfile) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetHandles sets the value of Handles.
+func (s *AccountProfile) SetHandles(val []AccountProfileHandle) {
+	s.Handles = val
+}
+
+// SetOrganizations sets the value of Organizations.
+func (s *AccountProfile) SetOrganizations(val []AccountProfileOrganization) {
+	s.Organizations = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AccountProfile) SetAdditionalProps(val AccountProfileAdditional) {
+	s.AdditionalProps = val
+}
+
+type AccountProfileAdditional map[string]jx.Raw
+
+func (s *AccountProfileAdditional) init() AccountProfileAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/AccountProfileHandle
+type AccountProfileHandle struct {
+	Handle          string `json:"handle"`
+	IsPrimary       bool   `json:"isPrimary"`
+	Provider        string `json:"provider"`
+	AdditionalProps AccountProfileHandleAdditional
+}
+
+// GetHandle returns the value of Handle.
+func (s *AccountProfileHandle) GetHandle() string {
+	return s.Handle
+}
+
+// GetIsPrimary returns the value of IsPrimary.
+func (s *AccountProfileHandle) GetIsPrimary() bool {
+	return s.IsPrimary
+}
+
+// GetProvider returns the value of Provider.
+func (s *AccountProfileHandle) GetProvider() string {
+	return s.Provider
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AccountProfileHandle) GetAdditionalProps() AccountProfileHandleAdditional {
+	return s.AdditionalProps
+}
+
+// SetHandle sets the value of Handle.
+func (s *AccountProfileHandle) SetHandle(val string) {
+	s.Handle = val
+}
+
+// SetIsPrimary sets the value of IsPrimary.
+func (s *AccountProfileHandle) SetIsPrimary(val bool) {
+	s.IsPrimary = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *AccountProfileHandle) SetProvider(val string) {
+	s.Provider = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AccountProfileHandle) SetAdditionalProps(val AccountProfileHandleAdditional) {
+	s.AdditionalProps = val
+}
+
+type AccountProfileHandleAdditional map[string]jx.Raw
+
+func (s *AccountProfileHandleAdditional) init() AccountProfileHandleAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// AccountProfileHeaders wraps AccountProfile with response headers.
+type AccountProfileHeaders struct {
+	CacheControl OptString
+	Response     AccountProfile
+}
+
+// GetCacheControl returns the value of CacheControl.
+func (s *AccountProfileHeaders) GetCacheControl() OptString {
+	return s.CacheControl
+}
+
+// GetResponse returns the value of Response.
+func (s *AccountProfileHeaders) GetResponse() AccountProfile {
+	return s.Response
+}
+
+// SetCacheControl sets the value of CacheControl.
+func (s *AccountProfileHeaders) SetCacheControl(val OptString) {
+	s.CacheControl = val
+}
+
+// SetResponse sets the value of Response.
+func (s *AccountProfileHeaders) SetResponse(val AccountProfile) {
+	s.Response = val
+}
+
+// Ref: #/components/schemas/AccountProfileOrganization
+type AccountProfileOrganization struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	AdditionalProps AccountProfileOrganizationAdditional
+}
+
+// GetID returns the value of ID.
+func (s *AccountProfileOrganization) GetID() string {
+	return s.ID
+}
+
+// GetName returns the value of Name.
+func (s *AccountProfileOrganization) GetName() string {
+	return s.Name
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *AccountProfileOrganization) GetAdditionalProps() AccountProfileOrganizationAdditional {
+	return s.AdditionalProps
+}
+
+// SetID sets the value of ID.
+func (s *AccountProfileOrganization) SetID(val string) {
+	s.ID = val
+}
+
+// SetName sets the value of Name.
+func (s *AccountProfileOrganization) SetName(val string) {
+	s.Name = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *AccountProfileOrganization) SetAdditionalProps(val AccountProfileOrganizationAdditional) {
+	s.AdditionalProps = val
+}
+
+type AccountProfileOrganizationAdditional map[string]jx.Raw
+
+func (s *AccountProfileOrganizationAdditional) init() AccountProfileOrganizationAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/AddOrgMemberInputBody
 type AddOrgMemberInputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -2981,7 +3266,7 @@ func (s *ConnectOrgCIDepotOrganizationInputBodyAdditional) init() ConnectOrgCIDe
 type CreateBindingInputBody struct {
 	// A URL to the JSON Schema for this object.
 	Schema OptURI `json:"$schema"`
-	// Exact-match key/value map; empty filter matches any token.
+	// Canonical attribute name → required value; at least one pin.
 	AttributeFilter jx.Raw `json:"attributeFilter"`
 	ProviderId      string `json:"providerId"`
 	AdditionalProps CreateBindingInputBodyAdditional
@@ -3381,6 +3666,158 @@ func (s *CreateOrgInvitationInputBodyRole) UnmarshalText(data []byte) error {
 type CreateOrgInvitationOK Invitation
 
 func (*CreateOrgInvitationOK) createOrgInvitationRes() {}
+
+// Ref: #/components/schemas/CreatePluginInstallationInputBody
+type CreatePluginInstallationInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Existing installation (ins_<ULID>) to retry.
+	InstallationID OptString `json:"installation_id"`
+	// Entire org the installation belongs to. Deprecated: use project_id.
+	OrgID OptString `json:"org_id"`
+	// Entire project the installation belongs to.
+	ProjectID OptString `json:"project_id"`
+	// Public repository ids (repo_<ULID>) when repository_selection is selected.
+	RepositoryIds []string `json:"repository_ids"`
+	// Project installations: all repositories in the project, or only repository_ids.
+	RepositorySelection OptCreatePluginInstallationInputBodyRepositorySelection `json:"repository_selection"`
+	// Opaque state interpreted by the selected plugin profile.
+	State           OptString `json:"state"`
+	AdditionalProps CreatePluginInstallationInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CreatePluginInstallationInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetInstallationID returns the value of InstallationID.
+func (s *CreatePluginInstallationInputBody) GetInstallationID() OptString {
+	return s.InstallationID
+}
+
+// GetOrgID returns the value of OrgID.
+func (s *CreatePluginInstallationInputBody) GetOrgID() OptString {
+	return s.OrgID
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *CreatePluginInstallationInputBody) GetProjectID() OptString {
+	return s.ProjectID
+}
+
+// GetRepositoryIds returns the value of RepositoryIds.
+func (s *CreatePluginInstallationInputBody) GetRepositoryIds() []string {
+	return s.RepositoryIds
+}
+
+// GetRepositorySelection returns the value of RepositorySelection.
+func (s *CreatePluginInstallationInputBody) GetRepositorySelection() OptCreatePluginInstallationInputBodyRepositorySelection {
+	return s.RepositorySelection
+}
+
+// GetState returns the value of State.
+func (s *CreatePluginInstallationInputBody) GetState() OptString {
+	return s.State
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreatePluginInstallationInputBody) GetAdditionalProps() CreatePluginInstallationInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CreatePluginInstallationInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetInstallationID sets the value of InstallationID.
+func (s *CreatePluginInstallationInputBody) SetInstallationID(val OptString) {
+	s.InstallationID = val
+}
+
+// SetOrgID sets the value of OrgID.
+func (s *CreatePluginInstallationInputBody) SetOrgID(val OptString) {
+	s.OrgID = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *CreatePluginInstallationInputBody) SetProjectID(val OptString) {
+	s.ProjectID = val
+}
+
+// SetRepositoryIds sets the value of RepositoryIds.
+func (s *CreatePluginInstallationInputBody) SetRepositoryIds(val []string) {
+	s.RepositoryIds = val
+}
+
+// SetRepositorySelection sets the value of RepositorySelection.
+func (s *CreatePluginInstallationInputBody) SetRepositorySelection(val OptCreatePluginInstallationInputBodyRepositorySelection) {
+	s.RepositorySelection = val
+}
+
+// SetState sets the value of State.
+func (s *CreatePluginInstallationInputBody) SetState(val OptString) {
+	s.State = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreatePluginInstallationInputBody) SetAdditionalProps(val CreatePluginInstallationInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreatePluginInstallationInputBodyAdditional map[string]jx.Raw
+
+func (s *CreatePluginInstallationInputBodyAdditional) init() CreatePluginInstallationInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Project installations: all repositories in the project, or only repository_ids.
+type CreatePluginInstallationInputBodyRepositorySelection string
+
+const (
+	CreatePluginInstallationInputBodyRepositorySelectionAll      CreatePluginInstallationInputBodyRepositorySelection = "all"
+	CreatePluginInstallationInputBodyRepositorySelectionSelected CreatePluginInstallationInputBodyRepositorySelection = "selected"
+)
+
+// AllValues returns all CreatePluginInstallationInputBodyRepositorySelection values.
+func (CreatePluginInstallationInputBodyRepositorySelection) AllValues() []CreatePluginInstallationInputBodyRepositorySelection {
+	return []CreatePluginInstallationInputBodyRepositorySelection{
+		CreatePluginInstallationInputBodyRepositorySelectionAll,
+		CreatePluginInstallationInputBodyRepositorySelectionSelected,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s CreatePluginInstallationInputBodyRepositorySelection) MarshalText() ([]byte, error) {
+	switch s {
+	case CreatePluginInstallationInputBodyRepositorySelectionAll:
+		return []byte(s), nil
+	case CreatePluginInstallationInputBodyRepositorySelectionSelected:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *CreatePluginInstallationInputBodyRepositorySelection) UnmarshalText(data []byte) error {
+	switch CreatePluginInstallationInputBodyRepositorySelection(data) {
+	case CreatePluginInstallationInputBodyRepositorySelectionAll:
+		*s = CreatePluginInstallationInputBodyRepositorySelectionAll
+		return nil
+	case CreatePluginInstallationInputBodyRepositorySelectionSelected:
+		*s = CreatePluginInstallationInputBodyRepositorySelectionSelected
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
 
 // Ref: #/components/schemas/CreateProjectInputBody
 type CreateProjectInputBody struct {
@@ -4559,6 +4996,7 @@ func (s *CreatedProjectOwnerType) UnmarshalText(data []byte) error {
 type CreatedRepo struct {
 	// A URL to the JSON Schema for this object.
 	Schema       OptURI              `json:"$schema"`
+	Candidate    OptRepoCandidate    `json:"candidate"`
 	Capabilities OptRepoCapabilities `json:"capabilities"`
 	ClusterHost  OptString           `json:"clusterHost"`
 	ClusterSlug  OptString           `json:"clusterSlug"`
@@ -4591,6 +5029,11 @@ type CreatedRepo struct {
 // GetSchema returns the value of Schema.
 func (s *CreatedRepo) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetCandidate returns the value of Candidate.
+func (s *CreatedRepo) GetCandidate() OptRepoCandidate {
+	return s.Candidate
 }
 
 // GetCapabilities returns the value of Capabilities.
@@ -4711,6 +5154,11 @@ func (s *CreatedRepo) GetAdditionalProps() CreatedRepoAdditional {
 // SetSchema sets the value of Schema.
 func (s *CreatedRepo) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetCandidate sets the value of Candidate.
+func (s *CreatedRepo) SetCandidate(val OptRepoCandidate) {
+	s.Candidate = val
 }
 
 // SetCapabilities sets the value of Capabilities.
@@ -4841,8 +5289,14 @@ func (s *CreatedRepoAdditional) init() CreatedRepoAdditional {
 
 // CreatedRepoHeaders wraps CreatedRepo with response headers.
 type CreatedRepoHeaders struct {
+	RetryAfter         OptString
 	XEntireCommitToken OptString
 	Response           CreatedRepo
+}
+
+// GetRetryAfter returns the value of RetryAfter.
+func (s *CreatedRepoHeaders) GetRetryAfter() OptString {
+	return s.RetryAfter
 }
 
 // GetXEntireCommitToken returns the value of XEntireCommitToken.
@@ -4853,6 +5307,11 @@ func (s *CreatedRepoHeaders) GetXEntireCommitToken() OptString {
 // GetResponse returns the value of Response.
 func (s *CreatedRepoHeaders) GetResponse() CreatedRepo {
 	return s.Response
+}
+
+// SetRetryAfter sets the value of RetryAfter.
+func (s *CreatedRepoHeaders) SetRetryAfter(val OptString) {
+	s.RetryAfter = val
 }
 
 // SetXEntireCommitToken sets the value of XEntireCommitToken.
@@ -4928,6 +5387,9 @@ func (s *DeleteOrgNoContent) GetXEntireCommitToken() OptString {
 func (s *DeleteOrgNoContent) SetXEntireCommitToken(val OptString) {
 	s.XEntireCommitToken = val
 }
+
+// DeletePluginInstallationNoContent is response for DeletePluginInstallation operation.
+type DeletePluginInstallationNoContent struct{}
 
 // DeleteProjectNoContent is response for DeleteProject operation.
 type DeleteProjectNoContent struct {
@@ -6903,15 +7365,20 @@ type Invitation struct {
 	AcceptedAt OptDateTime `json:"acceptedAt"`
 	// Account ID that used the token. Empty until the invitation is accepted.
 	AcceptedBy OptString `json:"acceptedBy"`
-	CreatedAt  time.Time `json:"createdAt"`
+	// Resolved identity for AcceptedBy. Absent when it cannot be resolved.
+	AcceptedByIdentity OptAccountIdentity `json:"acceptedByIdentity"`
+	CreatedAt          time.Time          `json:"createdAt"`
+	DeclinedAt         OptDateTime        `json:"declinedAt"`
 	// The invited address, normalized to lowercase.
 	Email     string    `json:"email"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	ID        string    `json:"id"`
-	// Account ID of the manager who created the invitation.
-	InvitedBy string      `json:"invitedBy"`
-	RevokedAt OptDateTime `json:"revokedAt"`
-	Role      string      `json:"role"`
+	// Account ID of the manager who created the invitation. Empty when that account has been erased.
+	InvitedBy string `json:"invitedBy"`
+	// Resolved identity for InvitedBy. Absent when it cannot be resolved.
+	InvitedByIdentity OptAccountIdentity `json:"invitedByIdentity"`
+	RevokedAt         OptDateTime        `json:"revokedAt"`
+	Role              string             `json:"role"`
 	// Derived from the outcome columns at read time.
 	Status          string `json:"status"`
 	AdditionalProps InvitationAdditional
@@ -6932,9 +7399,19 @@ func (s *Invitation) GetAcceptedBy() OptString {
 	return s.AcceptedBy
 }
 
+// GetAcceptedByIdentity returns the value of AcceptedByIdentity.
+func (s *Invitation) GetAcceptedByIdentity() OptAccountIdentity {
+	return s.AcceptedByIdentity
+}
+
 // GetCreatedAt returns the value of CreatedAt.
 func (s *Invitation) GetCreatedAt() time.Time {
 	return s.CreatedAt
+}
+
+// GetDeclinedAt returns the value of DeclinedAt.
+func (s *Invitation) GetDeclinedAt() OptDateTime {
+	return s.DeclinedAt
 }
 
 // GetEmail returns the value of Email.
@@ -6955,6 +7432,11 @@ func (s *Invitation) GetID() string {
 // GetInvitedBy returns the value of InvitedBy.
 func (s *Invitation) GetInvitedBy() string {
 	return s.InvitedBy
+}
+
+// GetInvitedByIdentity returns the value of InvitedByIdentity.
+func (s *Invitation) GetInvitedByIdentity() OptAccountIdentity {
+	return s.InvitedByIdentity
 }
 
 // GetRevokedAt returns the value of RevokedAt.
@@ -6992,9 +7474,19 @@ func (s *Invitation) SetAcceptedBy(val OptString) {
 	s.AcceptedBy = val
 }
 
+// SetAcceptedByIdentity sets the value of AcceptedByIdentity.
+func (s *Invitation) SetAcceptedByIdentity(val OptAccountIdentity) {
+	s.AcceptedByIdentity = val
+}
+
 // SetCreatedAt sets the value of CreatedAt.
 func (s *Invitation) SetCreatedAt(val time.Time) {
 	s.CreatedAt = val
+}
+
+// SetDeclinedAt sets the value of DeclinedAt.
+func (s *Invitation) SetDeclinedAt(val OptDateTime) {
+	s.DeclinedAt = val
 }
 
 // SetEmail sets the value of Email.
@@ -7015,6 +7507,11 @@ func (s *Invitation) SetID(val string) {
 // SetInvitedBy sets the value of InvitedBy.
 func (s *Invitation) SetInvitedBy(val string) {
 	s.InvitedBy = val
+}
+
+// SetInvitedByIdentity sets the value of InvitedByIdentity.
+func (s *Invitation) SetInvitedByIdentity(val OptAccountIdentity) {
+	s.InvitedByIdentity = val
 }
 
 // SetRevokedAt sets the value of RevokedAt.
@@ -7749,6 +8246,7 @@ const (
 	ListOrgInvitationsStatusAccepted ListOrgInvitationsStatus = "accepted"
 	ListOrgInvitationsStatusRevoked  ListOrgInvitationsStatus = "revoked"
 	ListOrgInvitationsStatusExpired  ListOrgInvitationsStatus = "expired"
+	ListOrgInvitationsStatusDeclined ListOrgInvitationsStatus = "declined"
 	ListOrgInvitationsStatusAll      ListOrgInvitationsStatus = "all"
 )
 
@@ -7759,6 +8257,7 @@ func (ListOrgInvitationsStatus) AllValues() []ListOrgInvitationsStatus {
 		ListOrgInvitationsStatusAccepted,
 		ListOrgInvitationsStatusRevoked,
 		ListOrgInvitationsStatusExpired,
+		ListOrgInvitationsStatusDeclined,
 		ListOrgInvitationsStatusAll,
 	}
 }
@@ -7773,6 +8272,8 @@ func (s ListOrgInvitationsStatus) MarshalText() ([]byte, error) {
 	case ListOrgInvitationsStatusRevoked:
 		return []byte(s), nil
 	case ListOrgInvitationsStatusExpired:
+		return []byte(s), nil
+	case ListOrgInvitationsStatusDeclined:
 		return []byte(s), nil
 	case ListOrgInvitationsStatusAll:
 		return []byte(s), nil
@@ -7796,8 +8297,54 @@ func (s *ListOrgInvitationsStatus) UnmarshalText(data []byte) error {
 	case ListOrgInvitationsStatusExpired:
 		*s = ListOrgInvitationsStatusExpired
 		return nil
+	case ListOrgInvitationsStatusDeclined:
+		*s = ListOrgInvitationsStatusDeclined
+		return nil
 	case ListOrgInvitationsStatusAll:
 		*s = ListOrgInvitationsStatusAll
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Asc (default) or desc. desc reverses the order, but people without a name stay last on the name
+// sort, and people without a membership stay last on joined.
+type ListOrgMembersOrder string
+
+const (
+	ListOrgMembersOrderAsc  ListOrgMembersOrder = "asc"
+	ListOrgMembersOrderDesc ListOrgMembersOrder = "desc"
+)
+
+// AllValues returns all ListOrgMembersOrder values.
+func (ListOrgMembersOrder) AllValues() []ListOrgMembersOrder {
+	return []ListOrgMembersOrder{
+		ListOrgMembersOrderAsc,
+		ListOrgMembersOrderDesc,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListOrgMembersOrder) MarshalText() ([]byte, error) {
+	switch s {
+	case ListOrgMembersOrderAsc:
+		return []byte(s), nil
+	case ListOrgMembersOrderDesc:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListOrgMembersOrder) UnmarshalText(data []byte) error {
+	switch ListOrgMembersOrder(data) {
+	case ListOrgMembersOrderAsc:
+		*s = ListOrgMembersOrderAsc
+		return nil
+	case ListOrgMembersOrderDesc:
+		*s = ListOrgMembersOrderDesc
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -7807,8 +8354,8 @@ func (s *ListOrgInvitationsStatus) UnmarshalText(data []byte) error {
 // Ref: #/components/schemas/ListOrgMembersOutputBody
 type ListOrgMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema  OptURI       `json:"$schema"`
-	Members []Membership `json:"members"`
+	Schema  OptURI              `json:"$schema"`
+	Members []OrgMemberListItem `json:"members"`
 	// Pass back to fetch the next page; empty when no more entries.
 	NextPageToken   OptString `json:"nextPageToken"`
 	AdditionalProps ListOrgMembersOutputBodyAdditional
@@ -7820,7 +8367,7 @@ func (s *ListOrgMembersOutputBody) GetSchema() OptURI {
 }
 
 // GetMembers returns the value of Members.
-func (s *ListOrgMembersOutputBody) GetMembers() []Membership {
+func (s *ListOrgMembersOutputBody) GetMembers() []OrgMemberListItem {
 	return s.Members
 }
 
@@ -7840,7 +8387,7 @@ func (s *ListOrgMembersOutputBody) SetSchema(val OptURI) {
 }
 
 // SetMembers sets the value of Members.
-func (s *ListOrgMembersOutputBody) SetMembers(val []Membership) {
+func (s *ListOrgMembersOutputBody) SetMembers(val []OrgMemberListItem) {
 	s.Members = val
 }
 
@@ -7865,8 +8412,67 @@ func (s *ListOrgMembersOutputBodyAdditional) init() ListOrgMembersOutputBodyAddi
 	return m
 }
 
-// Member includes non-pending memberships; invited means pending; collaborator means no direct
-// membership.
+// Sort column, name when omitted. name orders by public display name, else GitHub handle; people
+// without either come last. role orders by membership role, owner first, then by name; collaborators
+// come last. status orders active, pending, inactive, then people without a membership. joined
+// orders by membership creation, oldest first; people without a membership come last.
+type ListOrgMembersSort string
+
+const (
+	ListOrgMembersSortName   ListOrgMembersSort = "name"
+	ListOrgMembersSortRole   ListOrgMembersSort = "role"
+	ListOrgMembersSortStatus ListOrgMembersSort = "status"
+	ListOrgMembersSortJoined ListOrgMembersSort = "joined"
+)
+
+// AllValues returns all ListOrgMembersSort values.
+func (ListOrgMembersSort) AllValues() []ListOrgMembersSort {
+	return []ListOrgMembersSort{
+		ListOrgMembersSortName,
+		ListOrgMembersSortRole,
+		ListOrgMembersSortStatus,
+		ListOrgMembersSortJoined,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListOrgMembersSort) MarshalText() ([]byte, error) {
+	switch s {
+	case ListOrgMembersSortName:
+		return []byte(s), nil
+	case ListOrgMembersSortRole:
+		return []byte(s), nil
+	case ListOrgMembersSortStatus:
+		return []byte(s), nil
+	case ListOrgMembersSortJoined:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListOrgMembersSort) UnmarshalText(data []byte) error {
+	switch ListOrgMembersSort(data) {
+	case ListOrgMembersSortName:
+		*s = ListOrgMembersSortName
+		return nil
+	case ListOrgMembersSortRole:
+		*s = ListOrgMembersSortRole
+		return nil
+	case ListOrgMembersSortStatus:
+		*s = ListOrgMembersSortStatus
+		return nil
+	case ListOrgMembersSortJoined:
+		*s = ListOrgMembersSortJoined
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Member includes non-pending memberships; invited means a WorkOS membership with status pending,
+// not an email invitation; collaborator means no direct membership.
 type ListOrgPeopleMembership string
 
 const (
@@ -7915,11 +8521,57 @@ func (s *ListOrgPeopleMembership) UnmarshalText(data []byte) error {
 	}
 }
 
+// Asc (default) or desc. desc reverses the order, but people without a name stay last on the name
+// sort, and people without a membership stay last on joined.
+type ListOrgPeopleOrder string
+
+const (
+	ListOrgPeopleOrderAsc  ListOrgPeopleOrder = "asc"
+	ListOrgPeopleOrderDesc ListOrgPeopleOrder = "desc"
+)
+
+// AllValues returns all ListOrgPeopleOrder values.
+func (ListOrgPeopleOrder) AllValues() []ListOrgPeopleOrder {
+	return []ListOrgPeopleOrder{
+		ListOrgPeopleOrderAsc,
+		ListOrgPeopleOrderDesc,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListOrgPeopleOrder) MarshalText() ([]byte, error) {
+	switch s {
+	case ListOrgPeopleOrderAsc:
+		return []byte(s), nil
+	case ListOrgPeopleOrderDesc:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListOrgPeopleOrder) UnmarshalText(data []byte) error {
+	switch ListOrgPeopleOrder(data) {
+	case ListOrgPeopleOrderAsc:
+		*s = ListOrgPeopleOrderAsc
+		return nil
+	case ListOrgPeopleOrderDesc:
+		*s = ListOrgPeopleOrderDesc
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/ListOrgPeopleOutputBody
 type ListOrgPeopleOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI             `json:"$schema"`
-	Items  []OrgPersonSummary `json:"items"`
+	Schema OptURI `json:"$schema"`
+	// Outstanding (open and expired) invitations, only on the first page of an unfiltered request and
+	// only when the caller passes the SSO check. They are never joined to an account.
+	Invitations []Invitation       `json:"invitations"`
+	Items       []OrgPersonSummary `json:"items"`
 	// Pass back to fetch the next page; empty when no more entries.
 	NextPageToken   OptString `json:"nextPageToken"`
 	TotalCount      int64     `json:"totalCount"`
@@ -7929,6 +8581,11 @@ type ListOrgPeopleOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListOrgPeopleOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetInvitations returns the value of Invitations.
+func (s *ListOrgPeopleOutputBody) GetInvitations() []Invitation {
+	return s.Invitations
 }
 
 // GetItems returns the value of Items.
@@ -7954,6 +8611,11 @@ func (s *ListOrgPeopleOutputBody) GetAdditionalProps() ListOrgPeopleOutputBodyAd
 // SetSchema sets the value of Schema.
 func (s *ListOrgPeopleOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetInvitations sets the value of Invitations.
+func (s *ListOrgPeopleOutputBody) SetInvitations(val []Invitation) {
+	s.Invitations = val
 }
 
 // SetItems sets the value of Items.
@@ -8126,6 +8788,65 @@ func (s *ListOrgPeopleScope) UnmarshalText(data []byte) error {
 		return nil
 	case ListOrgPeopleScopeRepository:
 		*s = ListOrgPeopleScopeRepository
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Sort column, name when omitted. name orders by public display name, else GitHub handle; people
+// without either come last. role orders by membership role, owner first, then by name; collaborators
+// come last. status orders active, pending, inactive, then people without a membership. joined
+// orders by membership creation, oldest first; people without a membership come last.
+type ListOrgPeopleSort string
+
+const (
+	ListOrgPeopleSortName   ListOrgPeopleSort = "name"
+	ListOrgPeopleSortRole   ListOrgPeopleSort = "role"
+	ListOrgPeopleSortStatus ListOrgPeopleSort = "status"
+	ListOrgPeopleSortJoined ListOrgPeopleSort = "joined"
+)
+
+// AllValues returns all ListOrgPeopleSort values.
+func (ListOrgPeopleSort) AllValues() []ListOrgPeopleSort {
+	return []ListOrgPeopleSort{
+		ListOrgPeopleSortName,
+		ListOrgPeopleSortRole,
+		ListOrgPeopleSortStatus,
+		ListOrgPeopleSortJoined,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListOrgPeopleSort) MarshalText() ([]byte, error) {
+	switch s {
+	case ListOrgPeopleSortName:
+		return []byte(s), nil
+	case ListOrgPeopleSortRole:
+		return []byte(s), nil
+	case ListOrgPeopleSortStatus:
+		return []byte(s), nil
+	case ListOrgPeopleSortJoined:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListOrgPeopleSort) UnmarshalText(data []byte) error {
+	switch ListOrgPeopleSort(data) {
+	case ListOrgPeopleSortName:
+		*s = ListOrgPeopleSortName
+		return nil
+	case ListOrgPeopleSortRole:
+		*s = ListOrgPeopleSortRole
+		return nil
+	case ListOrgPeopleSortStatus:
+		*s = ListOrgPeopleSortStatus
+		return nil
+	case ListOrgPeopleSortJoined:
+		*s = ListOrgPeopleSortJoined
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -8373,6 +9094,142 @@ func (s *ListOrgsOutputBodyHeaders) SetResponse(val ListOrgsOutputBody) {
 	s.Response = val
 }
 
+// Ref: #/components/schemas/ListPluginInstallationsOutputBody
+type ListPluginInstallationsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                   `json:"$schema"`
+	Items           []PluginInstallationView `json:"items"`
+	AdditionalProps ListPluginInstallationsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListPluginInstallationsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetItems returns the value of Items.
+func (s *ListPluginInstallationsOutputBody) GetItems() []PluginInstallationView {
+	return s.Items
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListPluginInstallationsOutputBody) GetAdditionalProps() ListPluginInstallationsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListPluginInstallationsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetItems sets the value of Items.
+func (s *ListPluginInstallationsOutputBody) SetItems(val []PluginInstallationView) {
+	s.Items = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListPluginInstallationsOutputBody) SetAdditionalProps(val ListPluginInstallationsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListPluginInstallationsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListPluginInstallationsOutputBodyAdditional) init() ListPluginInstallationsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/ListProjectCollaboratorsOutputBody
+type ListProjectCollaboratorsOutputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema        OptURI                `json:"$schema"`
+	Collaborators []ProjectCollaborator `json:"collaborators"`
+	// Pass back to fetch the next page; empty when no more entries.
+	NextPageToken   OptString `json:"nextPageToken"`
+	AdditionalProps ListProjectCollaboratorsOutputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *ListProjectCollaboratorsOutputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetCollaborators returns the value of Collaborators.
+func (s *ListProjectCollaboratorsOutputBody) GetCollaborators() []ProjectCollaborator {
+	return s.Collaborators
+}
+
+// GetNextPageToken returns the value of NextPageToken.
+func (s *ListProjectCollaboratorsOutputBody) GetNextPageToken() OptString {
+	return s.NextPageToken
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ListProjectCollaboratorsOutputBody) GetAdditionalProps() ListProjectCollaboratorsOutputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *ListProjectCollaboratorsOutputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetCollaborators sets the value of Collaborators.
+func (s *ListProjectCollaboratorsOutputBody) SetCollaborators(val []ProjectCollaborator) {
+	s.Collaborators = val
+}
+
+// SetNextPageToken sets the value of NextPageToken.
+func (s *ListProjectCollaboratorsOutputBody) SetNextPageToken(val OptString) {
+	s.NextPageToken = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ListProjectCollaboratorsOutputBody) SetAdditionalProps(val ListProjectCollaboratorsOutputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type ListProjectCollaboratorsOutputBodyAdditional map[string]jx.Raw
+
+func (s *ListProjectCollaboratorsOutputBodyAdditional) init() ListProjectCollaboratorsOutputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// ListProjectCollaboratorsOutputBodyHeaders wraps ListProjectCollaboratorsOutputBody with response headers.
+type ListProjectCollaboratorsOutputBodyHeaders struct {
+	CacheControl OptString
+	Response     ListProjectCollaboratorsOutputBody
+}
+
+// GetCacheControl returns the value of CacheControl.
+func (s *ListProjectCollaboratorsOutputBodyHeaders) GetCacheControl() OptString {
+	return s.CacheControl
+}
+
+// GetResponse returns the value of Response.
+func (s *ListProjectCollaboratorsOutputBodyHeaders) GetResponse() ListProjectCollaboratorsOutputBody {
+	return s.Response
+}
+
+// SetCacheControl sets the value of CacheControl.
+func (s *ListProjectCollaboratorsOutputBodyHeaders) SetCacheControl(val OptString) {
+	s.CacheControl = val
+}
+
+// SetResponse sets the value of Response.
+func (s *ListProjectCollaboratorsOutputBodyHeaders) SetResponse(val ListProjectCollaboratorsOutputBody) {
+	s.Response = val
+}
+
 // Ref: #/components/schemas/ListProjectMembersOutputBody
 type ListProjectMembersOutputBody struct {
 	// A URL to the JSON Schema for this object.
@@ -8432,6 +9289,49 @@ func (s *ListProjectMembersOutputBodyAdditional) init() ListProjectMembersOutput
 		*s = m
 	}
 	return m
+}
+
+// Asc (default) or desc. desc reverses the order, but people without a name stay last on the name
+// and handle sorts.
+type ListProjectPeopleOrder string
+
+const (
+	ListProjectPeopleOrderAsc  ListProjectPeopleOrder = "asc"
+	ListProjectPeopleOrderDesc ListProjectPeopleOrder = "desc"
+)
+
+// AllValues returns all ListProjectPeopleOrder values.
+func (ListProjectPeopleOrder) AllValues() []ListProjectPeopleOrder {
+	return []ListProjectPeopleOrder{
+		ListProjectPeopleOrderAsc,
+		ListProjectPeopleOrderDesc,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListProjectPeopleOrder) MarshalText() ([]byte, error) {
+	switch s {
+	case ListProjectPeopleOrderAsc:
+		return []byte(s), nil
+	case ListProjectPeopleOrderDesc:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListProjectPeopleOrder) UnmarshalText(data []byte) error {
+	switch ListProjectPeopleOrder(data) {
+	case ListProjectPeopleOrderAsc:
+		*s = ListProjectPeopleOrderAsc
+		return nil
+	case ListProjectPeopleOrderDesc:
+		*s = ListProjectPeopleOrderDesc
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Exact effective role on the selected resource.
@@ -8504,10 +9404,69 @@ func (s *ListProjectPeopleRole) UnmarshalText(data []byte) error {
 	}
 }
 
+// Sort column, name when omitted. name orders by public display name, else GitHub handle; people
+// without either come last. handle orders by GitHub handle ignoring case, people without one last.
+// role orders strongest first, then by name. access orders by the listed sources, then by name.
+type ListProjectPeopleSort string
+
+const (
+	ListProjectPeopleSortName   ListProjectPeopleSort = "name"
+	ListProjectPeopleSortHandle ListProjectPeopleSort = "handle"
+	ListProjectPeopleSortRole   ListProjectPeopleSort = "role"
+	ListProjectPeopleSortAccess ListProjectPeopleSort = "access"
+)
+
+// AllValues returns all ListProjectPeopleSort values.
+func (ListProjectPeopleSort) AllValues() []ListProjectPeopleSort {
+	return []ListProjectPeopleSort{
+		ListProjectPeopleSortName,
+		ListProjectPeopleSortHandle,
+		ListProjectPeopleSortRole,
+		ListProjectPeopleSortAccess,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListProjectPeopleSort) MarshalText() ([]byte, error) {
+	switch s {
+	case ListProjectPeopleSortName:
+		return []byte(s), nil
+	case ListProjectPeopleSortHandle:
+		return []byte(s), nil
+	case ListProjectPeopleSortRole:
+		return []byte(s), nil
+	case ListProjectPeopleSortAccess:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListProjectPeopleSort) UnmarshalText(data []byte) error {
+	switch ListProjectPeopleSort(data) {
+	case ListProjectPeopleSortName:
+		*s = ListProjectPeopleSortName
+		return nil
+	case ListProjectPeopleSortHandle:
+		*s = ListProjectPeopleSortHandle
+		return nil
+	case ListProjectPeopleSortRole:
+		*s = ListProjectPeopleSortRole
+		return nil
+	case ListProjectPeopleSortAccess:
+		*s = ListProjectPeopleSortAccess
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Ref: #/components/schemas/ListProjectReposOutputBody
 type ListProjectReposOutputBody struct {
 	// A URL to the JSON Schema for this object.
-	Schema OptURI `json:"$schema"`
+	Schema               OptURI  `json:"$schema"`
+	CandidatesIncomplete OptBool `json:"candidatesIncomplete"`
 	// Pass back to fetch the next page; empty when no more entries.
 	NextPageToken   OptString `json:"nextPageToken"`
 	Repo            OptRepo   `json:"repo"`
@@ -8518,6 +9477,11 @@ type ListProjectReposOutputBody struct {
 // GetSchema returns the value of Schema.
 func (s *ListProjectReposOutputBody) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetCandidatesIncomplete returns the value of CandidatesIncomplete.
+func (s *ListProjectReposOutputBody) GetCandidatesIncomplete() OptBool {
+	return s.CandidatesIncomplete
 }
 
 // GetNextPageToken returns the value of NextPageToken.
@@ -8543,6 +9507,11 @@ func (s *ListProjectReposOutputBody) GetAdditionalProps() ListProjectReposOutput
 // SetSchema sets the value of Schema.
 func (s *ListProjectReposOutputBody) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetCandidatesIncomplete sets the value of CandidatesIncomplete.
+func (s *ListProjectReposOutputBody) SetCandidatesIncomplete(val OptBool) {
+	s.CandidatesIncomplete = val
 }
 
 // SetNextPageToken sets the value of NextPageToken.
@@ -8574,6 +9543,50 @@ func (s *ListProjectReposOutputBodyAdditional) init() ListProjectReposOutputBody
 		*s = m
 	}
 	return m
+}
+
+// Onboarded (default): the project's repos in Entire. all: also lists the GitHub owner's unmirrored
+// repos that the caller can access on GitHub, after all published repos. Only a GitHub mirrors
+// project has such repos. Ignored when name is set.
+type ListProjectReposScope string
+
+const (
+	ListProjectReposScopeOnboarded ListProjectReposScope = "onboarded"
+	ListProjectReposScopeAll       ListProjectReposScope = "all"
+)
+
+// AllValues returns all ListProjectReposScope values.
+func (ListProjectReposScope) AllValues() []ListProjectReposScope {
+	return []ListProjectReposScope{
+		ListProjectReposScopeOnboarded,
+		ListProjectReposScopeAll,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListProjectReposScope) MarshalText() ([]byte, error) {
+	switch s {
+	case ListProjectReposScopeOnboarded:
+		return []byte(s), nil
+	case ListProjectReposScopeAll:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListProjectReposScope) UnmarshalText(data []byte) error {
+	switch ListProjectReposScope(data) {
+	case ListProjectReposScopeOnboarded:
+		*s = ListProjectReposScopeOnboarded
+		return nil
+	case ListProjectReposScopeAll:
+		*s = ListProjectReposScopeAll
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/ListProjectsOutputBody
@@ -9056,6 +10069,49 @@ func (s *ListRepoGrantsOutputBodyAdditional) init() ListRepoGrantsOutputBodyAddi
 	return m
 }
 
+// Asc (default) or desc. desc reverses the order, but people without a name stay last on the name
+// and handle sorts.
+type ListRepoPeopleOrder string
+
+const (
+	ListRepoPeopleOrderAsc  ListRepoPeopleOrder = "asc"
+	ListRepoPeopleOrderDesc ListRepoPeopleOrder = "desc"
+)
+
+// AllValues returns all ListRepoPeopleOrder values.
+func (ListRepoPeopleOrder) AllValues() []ListRepoPeopleOrder {
+	return []ListRepoPeopleOrder{
+		ListRepoPeopleOrderAsc,
+		ListRepoPeopleOrderDesc,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListRepoPeopleOrder) MarshalText() ([]byte, error) {
+	switch s {
+	case ListRepoPeopleOrderAsc:
+		return []byte(s), nil
+	case ListRepoPeopleOrderDesc:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListRepoPeopleOrder) UnmarshalText(data []byte) error {
+	switch ListRepoPeopleOrder(data) {
+	case ListRepoPeopleOrderAsc:
+		*s = ListRepoPeopleOrderAsc
+		return nil
+	case ListRepoPeopleOrderDesc:
+		*s = ListRepoPeopleOrderDesc
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Exact effective role on the selected resource.
 type ListRepoPeopleRole string
 
@@ -9120,6 +10176,64 @@ func (s *ListRepoPeopleRole) UnmarshalText(data []byte) error {
 		return nil
 	case ListRepoPeopleRoleMirrorSourceAdmin:
 		*s = ListRepoPeopleRoleMirrorSourceAdmin
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Sort column, name when omitted. name orders by public display name, else GitHub handle; people
+// without either come last. handle orders by GitHub handle ignoring case, people without one last.
+// role orders strongest first, then by name. access orders by the listed sources, then by name.
+type ListRepoPeopleSort string
+
+const (
+	ListRepoPeopleSortName   ListRepoPeopleSort = "name"
+	ListRepoPeopleSortHandle ListRepoPeopleSort = "handle"
+	ListRepoPeopleSortRole   ListRepoPeopleSort = "role"
+	ListRepoPeopleSortAccess ListRepoPeopleSort = "access"
+)
+
+// AllValues returns all ListRepoPeopleSort values.
+func (ListRepoPeopleSort) AllValues() []ListRepoPeopleSort {
+	return []ListRepoPeopleSort{
+		ListRepoPeopleSortName,
+		ListRepoPeopleSortHandle,
+		ListRepoPeopleSortRole,
+		ListRepoPeopleSortAccess,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s ListRepoPeopleSort) MarshalText() ([]byte, error) {
+	switch s {
+	case ListRepoPeopleSortName:
+		return []byte(s), nil
+	case ListRepoPeopleSortHandle:
+		return []byte(s), nil
+	case ListRepoPeopleSortRole:
+		return []byte(s), nil
+	case ListRepoPeopleSortAccess:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *ListRepoPeopleSort) UnmarshalText(data []byte) error {
+	switch ListRepoPeopleSort(data) {
+	case ListRepoPeopleSortName:
+		*s = ListRepoPeopleSortName
+		return nil
+	case ListRepoPeopleSortHandle:
+		*s = ListRepoPeopleSortHandle
+		return nil
+	case ListRepoPeopleSortRole:
+		*s = ListRepoPeopleSortRole
+		return nil
+	case ListRepoPeopleSortAccess:
+		*s = ListRepoPeopleSortAccess
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -9840,7 +10954,10 @@ type MeGlobal struct {
 	AccountId string    `json:"accountId"`
 	AvatarUrl OptString `json:"avatarUrl"`
 	// When the account was created (accounts.created_at).
-	CreatedAt        time.Time          `json:"createdAt"`
+	CreatedAt time.Time `json:"createdAt"`
+	// The account-level Display Name: provider-asserted, not user-editable. Null until seeded. Distinct
+	// from regional.displayName, the free-editable provider-login mirror.
+	DisplayName      OptString          `json:"displayName"`
 	Handle           OptString          `json:"handle"`
 	Handles          []MeIdentityHandle `json:"handles"`
 	HomeJurisdiction OptString          `json:"homeJurisdiction"`
@@ -9860,6 +10977,11 @@ func (s *MeGlobal) GetAvatarUrl() OptString {
 // GetCreatedAt returns the value of CreatedAt.
 func (s *MeGlobal) GetCreatedAt() time.Time {
 	return s.CreatedAt
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *MeGlobal) GetDisplayName() OptString {
+	return s.DisplayName
 }
 
 // GetHandle returns the value of Handle.
@@ -9895,6 +11017,11 @@ func (s *MeGlobal) SetAvatarUrl(val OptString) {
 // SetCreatedAt sets the value of CreatedAt.
 func (s *MeGlobal) SetCreatedAt(val time.Time) {
 	s.CreatedAt = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *MeGlobal) SetDisplayName(val OptString) {
+	s.DisplayName = val
 }
 
 // SetHandle sets the value of Handle.
@@ -11356,6 +12483,52 @@ func (s *OIDCProviderAdditional) init() OIDCProviderAdditional {
 	return m
 }
 
+// NewOptAccountIdentity returns new OptAccountIdentity with value set to v.
+func NewOptAccountIdentity(v AccountIdentity) OptAccountIdentity {
+	return OptAccountIdentity{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptAccountIdentity is optional AccountIdentity.
+type OptAccountIdentity struct {
+	Value AccountIdentity
+	Set   bool
+}
+
+// IsSet returns true if OptAccountIdentity was set.
+func (o OptAccountIdentity) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptAccountIdentity) Reset() {
+	var v AccountIdentity
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptAccountIdentity) SetTo(v AccountIdentity) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptAccountIdentity) Get() (v AccountIdentity, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptAccountIdentity) Or(d AccountIdentity) AccountIdentity {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptAddOrgMemberInputBodyRole returns new OptAddOrgMemberInputBodyRole with value set to v.
 func NewOptAddOrgMemberInputBodyRole(v AddOrgMemberInputBodyRole) OptAddOrgMemberInputBodyRole {
 	return OptAddOrgMemberInputBodyRole{
@@ -11626,6 +12799,52 @@ func (o OptCIWebhookAuditEventViewMetadata) Get() (v CIWebhookAuditEventViewMeta
 
 // Or returns value if set, or given parameter if does not.
 func (o OptCIWebhookAuditEventViewMetadata) Or(d CIWebhookAuditEventViewMetadata) CIWebhookAuditEventViewMetadata {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptCreatePluginInstallationInputBodyRepositorySelection returns new OptCreatePluginInstallationInputBodyRepositorySelection with value set to v.
+func NewOptCreatePluginInstallationInputBodyRepositorySelection(v CreatePluginInstallationInputBodyRepositorySelection) OptCreatePluginInstallationInputBodyRepositorySelection {
+	return OptCreatePluginInstallationInputBodyRepositorySelection{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptCreatePluginInstallationInputBodyRepositorySelection is optional CreatePluginInstallationInputBodyRepositorySelection.
+type OptCreatePluginInstallationInputBodyRepositorySelection struct {
+	Value CreatePluginInstallationInputBodyRepositorySelection
+	Set   bool
+}
+
+// IsSet returns true if OptCreatePluginInstallationInputBodyRepositorySelection was set.
+func (o OptCreatePluginInstallationInputBodyRepositorySelection) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptCreatePluginInstallationInputBodyRepositorySelection) Reset() {
+	var v CreatePluginInstallationInputBodyRepositorySelection
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptCreatePluginInstallationInputBodyRepositorySelection) SetTo(v CreatePluginInstallationInputBodyRepositorySelection) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptCreatePluginInstallationInputBodyRepositorySelection) Get() (v CreatePluginInstallationInputBodyRepositorySelection, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptCreatePluginInstallationInputBodyRepositorySelection) Or(d CreatePluginInstallationInputBodyRepositorySelection) CreatePluginInstallationInputBodyRepositorySelection {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -12138,6 +13357,98 @@ func (o OptListOrgInvitationsStatus) Or(d ListOrgInvitationsStatus) ListOrgInvit
 	return d
 }
 
+// NewOptListOrgMembersOrder returns new OptListOrgMembersOrder with value set to v.
+func NewOptListOrgMembersOrder(v ListOrgMembersOrder) OptListOrgMembersOrder {
+	return OptListOrgMembersOrder{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListOrgMembersOrder is optional ListOrgMembersOrder.
+type OptListOrgMembersOrder struct {
+	Value ListOrgMembersOrder
+	Set   bool
+}
+
+// IsSet returns true if OptListOrgMembersOrder was set.
+func (o OptListOrgMembersOrder) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListOrgMembersOrder) Reset() {
+	var v ListOrgMembersOrder
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListOrgMembersOrder) SetTo(v ListOrgMembersOrder) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListOrgMembersOrder) Get() (v ListOrgMembersOrder, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListOrgMembersOrder) Or(d ListOrgMembersOrder) ListOrgMembersOrder {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptListOrgMembersSort returns new OptListOrgMembersSort with value set to v.
+func NewOptListOrgMembersSort(v ListOrgMembersSort) OptListOrgMembersSort {
+	return OptListOrgMembersSort{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListOrgMembersSort is optional ListOrgMembersSort.
+type OptListOrgMembersSort struct {
+	Value ListOrgMembersSort
+	Set   bool
+}
+
+// IsSet returns true if OptListOrgMembersSort was set.
+func (o OptListOrgMembersSort) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListOrgMembersSort) Reset() {
+	var v ListOrgMembersSort
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListOrgMembersSort) SetTo(v ListOrgMembersSort) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListOrgMembersSort) Get() (v ListOrgMembersSort, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListOrgMembersSort) Or(d ListOrgMembersSort) ListOrgMembersSort {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptListOrgPeopleMembership returns new OptListOrgPeopleMembership with value set to v.
 func NewOptListOrgPeopleMembership(v ListOrgPeopleMembership) OptListOrgPeopleMembership {
 	return OptListOrgPeopleMembership{
@@ -12178,6 +13489,52 @@ func (o OptListOrgPeopleMembership) Get() (v ListOrgPeopleMembership, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptListOrgPeopleMembership) Or(d ListOrgPeopleMembership) ListOrgPeopleMembership {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptListOrgPeopleOrder returns new OptListOrgPeopleOrder with value set to v.
+func NewOptListOrgPeopleOrder(v ListOrgPeopleOrder) OptListOrgPeopleOrder {
+	return OptListOrgPeopleOrder{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListOrgPeopleOrder is optional ListOrgPeopleOrder.
+type OptListOrgPeopleOrder struct {
+	Value ListOrgPeopleOrder
+	Set   bool
+}
+
+// IsSet returns true if OptListOrgPeopleOrder was set.
+func (o OptListOrgPeopleOrder) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListOrgPeopleOrder) Reset() {
+	var v ListOrgPeopleOrder
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListOrgPeopleOrder) SetTo(v ListOrgPeopleOrder) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListOrgPeopleOrder) Get() (v ListOrgPeopleOrder, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListOrgPeopleOrder) Or(d ListOrgPeopleOrder) ListOrgPeopleOrder {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -12276,6 +13633,52 @@ func (o OptListOrgPeopleScope) Or(d ListOrgPeopleScope) ListOrgPeopleScope {
 	return d
 }
 
+// NewOptListOrgPeopleSort returns new OptListOrgPeopleSort with value set to v.
+func NewOptListOrgPeopleSort(v ListOrgPeopleSort) OptListOrgPeopleSort {
+	return OptListOrgPeopleSort{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListOrgPeopleSort is optional ListOrgPeopleSort.
+type OptListOrgPeopleSort struct {
+	Value ListOrgPeopleSort
+	Set   bool
+}
+
+// IsSet returns true if OptListOrgPeopleSort was set.
+func (o OptListOrgPeopleSort) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListOrgPeopleSort) Reset() {
+	var v ListOrgPeopleSort
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListOrgPeopleSort) SetTo(v ListOrgPeopleSort) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListOrgPeopleSort) Get() (v ListOrgPeopleSort, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListOrgPeopleSort) Or(d ListOrgPeopleSort) ListOrgPeopleSort {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptListOrgPeopleStatus returns new OptListOrgPeopleStatus with value set to v.
 func NewOptListOrgPeopleStatus(v ListOrgPeopleStatus) OptListOrgPeopleStatus {
 	return OptListOrgPeopleStatus{
@@ -12316,6 +13719,52 @@ func (o OptListOrgPeopleStatus) Get() (v ListOrgPeopleStatus, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptListOrgPeopleStatus) Or(d ListOrgPeopleStatus) ListOrgPeopleStatus {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptListProjectPeopleOrder returns new OptListProjectPeopleOrder with value set to v.
+func NewOptListProjectPeopleOrder(v ListProjectPeopleOrder) OptListProjectPeopleOrder {
+	return OptListProjectPeopleOrder{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListProjectPeopleOrder is optional ListProjectPeopleOrder.
+type OptListProjectPeopleOrder struct {
+	Value ListProjectPeopleOrder
+	Set   bool
+}
+
+// IsSet returns true if OptListProjectPeopleOrder was set.
+func (o OptListProjectPeopleOrder) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListProjectPeopleOrder) Reset() {
+	var v ListProjectPeopleOrder
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListProjectPeopleOrder) SetTo(v ListProjectPeopleOrder) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListProjectPeopleOrder) Get() (v ListProjectPeopleOrder, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListProjectPeopleOrder) Or(d ListProjectPeopleOrder) ListProjectPeopleOrder {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -12368,6 +13817,98 @@ func (o OptListProjectPeopleRole) Or(d ListProjectPeopleRole) ListProjectPeopleR
 	return d
 }
 
+// NewOptListProjectPeopleSort returns new OptListProjectPeopleSort with value set to v.
+func NewOptListProjectPeopleSort(v ListProjectPeopleSort) OptListProjectPeopleSort {
+	return OptListProjectPeopleSort{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListProjectPeopleSort is optional ListProjectPeopleSort.
+type OptListProjectPeopleSort struct {
+	Value ListProjectPeopleSort
+	Set   bool
+}
+
+// IsSet returns true if OptListProjectPeopleSort was set.
+func (o OptListProjectPeopleSort) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListProjectPeopleSort) Reset() {
+	var v ListProjectPeopleSort
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListProjectPeopleSort) SetTo(v ListProjectPeopleSort) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListProjectPeopleSort) Get() (v ListProjectPeopleSort, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListProjectPeopleSort) Or(d ListProjectPeopleSort) ListProjectPeopleSort {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptListProjectReposScope returns new OptListProjectReposScope with value set to v.
+func NewOptListProjectReposScope(v ListProjectReposScope) OptListProjectReposScope {
+	return OptListProjectReposScope{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListProjectReposScope is optional ListProjectReposScope.
+type OptListProjectReposScope struct {
+	Value ListProjectReposScope
+	Set   bool
+}
+
+// IsSet returns true if OptListProjectReposScope was set.
+func (o OptListProjectReposScope) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListProjectReposScope) Reset() {
+	var v ListProjectReposScope
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListProjectReposScope) SetTo(v ListProjectReposScope) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListProjectReposScope) Get() (v ListProjectReposScope, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListProjectReposScope) Or(d ListProjectReposScope) ListProjectReposScope {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptListRepoCIDeliveriesDirection returns new OptListRepoCIDeliveriesDirection with value set to v.
 func NewOptListRepoCIDeliveriesDirection(v ListRepoCIDeliveriesDirection) OptListRepoCIDeliveriesDirection {
 	return OptListRepoCIDeliveriesDirection{
@@ -12414,6 +13955,52 @@ func (o OptListRepoCIDeliveriesDirection) Or(d ListRepoCIDeliveriesDirection) Li
 	return d
 }
 
+// NewOptListRepoPeopleOrder returns new OptListRepoPeopleOrder with value set to v.
+func NewOptListRepoPeopleOrder(v ListRepoPeopleOrder) OptListRepoPeopleOrder {
+	return OptListRepoPeopleOrder{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListRepoPeopleOrder is optional ListRepoPeopleOrder.
+type OptListRepoPeopleOrder struct {
+	Value ListRepoPeopleOrder
+	Set   bool
+}
+
+// IsSet returns true if OptListRepoPeopleOrder was set.
+func (o OptListRepoPeopleOrder) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListRepoPeopleOrder) Reset() {
+	var v ListRepoPeopleOrder
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListRepoPeopleOrder) SetTo(v ListRepoPeopleOrder) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListRepoPeopleOrder) Get() (v ListRepoPeopleOrder, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListRepoPeopleOrder) Or(d ListRepoPeopleOrder) ListRepoPeopleOrder {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
 // NewOptListRepoPeopleRole returns new OptListRepoPeopleRole with value set to v.
 func NewOptListRepoPeopleRole(v ListRepoPeopleRole) OptListRepoPeopleRole {
 	return OptListRepoPeopleRole{
@@ -12454,6 +14041,52 @@ func (o OptListRepoPeopleRole) Get() (v ListRepoPeopleRole, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptListRepoPeopleRole) Or(d ListRepoPeopleRole) ListRepoPeopleRole {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptListRepoPeopleSort returns new OptListRepoPeopleSort with value set to v.
+func NewOptListRepoPeopleSort(v ListRepoPeopleSort) OptListRepoPeopleSort {
+	return OptListRepoPeopleSort{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptListRepoPeopleSort is optional ListRepoPeopleSort.
+type OptListRepoPeopleSort struct {
+	Value ListRepoPeopleSort
+	Set   bool
+}
+
+// IsSet returns true if OptListRepoPeopleSort was set.
+func (o OptListRepoPeopleSort) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptListRepoPeopleSort) Reset() {
+	var v ListRepoPeopleSort
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptListRepoPeopleSort) SetTo(v ListRepoPeopleSort) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptListRepoPeopleSort) Get() (v ListRepoPeopleSort, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptListRepoPeopleSort) Or(d ListRepoPeopleSort) ListRepoPeopleSort {
 	if v, ok := o.Get(); ok {
 		return v
 	}
@@ -14128,7 +15761,7 @@ func (s *OrgCIGitHubActionsCredentialViewAdditional) init() OrgCIGitHubActionsCr
 
 // Ref: #/components/schemas/OrgCapabilities
 type OrgCapabilities struct {
-	// Whether the caller holds the direct organization owner relation. Individual mutations still
+	// Whether this surface permits the caller to change organization owners. Individual mutations still
 	// enforce all guards.
 	CanChangeOwners  bool `json:"canChangeOwners"`
 	CanCreateProject bool `json:"canCreateProject"`
@@ -14198,12 +15831,163 @@ func (s *OrgCapabilitiesAdditional) init() OrgCapabilitiesAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/OrgMemberListItem
+type OrgMemberListItem struct {
+	AccountId string `json:"accountId"`
+	// Public avatar URL.
+	AvatarUrl OptString `json:"avatarUrl"`
+	CreatedAt time.Time `json:"createdAt"`
+	// Account-level public display name.
+	DisplayName OptString `json:"displayName"`
+	Handle      OptString `json:"handle"`
+	ID          string    `json:"id"`
+	OrgId       string    `json:"orgId"`
+	Provider    OptString `json:"provider"`
+	Role        string    `json:"role"`
+	// Membership lifecycle status.
+	Status                string    `json:"status"`
+	WorkosOrgMembershipId OptString `json:"workosOrgMembershipId"`
+	AdditionalProps       OrgMemberListItemAdditional
+}
+
+// GetAccountId returns the value of AccountId.
+func (s *OrgMemberListItem) GetAccountId() string {
+	return s.AccountId
+}
+
+// GetAvatarUrl returns the value of AvatarUrl.
+func (s *OrgMemberListItem) GetAvatarUrl() OptString {
+	return s.AvatarUrl
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *OrgMemberListItem) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *OrgMemberListItem) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetHandle returns the value of Handle.
+func (s *OrgMemberListItem) GetHandle() OptString {
+	return s.Handle
+}
+
+// GetID returns the value of ID.
+func (s *OrgMemberListItem) GetID() string {
+	return s.ID
+}
+
+// GetOrgId returns the value of OrgId.
+func (s *OrgMemberListItem) GetOrgId() string {
+	return s.OrgId
+}
+
+// GetProvider returns the value of Provider.
+func (s *OrgMemberListItem) GetProvider() OptString {
+	return s.Provider
+}
+
+// GetRole returns the value of Role.
+func (s *OrgMemberListItem) GetRole() string {
+	return s.Role
+}
+
+// GetStatus returns the value of Status.
+func (s *OrgMemberListItem) GetStatus() string {
+	return s.Status
+}
+
+// GetWorkosOrgMembershipId returns the value of WorkosOrgMembershipId.
+func (s *OrgMemberListItem) GetWorkosOrgMembershipId() OptString {
+	return s.WorkosOrgMembershipId
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *OrgMemberListItem) GetAdditionalProps() OrgMemberListItemAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccountId sets the value of AccountId.
+func (s *OrgMemberListItem) SetAccountId(val string) {
+	s.AccountId = val
+}
+
+// SetAvatarUrl sets the value of AvatarUrl.
+func (s *OrgMemberListItem) SetAvatarUrl(val OptString) {
+	s.AvatarUrl = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *OrgMemberListItem) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *OrgMemberListItem) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetHandle sets the value of Handle.
+func (s *OrgMemberListItem) SetHandle(val OptString) {
+	s.Handle = val
+}
+
+// SetID sets the value of ID.
+func (s *OrgMemberListItem) SetID(val string) {
+	s.ID = val
+}
+
+// SetOrgId sets the value of OrgId.
+func (s *OrgMemberListItem) SetOrgId(val string) {
+	s.OrgId = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *OrgMemberListItem) SetProvider(val OptString) {
+	s.Provider = val
+}
+
+// SetRole sets the value of Role.
+func (s *OrgMemberListItem) SetRole(val string) {
+	s.Role = val
+}
+
+// SetStatus sets the value of Status.
+func (s *OrgMemberListItem) SetStatus(val string) {
+	s.Status = val
+}
+
+// SetWorkosOrgMembershipId sets the value of WorkosOrgMembershipId.
+func (s *OrgMemberListItem) SetWorkosOrgMembershipId(val OptString) {
+	s.WorkosOrgMembershipId = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *OrgMemberListItem) SetAdditionalProps(val OrgMemberListItemAdditional) {
+	s.AdditionalProps = val
+}
+
+type OrgMemberListItemAdditional map[string]jx.Raw
+
+func (s *OrgMemberListItemAdditional) init() OrgMemberListItemAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/OrgPerson
 type OrgPerson struct {
 	// A URL to the JSON Schema for this object.
 	Schema          OptURI              `json:"$schema"`
 	AccountId       string              `json:"accountId"`
 	AvatarUrl       OptString           `json:"avatarUrl"`
+	DisplayName     OptString           `json:"displayName"`
 	Grants          []OrgPersonGrant    `json:"grants"`
 	Handle          OptString           `json:"handle"`
 	Membership      OrgPersonMembership `json:"membership"`
@@ -14224,6 +16008,11 @@ func (s *OrgPerson) GetAccountId() string {
 // GetAvatarUrl returns the value of AvatarUrl.
 func (s *OrgPerson) GetAvatarUrl() OptString {
 	return s.AvatarUrl
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *OrgPerson) GetDisplayName() OptString {
+	return s.DisplayName
 }
 
 // GetGrants returns the value of Grants.
@@ -14264,6 +16053,11 @@ func (s *OrgPerson) SetAccountId(val string) {
 // SetAvatarUrl sets the value of AvatarUrl.
 func (s *OrgPerson) SetAvatarUrl(val OptString) {
 	s.AvatarUrl = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *OrgPerson) SetDisplayName(val OptString) {
+	s.DisplayName = val
 }
 
 // SetGrants sets the value of Grants.
@@ -14784,6 +16578,7 @@ type OrgPersonSummary struct {
 	AccessScopes    []OrgPersonSummaryAccessScopesItem `json:"accessScopes"`
 	AccountId       string                             `json:"accountId"`
 	AvatarUrl       OptString                          `json:"avatarUrl"`
+	DisplayName     OptString                          `json:"displayName"`
 	Handle          OptString                          `json:"handle"`
 	Membership      OrgPersonMembership                `json:"membership"`
 	Provider        OptString                          `json:"provider"`
@@ -14803,6 +16598,11 @@ func (s *OrgPersonSummary) GetAccountId() string {
 // GetAvatarUrl returns the value of AvatarUrl.
 func (s *OrgPersonSummary) GetAvatarUrl() OptString {
 	return s.AvatarUrl
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *OrgPersonSummary) GetDisplayName() OptString {
+	return s.DisplayName
 }
 
 // GetHandle returns the value of Handle.
@@ -14838,6 +16638,11 @@ func (s *OrgPersonSummary) SetAccountId(val string) {
 // SetAvatarUrl sets the value of AvatarUrl.
 func (s *OrgPersonSummary) SetAvatarUrl(val OptString) {
 	s.AvatarUrl = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *OrgPersonSummary) SetDisplayName(val OptString) {
+	s.DisplayName = val
 }
 
 // SetHandle sets the value of Handle.
@@ -15015,6 +16820,232 @@ func (s *PatchRepoCIWebhookInputBody) SetAdditionalProps(val PatchRepoCIWebhookI
 type PatchRepoCIWebhookInputBodyAdditional map[string]jx.Raw
 
 func (s *PatchRepoCIWebhookInputBodyAdditional) init() PatchRepoCIWebhookInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/PluginInstallation
+type PluginInstallation struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Provider account for this installation (ins-<ulid>).
+	Account string `json:"account"`
+	// Installation id (ins_<ULID>) the plugin stores.
+	InstallationID string `json:"installation_id"`
+	// Entire org that owns the installation, or the project's owning org.
+	OrgID OptString `json:"org_id"`
+	// Opaque output from the selected static plugin profile.
+	Profile PluginInstallationProfile `json:"profile"`
+	// Entire project the installation belongs to.
+	ProjectID OptString `json:"project_id"`
+	// All or selected; empty for an org installation.
+	RepositorySelection OptString `json:"repository_selection"`
+	AdditionalProps     PluginInstallationAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *PluginInstallation) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAccount returns the value of Account.
+func (s *PluginInstallation) GetAccount() string {
+	return s.Account
+}
+
+// GetInstallationID returns the value of InstallationID.
+func (s *PluginInstallation) GetInstallationID() string {
+	return s.InstallationID
+}
+
+// GetOrgID returns the value of OrgID.
+func (s *PluginInstallation) GetOrgID() OptString {
+	return s.OrgID
+}
+
+// GetProfile returns the value of Profile.
+func (s *PluginInstallation) GetProfile() PluginInstallationProfile {
+	return s.Profile
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *PluginInstallation) GetProjectID() OptString {
+	return s.ProjectID
+}
+
+// GetRepositorySelection returns the value of RepositorySelection.
+func (s *PluginInstallation) GetRepositorySelection() OptString {
+	return s.RepositorySelection
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *PluginInstallation) GetAdditionalProps() PluginInstallationAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *PluginInstallation) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAccount sets the value of Account.
+func (s *PluginInstallation) SetAccount(val string) {
+	s.Account = val
+}
+
+// SetInstallationID sets the value of InstallationID.
+func (s *PluginInstallation) SetInstallationID(val string) {
+	s.InstallationID = val
+}
+
+// SetOrgID sets the value of OrgID.
+func (s *PluginInstallation) SetOrgID(val OptString) {
+	s.OrgID = val
+}
+
+// SetProfile sets the value of Profile.
+func (s *PluginInstallation) SetProfile(val PluginInstallationProfile) {
+	s.Profile = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *PluginInstallation) SetProjectID(val OptString) {
+	s.ProjectID = val
+}
+
+// SetRepositorySelection sets the value of RepositorySelection.
+func (s *PluginInstallation) SetRepositorySelection(val OptString) {
+	s.RepositorySelection = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *PluginInstallation) SetAdditionalProps(val PluginInstallationAdditional) {
+	s.AdditionalProps = val
+}
+
+type PluginInstallationAdditional map[string]jx.Raw
+
+func (s *PluginInstallationAdditional) init() PluginInstallationAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Opaque output from the selected static plugin profile.
+type PluginInstallationProfile map[string]jx.Raw
+
+func (s *PluginInstallationProfile) init() PluginInstallationProfile {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/PluginInstallationView
+type PluginInstallationView struct {
+	// A URL to the JSON Schema for this object.
+	Schema              OptURI    `json:"$schema"`
+	Account             string    `json:"account"`
+	CreatedAt           time.Time `json:"created_at"`
+	InstallationID      string    `json:"installation_id"`
+	OrgID               OptString `json:"org_id"`
+	ProjectID           OptString `json:"project_id"`
+	RepositorySelection OptString `json:"repository_selection"`
+	AdditionalProps     PluginInstallationViewAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *PluginInstallationView) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetAccount returns the value of Account.
+func (s *PluginInstallationView) GetAccount() string {
+	return s.Account
+}
+
+// GetCreatedAt returns the value of CreatedAt.
+func (s *PluginInstallationView) GetCreatedAt() time.Time {
+	return s.CreatedAt
+}
+
+// GetInstallationID returns the value of InstallationID.
+func (s *PluginInstallationView) GetInstallationID() string {
+	return s.InstallationID
+}
+
+// GetOrgID returns the value of OrgID.
+func (s *PluginInstallationView) GetOrgID() OptString {
+	return s.OrgID
+}
+
+// GetProjectID returns the value of ProjectID.
+func (s *PluginInstallationView) GetProjectID() OptString {
+	return s.ProjectID
+}
+
+// GetRepositorySelection returns the value of RepositorySelection.
+func (s *PluginInstallationView) GetRepositorySelection() OptString {
+	return s.RepositorySelection
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *PluginInstallationView) GetAdditionalProps() PluginInstallationViewAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *PluginInstallationView) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetAccount sets the value of Account.
+func (s *PluginInstallationView) SetAccount(val string) {
+	s.Account = val
+}
+
+// SetCreatedAt sets the value of CreatedAt.
+func (s *PluginInstallationView) SetCreatedAt(val time.Time) {
+	s.CreatedAt = val
+}
+
+// SetInstallationID sets the value of InstallationID.
+func (s *PluginInstallationView) SetInstallationID(val string) {
+	s.InstallationID = val
+}
+
+// SetOrgID sets the value of OrgID.
+func (s *PluginInstallationView) SetOrgID(val OptString) {
+	s.OrgID = val
+}
+
+// SetProjectID sets the value of ProjectID.
+func (s *PluginInstallationView) SetProjectID(val OptString) {
+	s.ProjectID = val
+}
+
+// SetRepositorySelection sets the value of RepositorySelection.
+func (s *PluginInstallationView) SetRepositorySelection(val OptString) {
+	s.RepositorySelection = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *PluginInstallationView) SetAdditionalProps(val PluginInstallationViewAdditional) {
+	s.AdditionalProps = val
+}
+
+type PluginInstallationViewAdditional map[string]jx.Raw
+
+func (s *PluginInstallationViewAdditional) init() PluginInstallationViewAdditional {
 	m := *s
 	if m == nil {
 		m = map[string]jx.Raw{}
@@ -15438,14 +17469,91 @@ func (s *ProjectCapabilitiesAdditional) init() ProjectCapabilitiesAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/ProjectCollaborator
+type ProjectCollaborator struct {
+	AccountId       string    `json:"accountId"`
+	AvatarUrl       OptString `json:"avatarUrl"`
+	DisplayName     OptString `json:"displayName"`
+	Handle          OptString `json:"handle"`
+	AdditionalProps ProjectCollaboratorAdditional
+}
+
+// GetAccountId returns the value of AccountId.
+func (s *ProjectCollaborator) GetAccountId() string {
+	return s.AccountId
+}
+
+// GetAvatarUrl returns the value of AvatarUrl.
+func (s *ProjectCollaborator) GetAvatarUrl() OptString {
+	return s.AvatarUrl
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *ProjectCollaborator) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
+// GetHandle returns the value of Handle.
+func (s *ProjectCollaborator) GetHandle() OptString {
+	return s.Handle
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *ProjectCollaborator) GetAdditionalProps() ProjectCollaboratorAdditional {
+	return s.AdditionalProps
+}
+
+// SetAccountId sets the value of AccountId.
+func (s *ProjectCollaborator) SetAccountId(val string) {
+	s.AccountId = val
+}
+
+// SetAvatarUrl sets the value of AvatarUrl.
+func (s *ProjectCollaborator) SetAvatarUrl(val OptString) {
+	s.AvatarUrl = val
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *ProjectCollaborator) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
+// SetHandle sets the value of Handle.
+func (s *ProjectCollaborator) SetHandle(val OptString) {
+	s.Handle = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *ProjectCollaborator) SetAdditionalProps(val ProjectCollaboratorAdditional) {
+	s.AdditionalProps = val
+}
+
+type ProjectCollaboratorAdditional map[string]jx.Raw
+
+func (s *ProjectCollaboratorAdditional) init() ProjectCollaboratorAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
 // Ref: #/components/schemas/ProjectGrant
 type ProjectGrant struct {
+	// The account's public display name, when it has one. Absent for non-account grantees.
+	DisplayName     OptString `json:"displayName"`
 	GranteeId       string    `json:"granteeId"`
 	GranteeName     OptString `json:"granteeName"`
 	GranteeType     string    `json:"granteeType"`
 	Role            string    `json:"role"`
 	Source          string    `json:"source"`
 	AdditionalProps ProjectGrantAdditional
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *ProjectGrant) GetDisplayName() OptString {
+	return s.DisplayName
 }
 
 // GetGranteeId returns the value of GranteeId.
@@ -15476,6 +17584,11 @@ func (s *ProjectGrant) GetSource() string {
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *ProjectGrant) GetAdditionalProps() ProjectGrantAdditional {
 	return s.AdditionalProps
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *ProjectGrant) SetDisplayName(val OptString) {
+	s.DisplayName = val
 }
 
 // SetGranteeId sets the value of GranteeId.
@@ -15731,13 +17844,20 @@ func (s *RegisterOrgCIBuildkiteClusterInputBodyAdditional) init() RegisterOrgCIB
 	return m
 }
 
+// RemoveOrgMemberByMembershipIDNoContent is response for RemoveOrgMemberByMembershipID operation.
+type RemoveOrgMemberByMembershipIDNoContent struct{}
+
 // RemoveOrgMemberNoContent is response for RemoveOrgMember operation.
 type RemoveOrgMemberNoContent struct{}
+
+// RemovePluginInstallationRepositoryNoContent is response for RemovePluginInstallationRepository operation.
+type RemovePluginInstallationRepositoryNoContent struct{}
 
 // Ref: #/components/schemas/Repo
 type Repo struct {
 	// A URL to the JSON Schema for this object.
 	Schema            OptURI              `json:"$schema"`
+	Candidate         OptRepoCandidate    `json:"candidate"`
 	Capabilities      OptRepoCapabilities `json:"capabilities"`
 	ClusterHost       OptString           `json:"clusterHost"`
 	ClusterSlug       OptString           `json:"clusterSlug"`
@@ -15766,6 +17886,11 @@ type Repo struct {
 // GetSchema returns the value of Schema.
 func (s *Repo) GetSchema() OptURI {
 	return s.Schema
+}
+
+// GetCandidate returns the value of Candidate.
+func (s *Repo) GetCandidate() OptRepoCandidate {
+	return s.Candidate
 }
 
 // GetCapabilities returns the value of Capabilities.
@@ -15881,6 +18006,11 @@ func (s *Repo) GetAdditionalProps() RepoAdditional {
 // SetSchema sets the value of Schema.
 func (s *Repo) SetSchema(val OptURI) {
 	s.Schema = val
+}
+
+// SetCandidate sets the value of Candidate.
+func (s *Repo) SetCandidate(val OptRepoCandidate) {
+	s.Candidate = val
 }
 
 // SetCapabilities sets the value of Capabilities.
@@ -16333,12 +18463,19 @@ func (s *RepoFacetPageAdditional) init() RepoFacetPageAdditional {
 
 // Ref: #/components/schemas/RepoGrant
 type RepoGrant struct {
+	// The account's public display name, when it has one. Absent for non-account grantees.
+	DisplayName     OptString `json:"displayName"`
 	GranteeId       string    `json:"granteeId"`
 	GranteeName     OptString `json:"granteeName"`
 	GranteeType     string    `json:"granteeType"`
 	Role            string    `json:"role"`
 	Source          string    `json:"source"`
 	AdditionalProps RepoGrantAdditional
+}
+
+// GetDisplayName returns the value of DisplayName.
+func (s *RepoGrant) GetDisplayName() OptString {
+	return s.DisplayName
 }
 
 // GetGranteeId returns the value of GranteeId.
@@ -16369,6 +18506,11 @@ func (s *RepoGrant) GetSource() string {
 // GetAdditionalProps returns the value of AdditionalProps.
 func (s *RepoGrant) GetAdditionalProps() RepoGrantAdditional {
 	return s.AdditionalProps
+}
+
+// SetDisplayName sets the value of DisplayName.
+func (s *RepoGrant) SetDisplayName(val OptString) {
+	s.DisplayName = val
 }
 
 // SetGranteeId sets the value of GranteeId.
@@ -16410,6 +18552,32 @@ func (s *RepoGrantAdditional) init() RepoGrantAdditional {
 		*s = m
 	}
 	return m
+}
+
+// RepoHeaders wraps Repo with response headers.
+type RepoHeaders struct {
+	RetryAfter OptString
+	Response   Repo
+}
+
+// GetRetryAfter returns the value of RetryAfter.
+func (s *RepoHeaders) GetRetryAfter() OptString {
+	return s.RetryAfter
+}
+
+// GetResponse returns the value of Response.
+func (s *RepoHeaders) GetResponse() Repo {
+	return s.Response
+}
+
+// SetRetryAfter sets the value of RetryAfter.
+func (s *RepoHeaders) SetRetryAfter(val OptString) {
+	s.RetryAfter = val
+}
+
+// SetResponse sets the value of Response.
+func (s *RepoHeaders) SetResponse(val Repo) {
+	s.Response = val
 }
 
 // Ref: #/components/schemas/RepoIDResolution
@@ -17882,13 +20050,18 @@ func (s *ResourcePeopleOutputBodyAdditional) init() ResourcePeopleOutputBodyAddi
 
 // Ref: #/components/schemas/ResourcePerson
 type ResourcePerson struct {
-	AccountId       string                    `json:"accountId"`
-	AvatarUrl       OptString                 `json:"avatarUrl"`
-	DirectGrant     ResourcePersonDirectGrant `json:"directGrant"`
-	Handle          OptString                 `json:"handle"`
-	Provider        OptString                 `json:"provider"`
-	Role            string                    `json:"role"`
-	Sources         []ResourcePersonSource    `json:"sources"`
+	AccountId   string                    `json:"accountId"`
+	AvatarUrl   OptString                 `json:"avatarUrl"`
+	DirectGrant ResourcePersonDirectGrant `json:"directGrant"`
+	DisplayName OptString                 `json:"displayName"`
+	Handle      OptString                 `json:"handle"`
+	// Earliest known effective-access time for the selected project. Organization-derived dates use
+	// membership activation, not invitation creation. Omitted for repositories and access without a
+	// known timestamp.
+	JoinedAt        OptDateTime            `json:"joinedAt"`
+	Provider        OptString              `json:"provider"`
+	Role            string                 `json:"role"`
+	Sources         []ResourcePersonSource `json:"sources"`
 	AdditionalProps ResourcePersonAdditional
 }
 
@@ -17907,9 +20080,19 @@ func (s *ResourcePerson) GetDirectGrant() ResourcePersonDirectGrant {
 	return s.DirectGrant
 }
 
+// GetDisplayName returns the value of DisplayName.
+func (s *ResourcePerson) GetDisplayName() OptString {
+	return s.DisplayName
+}
+
 // GetHandle returns the value of Handle.
 func (s *ResourcePerson) GetHandle() OptString {
 	return s.Handle
+}
+
+// GetJoinedAt returns the value of JoinedAt.
+func (s *ResourcePerson) GetJoinedAt() OptDateTime {
+	return s.JoinedAt
 }
 
 // GetProvider returns the value of Provider.
@@ -17947,9 +20130,19 @@ func (s *ResourcePerson) SetDirectGrant(val ResourcePersonDirectGrant) {
 	s.DirectGrant = val
 }
 
+// SetDisplayName sets the value of DisplayName.
+func (s *ResourcePerson) SetDisplayName(val OptString) {
+	s.DisplayName = val
+}
+
 // SetHandle sets the value of Handle.
 func (s *ResourcePerson) SetHandle(val OptString) {
 	s.Handle = val
+}
+
+// SetJoinedAt sets the value of JoinedAt.
+func (s *ResourcePerson) SetJoinedAt(val OptDateTime) {
+	s.JoinedAt = val
 }
 
 // SetProvider sets the value of Provider.
@@ -18693,6 +20886,110 @@ func (s *SessionAuth) SetAPIKey(val string) {
 // SetRoles sets the value of Roles.
 func (s *SessionAuth) SetRoles(val []string) {
 	s.Roles = val
+}
+
+// Ref: #/components/schemas/SetPluginInstallationRepositoriesInputBody
+type SetPluginInstallationRepositoriesInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Public repository ids (repo_<ULID>) when selected.
+	RepositoryIds []string `json:"repository_ids"`
+	// All repositories in the project, or only repository_ids.
+	RepositorySelection SetPluginInstallationRepositoriesInputBodyRepositorySelection `json:"repository_selection"`
+	AdditionalProps     SetPluginInstallationRepositoriesInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *SetPluginInstallationRepositoriesInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetRepositoryIds returns the value of RepositoryIds.
+func (s *SetPluginInstallationRepositoriesInputBody) GetRepositoryIds() []string {
+	return s.RepositoryIds
+}
+
+// GetRepositorySelection returns the value of RepositorySelection.
+func (s *SetPluginInstallationRepositoriesInputBody) GetRepositorySelection() SetPluginInstallationRepositoriesInputBodyRepositorySelection {
+	return s.RepositorySelection
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *SetPluginInstallationRepositoriesInputBody) GetAdditionalProps() SetPluginInstallationRepositoriesInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *SetPluginInstallationRepositoriesInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetRepositoryIds sets the value of RepositoryIds.
+func (s *SetPluginInstallationRepositoriesInputBody) SetRepositoryIds(val []string) {
+	s.RepositoryIds = val
+}
+
+// SetRepositorySelection sets the value of RepositorySelection.
+func (s *SetPluginInstallationRepositoriesInputBody) SetRepositorySelection(val SetPluginInstallationRepositoriesInputBodyRepositorySelection) {
+	s.RepositorySelection = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *SetPluginInstallationRepositoriesInputBody) SetAdditionalProps(val SetPluginInstallationRepositoriesInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type SetPluginInstallationRepositoriesInputBodyAdditional map[string]jx.Raw
+
+func (s *SetPluginInstallationRepositoriesInputBodyAdditional) init() SetPluginInstallationRepositoriesInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// All repositories in the project, or only repository_ids.
+type SetPluginInstallationRepositoriesInputBodyRepositorySelection string
+
+const (
+	SetPluginInstallationRepositoriesInputBodyRepositorySelectionAll      SetPluginInstallationRepositoriesInputBodyRepositorySelection = "all"
+	SetPluginInstallationRepositoriesInputBodyRepositorySelectionSelected SetPluginInstallationRepositoriesInputBodyRepositorySelection = "selected"
+)
+
+// AllValues returns all SetPluginInstallationRepositoriesInputBodyRepositorySelection values.
+func (SetPluginInstallationRepositoriesInputBodyRepositorySelection) AllValues() []SetPluginInstallationRepositoriesInputBodyRepositorySelection {
+	return []SetPluginInstallationRepositoriesInputBodyRepositorySelection{
+		SetPluginInstallationRepositoriesInputBodyRepositorySelectionAll,
+		SetPluginInstallationRepositoriesInputBodyRepositorySelectionSelected,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s SetPluginInstallationRepositoriesInputBodyRepositorySelection) MarshalText() ([]byte, error) {
+	switch s {
+	case SetPluginInstallationRepositoriesInputBodyRepositorySelectionAll:
+		return []byte(s), nil
+	case SetPluginInstallationRepositoriesInputBodyRepositorySelectionSelected:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *SetPluginInstallationRepositoriesInputBodyRepositorySelection) UnmarshalText(data []byte) error {
+	switch SetPluginInstallationRepositoriesInputBodyRepositorySelection(data) {
+	case SetPluginInstallationRepositoriesInputBodyRepositorySelectionAll:
+		*s = SetPluginInstallationRepositoriesInputBodyRepositorySelectionAll
+		return nil
+	case SetPluginInstallationRepositoriesInputBodyRepositorySelectionSelected:
+		*s = SetPluginInstallationRepositoriesInputBodyRepositorySelectionSelected
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
 }
 
 // Ref: #/components/schemas/SetRepoVisibilityInputBody

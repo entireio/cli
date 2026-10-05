@@ -218,6 +218,24 @@ func (r *apiCheckpointReader) checkpointCommit(ctx context.Context, checkpointID
 	}}, nil
 }
 
+// --- task tier --------------------------------------------------------
+//
+// The cell's checkpoint routes serve the root summary, the sessions, and their
+// raw transcripts, but not the tasks/<tool_use_id>/ records. Saying so beats
+// reporting an empty list, which would claim the checkpoint had no subagents.
+
+func (r *apiCheckpointReader) ListTasks(context.Context, id.CheckpointID) ([]checkpoint.TaskEntry, error) {
+	return nil, r.tasksUnsupported()
+}
+
+func (r *apiCheckpointReader) ReadTaskTranscript(context.Context, id.CheckpointID, string) ([]byte, error) {
+	return nil, r.tasksUnsupported()
+}
+
+func (r *apiCheckpointReader) tasksUnsupported() error {
+	return fmt.Errorf("%w: --repo reads %s over the Entire API, which does not serve them; run explain in a clone of that repo", checkpoint.ErrTaskRecordsUnsupported, r.ownerRepo)
+}
+
 // --- session tier -----------------------------------------------------
 
 func (r *apiCheckpointReader) ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error) {

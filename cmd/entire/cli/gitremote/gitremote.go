@@ -69,18 +69,59 @@ const (
 	// ForgeGitHub is the entire:// path token for a GitHub mirror.
 	ForgeGitHub = "gh"
 
-	// ForgeNative is the entire:// path token for an Entire-native repo. It is
-	// the one forge whose repo names may legitimately end in `.git`: GitHub
-	// rejects such a name outright, so on a /gh/ path the suffix can only be
-	// decoration, while entiredb permits an interior dot and the data plane
-	// resolves /et/ paths verbatim. Exported so callers holding a parsed forge
-	// can ask the question without a bare "et" literal.
+	// ForgeNative is the entire:// path token for an Entire-native repo.
+	// Exported so callers holding a parsed forge can ask the question without a
+	// bare "et" literal.
 	ForgeNative = "et"
 )
 
-// gitDirSuffix is the suffix git tools habitually append to a repo path.
-// Dropped for every forge except ForgeNative — see splitOwnerRepo.
-const gitDirSuffix = ".git"
+// GitDirSuffix is the suffix git tools habitually append to a repo path. It is
+// never part of a repo name Entire stores — see CutGitDirSuffix, and
+// cli.gitDirSuffix for why names have to stay free of it.
+const GitDirSuffix = ".git"
+
+// CutGitDirSuffix removes a trailing GitDirSuffix in ANY case, reporting
+// whether one was there. Every place in the CLI that asks Entire's `.git`
+// question goes through it, so the answer cannot vary by call site — which it
+// did, in five separate hand-rolled spellings, until this existed.
+//
+// Case-insensitive is the deliberate half of the choice, and it is not what
+// canonical git does everywhere. Git draws the line by PURPOSE. When it is
+// merely guessing a local directory name out of a URL the user pasted, it cuts
+// case-sensitively (git_url_basename in dir.c: `strncmp(end - 4, ".git", 4)`,
+// then one strip_suffix_mem). When the question is instead whether a path IS
+// the reserved `.git` — a safety question, where a miss is a vulnerability —
+// it matches with aggressive case-insensitivity and then some: is_hfs_dotgit
+// (utf8.c) skips Unicode codepoints HFS+ ignores, and is_ntfs_dotgit (path.c)
+// also admits `git~1`, trailing dots and spaces, and NTFS stream suffixes.
+//
+// Entire's uses fall on the reserved-spelling side of that line. `repo create`
+// asks whether a name collides with a spelling git tooling reserves. The ref
+// parsers ask which repository a path names — and the answer belongs to the
+// server, not to a local directory heuristic. Entire's transport accepts the
+// suffix on a repo path whatever its case, so a case-sensitive client
+// disagrees with the server it is dialing:
+// `git clone entire://…/et/acme/widgets.GIT` resolves while
+// `entire repo clone /et/acme/widgets.GIT` reports no such repo.
+//
+// That reasoning is Entire's alone. GitHub's transport cuts the suffix
+// case-sensitively (`github.com/git/git.GIT` is not found), so a URL a forge
+// serves directly must not come through here — see splitOwnerRepo.
+//
+// The cut happens exactly once, as git's single strip_suffix_mem does, so
+// "widgets.git.git" yields "widgets.git" rather than collapsing every dotted
+// segment. Slicing the last four bytes is safe against a multi-byte final
+// rune: a split rune decodes to RuneError, which never folds equal to ASCII.
+func CutGitDirSuffix(name string) (string, bool) {
+	if len(name) < len(GitDirSuffix) {
+		return name, false
+	}
+	cut := len(name) - len(GitDirSuffix)
+	if !strings.EqualFold(name[cut:], GitDirSuffix) {
+		return name, false
+	}
+	return name[:cut], true
+}
 
 // pathForges are the forge tokens Entire uses in an entire:// URL path
 // (`entire://<cluster-host>/<forge>/…`), mapped to the placeholder spelling of
@@ -111,10 +152,11 @@ var pathForges = map[string]string{
 // The name says syntax deliberately: this is NOT a capability check, and it
 // once was one (it read the upstream-host map, so it answered `{gh}`). Widening
 // it to the real path tokens is what a URL needs, but it means a caller after a
-// capability has to narrow afterwards — the trail API takes `et` in a path and
-// resolves only `gh`, so `entire trail` refuses it separately
-// (errTrailsNativeUnsupported). A caller that skips that step gets a token this
-// says yes to and an API that 404s.
+// capability still has to narrow afterwards. Trails are the worked example: a
+// native repo is reachable there, but only by ULID rather than by the
+// forge/owner/repo path a mirror uses, so trailRepoBasePath routes on the forge
+// after this has answered yes. A caller that treats this as the capability gets
+// a token it says yes to and a route that does not exist.
 func IsForgePathToken(forge string) bool {
 	_, ok := pathForges[forge]
 	return ok
@@ -135,10 +177,26 @@ func ForgePathLabels(forge string) string {
 // to Host when the forge is unknown (e.g. a self-hosted GitHub Enterprise),
 // preserving the only host we know for it.
 func (i *Info) CanonicalHost() string {
-	if host, ok := forgeToHost[i.Forge]; ok {
+	if host, ok := i.UpstreamHost(); ok {
 		return host
 	}
 	return i.Host
+}
+
+// UpstreamHost is CanonicalHost without the fallback: it returns the forge's
+// canonical public host and whether one is known at all.
+//
+// The distinction matters for an entire:// remote, and only there. Host is a
+// cluster rather than a git host, so when the forge maps to nothing there is no
+// upstream host to fall back TO — CanonicalHost answers the cluster, which is
+// the right answer for "where do I reach this" and the wrong one for "which
+// forge backs this". ParseURL preserves any non-empty forge token it finds in
+// the path, so an unrecognized one reaches callers looking exactly like a
+// mirror. A caller that needs a real forge host must ask this instead and
+// handle the false.
+func (i *Info) UpstreamHost() (string, bool) {
+	host, ok := forgeToHost[i.Forge]
+	return host, ok
 }
 
 // HostPort returns Host, or "Host:Port" when Port is non-empty.
@@ -245,16 +303,13 @@ func ParseURL(rawURL string) (*Info, error) {
 			host = hostPart
 		}
 
-		// Forge first: splitOwnerRepo needs it to decide whether `.git` is
-		// decoration. An SCP-style URL never names a native repo (the map holds
-		// git hosts only), but reading it here keeps one rule in one place.
-		forge := hostToForge[host]
-		owner, repo, err := splitOwnerRepo(parts[1], forge)
+		// SCP syntax is never entire://, so a forge serves this path.
+		owner, repo, err := splitOwnerRepo(parts[1], false)
 		if err != nil {
 			return nil, err
 		}
 
-		return &Info{Protocol: ProtocolSSH, Host: host, Forge: forge, Owner: owner, Repo: repo}, nil
+		return &Info{Protocol: ProtocolSSH, Host: host, Forge: hostToForge[host], Owner: owner, Repo: repo}, nil
 	}
 
 	u, err := url.Parse(rawURL)
@@ -271,7 +326,7 @@ func ParseURL(rawURL string) (*Info, error) {
 		// entire:// URLs encode the forge as the first path segment.
 		forge, pathPart = splitForgePrefix(pathPart)
 	}
-	owner, repo, err := splitOwnerRepo(pathPart, forge)
+	owner, repo, err := splitOwnerRepo(pathPart, u.Scheme == ProtocolEntire)
 	if err != nil {
 		return nil, err
 	}
@@ -363,17 +418,36 @@ func ResolveRemoteRepo(ctx context.Context, remoteName string) (forge, owner, re
 
 // splitOwnerRepo splits a remote path into owner and repo.
 //
-// A trailing `.git` is dropped for every forge except ForgeNative. GitHub
-// rejects a name ending in it, so there the suffix is decoration; a native repo
-// may genuinely be named "foo.git", and trimming it names a different
-// repository. See COR-1892. The forge is known on every ParseURL branch before
-// the split, so the choice needs no lookup and has no fallback.
+// A trailing `.git` is decoration on every forge and is dropped unconditionally:
+// it is what git tools append to a clone path, never part of the name Entire
+// stores. This is the only place the suffix is dropped, so it goes exactly once
+// — trimming again in ParseURL's SCP branch collapsed "repo.git.git" to "repo".
+// git strips it exactly once too (one strip_suffix_mem in git_url_basename), so
+// "repo.git.git" names "repo.git" here and clones into "repo.git" there.
 //
-// This is the only place the suffix is dropped: trimming again in ParseURL's
-// SCP branch collapsed "repo.git.git" to "repo".
-func splitOwnerRepo(path, forge string) (string, string, error) {
-	if forge != ForgeNative {
-		path = strings.TrimSuffix(path, gitDirSuffix)
+// Case follows whoever serves the URL, because the question is which
+// repository a remote names and the authority on that is the server it
+// dials. entireServed is true for entire:// remotes: Entire's transport
+// accepts the suffix whatever its case, so the cut does too (see
+// CutGitDirSuffix). Every other URL is dialed straight at its forge, and
+// those cut case-sensitively — git's own strncmp, and GitHub's transport,
+// which does not find `git/git.GIT` — so "repo.GIT" there is a repo named
+// "repo.GIT", not "repo".
+//
+// Trailing separators go FIRST, which is also git's order. Trimming the suffix
+// first leaves "p/foo.git/" spelled with the suffix intact — a trailing slash is
+// exactly what a pasted URL carries — and lets "o/../" reach the dot-only guard
+// below still wearing a slash, where it no longer reads as dot-only.
+//
+// Separators only, not whitespace: git strips both, but ParseURL has already
+// trimmed the raw URL, and stripping a percent-encoded trailing newline here
+// would turn the control-character rejection below into a silent accept.
+func splitOwnerRepo(path string, entireServed bool) (string, string, error) {
+	path = strings.TrimRight(path, "/")
+	if entireServed {
+		path, _ = CutGitDirSuffix(path)
+	} else {
+		path = strings.TrimSuffix(path, GitDirSuffix)
 	}
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

@@ -289,11 +289,12 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot, linkCommitSH
 	for _, e := range selected {
 		progress, stopProgress := newImportProgressReporter(w, e.displayName)
 		res, err := agentimport.Run(ctx, repo, e.imp, agentimport.Options{
-			LinkCommitSHA: linkCommitSHA,
-			RepoRoot:      repoRoot,
-			Now:           time.Now(),
-			Progress:      progress,
-			ReadRemotes:   strategy.CheckpointReadRemotes(ctx),
+			LinkCommitSHA:   linkCommitSHA,
+			RepoRoot:        repoRoot,
+			Now:             time.Now(),
+			Progress:        progress,
+			ReadRemotes:     strategy.CheckpointReadRemotes(ctx),
+			RemoteRefLister: ListCheckpointRefsOnRemote,
 		})
 		stopProgress(err == nil)
 		if err != nil {

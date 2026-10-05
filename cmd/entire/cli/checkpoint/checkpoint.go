@@ -66,6 +66,13 @@ type WriteEphemeralResult struct {
 	// Skipped is true if the checkpoint was skipped due to no changes
 	// (tree hash matched the previous checkpoint)
 	Skipped bool
+
+	// ChangedFiles are the worktree files whose content differs from the
+	// start of the session's window (WriteEphemeralOptions.ClaimsSince), or
+	// else from the previous snapshot on the shadow branch (from the base
+	// tree when there was none), as repo-relative paths. Session metadata is
+	// excluded.
+	ChangedFiles []string
 }
 
 // WriteEphemeralOptions contains options for writing a temporary checkpoint.
@@ -80,13 +87,15 @@ type WriteEphemeralOptions struct {
 	// Used to create worktree-specific shadow branch names
 	WorktreeID string
 
-	// ModifiedFiles are files that have been modified (relative paths)
+	// ModifiedFiles and NewFiles are the files the caller detected as
+	// modified or created (relative paths). They do not decide what a snapshot
+	// holds: every snapshot captures the whole dirty worktree from git status,
+	// so files no transcript names (a shell command's writes) are included.
 	ModifiedFiles []string
+	NewFiles      []string
 
-	// NewFiles are files that have been created (relative paths)
-	NewFiles []string
-
-	// DeletedFiles are files that have been deleted (relative paths)
+	// DeletedFiles are files the caller detected as deleted (relative paths),
+	// removed from the snapshot in addition to the deletions git status reports.
 	DeletedFiles []string
 
 	// MetadataDir is the repo-relative path to the metadata directory
@@ -105,9 +114,22 @@ type WriteEphemeralOptions struct {
 	// AuthorEmail is the email to use for commits
 	AuthorEmail string
 
-	// IsFirstCheckpoint indicates if this is the first checkpoint of the session
-	// When true, all working directory files are captured (not just modified)
+	// IsFirstCheckpoint indicates the session's first checkpoint. It no longer
+	// changes what is captured: every snapshot captures the whole dirty
+	// worktree.
 	IsFirstCheckpoint bool
+
+	// SkipWhenUnchanged skips the write when no worktree file changed since
+	// the previous snapshot (or since the base commit, when there is none).
+	// Snapshots taken when an agent stops without a detected change set it so
+	// that turns which changed nothing write nothing.
+	SkipWhenUnchanged bool
+
+	// ClaimsSince is the commit the session's window started at (see
+	// session.State.ClaimsSinceCommit). ChangedFiles are measured from it when
+	// set and readable, rather than from the shared branch tip, which may be
+	// another session's snapshot.
+	ClaimsSince plumbing.Hash
 }
 
 // ReadEphemeralResult contains the result of reading a temporary checkpoint.

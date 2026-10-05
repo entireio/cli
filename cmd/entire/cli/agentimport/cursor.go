@@ -82,7 +82,7 @@ func (cursorImporter) SplitTurns(sf SessionFile, full []byte) ([]Turn, error) {
 			return &Turn{
 				UUID:      strconv.Itoa(start),
 				Prompt:    transcript.ExtractUserContent(rec.Message),
-				CreatedAt: createdAt,
+				CreatedAt: createdAt, CreatedAtFromModTime: true,
 			}, nil
 		})
 }

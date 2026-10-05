@@ -462,7 +462,7 @@ func (r *attributionResolver) readCheckpointContext(cpID id.CheckpointID, file s
 	}
 	if err != nil {
 		ctx.MetadataMissing = true
-		ctx.MetadataMissingReason = metadataMissingReason(r.ctx, cpID.String(), err)
+		ctx.MetadataMissingReason = metadataMissingReason(r.ctx, cpID, err)
 		return ctx
 	}
 
@@ -560,15 +560,16 @@ func readAttributionCheckpointSummary(ctx context.Context, reader attributionChe
 	return summary, nil
 }
 
-func metadataMissingReason(ctx context.Context, checkpointID string, cause error) string {
+func metadataMissingReason(ctx context.Context, checkpointID id.CheckpointID, cause error) string {
 	reason := "checkpoint metadata was not found locally"
 	if cause != nil {
 		reason = fmt.Sprintf("%s (%v)", reason, cause)
 	}
-	if checkpointID == "" {
-		return fmt.Sprintf("%s. Run: %s.", reason, suggestCheckpointFetchCommand(ctx))
+	fetchCmd := strings.Join(suggestCheckpointStorageFetchCommands(ctx, checkpointID), " or ")
+	if checkpointID.IsEmpty() {
+		return fmt.Sprintf("%s. Run: %s.", reason, fetchCmd)
 	}
-	return fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, suggestCheckpointFetchCommand(ctx), checkpointID)
+	return fmt.Sprintf("%s. Run: %s. Then re-run entire checkpoint explain %s.", reason, fetchCmd, checkpointID)
 }
 
 func (r *attributionResolver) fetchCheckpointContext(cpID id.CheckpointID, file string) (attributionCheckpointContext, error) {

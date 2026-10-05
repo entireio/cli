@@ -641,6 +641,16 @@ type stubCommittedReader struct {
 	summary  *checkpoint.CheckpointSummary
 	contents map[int]*checkpoint.SessionContent // idx -> content (nil ⇒ return error)
 	err      error                              // err returned for indexes not in contents
+	tasks    []checkpoint.TaskEntry             // ListTasks result
+	tasksErr error                              // ListTasks error
+}
+
+func (s *stubCommittedReader) ListTasks(context.Context, id.CheckpointID) ([]checkpoint.TaskEntry, error) {
+	return s.tasks, s.tasksErr
+}
+
+func (s *stubCommittedReader) ReadTaskTranscript(context.Context, id.CheckpointID, string) ([]byte, error) {
+	return nil, checkpoint.ErrTaskNotFound
 }
 
 //nolint:unparam // test stub; signature matches CheckpointReader.Read.

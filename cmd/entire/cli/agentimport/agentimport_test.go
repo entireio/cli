@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	cp "github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
@@ -101,6 +103,25 @@ func initRepoWithCommit(t *testing.T) (*git.Repository, string) {
 		t.Fatal(err)
 	}
 	return repo, repoDir
+}
+
+// Timestamps of the u1 and u2 user turns in writeFixtureSession and the inline
+// Claude fixtures below.
+var (
+	fixtureU1At = time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+	fixtureU2At = fixtureU1At.Add(time.Minute)
+)
+
+// importedCheckpointID returns the ID Run stores turn under in stores' backend.
+// Run and cp.Open resolve that backend from the same settings, so the ID's
+// format follows whichever primary they select.
+func importedCheckpointID(t *testing.T, stores *cp.Stores, sessionID string, turn Turn) id.CheckpointID {
+	t.Helper()
+	cid, _, err := turnCheckpointID(sessionID, turn, stores.PrimaryIsRefs(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cid
 }
 
 func writeFixtureSession(t *testing.T, dir, name string) {
@@ -216,7 +237,7 @@ func TestRun_StampsLinkCommitSHA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cid := DeriveCheckpointID("sess-with-sha", "u1")
+	cid := importedCheckpointID(t, stores, "sess-with-sha", Turn{UUID: "u1", CreatedAt: fixtureU1At})
 	md, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +307,7 @@ func TestRun_AnchorsTurnToRecordedCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cid1 := DeriveCheckpointID("sess-anchor", "u1")
+	cid1 := importedCheckpointID(t, stores, "sess-anchor", Turn{UUID: "u1", CreatedAt: fixtureU1At})
 	md1, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid1, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -295,7 +316,7 @@ func TestRun_AnchorsTurnToRecordedCommit(t *testing.T) {
 		t.Fatalf("turn1 CommitSHA = %q, want recorded commit %q", md1.CommitSHA, firstSHA)
 	}
 
-	cid2 := DeriveCheckpointID("sess-anchor", "u2")
+	cid2 := importedCheckpointID(t, stores, "sess-anchor", Turn{UUID: "u2", CreatedAt: fixtureU2At})
 	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(), cid2, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -344,7 +365,7 @@ func TestRun_AppliesConfiguredCustomRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cid := DeriveCheckpointID("sess1", "u1")
+	cid := importedCheckpointID(t, stores, "sess1", Turn{UUID: "u1", CreatedAt: fixtureU1At})
 	sc, err := stores.Persistent.ReadSessionContent(context.Background(), cid, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -438,7 +459,7 @@ func TestRun_StampsImporterGitAuthorOnCheckpointCommit(t *testing.T) {
 	if !ok {
 		t.Fatalf("persistent store %T does not implement AuthorReader", stores.Persistent)
 	}
-	cid := DeriveCheckpointID("sess-author", "u1")
+	cid := importedCheckpointID(t, stores, "sess-author", Turn{UUID: "u1", CreatedAt: fixtureU1At})
 	author, err := ar.GetCheckpointAuthor(context.Background(), cid)
 	if err != nil {
 		t.Fatal(err)
@@ -520,7 +541,7 @@ func TestRun_UnconfiguredGitIdentityFallsBackToDefaults(t *testing.T) {
 	if !ok {
 		t.Fatalf("persistent store %T does not implement AuthorReader", stores.Persistent)
 	}
-	cid := DeriveCheckpointID("sess-noauthor", "u1")
+	cid := importedCheckpointID(t, stores, "sess-noauthor", Turn{UUID: "u1", CreatedAt: fixtureU1At})
 	author, err := ar.GetCheckpointAuthor(context.Background(), cid)
 	if err != nil {
 		t.Fatal(err)
@@ -619,7 +640,7 @@ func TestRun_CodexImportSanitizesAndKeepsOffsetsAligned(t *testing.T) {
 	if len(turns) == 0 {
 		t.Fatal("codex importer produced no turns")
 	}
-	cid := DeriveCheckpointID("codex-import-1", turns[0].UUID)
+	cid := importedCheckpointID(t, stores, "codex-import-1", turns[0])
 	sc, err := stores.Persistent.ReadSessionContent(context.Background(), cid, 0)
 	if err != nil {
 		t.Fatalf("ReadSessionContent(%s): %v", cid, err)
@@ -726,4 +747,247 @@ func TestRun_CancellationStopsRefsBackedImport(t *testing.T) {
 	if len(infos) != 1 {
 		t.Fatalf("wrote %d checkpoints after cancellation, want 1 (the in-flight turn)", len(infos))
 	}
+}
+
+// TestRun_GitRefsPrimaryDerivesULIDs: under a git-refs primary, imports get
+// ULID IDs like every other git-refs checkpoint, stamped with the turn's time,
+// and stay idempotent across re-runs.
+func TestRun_GitRefsPrimaryDerivesULIDs(t *testing.T) {
+	// Not parallel: sets the checkpoint backend via the environment.
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+
+	repo, repoDir := initRepoWithCommit(t)
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess-ulid.jsonl")
+	opts := Options{
+		LinkCommitSHA: repoHeadSHA(t, repo),
+		RepoRoot:      repoDir,
+		OverridePath:  claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+	}
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	want := map[id.CheckpointID]time.Time{}
+	for uuid, at := range map[string]time.Time{"u1": fixtureU1At, "u2": fixtureU2At} {
+		cid, err := DeriveULIDCheckpointID("sess-ulid", uuid, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[cid] = at
+	}
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, err := stores.Persistent.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != len(want) {
+		t.Fatalf("got %d checkpoints, want %d: %+v", len(infos), len(want), infos)
+	}
+	for _, info := range infos {
+		at, ok := want[info.CheckpointID]
+		if !ok {
+			t.Fatalf("unexpected checkpoint %s (kind %v), want the derived ULIDs", info.CheckpointID, info.CheckpointID.Kind())
+		}
+		if got, _ := info.CheckpointID.Time(); !got.Equal(at) {
+			t.Errorf("%s: ULID time = %v, want the turn's %v", info.CheckpointID, got, at)
+		}
+		if !info.Imported {
+			t.Errorf("%s: not flagged imported", info.CheckpointID)
+		}
+	}
+
+	res2, err := Run(context.Background(), repo, claudeImporter{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.TurnsImported != 0 || res2.TurnsSkipped != 2 {
+		t.Fatalf("re-run not idempotent: %+v", res2)
+	}
+
+	lastCID, err := DeriveULIDCheckpointID("sess-ulid", "u2", fixtureU2At)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := loadStateAt(t, repoDir, "sess-ulid"); st == nil || st.LastCheckpointID != lastCID {
+		t.Fatalf("session state LastCheckpointID = %+v, want %s", st, lastCID)
+	}
+}
+
+// TestRun_SkipsTurnsImportedUnderOtherPrimary: a turn already imported in one
+// ID format is a skip when re-imported after the primary switched to the
+// other backend, not a duplicate in the new format. Covers hex imports (from
+// git-branch, or from before imports followed the backend format) re-run under
+// git-refs, and ULID imports re-run after reverting to git-branch.
+func TestRun_SkipsTurnsImportedUnderOtherPrimary(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second string
+		wantKind            id.Kind
+	}{
+		{name: "hex then git-refs", first: "git-branch", second: "git-refs", wantKind: id.KindLegacy},
+		{name: "ULID then git-branch", first: "git-refs", second: "git-branch", wantKind: id.KindULID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Not parallel: sets the checkpoint backend via the environment.
+			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", tc.first)
+
+			repo, repoDir := initRepoWithCommit(t)
+			claudeDir := t.TempDir()
+			writeFixtureSession(t, claudeDir, "sess-switch.jsonl")
+			opts := Options{
+				LinkCommitSHA: repoHeadSHA(t, repo),
+				RepoRoot:      repoDir,
+				OverridePath:  claudeDir,
+				Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+			}
+
+			if res, err := Run(context.Background(), repo, claudeImporter{}, opts); err != nil || res.TurnsImported != 2 {
+				t.Fatalf("%s import: %+v, %v", tc.first, res, err)
+			}
+
+			t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", tc.second)
+			res, err := Run(context.Background(), repo, claudeImporter{}, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.TurnsImported != 0 || res.TurnsSkipped != 2 {
+				t.Fatalf("turns imported under %s were not skipped under %s: %+v", tc.first, tc.second, res)
+			}
+
+			stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			infos, err := stores.Persistent.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(infos) != 2 {
+				t.Fatalf("got %d checkpoints, want the 2 original imports: %+v", len(infos), infos)
+			}
+			for _, info := range infos {
+				if info.CheckpointID.Kind() != tc.wantKind {
+					t.Errorf("checkpoint %s: kind %v, want the original import's %v", info.CheckpointID, info.CheckpointID.Kind(), tc.wantKind)
+				}
+			}
+
+			last, _, err := turnCheckpointID("sess-switch", Turn{UUID: "u2", CreatedAt: fixtureU2At}, tc.first == "git-refs", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st := loadStateAt(t, repoDir, "sess-switch"); st == nil || st.LastCheckpointID != last {
+				t.Fatalf("session state LastCheckpointID = %+v, want the original import %s", st, last)
+			}
+		})
+	}
+}
+
+// TestRun_GitRefsModTimeTurnsKeepIDsAsTranscriptGrows: Cursor and Factory
+// turns carry the transcript file's modtime, which moves whenever the session
+// grows. Under git-refs that time must not feed the ULID, or re-importing a
+// grown transcript would write every earlier turn again under a new ID.
+func TestRun_GitRefsModTimeTurnsKeepIDsAsTranscriptGrows(t *testing.T) {
+	// Not parallel: sets the checkpoint backend via the environment.
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+
+	repo, repoDir := initRepoWithCommit(t)
+	cursorDir := t.TempDir()
+	path := filepath.Join(cursorDir, "sessGrow.jsonl")
+	lines := []string{
+		`{"role":"user","message":{"role":"user","content":"first"}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{LinkCommitSHA: repoHeadSHA(t, repo), RepoRoot: repoDir, OverridePath: cursorDir, Now: time.Now()}
+	if res, err := Run(context.Background(), repo, cursorImporter{}, opts); err != nil || res.TurnsImported != 1 {
+		t.Fatalf("first import: %+v, %v", res, err)
+	}
+
+	lines = append(lines, `{"role":"user","message":{"role":"user","content":"second"}}`)
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(context.Background(), repo, cursorImporter{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsSkipped != 1 || res.TurnsImported != 1 {
+		t.Fatalf("grown transcript: want the first turn skipped and the second imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, err := stores.Persistent.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 2 {
+		t.Fatalf("got %d checkpoints, want 2 (no duplicate of the first turn): %+v", len(infos), infos)
+	}
+}
+
+// TestRun_SkipsTurnsImportedOnlyOnRemote: from a fresh clone, turns imported
+// elsewhere exist only as remote refs. The idempotency listing must see them
+// by name, or a git-refs re-import writes hex-imported turns again as ULIDs.
+func TestRun_SkipsTurnsImportedOnlyOnRemote(t *testing.T) {
+	// Not parallel: sets the checkpoint backend via the environment.
+	t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+
+	repo, repoDir := initRepoWithCommit(t)
+	claudeDir := t.TempDir()
+	writeFixtureSession(t, claudeDir, "sess-remote.jsonl")
+	var remote []plumbing.ReferenceName
+	for _, uuid := range []string{"u1", "u2"} {
+		ref, err := cp.RefName(DeriveCheckpointID("sess-remote", uuid))
+		if err != nil {
+			t.Fatal(err)
+		}
+		remote = append(remote, ref)
+	}
+	opts := Options{
+		LinkCommitSHA:   repoHeadSHA(t, repo),
+		RepoRoot:        repoDir,
+		OverridePath:    claudeDir,
+		Now:             time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		RemoteRefLister: func(context.Context) ([]plumbing.ReferenceName, error) { return remote, nil },
+	}
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 0 || res.TurnsSkipped != 2 {
+		t.Fatalf("remote-only imports were not skipped: %+v", res)
+	}
+}
+
+// loadStateAt reads a session state by id from repoDir's store.
+func loadStateAt(t *testing.T, repoDir, sid string) *session.State {
+	t.Helper()
+	store, err := session.NewStateStoreForWorktree(context.Background(), repoDir)
+	if err != nil {
+		t.Fatalf("NewStateStoreForWorktree: %v", err)
+	}
+	st, err := store.Load(context.Background(), sid)
+	if err != nil {
+		t.Fatalf("Load %s: %v", sid, err)
+	}
+	return st
 }

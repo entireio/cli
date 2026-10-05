@@ -874,3 +874,67 @@ func getAttributionFromMetadata(t *testing.T, repo *git.Repository, checkpointID
 
 	return metadata.Attribution
 }
+
+// TestManualCommit_Attribution_AgentShellEditToPreexistingUntrackedFile pins
+// that an agent's shell edit to an untracked file that already existed when
+// the prompt arrived reaches the turn's snapshot. Turn-end detection reports
+// untracked files only when they are new to the turn, and the transcript names
+// no file for a shell command, so the edit stayed out of the snapshot and the
+// next prompt counted its lines as user work.
+func TestManualCommit_Attribution_AgentShellEditToPreexistingUntrackedFile(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	sess := env.NewSession()
+
+	const (
+		notesFile = "docs/notes.md"
+		turnOne   = "First line written by the agent.\nSecond line written by the agent.\nThird line written by the agent.\n"
+		turnTwo   = turnOne + "Fourth line appended by an agent shell command.\nFifth line appended by an agent shell command.\n"
+	)
+
+	// Turn 1: the agent creates the file with an edit tool call.
+	sess.CreateTranscript("write the notes", []FileChange{{Path: notesFile, Content: turnOne}})
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit (turn 1) failed: %v", err)
+	}
+	env.WriteFile(notesFile, turnOne)
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop (turn 1) failed: %v", err)
+	}
+
+	// Turn 2: the file is untracked and pre-existing; the agent appends to it
+	// through a shell command, so the transcript names no file.
+	sess.CreateTranscript("append two lines with a shell command", nil)
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit (turn 2) failed: %v", err)
+	}
+	env.WriteFile(notesFile, turnTwo)
+	if err := env.SimulateStop(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop (turn 2) failed: %v", err)
+	}
+
+	// Turn 3 starts: its prompt attribution must not see the shell edit as user work.
+	if err := env.SimulateUserPromptSubmitWithTranscriptPath(sess.ID, sess.TranscriptPath); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit (turn 3) failed: %v", err)
+	}
+	env.GitCommitWithShadowHooks("Add notes", notesFile)
+
+	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
+	if checkpointID == "" {
+		t.Fatal("commit should carry an Entire-Checkpoint trailer")
+	}
+	content, ok := env.ReadFileFromBranch(paths.MetadataBranchName, SessionMetadataPath(checkpointID))
+	if !ok {
+		t.Fatalf("session metadata.json not found for checkpoint %s", checkpointID)
+	}
+	var metadata checkpoint.Metadata
+	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+		t.Fatalf("parse session metadata: %v", err)
+	}
+	if metadata.Attribution == nil {
+		t.Fatal("session metadata has no attribution")
+	}
+	if attr := metadata.Attribution; attr.AgentLines != 5 || attr.HumanAdded != 0 {
+		t.Errorf("attribution: agent_lines=%d human_added=%d, want agent_lines=5 human_added=0", attr.AgentLines, attr.HumanAdded)
+	}
+}

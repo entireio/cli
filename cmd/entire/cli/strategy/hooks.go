@@ -263,10 +263,10 @@ func HooksDirLinkTarget(hooksDir string) (string, bool) {
 //
 // Quoted only when it needs to be, so the common clean path stays readable.
 func HooksPathCommand(dir string) string {
-	return "git config core.hooksPath " + shellQuoteForDisplay(dir)
+	return "git config core.hooksPath " + ShellQuoteForDisplay(dir)
 }
 
-// shellQuoteForDisplay quotes a path for a command line the USER will paste. It
+// ShellQuoteForDisplay quotes a value for a command line the USER will paste. It
 // is not for building an argv -- nothing here is executed, and a path that
 // reaches an exec goes as a separate argument instead (see docs/development/git-safety.md's
 // "Never Put a Dynamic Value on a cmd.exe Line").
@@ -279,7 +279,7 @@ func HooksPathCommand(dir string) string {
 // path.
 //
 // Quoted only when it has to be, so the ordinary path stays readable.
-func shellQuoteForDisplay(s string) string {
+func ShellQuoteForDisplay(s string) string {
 	if s != "" && !strings.ContainsFunc(s, needsShellQuote) {
 		return s
 	}
@@ -292,12 +292,18 @@ func shellQuoteForDisplay(s string) string {
 // needsShellQuote reports a rune that is not safe bare in a shell word. An
 // allowlist, so a character nobody has considered is quoted rather than passed
 // through.
+//
+// A backslash is literal only on Windows, where it separates path components.
+// A POSIX shell reads it as an escape and drops it, and a trailing one joins
+// the next pasted line onto this one.
 func needsShellQuote(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 		return false
+	case r == '\\':
+		return runtime.GOOS != goosWindows
 	}
-	return !strings.ContainsRune(`_@%+=:,./-\`, r)
+	return !strings.ContainsRune(`_@%+=:,./-`, r)
 }
 
 // symlinkedHooksDirError explains a refusal from hooksRootForInstall in terms of

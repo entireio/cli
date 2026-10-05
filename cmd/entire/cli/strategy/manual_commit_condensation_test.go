@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -1254,6 +1256,117 @@ func TestCondenseSession_TranscriptUnavailableDoesNotProbeGenericLayout(t *testi
 	taskJSON, found := checkpointTaskFile(t, repo, checkpointID, "tasks/"+toolUseID+"/task.json")
 	require.True(t, found)
 	require.Contains(t, taskJSON, taskTranscriptReasonUnresolvable)
+}
+
+// TestMaterializeTaskRecords_CodexRecordWithoutPathResolvesThroughInventory
+// covers a Codex parent that commits mid-turn, after its child finished but
+// before the parent's Stop refreshed the inventory: the task record has no
+// declared path, and the Claude-layout fallback cannot find a Codex rollout.
+// Condensation must resolve the rollout by session_meta.id through the
+// inventory instead of storing a reason-only task.json, and must still refuse
+// a rollout whose session_meta.id names a different agent.
+func TestMaterializeTaskRecords_CodexRecordWithoutPathResolvesThroughInventory(t *testing.T) {
+	const agentID = "01a1024d-83c0-78f2-9d06-1d122de7dab4"
+	tests := []struct {
+		name           string
+		rolloutID      string
+		wantTranscript bool
+	}{
+		{name: "matching session_meta id", rolloutID: agentID, wantTranscript: true},
+		{name: "mismatched session_meta id", rolloutID: "01a1024d-0000-0000-0000-000000000000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, state := setupCondensableSessionWithTranscript(t, "2026-10-03-codex-mid-turn-"+tt.rolloutID)
+
+			sessions := t.TempDir()
+			rollout := filepath.Join(sessions, "2026", "10", "03", "rollout-2026-10-03T17-06-36-"+tt.rolloutID+".jsonl")
+			writeCodexRolloutFixture(t, rollout, tt.rolloutID)
+
+			// The shape RecordSubagentStop leaves behind before any refresh:
+			// an inventory entry and an in-flight record, neither with a path.
+			state.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: agentID, ObservedTurnIDs: []string{"turn-1"}}}
+			state.TaskRecords = []session.TaskRecord{{ToolUseID: agentID, AgentID: agentID}}
+
+			ag := &codex.CodexAgent{RolloutRoots: []string{sessions}}
+			payloads, _ := (&ManualCommitStrategy{}).materializeTaskRecords(context.Background(), context.Background(), ag, state, nil)
+			require.Len(t, payloads, 1)
+			if !tt.wantTranscript {
+				require.Equal(t, taskTranscriptReasonUnresolvable, payloads[0].TranscriptUnavailableReason)
+				require.Empty(t, payloads[0].Transcript.Bytes())
+				return
+			}
+			require.Empty(t, payloads[0].TranscriptUnavailableReason)
+			require.Contains(t, string(payloads[0].Transcript.Bytes()), "added count")
+		})
+	}
+}
+
+// TestMaterializeTaskRecords_CodexRelocatedRolloutResolvesThroughInventory
+// covers a declared path that went stale: Codex archived the rollout after the
+// turn-end refresh recorded its path on the task record. The declared path no
+// longer exists and the Claude-layout fallback cannot find a Codex rollout, so
+// condensation must re-resolve it by session_meta.id through the inventory.
+func TestMaterializeTaskRecords_CodexRelocatedRolloutResolvesThroughInventory(t *testing.T) {
+	const agentID = "01a1024d-83c0-78f2-9d06-1d122de7dab4"
+	_, state := setupCondensableSessionWithTranscript(t, "2026-10-03-codex-relocated-rollout")
+
+	root := t.TempDir()
+	name := filepath.Join("2026", "10", "03", "rollout-2026-10-03T17-06-36-"+agentID+".jsonl")
+	stale := filepath.Join(root, "sessions", name)
+	archived := filepath.Join(root, "archived_sessions", name)
+	writeCodexRolloutFixture(t, archived, agentID)
+
+	state.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: agentID, ObservedTurnIDs: []string{"turn-1"}, ResolvedTranscriptPath: stale}}
+	state.TaskRecords = []session.TaskRecord{{ToolUseID: agentID, AgentID: agentID, DeclaredTranscriptPath: stale, CompletedAt: time.Now()}}
+
+	ag := &codex.CodexAgent{RolloutRoots: []string{filepath.Join(root, "sessions"), filepath.Join(root, "archived_sessions")}}
+	payloads, _ := (&ManualCommitStrategy{}).materializeTaskRecords(context.Background(), context.Background(), ag, state, nil)
+	require.Len(t, payloads, 1)
+	require.Empty(t, payloads[0].TranscriptUnavailableReason)
+	require.Contains(t, string(payloads[0].Transcript.Bytes()), "added count")
+}
+
+// TestMaterializeTaskRecords_CodexUnreadableDeclaredPathResolvesThroughInventory
+// covers a declared path that exists but cannot be opened: an existence check
+// alone would keep it off the inventory resolver, and reading it then fails.
+// The declared file sits outside the rollout roots, because an unreadable file
+// inside them makes the Codex scan fail closed by design.
+func TestMaterializeTaskRecords_CodexUnreadableDeclaredPathResolvesThroughInventory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test removes")
+	}
+	if runtime.GOOS == goosWindows {
+		t.Skip("unix permission bits")
+	}
+	const agentID = "01a1024d-83c0-78f2-9d06-1d122de7dab4"
+	_, state := setupCondensableSessionWithTranscript(t, "2026-10-03-codex-unreadable-declared")
+
+	root := t.TempDir()
+	declared := filepath.Join(root, "declared", "rollout.jsonl")
+	writeCodexRolloutFixture(t, declared, agentID)
+	require.NoError(t, os.Chmod(declared, 0o000))
+	sessions := filepath.Join(root, "sessions")
+	writeCodexRolloutFixture(t, filepath.Join(sessions, "2026", "10", "03", "rollout-"+agentID+".jsonl"), agentID)
+
+	state.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: agentID, ObservedTurnIDs: []string{"turn-1"}, DeclaredTranscriptPath: declared}}
+	state.TaskRecords = []session.TaskRecord{{ToolUseID: agentID, AgentID: agentID, DeclaredTranscriptPath: declared, CompletedAt: time.Now()}}
+
+	ag := &codex.CodexAgent{RolloutRoots: []string{sessions}}
+	payloads, _ := (&ManualCommitStrategy{}).materializeTaskRecords(context.Background(), context.Background(), ag, state, nil)
+	require.Len(t, payloads, 1)
+	require.Empty(t, payloads[0].TranscriptUnavailableReason)
+	require.Contains(t, string(payloads[0].Transcript.Bytes()), "added count")
+}
+
+// writeCodexRolloutFixture writes a minimal Codex rollout whose session_meta.id
+// is id, with one assistant message reading "added count".
+func writeCodexRolloutFixture(t *testing.T, path, id string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"type":"session_meta","payload":{"id":"`+id+`"}}`+"\n"+
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"added count"}]}}`+"\n"), 0o600))
 }
 
 // TestCondenseSession_InFlightTaskRecord_TranscriptSoFarStoredRecordSurvives

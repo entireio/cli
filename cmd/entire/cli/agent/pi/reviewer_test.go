@@ -2,10 +2,13 @@ package pi
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 )
@@ -32,7 +35,11 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 	if cmd.Args[0] != "pi" {
 		t.Fatalf("Args[0] = %q, want pi; args=%v", cmd.Args[0], cmd.Args)
 	}
-	wantPrefix := []string{"pi", "--mode", "json", "--print", "--model", "anthropic/claude-sonnet-4-5:high"}
+	extPath, err := reviewExtensionPath()
+	if err != nil {
+		t.Fatalf("reviewExtensionPath: %v", err)
+	}
+	wantPrefix := []string{"pi", "--mode", "json", "--print", "--no-approve", "--no-extensions", "--extension", extPath, "--model", "anthropic/claude-sonnet-4-5:high"}
 	if len(cmd.Args) != len(wantPrefix)+1 {
 		t.Fatalf("args len = %d, want %d: %v", len(cmd.Args), len(wantPrefix)+1, cmd.Args)
 	}
@@ -54,6 +61,36 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 	}
 	if env[review.EnvStartingSHA] != "abc123" {
 		t.Errorf("%s = %q, want abc123", review.EnvStartingSHA, env[review.EnvStartingSHA])
+	}
+}
+
+// Pi loads every extension under the checkout's .pi/extensions as code, so the
+// reviewer turns discovery off and loads Entire's extension from a copy the
+// binary writes outside the checkout.
+func TestPiReviewer_LoadsEntireExtensionFromBinary(t *testing.T) {
+	// No t.Parallel: t.Setenv isolates the cache directory the copy lands in.
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	// Prepare opens a shared root over the cache dir; release it so the temp
+	// dir can be removed (an open handle blocks that on Windows).
+	t.Cleanup(osroot.ResetShared)
+
+	if err := NewReviewer().Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	extPath, err := reviewExtensionPath()
+	if err != nil {
+		t.Fatalf("reviewExtensionPath: %v", err)
+	}
+	if !strings.HasPrefix(extPath, cacheHome) {
+		t.Fatalf("extension path %q is not under the cache dir %q", extPath, cacheHome)
+	}
+	got, err := os.ReadFile(extPath)
+	if err != nil {
+		t.Fatalf("read written extension: %v", err)
+	}
+	if string(got) != renderExtension() {
+		t.Error("written extension does not match the one the binary renders")
 	}
 }
 
@@ -213,4 +250,30 @@ func envMap(env []string) map[string]string {
 		out[kv[:idx]] = kv[idx+1:]
 	}
 	return out
+}
+
+// TestPiReviewer_TooOldForIsolation: a pi that predates --no-approve (e.g.
+// 0.70.2) rejects it with "Unknown option" and exits before loading anything,
+// so the review fails closed. It must say to update pi rather than surface the
+// bare option error; an unrelated failure keeps the default error.
+func TestPiReviewer_TooOldForIsolation(t *testing.T) {
+	t.Parallel()
+	classify := NewReviewer().ClassifyExit
+	if classify == nil {
+		t.Fatal("pi reviewer has no ClassifyExit; a pi too old for --no-approve would fail with a bare option error")
+	}
+	exitErr := errors.New("exit status 1")
+
+	got := classify("Error: Unknown option: --no-approve", exitErr)
+	if got == nil || !strings.Contains(got.Error(), "--no-approve") || !strings.Contains(got.Error(), "update pi") {
+		t.Fatalf("classify(unknown --no-approve) = %v, want an update-pi error naming --no-approve", got)
+	}
+	if !errors.Is(got, exitErr) {
+		t.Errorf("classified error does not wrap the exit error")
+	}
+	for _, stderr := range []string{"Error: Unknown option: --frobnicate", `Error: Model "x" not found.`, ""} {
+		if got := classify(stderr, exitErr); got != nil {
+			t.Errorf("classify(%q) = %v, want nil", stderr, got)
+		}
+	}
 }

@@ -40,6 +40,41 @@ remains available through `entire review --findings` even after target cleanup.
 Positive integer targets always mean trail numbers rather than numeric branch
 names; this avoids a local branch silently shadowing a trail selector.
 
+## Reviewer isolation
+
+A reviewer runs inside the checkout it reviews, which for `--target` is a
+branch someone else may control. Reviewers therefore do not load
+execution-capable agent configuration from that checkout:
+
+- claude-code runs with `--setting-sources user` and `--strict-mcp-config`, so
+  the checkout's `.claude/settings.json`, `.claude/settings.local.json`, and
+  `.mcp.json` are not loaded; Entire's lifecycle hooks are passed from the
+  binary via `--settings`. The user's own MCP servers are not loaded either.
+  The same flags keep the checkout's `.claude/commands`, `.claude/skills`, and
+  `.claude/agents` from being discovered, so a branch cannot shadow `/review`
+  with a command whose `!` lines run shell commands; the user's own commands
+  and skills still resolve. Checked on Claude Code 2.0.0 through 2.1.286. A
+  Claude Code older than `--setting-sources` (e.g. 1.0.x) rejects the flag and
+  exits before loading anything, and the review fails with a message to update
+  Claude Code.
+- pi runs with `--no-approve` and `--no-extensions`, so `.pi/settings.json`,
+  `.pi/extensions/`, `.pi/SYSTEM.md`, and extensions or packages named in
+  project settings are not loaded, even when the repository is trusted (pi
+  inherits trust from the nearest trusted ancestor, which covers review
+  worktrees). Entire's extension is loaded with `--extension` from a copy the
+  binary writes to the per-user cache directory.
+- codex, on a `--target` run, runs with the checkout marked untrusted
+  (`-c projects={"<checkout>"={trust_level="untrusted"}}`), so the checkout's
+  `.codex/config.toml`, `mcp_servers` and `hooks.json` included, is not
+  loaded. Without it, a review worktree inside a repository the user trusts in
+  codex is trusted too. A plain `entire review` in the user's own checkout
+  keeps codex's normal trust, so Entire's codex hooks still tag the session.
+
+The user's own agent settings still apply. For claude-code, the checkout's
+`CLAUDE.md` is not preloaded as project instructions and its project skills
+are not available, so a profile that names a project-level skill does not
+resolve it; the reviewer can still read `CLAUDE.md` with its file tools.
+
 ## Profiles
 
 Profiles live in:
@@ -124,7 +159,7 @@ When `RunMulti` is dispatched in a TTY, sink composition includes a live Bubble 
 
 ## Skill Discovery (Claude Code)
 
-`DiscoverReviewSkills` (`cmd/entire/cli/agent/claudecode/discovery.go`) walks three roots: plugin cache (`~/.claude/plugins/cache/<market>/<plugin>/<version>/{skills,commands,agents}`), user skills (`~/.claude/skills`), and user commands/agents (`~/.claude/commands`, `~/.claude/agents`).
+`DiscoverReviewSkills` (`cmd/entire/cli/agent/claudecode/discovery.go`) walks three roots under Claude Code's config directory (`$CLAUDE_CONFIG_DIR`, default `~/.claude`): plugin cache (`plugins/cache/<market>/<plugin>/<version>/{skills,commands,agents}`), user skills (`skills`), and user commands/agents (`commands`, `agents`).
 
 For the plugin cache, `pickLatestVersion` picks one version directory per plugin: highest valid semver wins; if no entries parse as semver, the lexicographic max is picked.
 

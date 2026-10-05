@@ -2207,9 +2207,10 @@ func TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles(t *testing.
 	}
 }
 
-// TestWriteTemporary_PathNormalizationAndSkipping verifies that shadow branch writes
-// normalize absolute in-repo paths back to repo-relative tree entries and skip invalid
-// paths rather than encoding them into git trees.
+// TestWriteTemporary_PathNormalizationAndSkipping verifies that file paths an
+// agent reports, valid or not, never become malformed git tree entries. A
+// snapshot captures the dirty worktree from git status, so the changed main.go
+// is in the snapshot however the agent named it, or whether it named it at all.
 func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -2224,18 +2225,18 @@ func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 			wantUpdated: true,
 		},
 		{
-			name: "absolute outside repo path is skipped",
+			name: "absolute outside repo path is ignored",
 			modifiedFiles: func(_, _ string) []string {
 				return []string{"C:/Users/rober/Vaults/Flowsign/main.go"}
 			},
-			wantUpdated: false,
+			wantUpdated: true,
 		},
 		{
-			name: "empty segment path is skipped",
+			name: "empty segment path is ignored",
 			modifiedFiles: func(_, _ string) []string {
 				return []string{"dir//main.go"}
 			},
-			wantUpdated: false,
+			wantUpdated: true,
 		},
 	}
 
@@ -4529,7 +4530,7 @@ func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing
 			if err != nil {
 				t.Fatalf("failed to read task.json: %v", err)
 			}
-			var meta taskRecordMetadata
+			var meta TaskRecord
 			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
 				t.Fatalf("failed to unmarshal task.json: %v", err)
 			}
@@ -4612,7 +4613,7 @@ func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJS
 	if err != nil {
 		t.Fatalf("failed to read task.json: %v", err)
 	}
-	var meta taskRecordMetadata
+	var meta TaskRecord
 	if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
 		t.Fatalf("failed to unmarshal task.json: %v", err)
 	}
@@ -4721,7 +4722,7 @@ func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
 			if strings.Contains(taskContent, awsKeyFixture) {
 				t.Errorf("task.json still carries the secret: %s", taskContent)
 			}
-			var meta taskRecordMetadata
+			var meta TaskRecord
 			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
 				t.Fatalf("failed to unmarshal task.json: %v", err)
 			}

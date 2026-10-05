@@ -13,6 +13,7 @@ type ClaudeHooks struct {
 	SessionEnd       []ClaudeHookMatcher `json:"SessionEnd,omitempty"`
 	UserPromptSubmit []ClaudeHookMatcher `json:"UserPromptSubmit,omitempty"`
 	Stop             []ClaudeHookMatcher `json:"Stop,omitempty"`
+	StopFailure      []ClaudeHookMatcher `json:"StopFailure,omitempty"`
 	SubagentStop     []ClaudeHookMatcher `json:"SubagentStop,omitempty"`
 	PreToolUse       []ClaudeHookMatcher `json:"PreToolUse,omitempty"`
 	PostToolUse      []ClaudeHookMatcher `json:"PostToolUse,omitempty"`
@@ -65,8 +66,19 @@ type postToolHookInputRaw struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 	ToolResponse   struct {
 		AgentID string `json:"agentId"`
+		// Status and IsAsync report how Claude Code actually ran an Agent
+		// call: "completed" once a foreground subagent finished,
+		// "async_launched" (with isAsync) when it returned at launch.
+		Status  string `json:"status"`
+		IsAsync bool   `json:"isAsync"`
 	} `json:"tool_response"`
 }
+
+// Agent tool_response.status values that identify the launch mode.
+const (
+	agentToolStatusCompleted     = "completed"
+	agentToolStatusAsyncLaunched = "async_launched"
+)
 
 // subagentStopHookInputRaw is the JSON structure from the SubagentStop hook.
 // Per the Agent SDK docs this also carries hook_event_name and cwd, which

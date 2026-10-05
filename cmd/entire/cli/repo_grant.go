@@ -30,8 +30,9 @@ import (
 // on reads as a bug the first time and a lie the second.
 
 // mirrorCollaboratorColumns is the mirror half of `repo grant list`. It is
-// grantColumns' leading pair, the two things the mirror endpoint answers for:
-// who, and with which role. The columns behind them are the native listing's
+// grantColumns' GRANTEE and ROLE, the two things the mirror endpoint answers
+// for: who, and with which role. NAME is absent because MirrorCollaborator
+// carries no display name yet. The columns behind them are the native listing's
 // provenance (SOURCE/TYPE), which the mirror endpoint does not report and which
 // would be invented if this table filled them in. Like every grant table it
 // prints no internal id — the account ULID is in the --json output.
@@ -113,7 +114,8 @@ const repoGrantListLong = "List who can reach a repository.\n\n" +
 	"`source`, plus `granteeName` when a name resolved, so one script reads either. " +
 	"A mirror's rows carry no `granteeType`: that endpoint reports no grantee kind, " +
 	"and the missing key is the answer, since an Entire repository's rows always " +
-	"have one."
+	"have one. Nor do they carry `displayName`, which an Entire repository's account " +
+	"rows have when the account has a name: the mirror endpoint reports no names."
 
 const repoGrantListExample = "  entire repo grant list /" + nativeCloneForge + "/acme/web\n" +
 	"  entire repo grant list /" + mirrorCloneForge + "/acme/widget"
@@ -264,7 +266,7 @@ func mirrorReadTarget(cmd *cobra.Command, owner, repo string) (clusterHost strin
 		switch clusterHost = mirrorReadCluster(placements); {
 		case clusterHost != "":
 		case len(placements) == 0:
-			// `repo mirror get` cannot answer here: it resolves through the
+			// `repo view` cannot answer here: it resolves through the
 			// affiliation-scoped repo directory, which is narrower than the
 			// pull-gated lookup that just came back empty, so it would fail
 			// for the same reason one step later. What is left is the login —
@@ -274,7 +276,7 @@ func mirrorReadTarget(cmd *cobra.Command, owner, repo string) (clusterHost strin
 				next:   mirrorLoginHint(),
 			}
 		default:
-			// Placements DID resolve, so `repo mirror get` will list them.
+			// Placements DID resolve, so `repo view` will list them.
 			guess = &clusterGuess{
 				reason: "no placement named a cluster host this command can dial",
 				next:   mirrorPlacementsHint(owner, repo),
@@ -298,11 +300,11 @@ func mirrorLoginHint() string {
 }
 
 // mirrorPlacementsHint names the verb that lists a mirror's real placements. It
-// answers only where placements DID resolve: `repo mirror get` reads the
+// answers only where placements DID resolve: `repo view` reads the
 // affiliation-scoped repo directory, so it cannot see what the broader
 // pull-gated lookup could not.
 func mirrorPlacementsHint(owner, repo string) string {
-	return fmt.Sprintf("`entire repo mirror get /%s/%s/%s` lists its placements.", mirrorCloneForge, owner, repo)
+	return fmt.Sprintf("`entire repo view /%s/%s/%s` lists its placements.", mirrorCloneForge, owner, repo)
 }
 
 // mirrorReadCluster picks which placement answers for the mirror. Any of them

@@ -70,6 +70,7 @@ func TestGranteeName(t *testing.T) {
 		want string
 	}{
 		{name: "friendly name wins", in: coreapi.NewOptString("github:alice"), id: ulid, want: "github:alice"},
+		{name: "google minted handle shows the subject id", in: coreapi.NewOptString("google:google-1001"), id: ulid, want: "google:1001"},
 		{name: "unset falls back to ULID", in: coreapi.OptString{}, id: ulid, want: ulid},
 		{name: "empty string falls back to ULID", in: coreapi.NewOptString(""), id: ulid, want: ulid},
 	}
@@ -90,7 +91,7 @@ func TestGrantRows(t *testing.T) {
 	// grantColumns and the row builders must stay in lockstep — same width,
 	// same column order — or the table header and cells misalign. No column
 	// carries an internal id: the grantee ULID stays in --json only.
-	require.Equal(t, []string{"GRANTEE", "ROLE", "SOURCE", "TYPE"}, grantColumns)
+	require.Equal(t, []string{"GRANTEE", "NAME", "ROLE", "SOURCE", "TYPE"}, grantColumns)
 
 	t.Run("project resolved name", func(t *testing.T) {
 		t.Parallel()
@@ -101,22 +102,59 @@ func TestGrantRows(t *testing.T) {
 			Role:        "writer",
 			Source:      "direct",
 		})
-		require.Equal(t, []string{"github:alice", "writer", "direct", "account"}, row)
+		require.Equal(t, []string{"github:alice", "-", "writer", "direct", "account"}, row)
+	})
+
+	t.Run("project shows the display name", func(t *testing.T) {
+		t.Parallel()
+		row := projectGrantRow(coreapi.ProjectGrant{
+			GranteeId:   ulid,
+			GranteeName: coreapi.NewOptString("google:google-1001"),
+			DisplayName: coreapi.NewOptString("  Victor Gutierrez "),
+			GranteeType: "account",
+			Role:        "writer",
+			Source:      "direct",
+		})
+		require.Equal(t, []string{"google:1001", "Victor Gutierrez", "writer", "direct", "account"}, row)
+	})
+
+	t.Run("repo shows the display name", func(t *testing.T) {
+		t.Parallel()
+		row := repoGrantRow(coreapi.RepoGrant{
+			GranteeId:   ulid,
+			GranteeName: coreapi.NewOptString("github:alice"),
+			DisplayName: coreapi.NewOptString("Alice Smith"),
+			GranteeType: "account",
+			Role:        "admin",
+			Source:      "direct",
+		})
+		require.Equal(t, []string{"github:alice", "Alice Smith", "admin", "direct", "account"}, row)
 	})
 
 	// Org membership is the same table shape at the front: the grantee's
 	// handle first, the account ULID only when the server sent no handle.
 	t.Run("org member shows the handle", func(t *testing.T) {
 		t.Parallel()
-		require.Equal(t, []string{"GRANTEE", "ROLE", "STATUS"}, orgMemberColumns)
-		row := orgMemberRow(coreapi.Membership{AccountId: ulid, Handle: coreapi.NewOptString("github:alice"), Role: "owner", Status: "active"})
-		require.Equal(t, []string{"github:alice", "owner", "active"}, row)
+		require.Equal(t, []string{"GRANTEE", "NAME", "ROLE", "STATUS"}, orgMemberColumns)
+		row := orgMemberRow(coreapi.OrgMemberListItem{AccountId: ulid, Handle: coreapi.NewOptString("github:alice"), Role: "owner", Status: "active"})
+		require.Equal(t, []string{"github:alice", "-", "owner", "active"}, row)
 	})
 
 	t.Run("org member without a handle falls back to the ULID", func(t *testing.T) {
 		t.Parallel()
-		row := orgMemberRow(coreapi.Membership{AccountId: ulid, Role: "member", Status: "pending"})
-		require.Equal(t, []string{ulid, "member", "pending"}, row)
+		row := orgMemberRow(coreapi.OrgMemberListItem{AccountId: ulid, Role: "member", Status: "pending"})
+		require.Equal(t, []string{ulid, "-", "member", "pending"}, row)
+	})
+
+	// A Google handle is only a subject id, so the display name the server
+	// sends is what names the person.
+	t.Run("org member shows the display name", func(t *testing.T) {
+		t.Parallel()
+		row := orgMemberRow(coreapi.OrgMemberListItem{
+			AccountId: ulid, Handle: coreapi.NewOptString("google:google-1001"),
+			DisplayName: coreapi.NewOptString("Victor Gutierrez"), Role: "writer", Status: "active",
+		})
+		require.Equal(t, []string{"google:1001", "Victor Gutierrez", "writer", "active"}, row)
 	})
 
 	t.Run("repo unresolved name falls back to ULID", func(t *testing.T) {
@@ -128,6 +166,6 @@ func TestGrantRows(t *testing.T) {
 			Role:        "reader",
 			Source:      "inherited",
 		})
-		require.Equal(t, []string{ulid, "reader", "inherited", "team"}, row)
+		require.Equal(t, []string{ulid, "-", "reader", "inherited", "team"}, row)
 	})
 }

@@ -77,7 +77,7 @@ func TestPostTrailCreateUsesNativeRepoBasePath(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	_, err := postTrailCreate(t.Context(), api.NewClientWithBaseURL("token", srv.URL), basePath,
-		"et", "entirehq", "marvin", "Native trail", "", "feature/native", "main", "open", "", "", nil)
+		"et", "entirehq", "marvin", "Native trail", "", "feature/native", "main", "open", "", "", nil, true)
 	require.NoError(t, err)
 	require.Equal(t, http.MethodPost, gotMethod)
 	require.Equal(t, basePath, gotPath)
@@ -939,11 +939,12 @@ func TestDeleteTrailByNumber(t *testing.T) {
 	})
 }
 
-// TestParseTrailRepoShape_GitSuffixIsForgeAware pins that a bare triple keeps
-// `.git` for a native ref and drops it for a mirror ref. `entire trail` refuses
-// native refs downstream (errTrailsNativeUnsupported), so this is about the
-// parser reporting the name it was given rather than a user-visible unlock.
-func TestParseTrailRepoShape_GitSuffixIsForgeAware(t *testing.T) {
+// TestParseTrailRepoShape_GitSuffixIsDroppedOnEveryForge pins that a bare
+// triple drops `.git` whichever forge it names. Both forges reach a trails
+// route — a mirror by forge/owner/repo, a native repo by ULID through
+// trailRepoBasePath — so this is user-visible normalization: `--repo
+// et/p/foo.git` and `--repo et/p/foo` name one repository.
+func TestParseTrailRepoShape_GitSuffixIsDroppedOnEveryForge(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
@@ -952,9 +953,16 @@ func TestParseTrailRepoShape_GitSuffixIsForgeAware(t *testing.T) {
 		wantOwner string
 		wantRepo  string
 	}{
-		{name: "native keeps the suffix", raw: "et/audit1/foo.git", wantForge: "et", wantOwner: "audit1", wantRepo: "foo.git"},
+		{name: "native drops the suffix", raw: "et/audit1/foo.git", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
 		{name: "native without a suffix", raw: "et/audit1/foo", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
 		{name: "mirror drops the suffix", raw: "gh/acme/app.git", wantForge: "gh", wantOwner: "acme", wantRepo: "app"},
+		// Case is not part of the suffix. This value is typically pasted
+		// from a clone URL, and the server cuts the suffix with EqualFold,
+		// so a case-sensitive drop here forwards "foo.GIT" as a repo
+		// coordinate — a name the trails route cannot match.
+		{name: "native drops an uppercase suffix", raw: "et/audit1/foo.GIT", wantForge: "et", wantOwner: "audit1", wantRepo: "foo"},
+		{name: "mirror drops a mixed-case suffix", raw: "gh/acme/app.Git", wantForge: "gh", wantOwner: "acme", wantRepo: "app"},
+		{name: "a longer dotted extension survives", raw: "gh/acme/app.gitignore", wantForge: "gh", wantOwner: "acme", wantRepo: "app.gitignore"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -963,6 +971,34 @@ func TestParseTrailRepoShape_GitSuffixIsForgeAware(t *testing.T) {
 			require.Equal(t, tc.wantForge, forge)
 			require.Equal(t, tc.wantOwner, owner)
 			require.Equal(t, tc.wantRepo, repo)
+		})
+	}
+}
+
+// TestParseTrailRepoShape_RefusesNamesTheTrimManufactures pins that the segment
+// check runs again AFTER the suffix is dropped. The emptiness check ahead of the
+// trim sees the name as typed, so ".git" and "..git" both passed it and then
+// became "" and "." — coordinates the trim invented, forwarded to a trails
+// route. Neither forge is exempt.
+func TestParseTrailRepoShape_RefusesNamesTheTrimManufactures(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		"et/acme/.git",   // empties
+		"et/acme/..git",  // becomes "."
+		"et/acme/...git", // becomes ".."
+		"gh/acme/.git",
+		"gh/acme/..git",
+		// The manufactured-name guard has to cover every case of the
+		// suffix too, or the case-insensitive cut reopens exactly the hole
+		// the case-sensitive one had closed.
+		"et/acme/.GIT",
+		"et/acme/..GIT",
+		"gh/acme/..Git",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, err := parseTrailRepoShape(raw)
+			require.Error(t, err)
 		})
 	}
 }

@@ -529,6 +529,10 @@ type Response struct {
 
 // Config holds the configuration for a search request.
 type Config struct {
+	// Forge, Owner, and Repo name the current repository for the default
+	// (single-repo) scope. Forge is the entire:// path token ("gh", "et");
+	// empty means the origin's forge is unknown and the bare pair is used.
+	Forge    string
 	Owner    string
 	Repo     string
 	Repos    []string
@@ -559,7 +563,14 @@ func (c Config) ScopeSlugs() (slugs []string, allRepos bool) {
 		return nil, true
 	}
 	if c.Owner != "" && c.Repo != "" {
-		return []string{c.Owner + "/" + c.Repo}, false
+		// Keep the forge on the default slug: the control plane reads a bare
+		// owner/repo as "either forge", so a native repo and a same-named
+		// GitHub mirror would otherwise both match.
+		slug := c.Owner + "/" + c.Repo
+		if c.Forge != "" {
+			slug = c.Forge + "/" + slug
+		}
+		return []string{slug}, false
 	}
 	return nil, false
 }
