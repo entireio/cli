@@ -1771,7 +1771,7 @@ func TestPrintTrailDetailsOmitsWhitespacePhase(t *testing.T) {
 		Base:   "main",
 		Status: trail.StatusOpen,
 		Phase:  "   ",
-	}, "", nil, "")
+	}, "", nil, nil, "")
 
 	if text := out.String(); strings.Contains(text, "Phase:") {
 		t.Fatalf("expected whitespace phase to be omitted, got:\n%s", text)
@@ -1783,7 +1783,7 @@ func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
 	m := &trail.Metadata{Title: "T", Branch: "feat/a", Base: "main", Status: trail.StatusOpen}
 
 	var out bytes.Buffer
-	printTrailDetails(&out, m, "https://entire.io/gh/acme/repo/trails/5", nil, "line one\nline two")
+	printTrailDetails(&out, m, "https://entire.io/gh/acme/repo/trails/5", nil, nil, "line one\nline two")
 	text := out.String()
 	if !strings.Contains(text, "URL:") || !strings.Contains(text, "https://entire.io/gh/acme/repo/trails/5") {
 		t.Fatalf("expected a URL line, got:\n%s", text)
@@ -1794,7 +1794,7 @@ func TestPrintTrailDetailsRendersURLAndDescription(t *testing.T) {
 
 	// Empty URL and whitespace-only body are omitted.
 	out.Reset()
-	printTrailDetails(&out, m, "", nil, "   ")
+	printTrailDetails(&out, m, "", nil, nil, "   ")
 	if text := out.String(); strings.Contains(text, "URL:") || strings.Contains(text, "Description:") {
 		t.Fatalf("expected URL/Description omitted for empty values, got:\n%s", text)
 	}
@@ -2862,7 +2862,7 @@ func TestPrintTrailDetailsShowsTypePriorityReviewers(t *testing.T) {
 		Type:      trail.TypeBug,
 		Priority:  trail.PriorityHigh,
 		Reviewers: []trail.Reviewer{{Login: "rev1", Status: trail.ReviewerApproved}},
-	}, "", nil, "")
+	}, "", nil, nil, "")
 	s := out.String()
 	for _, want := range []string{"Type:", "bug", "Priority:", "high", "Reviewers:", "rev1", "approved"} {
 		if !strings.Contains(s, want) {

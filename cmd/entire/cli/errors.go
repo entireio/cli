@@ -44,3 +44,22 @@ func (e *SilentError) AlreadyPrinted() bool {
 func NewSilentError(err error) *SilentError {
 	return &SilentError{Err: err}
 }
+
+// ExitCodeError makes the process exit with Code instead of 1. The command has
+// already printed everything the user needs, so main.go prints nothing more.
+type ExitCodeError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitCodeError) Error() string { return e.Err.Error() }
+
+func (e *ExitCodeError) Unwrap() error { return e.Err }
+
+// ExitCode reports the process exit code main.go should use.
+func (e *ExitCodeError) ExitCode() int { return e.Code }
+
+// NewExitCodeError wraps err so the process exits with code, silently.
+func NewExitCodeError(code int, err error) *ExitCodeError {
+	return &ExitCodeError{Code: code, Err: NewSilentError(err)}
+}
