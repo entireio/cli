@@ -31,6 +31,7 @@ var userDirConsumers = map[string]string{
 	"cmd/entire/cli/auth/contexts.go":             "passes the config dir to contexts.Modify",
 	"cmd/entire/cli/auth/control_plane.go":        "passes both to clusterdiscovery and contexts.Load",
 	"cmd/entire/cli/auth/data_api.go":             "passes both to clusterdiscovery",
+	"cmd/entire/cli/auth_protect.go":              "passes the config dir to auth.EnableProtection/DisableProtection, which reach contexts.Load and userdirs.ConfigRoot; both check before creating",
 	"cmd/entire/cli/versioncheck/versioncheck.go": "only ever creates through userdirs.ConfigRoot, whose resolveUserRoot checks before creating",
 	"cmd/git-remote-entire/main.go":               "passes both to clusterdiscovery, which reaches contexts and discovery",
 	"internal/remotehelper/replicas/replicas.go":  "passes the cache dir to discovery.LoadCache/ModifyCache, which check before MkdirAll",

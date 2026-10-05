@@ -423,7 +423,7 @@ func TestSetAuthWithProvider_ResolvesCredentialPerRequest(t *testing.T) {
 	setAuth := setAuthWithProvider(func(context.Context) (string, error) {
 		calls++
 		return fmt.Sprintf("login-jwt-%d", calls), nil
-	})
+	}, "cluster.example.com")
 
 	for i, want := range []string{"Bearer login-jwt-1", "Bearer login-jwt-2"} {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://cluster.example.com/et/alice/repo/info/refs?service=git-upload-pack", nil)

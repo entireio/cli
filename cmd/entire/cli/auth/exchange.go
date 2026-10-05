@@ -37,7 +37,9 @@ func EnableInsecureHTTP() {
 // per-context providers read this so --insecure-http-auth still relaxes
 // the HTTPS guard for a non-loopback http:// core.
 func insecureHTTPEnabled() bool {
-	return insecureHTTPOverride.Load()
+	// Protected tokens never travel over relaxed transport: a plaintext
+	// hop would hand an interceptor what the Secure Enclave gate guards.
+	return insecureHTTPOverride.Load() && !TokensProtected()
 }
 
 // isLoopbackHTTP reports whether u is an http:// URL pointing at a

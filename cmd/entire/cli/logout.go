@@ -159,6 +159,10 @@ func loginBearer(ctx context.Context, c *contexts.Context) (bearer, error) {
 	if refreshErr == nil && tok != "" {
 		return bearer{token: tok}, nil
 	}
+	if auth.PromptDeclined(refreshErr) {
+		// The user said no once; do not ask again via the raw slot.
+		return bearer{}, refreshErr //nolint:wrapcheck // names the context already
+	}
 	stored, err := auth.LoginTokenForContext(c)
 	if err != nil {
 		return bearer{}, err //nolint:wrapcheck // names the context already

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -121,6 +122,8 @@ func NewRootCmd() *cobra.Command {
 			if isShellCompletion(cmd) {
 				return nil
 			}
+			// Names the command in the Touch ID dialog for protected tokens.
+			auth.SetPromptCommand(cmd.CommandPath())
 			if err := validateContextFlag(cmd); err != nil {
 				return err
 			}

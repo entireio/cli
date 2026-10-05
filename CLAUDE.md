@@ -34,6 +34,7 @@ at session start. Follow its related links when the task crosses those boundarie
 | Git operations, executable lookup, subprocesses, Windows launching | [Git and subprocess safety](docs/development/git-safety.md) |
 | Caller identification or session current/tokens/adopt | [Caller-session resolution](docs/development/caller-session-resolution.md) |
 | Control-plane auth or data-plane routing | [API routing](docs/development/api-routing.md) |
+| Stored login tokens, Touch ID gating | [Token protection](docs/architecture/token-protection.md) |
 | Checkpoint writes, lifecycle, sync, settings trust, redaction | [Implementation contracts](docs/development/checkpoint-implementation.md), [domain model](docs/architecture/sessions-and-checkpoints.md), [scenarios](docs/architecture/checkpoint-scenarios.md) |
 | Ref-based checkpoint backend | [Ref backend](docs/architecture/ref-checkpoint-backend.md) |
 | Agent integrations | [Agent guide](docs/architecture/agent-guide.md), [integration checklist](docs/architecture/agent-integration-checklist.md) |

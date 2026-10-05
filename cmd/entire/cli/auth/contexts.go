@@ -94,17 +94,8 @@ func RecordLoginContext(rawToken, refreshToken string, activate bool) (string, e
 	// the access token is touched (old pair preserved), rather than committing
 	// a new access JWT against a dead refresh token.
 	refreshSlot := tokenstore.RefreshService(keychainService)
-	if refreshToken != "" {
-		if err := tokenstore.Set(refreshSlot, handle, refreshToken); err != nil {
-			return "", fmt.Errorf("store refresh token in credential store: %w", &credStoreWriteError{err})
-		}
-	} else {
-		_ = tokenstore.Delete(refreshSlot, handle) //nolint:errcheck // best-effort cleanup of a stale refresh token
-	}
-
-	encoded := tokenstore.EncodeTokenWithExpiration(rawToken, expiresIn)
-	if err := tokenstore.Set(keychainService, handle, encoded); err != nil {
-		return "", fmt.Errorf("store login token in credential store: %w", &credStoreWriteError{err})
+	if err := storeLoginTokens(coreURL, keychainService, handle, rawToken, refreshToken, expiresIn, refreshSlot); err != nil {
+		return "", err
 	}
 
 	var name string
@@ -201,11 +192,50 @@ func LocalIdentityCacheKey() (string, error) {
 	}, "|"), nil
 }
 
+// storeLoginTokens writes a fresh login's tokens, sealed when protection is
+// on. Plaintext writes go refresh-first (see RecordLoginContext).
+func storeLoginTokens(coreURL, keychainService, handle, rawToken, refreshToken string, expiresIn int64, refreshSlot string) error {
+	sl, err := protection.sealer()
+	switch {
+	case err == nil:
+		encoded, err := sealSlot(sl, tokenBundle{Issuer: coreURL, Handle: handle, Access: rawToken, Refresh: refreshToken}, expiresIn)
+		if err != nil {
+			return err
+		}
+		// Clear any plaintext refresh token first: a leftover one would be
+		// usable without the dialog. Failing here leaves the previous pair
+		// intact rather than a sealed access token beside a plaintext refresh.
+		if err := tokenstore.Delete(refreshSlot, handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("clear plaintext refresh token: %w", &credStoreWriteError{err})
+		}
+		if err := tokenstore.Set(keychainService, handle, encoded); err != nil {
+			return fmt.Errorf("store sealed login in credential store: %w", &credStoreWriteError{err})
+		}
+		return nil
+	case !errors.Is(err, ErrProtectionOff):
+		return err
+	}
+
+	if refreshToken != "" {
+		if err := tokenstore.Set(refreshSlot, handle, refreshToken); err != nil {
+			return fmt.Errorf("store refresh token in credential store: %w", &credStoreWriteError{err})
+		}
+	} else {
+		_ = tokenstore.Delete(refreshSlot, handle) //nolint:errcheck // best-effort cleanup of a stale refresh token
+	}
+
+	encoded := tokenstore.EncodeTokenWithExpiration(rawToken, expiresIn)
+	if err := tokenstore.Set(keychainService, handle, encoded); err != nil {
+		return fmt.Errorf("store login token in credential store: %w", &credStoreWriteError{err})
+	}
+	return nil
+}
+
 // LoginTokenForContext returns the login JWT stored for c, read from the
 // OS keyring slot the context points at. The encoded expiry is stripped;
 // the server is the authority on validity and the device-flow login holds
 // no refresh token, so an expired token surfaces as a 401 the caller can
-// translate into a re-login hint.
+// translate into a re-login hint. A sealed slot prompts to unseal.
 func LoginTokenForContext(c *contexts.Context) (string, error) {
 	if c == nil {
 		return "", errors.New("nil context")
@@ -219,6 +249,16 @@ func LoginTokenForContext(c *contexts.Context) (string, error) {
 	}
 	if encoded == "" {
 		return "", fmt.Errorf("no token stored for context %q (run `entire login`)", c.Name)
+	}
+	if isSealed(encoded) {
+		b, _, err := openSealedSlot(encoded, c.CoreURL, c.Handle, promptReason(defaultPromptAction(), c.CoreURL, c.Handle))
+		if err != nil {
+			return "", fmt.Errorf("read token for context %q: %w", c.Name, err)
+		}
+		return b.Access, nil
+	}
+	if err := refusePlaintextWhileProtected(); err != nil {
+		return "", fmt.Errorf("read token for context %q: %w", c.Name, err)
 	}
 	token, _ := tokenstore.DecodeTokenWithExpiration(encoded)
 	return token, nil

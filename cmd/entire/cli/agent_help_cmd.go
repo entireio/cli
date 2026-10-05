@@ -162,20 +162,23 @@ var agentHelpClassification = map[string]agentHelpFacts{
 
 	// The user's to start. review is not destructive but spawns a paid
 	// multi-agent run, so an uninvited one spends the user's money.
-	"agent":     {agentHelpAudienceUserOwned, false},
-	"auth":      {agentHelpAudienceUserOwned, false},
-	"clean":     {agentHelpAudienceUserOwned, false},
-	"cluster":   {agentHelpAudienceUserOwned, false},
-	"configure": {agentHelpAudienceUserOwned, false},
-	"disable":   {agentHelpAudienceUserOwned, false},
-	"enable":    {agentHelpAudienceUserOwned, false},
-	"login":     {agentHelpAudienceUserOwned, false},
-	"logout":    {agentHelpAudienceUserOwned, false},
-	"org":       {agentHelpAudienceUserOwned, false},
-	"plugin":    {agentHelpAudienceUserOwned, false},
-	"project":   {agentHelpAudienceUserOwned, false},
-	"repo":      {agentHelpAudienceUserOwned, false},
-	"review":    {agentHelpAudienceUserOwned, false},
+	"agent": {agentHelpAudienceUserOwned, false},
+	"auth":  {agentHelpAudienceUserOwned, false},
+	// Sealing or unsealing the user's logins is the user's decision alone.
+	"auth protect":   {agentHelpAudienceUserOwned, false},
+	"auth unprotect": {agentHelpAudienceUserOwned, false},
+	"clean":          {agentHelpAudienceUserOwned, false},
+	"cluster":        {agentHelpAudienceUserOwned, false},
+	"configure":      {agentHelpAudienceUserOwned, false},
+	"disable":        {agentHelpAudienceUserOwned, false},
+	"enable":         {agentHelpAudienceUserOwned, false},
+	"login":          {agentHelpAudienceUserOwned, false},
+	"logout":         {agentHelpAudienceUserOwned, false},
+	"org":            {agentHelpAudienceUserOwned, false},
+	"plugin":         {agentHelpAudienceUserOwned, false},
+	"project":        {agentHelpAudienceUserOwned, false},
+	"repo":           {agentHelpAudienceUserOwned, false},
+	"review":         {agentHelpAudienceUserOwned, false},
 }
 
 // agentHelpGuidance is agent-only advice about WHEN to reach for a command,

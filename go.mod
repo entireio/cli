@@ -13,6 +13,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
+	github.com/ebitengine/purego v0.11.1
 	github.com/entireio/auth-go v0.5.3-0.20260911082959-f3d099d20e7b
 	github.com/go-faster/errors v0.8.0
 	github.com/go-faster/jx v1.2.0
