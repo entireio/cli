@@ -97,6 +97,12 @@ func (k Kind) IsImported() bool {
 	return k == KindImported
 }
 
+// AttachReceipt identifies the snapshot saved by attach for a particular HEAD.
+type AttachReceipt struct {
+	CommitHash   string          `json:"commit_hash"`
+	CheckpointID id.CheckpointID `json:"checkpoint_id"`
+}
+
 // CondensationAttempt records the durable intent for an in-progress
 // condensation. RecoveryPending is set only when doctor must first look for a
 // checkpoint written before attempt IDs existed.
@@ -291,6 +297,11 @@ type State struct {
 	// `entire session attach` rather than being captured by hooks during
 	// normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
+
+	// AttachReceipt binds a saved manual snapshot to the HEAD seen before
+	// attempting to amend it. A retry can link that snapshot if the trailer
+	// was only printed or the amend failed, without reusing it on a new commit.
+	AttachReceipt *AttachReceipt `json:"attach_receipt,omitempty"`
 
 	// ContextInjectionDecided records that the once-per-session model-context
 	// injection (e.g. the `entire trail` pointer) has been handled for this
