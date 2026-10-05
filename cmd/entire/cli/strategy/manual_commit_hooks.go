@@ -3086,7 +3086,6 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 			recomputed := s.calculatePromptAttributionAtStart(ctx, repo, state)
 			state.PendingPromptAttribution = &recomputed
 		}
-		recordClaimsStart(repo, state)
 
 		state.LastCheckpointID = ""
 		state.TurnCheckpointIDs = nil
@@ -3114,7 +3113,6 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		promptAttr := s.calculatePromptAttributionAtStart(ctx, repo, state)
 		state.PendingPromptAttribution = &promptAttr
-		recordClaimsStart(repo, state)
 		captureSessionBranch(repo, state)
 		captureSessionOwner(state)
 		return nil
@@ -3145,86 +3143,6 @@ func captureSessionBranch(repo *git.Repository, state *SessionState) {
 		// using a stale, now-incorrect value.
 		state.Branch = ""
 	}
-}
-
-// RefreshSessionOwner records the current owning agent process for an existing
-// session, as a turn start does. A session hook can arrive from a different
-// owner than the last prompt did (Codex's daemon restarts and resumes the
-// thread), and liveness checks must follow it. Missing state is not an error.
-func RefreshSessionOwner(ctx context.Context, sessionID string) error {
-	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		captureSessionOwner(state)
-		return nil
-	})
-	if errors.Is(err, ErrStateNotFound) {
-		return nil
-	}
-	return err
-}
-
-// worktreeBusy reports whether an agent was working in self's worktree when
-// self's prompt arrived: another session mid-turn, or a background subagent of
-// any session (self included) still alive. Changes made while an agent was
-// busy are agent work, so a prompt arriving then records no human diff.
-//
-// A subagent's session counts while its owner process is alive. Owner gone
-// pauses it without ending it: a resumed session (a restarted Codex daemon)
-// refreshes its owner and counts again. When liveness cannot be determined,
-// it counts while the session interacted within StuckActiveThreshold, the
-// fallback the Owner contract names. Sessions with no recorded worktree are
-// skipped, as session matching skips them. An error means the answer is
-// unknown; the caller must not take the worktree for idle.
-func worktreeBusy(ctx context.Context, self *SessionState) (bool, error) {
-	// Read-only: this runs inside self's state mutation, so it must not take
-	// part in stale-state cleanup.
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return false, fmt.Errorf("open session store: %w", err)
-	}
-	states, err := store.ListReadOnly(ctx)
-	if err != nil {
-		return false, fmt.Errorf("list sessions: %w", err)
-	}
-	home := filepath.Clean(self.WorktreePath)
-	for _, st := range states {
-		if st == nil {
-			continue
-		}
-		if st.SessionID == self.SessionID {
-			st = self
-		} else if st.WorktreePath == "" || filepath.Clean(st.WorktreePath) != home {
-			continue
-		}
-		if st.Phase == session.PhaseEnded || st.EndedAt != nil {
-			continue
-		}
-		switch st.OwnerLiveness() {
-		case proclive.LivenessDead:
-			continue
-		case proclive.LivenessUnknown:
-			if st.IsStuckActive() || interactedLongAgo(st) {
-				continue
-			}
-		case proclive.LivenessAlive:
-		}
-		if st.SessionID != self.SessionID && st.Phase.IsActive() && !st.IsStuckActive() {
-			return true, nil
-		}
-		if len(st.LiveTaskRecords()) > 0 {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// interactedLongAgo reports whether st's last interaction (or its start, when
-// none is recorded) is older than StuckActiveThreshold.
-func interactedLongAgo(st *SessionState) bool {
-	ref := st.LastInteractionTime
-	if ref == nil {
-		ref = &st.StartedAt
-	}
-	return time.Since(*ref) > session.StuckActiveThreshold
 }
 
 // captureSessionOwner records the owning agent process (PID + start-time
@@ -3263,25 +3181,6 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	logCtx := logging.WithComponent(ctx, "attribution")
 	nextCheckpointNum := state.StepCount + 1
 	result := PromptAttribution{CheckpointNumber: nextCheckpointNum}
-
-	// A prompt that arrives while an agent is still busy (a background
-	// subagent's task notification, or another session mid-turn) is not a
-	// human boundary: what changed since the last snapshot is agent work.
-	busy, busyErr := worktreeBusy(ctx, state)
-	if busyErr != nil {
-		// Unknown is not idle: a human diff now could take an agent's
-		// unsnapshotted work for the user's.
-		logging.Debug(logCtx, "prompt attribution skipped: cannot tell whether an agent is busy",
-			slog.String("session_id", state.SessionID),
-			slog.String("error", busyErr.Error()))
-		result.Incomplete = true
-		return result
-	}
-	if busy {
-		logging.Debug(logCtx, "prompt attribution skipped: an agent is busy in this worktree",
-			slog.String("session_id", state.SessionID))
-		return result
-	}
 
 	// Get last checkpoint tree from shadow branch (if it exists).
 	// For a new session (StepCount == 0), always use baseTree as the reference.
@@ -3330,7 +3229,6 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree",
 			slog.String("error", err.Error()))
-		result.Incomplete = true
 		return result
 	}
 
@@ -3343,7 +3241,6 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 	if err != nil {
 		logging.Debug(logCtx, "prompt attribution skipped: failed to get worktree status",
 			slog.String("error", err.Error()))
-		result.Incomplete = true
 		return result
 	}
 

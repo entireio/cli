@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -77,29 +76,39 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 	// Collect file lists once — the worktree state is stable across retries,
 	// so this work doesn't repeat per CAS attempt. Tree-building (which
 	// depends on the parent tree) is what re-runs inside the retry loop.
-	//
-	// Every snapshot captures the whole dirty worktree (modified tracked and
-	// untracked files, via `git status --porcelain -z`, which respects repo
-	// and global .gitignore), not a list of files some transcript named: an
-	// agent's shell commands, formatters and subagents write files no
-	// transcript names, and attribution treats everything changed while an
-	// agent was busy as agent work. The base tree already holds every
-	// unchanged tracked file; pre-existing deletions are captured too.
+	var allFiles []string
+	var allDeletedFiles []string
+	if opts.IsFirstCheckpoint {
+		// For the first checkpoint, capture all changed files (modified tracked + untracked)
+		// using `git status --porcelain -z` which respects both repo and global .gitignore.
+		// This is much faster than filesystem walk. The base tree from HEAD already contains
+		// all unchanged tracked files. We also capture user's pre-existing deletions.
+		result, err := collectChangedFiles(ctx, s.repo)
+		if err != nil {
+			return WriteEphemeralResult{}, fmt.Errorf("failed to collect changed files: %w", err)
+		}
+		allFiles = result.Changed
+		// Merge user's pre-existing deletions with agent's deletions
+		allDeletedFiles = result.Deleted
+		allDeletedFiles = append(allDeletedFiles, opts.DeletedFiles...)
+	} else {
+		// For subsequent checkpoints, only include modified/new files.
+		// Filter out gitignored files — agent transcripts may report files like .env
+		// that exist on disk but are gitignored. Without filtering, secrets in gitignored
+		// files would leak into the shadow branch and could be pushed to remotes.
+		candidateFiles := make([]string, 0, len(opts.ModifiedFiles)+len(opts.NewFiles))
+		candidateFiles = append(candidateFiles, opts.ModifiedFiles...)
+		candidateFiles = append(candidateFiles, opts.NewFiles...)
+		allFiles = filterGitIgnoredFiles(ctx, s.repo, candidateFiles)
+		allDeletedFiles = opts.DeletedFiles
+	}
+
+	commitMsg := trailers.FormatShadowCommit(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
+
 	repoRoot, commonDir, err := s.repoDirs()
 	if err != nil {
 		return WriteEphemeralResult{}, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
-	changed, err := collectChangedFiles(ctx, s.repo)
-	if err != nil {
-		return WriteEphemeralResult{}, fmt.Errorf("failed to collect changed files: %w", err)
-	}
-	// git status still reports tracked files that match .gitignore (a
-	// committed template filled with local secrets). Keep the ignore policy:
-	// those stay at their base content. filterGitIgnoredFiles fails closed.
-	allFiles := filterGitIgnoredFiles(ctx, s.repo, changed.Changed)
-	allDeletedFiles := slices.Concat(changed.Deleted, opts.DeletedFiles)
-
-	commitMsg := trailers.FormatShadowCommit(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
 
 	var result WriteEphemeralResult
 	// withShadowBranchFlock serializes all writers targeting this shadow
@@ -127,50 +136,12 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 			if tErr != nil {
 				return fmt.Errorf("failed to build tree: %w", tErr)
 			}
-			if parentHash != plumbing.ZeroHash {
-				// The previous snapshot may hold a file that is clean now (an
-				// agent reverted it): put it back to its base content. A base
-				// that cannot be read leaves such files as they were.
-				resets, rErr := s.resetsToBase(opts.BaseCommit, lastTreeHash, allFiles, allDeletedFiles)
-				if rErr != nil {
-					logging.Warn(logging.WithComponent(ctx, "checkpoint"), "cannot reset reverted files in snapshot",
-						slog.String("error", rErr.Error()))
-				} else if treeHash, tErr = ApplyTreeChanges(ctx, s.repo, treeHash, resets); tErr != nil {
-					return fmt.Errorf("failed to reset reverted files: %w", tErr)
-				}
-			}
-			// Changes since the previous snapshot, or since the tree this
-			// first snapshot was built on.
-			from := lastTreeHash
-			if from == plumbing.ZeroHash {
-				from = baseTreeHash
-			}
-			changedSinceTip, dErr := s.changedSince(from, treeHash)
-			if dErr != nil {
-				return dErr
-			}
-			changedFiles := changedSinceTip
-			if opts.ClaimsSince != plumbing.ZeroHash && opts.ClaimsSince != parentHash {
-				if own, oErr := s.repo.CommitObject(opts.ClaimsSince); oErr == nil {
-					if sinceOwn, cErr := s.changedSince(own.TreeHash, treeHash); cErr == nil {
-						changedFiles = sinceOwn
-					}
-				}
-			}
-			// No worktree file changed since the previous snapshot: nothing to
-			// record. (Session metadata changes every turn, so the tree-hash
-			// check below cannot tell on its own.)
-			if opts.SkipWhenUnchanged && len(changedSinceTip) == 0 {
-				result = WriteEphemeralResult{CommitHash: parentHash, Skipped: true, ChangedFiles: changedFiles}
-				return nil
-			}
 
 			// Deduplication: skip if tree hash matches the current shadow tip.
 			if lastTreeHash != plumbing.ZeroHash && treeHash == lastTreeHash {
 				result = WriteEphemeralResult{
-					CommitHash:   parentHash,
-					Skipped:      true,
-					ChangedFiles: changedFiles,
+					CommitHash: parentHash,
+					Skipped:    true,
 				}
 				return nil
 			}
@@ -183,9 +154,8 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 			refErr := casUpdateShadowBranchRef(ctx, repoRoot, shadowBranchName, commitHash, parentHash)
 			if refErr == nil {
 				result = WriteEphemeralResult{
-					CommitHash:   commitHash,
-					Skipped:      false,
-					ChangedFiles: changedFiles,
+					CommitHash: commitHash,
+					Skipped:    false,
 				}
 				return nil
 			}
@@ -806,91 +776,6 @@ func (s *ephemeralStore) getOrCreateShadowBranch(branchName string) (plumbing.Ha
 	}
 
 	return plumbing.ZeroHash, headCommit.TreeHash, nil
-}
-
-// resetsToBase returns the changes that put back to its base-commit content
-// every file the snapshot tree tipTree holds differently from the base but the
-// worktree no longer changes (neither changed nor deleted now): a file that
-// was reverted since that snapshot. Session metadata and protected paths are
-// left alone.
-func (s *ephemeralStore) resetsToBase(baseCommit string, tipTree plumbing.Hash, changed, deleted []string) ([]TreeChange, error) {
-	baseTree, err := s.commitTree(baseCommit)
-	if err != nil {
-		return nil, err
-	}
-	tip, err := s.repo.TreeObject(tipTree)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read snapshot tree: %w", err)
-	}
-	diff, err := object.DiffTree(baseTree, tip)
-	if err != nil {
-		return nil, fmt.Errorf("failed to diff snapshot against base: %w", err)
-	}
-	current := make(map[string]struct{}, len(changed)+len(deleted))
-	for _, f := range changed {
-		current[f] = struct{}{}
-	}
-	for _, f := range deleted {
-		current[f] = struct{}{}
-	}
-	var resets []TreeChange
-	for _, change := range diff {
-		path := change.To.Name
-		if path == "" {
-			path = change.From.Name
-		}
-		if _, still := current[path]; still || isProtectedCheckpointPath(path) {
-			continue
-		}
-		if change.From.Name == "" {
-			resets = append(resets, TreeChange{Path: path})
-			continue
-		}
-		entry := change.From.TreeEntry
-		resets = append(resets, TreeChange{Path: path, Entry: &object.TreeEntry{Name: path, Mode: entry.Mode, Hash: entry.Hash}})
-	}
-	return resets, nil
-}
-
-// changedSince returns the worktree files (session metadata and protected
-// paths excluded) whose content differs between two snapshot trees.
-func (s *ephemeralStore) changedSince(fromTree, toTree plumbing.Hash) ([]string, error) {
-	from, err := s.repo.TreeObject(fromTree)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read previous snapshot tree: %w", err)
-	}
-	to, err := s.repo.TreeObject(toTree)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read snapshot tree: %w", err)
-	}
-	diff, err := object.DiffTree(from, to)
-	if err != nil {
-		return nil, fmt.Errorf("failed to diff snapshots: %w", err)
-	}
-	var files []string
-	for _, change := range diff {
-		path := change.To.Name
-		if path == "" {
-			path = change.From.Name
-		}
-		if isProtectedCheckpointPath(path) {
-			continue
-		}
-		files = append(files, path)
-	}
-	return files, nil
-}
-
-func (s *ephemeralStore) commitTree(commit string) (*object.Tree, error) {
-	c, err := s.repo.CommitObject(plumbing.NewHash(commit))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read base commit %s: %w", commit, err)
-	}
-	tree, err := c.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read base tree: %w", err)
-	}
-	return tree, nil
 }
 
 // buildTreeWithChanges builds a git tree with the given changes.

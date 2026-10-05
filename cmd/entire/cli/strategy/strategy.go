@@ -166,15 +166,6 @@ type StepContext struct {
 	// while token evidence was extracted. nil means no inventory snapshot;
 	// a pointer to zero is a valid snapshot before the first child is observed.
 	SubagentLedgerVersion *uint64
-
-	// SkipWhenUnchanged skips the snapshot when no worktree file changed since
-	// the previous one. See checkpoint.WriteEphemeralOptions.SkipWhenUnchanged.
-	SkipWhenUnchanged bool
-
-	// ExistingSessionOnly writes only for a session whose state exists and is
-	// not ended, judged under the save's state lock: a snapshot taken when an
-	// agent stops must never recreate a swept session or touch an ended one.
-	ExistingSessionOnly bool
 }
 
 // TaskStepContext contains all information needed for saving a task step checkpoint.

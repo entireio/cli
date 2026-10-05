@@ -150,13 +150,6 @@ const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this rep
 // fires state machine transition.
 func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
-	// A resumed session (Codex's daemon resuming a thread after a restart)
-	// may now be owned by a new process; record it before its next prompt.
-	if err := strategy.RefreshSessionOwner(ctx, event.SessionID); err != nil {
-		logging.Debug(logCtx, "failed to refresh session owner",
-			slog.String("session_id", event.SessionID),
-			slog.String("error", err.Error()))
-	}
 	logging.Info(logCtx, "session-start",
 		slog.String("event", event.Type.String()),
 		slog.String("session_id", event.SessionID),
@@ -1010,9 +1003,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		codexInventoryUsage, codexLedgerVersion = refreshCodexInventory(ctx, ag, sessionID, transcriptData, inventoryOffset)
 	}
 
-	// finishWithoutCheckpoint is the turn-end tail for a turn that wrote no
-	// checkpoint: nothing changed in the worktree since the last snapshot.
-	finishWithoutCheckpoint := func() error {
+	// Check if there are any changes
+	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
+	if totalChanges == 0 {
+		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
 		// SaveStep is skipped, but out-of-band token usage must still be
 		// recorded: an Antigravity turn that commits ALL its work mid-turn
@@ -1046,21 +1040,6 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 				slog.String("error", cleanupErr.Error()))
 		}
 		return nil
-	}
-
-	// Change detection only sees files the transcript names and new or
-	// tracked changes; a shell command can still have changed others (an
-	// untracked file that existed before the prompt). A turn with nothing
-	// detected still goes through the normal path, so a snapshot that does
-	// capture a change carries the turn's tokens like any other; SaveStep
-	// writes nothing when the worktree is unchanged.
-	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
-	noDetectedChanges := totalChanges == 0
-	if noDetectedChanges {
-		logging.Info(logCtx, "no files modified detected this turn; snapshotting only if the worktree changed")
-		if _, isSubagent := resolveSubagentSessionLink(ctx, ag, transcriptRef); isSubagent {
-			return finishWithoutCheckpoint()
-		}
 	}
 
 	// Log file changes
@@ -1126,8 +1105,6 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
-		SkipWhenUnchanged:        noDetectedChanges,
-		ExistingSessionOnly:      noDetectedChanges,
 		SessionID:                sessionID,
 		ModifiedFiles:            relModifiedFiles,
 		NewFiles:                 relNewFiles,
@@ -1172,9 +1149,6 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
-		if errors.Is(err, strategy.ErrNothingToSnapshot) || errors.Is(err, strategy.ErrStateNotFound) {
-			return finishWithoutCheckpoint()
-		}
 		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
 			// The first-checkpoint status read inside the save breached its
 			// budget. Hooks must never fail on status cost — skip this turn's
@@ -2114,20 +2088,6 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		TranscriptUnavailable:  event.SubagentTranscriptUnavailable,
 		Files:                  files,
 		TokenUsage:             tokenUsage,
-	}
-	if opts.analyzerFilesOnly {
-		// A background subagent can finish after its parent's turn ended: no
-		// turn end will snapshot what it wrote, so this stop does. Before the
-		// record completes: while it is live the worktree counts as busy, so
-		// a prompt racing this stop (Claude Code's task notification) cannot
-		// take the unsnapshotted edits for the user's. Both completion paths
-		// below (correlated and uncorrelated) rely on it.
-		if snapErr := snapshotAgentStop(logCtx, ag, event.SessionID, "Subagent finished"); snapErr != nil {
-			logging.Warn(logCtx, "failed to snapshot worktree at subagent stop",
-				slog.String("session_id", event.SessionID),
-				slog.String("tool_use_id", event.ToolUseID),
-				slog.String("error", snapErr.Error()))
-		}
 	}
 	// Exactly-once needs an identity to be "once" about. Copilot CLI's
 	// SubagentEnd carries no correlation ID at all, so every one of its

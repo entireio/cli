@@ -4135,36 +4135,45 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_Background_ExcludesForeignWorkt
 	assert.NotContains(t, state.FilesTouched, "foreign.txt")
 }
 
-// TestHandleLifecycleSubagentEnd_SubagentStop_BeforeFirstSaveStep_KeepsBaselineAndAnchor
-// pins that a background subagent completing before the session's first turn
-// end leaves the first-checkpoint guarantees intact. Its stop snapshots the
-// worktree (every snapshot captures the whole dirty worktree, the user's
-// pre-existing uncommitted work included), and the transcript anchor is set by
-// the first step that knows its transcript position, not by step number one.
-func TestHandleLifecycleSubagentEnd_SubagentStop_BeforeFirstSaveStep_KeepsBaselineAndAnchor(t *testing.T) {
+// TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveStep_PreservesBaseline
+// is the regression for overloading StepCount with transcript-only task
+// steps: StepCount's ==0 value drives SaveStep's IsFirstCheckpoint (the FIRST
+// shadow checkpoint snapshots the user's whole pre-existing uncommitted
+// worktree state — checkpoint/ephemeral.go's collectChangedFiles baseline)
+// and its ==1 value anchors TranscriptIdentifierAtStart. A transcript-only
+// background Final landing BEFORE the session's first SaveStep must therefore
+// register only on the task record, not StepCount —
+// otherwise the subsequent first SaveStep sees StepCount==1, skips the
+// baseline capture (silently dropping the user's pre-existing dirt from every
+// checkpoint), and never sets the transcript anchor.
+func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveStep_PreservesBaseline(t *testing.T) {
 	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
 	repoDir, headHash := setupSubagentEndTestRepo(t)
 	ctx := context.Background()
 	sessionID := "baseline-order-session"
 	toolUseID := "toolu_baseline1"
 
-	// The user's pre-existing uncommitted work, on disk before the session
-	// saves anything.
+	// The user's pre-existing uncommitted work, on disk BEFORE the session
+	// saves anything. Only the first SaveStep's baseline capture picks it up.
 	testutil.WriteFile(t, repoDir, "user-dirt.txt", "pre-existing uncommitted work")
 
 	saveInFlightSession(ctx, t, sessionID, headHash,
 		session.TaskRecord{ToolUseID: toolUseID, AgentID: "agent-baseline1", StartedAt: time.Now(), SubagentType: "reviewer"})
 
+	// A read-only background subagent completes first: transcript-only Final
+	// capture (no file changes; subagent transcript unresolvable is fine here —
+	// the point is the step registers without touching StepCount).
 	ag := newMockAgent()
 	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, finalSubagentEvent(sessionID, toolUseID, "agent-baseline1")))
 
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
+	require.Zero(t, state.StepCount, "transcript-only task step must not consume StepCount")
 	require.True(t, state.HasTaskContent(), "the completed record must register as pending task content")
-	require.Empty(t, state.TranscriptIdentifierAtStart, "a subagent-stop snapshot knows no transcript position")
 
-	// The session's first turn-end SaveStep, which knows its transcript position.
+	// Now the session's FIRST SaveStep. It must still get first-checkpoint
+	// semantics: baseline capture of user-dirt.txt and the transcript anchor.
 	metadataDir := ".entire/metadata/" + sessionID
 	metadataDirAbs := filepath.Join(repoDir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
@@ -4186,12 +4195,14 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_BeforeFirstSaveStep_KeepsBaseli
 	state, err = strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
+	assert.Equal(t, 1, state.StepCount, "the first SaveStep must be checkpoint #1")
 	assert.Equal(t, "anchor-uuid-1", state.TranscriptIdentifierAtStart,
-		"the first step that knows its transcript position must set the anchor")
+		"the first SaveStep must set the transcript anchor (StepCount==1 semantics)")
 
 	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
 	content, gotDirt := readShadowBranchFile(t, repoDir, shadowBranch, "user-dirt.txt")
-	assert.True(t, gotDirt, "the snapshot must hold the user's pre-existing uncommitted state")
+	assert.True(t, gotDirt,
+		"the first SaveStep must snapshot pre-existing uncommitted state (IsFirstCheckpoint baseline) even after a transcript-only task step")
 	assert.Equal(t, "pre-existing uncommitted work", content)
 }
 
@@ -4475,88 +4486,6 @@ func TestCodexSessionEndPersistsEndedBeforeInventoryRead(t *testing.T) {
 	}}
 	ag.agentType = agent.AgentTypeCodex
 	require.NoError(t, handleLifecycleSessionEnd(ctx, ag, &agent.Event{SessionID: id}))
-}
-
-// TestHandleLifecycleTurnEnd_UndetectedChangeKeepsTurnTokens pins that a turn
-// whose change detection found nothing, but whose snapshot does capture a
-// change (a shell command editing a pre-existing untracked file), keeps its
-// token usage like any other checkpointed turn.
-func TestHandleLifecycleTurnEnd_UndetectedChangeKeepsTurnTokens(t *testing.T) {
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "init.txt", "init")
-	testutil.GitAdd(t, tmpDir, "init.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-	testutil.WriteFile(t, tmpDir, "notes.md", "untracked before the prompt\n")
-	t.Chdir(tmpDir)
-	paths.ClearWorktreeRootCache()
-
-	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
-	sessionID := "test-undetected-change-tokens"
-	ag := newMockAgent()
-	ag.transcriptData = []byte(`{"type":"user","message":"test"}` + "\n")
-
-	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, &agent.Event{
-		Type: agent.TurnStart, SessionID: sessionID, SessionRef: transcriptPath, Prompt: "append to the notes", Timestamp: time.Now(),
-	}))
-	// A shell command appends to the untracked file: no transcript names it,
-	// and it is neither new to the turn nor tracked.
-	testutil.WriteFile(t, tmpDir, "notes.md", "untracked before the prompt\nappended by a shell command\n")
-
-	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, &agent.Event{
-		Type: agent.TurnEnd, SessionID: sessionID, SessionRef: transcriptPath, Timestamp: time.Now(),
-		TokenUsage: &agent.TokenUsage{InputTokens: 200, OutputTokens: 50, APICallCount: 1},
-	}))
-
-	state, err := strategy.LoadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.Equal(t, 1, state.StepCount, "the snapshot must capture the shell edit")
-	require.NotNil(t, state.TokenUsage, "the checkpointed turn must keep its tokens")
-	require.Equal(t, 200, state.TokenUsage.InputTokens)
-	require.Equal(t, 50, state.TokenUsage.OutputTokens)
-}
-
-// TestHandleLifecycleTurnEnd_LateStopLeavesEndedSessionAlone pins that a Stop
-// arriving after the session ended writes no checkpoint, even when the
-// worktree changed in a way change detection does not see (a shell edit to a
-// pre-existing untracked file).
-func TestHandleLifecycleTurnEnd_LateStopLeavesEndedSessionAlone(t *testing.T) {
-	tmpDir := t.TempDir()
-	testutil.InitRepo(t, tmpDir)
-	testutil.WriteFile(t, tmpDir, "init.txt", "init")
-	testutil.GitAdd(t, tmpDir, "init.txt")
-	testutil.GitCommit(t, tmpDir, "init")
-	testutil.WriteFile(t, tmpDir, "notes.md", "untracked before the prompt\n")
-	t.Chdir(tmpDir)
-	paths.ClearWorktreeRootCache()
-
-	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
-	sessionID := "test-late-stop-ended"
-	ag := newMockAgent()
-	ag.transcriptData = []byte(`{"type":"user","message":"test"}` + "\n")
-
-	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, &agent.Event{
-		Type: agent.TurnStart, SessionID: sessionID, SessionRef: transcriptPath, Prompt: "append to the notes", Timestamp: time.Now(),
-	}))
-	ended := time.Now()
-	require.NoError(t, strategy.MutateSessionState(context.Background(), sessionID, func(state *strategy.SessionState) error {
-		state.Phase = session.PhaseEnded
-		state.EndedAt = &ended
-		return nil
-	}))
-	testutil.WriteFile(t, tmpDir, "notes.md", "untracked before the prompt\nappended by a shell command\n")
-
-	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, &agent.Event{
-		Type: agent.TurnEnd, SessionID: sessionID, SessionRef: transcriptPath, Timestamp: time.Now(),
-	}))
-
-	state, err := strategy.LoadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.Zero(t, state.StepCount, "an ended session must not get a checkpoint from a late Stop")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_RecordsSubagentTokenUsage pins

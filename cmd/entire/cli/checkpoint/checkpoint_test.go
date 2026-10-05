@@ -2207,10 +2207,9 @@ func TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles(t *testing.
 	}
 }
 
-// TestWriteTemporary_PathNormalizationAndSkipping verifies that file paths an
-// agent reports, valid or not, never become malformed git tree entries. A
-// snapshot captures the dirty worktree from git status, so the changed main.go
-// is in the snapshot however the agent named it, or whether it named it at all.
+// TestWriteTemporary_PathNormalizationAndSkipping verifies that shadow branch writes
+// normalize absolute in-repo paths back to repo-relative tree entries and skip invalid
+// paths rather than encoding them into git trees.
 func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -2225,18 +2224,18 @@ func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 			wantUpdated: true,
 		},
 		{
-			name: "absolute outside repo path is ignored",
+			name: "absolute outside repo path is skipped",
 			modifiedFiles: func(_, _ string) []string {
 				return []string{"C:/Users/rober/Vaults/Flowsign/main.go"}
 			},
-			wantUpdated: true,
+			wantUpdated: false,
 		},
 		{
-			name: "empty segment path is ignored",
+			name: "empty segment path is skipped",
 			modifiedFiles: func(_, _ string) []string {
 				return []string{"dir//main.go"}
 			},
-			wantUpdated: true,
+			wantUpdated: false,
 		},
 	}
 

@@ -20,7 +20,6 @@ import (
 	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // SaveStep saves a checkpoint to the shadow branch.
@@ -42,18 +41,11 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	// MutateSessionState because the helper bails with ErrStateNotFound on
 	// missing state — initialization establishes the file the helper will
 	// then mutate under lock.
-	if !step.ExistingSessionOnly {
-		if err := s.ensureSessionInitialized(ctx, repo, sessionID, step.AgentType); err != nil {
-			return err
-		}
+	if err := s.ensureSessionInitialized(ctx, repo, sessionID, step.AgentType); err != nil {
+		return err
 	}
 
-	nothingChanged := false
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		if step.ExistingSessionOnly && (state.Phase == session.PhaseEnded || state.EndedAt != nil) {
-			nothingChanged = true
-			return ErrMutationSkip
-		}
 		invalidateStaleSubagentSnapshot(&step, state)
 		_, migrateSpan := perf.Start(ctx, "migrate_shadow_branch")
 		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
@@ -71,18 +63,12 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
 
-		pendingPromptAttr := state.PendingPromptAttribution
 		var promptAttr PromptAttribution
-		// humanDiffUnknown: a session's first step with no prompt recorded
-		// has no human diff for its window. (A later step with none had no
-		// prompt since the previous snapshot: its whole window is agent work.)
-		humanDiffUnknown := false
 		if state.PendingPromptAttribution != nil {
 			promptAttr = *state.PendingPromptAttribution
 			state.PendingPromptAttribution = nil
 		} else {
 			promptAttr = PromptAttribution{CheckpointNumber: state.StepCount + 1}
-			humanDiffUnknown = state.StepCount == 0
 		}
 
 		attrLogCtx := logging.WithComponent(ctx, "attribution")
@@ -108,8 +94,6 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			AuthorName:        step.AuthorName,
 			AuthorEmail:       step.AuthorEmail,
 			IsFirstCheckpoint: isFirstCheckpointOfSession,
-			SkipWhenUnchanged: step.SkipWhenUnchanged,
-			ClaimsSince:       claimsSince(state),
 		})
 		writeCheckpointSpan.RecordError(err)
 		writeCheckpointSpan.End()
@@ -125,19 +109,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 				slog.Int("checkpoint_count", state.StepCount),
 				slog.String("shadow_branch", shadowBranchName),
 			)
-			nothingChanged = true
-			// The worktree already matches the newest snapshot, possibly
-			// another session's: record what changed in this session's window,
-			// and start its next window there. The prompt attribution waits for the next written step.
-			claims := snapshotClaims(ctx, state, result.ChangedFiles, promptAttr, humanDiffUnknown)
-			if result.CommitHash == plumbing.ZeroHash || (len(claims) == 0 && claimsSince(state) == result.CommitHash) {
-				return ErrMutationSkip
-			}
-			state.PendingPromptAttribution = pendingPromptAttr
-			state.FilesTouched = mergeFilesTouched(state.FilesTouched, claims)
-			state.ClaimsSinceCommit = result.CommitHash.String()
-			state.ClaimsSinceBaseCommit = state.BaseCommit
-			return nil
+			return ErrMutationSkip
 		}
 
 		// LastCheckpointID is intentionally NOT cleared here. It is set during
@@ -145,17 +117,55 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// trailers on amend operations.
 		state.StepCount++
 		state.PromptAttributions = append(state.PromptAttributions, promptAttr)
-		snapshotAgentFiles := snapshotClaims(ctx, state, result.ChangedFiles, promptAttr, humanDiffUnknown)
-		state.ClaimsSinceCommit = result.CommitHash.String()
-		state.ClaimsSinceBaseCommit = state.BaseCommit
-		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles, snapshotAgentFiles)
-		// The first step that knows its transcript position anchors it. A
-		// snapshot taken when a subagent stops carries none.
-		if state.TranscriptIdentifierAtStart == "" && step.StepTranscriptIdentifier != "" {
+		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
+		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
 		if step.TokenUsage != nil {
-			accumulateStepTokenUsage(state, step.TokenUsage)
+			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
+			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
+			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
+			// snapshot (agent IDs are discovered from the full transcript and each
+			// subagent's own transcript is re-read from its start on every call —
+			// see CalculateTotalTokenUsage in the claudecode/factoryaidroid
+			// packages), not a per-step delta like the rest of TokenUsage.
+			// accumulateTokenUsage already replaces (rather than adds) the
+			// SubagentTokens field for that reason, so state.TokenUsage ends up
+			// correctly holding the latest cumulative total. CheckpointTokenUsage
+			// additionally needs rescoping to "since last condensation" by
+			// subtracting the baseline captured at the last reset, otherwise the
+			// full cumulative subagent total would be reported again at every
+			// checkpoint instead of just this checkpoint's share.
+			//
+			// Derive the checkpoint delta FRESH each call from the session-wide
+			// cumulative (state.TokenUsage.SubagentTokens) minus the baseline —
+			// do NOT mutate CheckpointTokenUsage.SubagentTokens in place. A later
+			// step in the same window can carry step.TokenUsage != nil but
+			// SubagentTokens == nil (the subagent transcript was cleaned up, so
+			// CalculateTotalTokenUsage returned APICallCount==0 and left it nil);
+			// accumulateTokenUsage then leaves CheckpointTokenUsage.SubagentTokens
+			// at its already-rescoped value, and re-subtracting the baseline from
+			// that would double-subtract and (via clampSubtract) shrink or zero a
+			// real subagent total. Recomputing from the session-wide cumulative
+			// is idempotent regardless of whether this step carried a snapshot.
+			if state.CheckpointTokenUsage != nil && state.TokenUsage != nil {
+				complete := state.TokenUsage.SubagentTokensComplete
+				switch {
+				case complete != nil && !*complete:
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				case state.SubagentTokensBaselineComplete != nil && !*state.SubagentTokensBaselineComplete:
+					// A known-incomplete baseline cannot yield an exact delta, even
+					// when the current inventory has become complete again.
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				default:
+					state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+						state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+					if complete != nil {
+						value := *complete
+						state.CheckpointTokenUsage.SubagentTokensComplete = &value
+					}
+				}
+			}
 		}
 
 		if !branchExisted {
@@ -180,22 +190,10 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return nil
 	})
 	if errors.Is(mutErr, ErrStateNotFound) {
-		if step.ExistingSessionOnly {
-			return ErrStateNotFound
-		}
 		return nil
-	}
-	if mutErr == nil && nothingChanged && (step.SkipWhenUnchanged || step.ExistingSessionOnly) {
-		return ErrNothingToSnapshot
 	}
 	return mutErr
 }
-
-// ErrNothingToSnapshot is returned by SaveStep when it wrote nothing: for a
-// step with SkipWhenUnchanged when no worktree file changed since the
-// previous snapshot, and for a step with ExistingSessionOnly when the session
-// has ended. The caller can then account for a turn that wrote no checkpoint.
-var ErrNothingToSnapshot = errors.New("no worktree change since the previous snapshot")
 
 func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {
 	if step.SubagentLedgerVersion == nil || step.TokenUsage == nil ||
@@ -329,147 +327,6 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 		return nil
 	}
 	return mutErr
-}
-
-// snapshotClaims returns the files of a snapshot's changes this session
-// claims as agent work (see agentChangedFiles). A window whose human diff is
-// unknown claims nothing. A session with no claims start (no turn start or
-// snapshot of its own on this base) leaves files other sessions already claim
-// to them.
-func snapshotClaims(ctx context.Context, state *SessionState, changed []string, human PromptAttribution, humanDiffUnknown bool) []string {
-	if humanDiffUnknown {
-		return nil
-	}
-	var others map[string]struct{}
-	if claimsSince(state) == plumbing.ZeroHash {
-		others = otherSessionsFiles(ctx, state)
-	}
-	return agentChangedFiles(changed, human, others)
-}
-
-// claimsSince returns the commit state's snapshot claims are measured from
-// (see session.State.ClaimsSinceCommit), when it belongs to the current base
-// commit.
-func claimsSince(state *SessionState) plumbing.Hash {
-	if state.ClaimsSinceCommit == "" || state.ClaimsSinceBaseCommit != state.BaseCommit {
-		return plumbing.ZeroHash
-	}
-	return plumbing.NewHash(state.ClaimsSinceCommit)
-}
-
-// recordClaimsStart starts state's claims window at a turn start: the newest
-// shadow snapshot for its base commit and worktree, or the base commit when
-// there is none yet.
-func recordClaimsStart(repo *git.Repository, state *SessionState) {
-	start := state.BaseCommit
-	shadow := plumbing.NewBranchReferenceName(checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID))
-	if ref, err := repo.Reference(shadow, true); err == nil {
-		start = ref.Hash().String()
-	}
-	state.ClaimsSinceCommit = start
-	state.ClaimsSinceBaseCommit = state.BaseCommit
-}
-
-// otherSessionsFiles returns the files other live sessions in self's worktree
-// have touched. Read-only: this runs inside self's state mutation. A listing
-// failure returns nothing, which can only over-claim files for self.
-func otherSessionsFiles(ctx context.Context, self *SessionState) map[string]struct{} {
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return nil
-	}
-	states, err := store.ListReadOnly(ctx)
-	if err != nil {
-		return nil
-	}
-	files := make(map[string]struct{})
-	home := filepath.Clean(self.WorktreePath)
-	for _, st := range states {
-		if st == nil || st.SessionID == self.SessionID || st.WorktreePath == "" || filepath.Clean(st.WorktreePath) != home {
-			continue
-		}
-		if st.Phase == session.PhaseEnded || st.EndedAt != nil {
-			continue
-		}
-		for _, f := range st.FilesTouched {
-			files[filepath.ToSlash(f)] = struct{}{}
-		}
-	}
-	return files
-}
-
-// accumulateStepTokenUsage adds a step's token usage to the session totals
-// and rescopes the checkpoint's subagent share (see the comments inside).
-func accumulateStepTokenUsage(state *SessionState, usage *agent.TokenUsage) {
-	state.TokenUsage = accumulateTokenUsage(state.TokenUsage, usage)
-	state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, usage)
-	// usage.SubagentTokens is a cumulative-since-session-start
-	// snapshot (agent IDs are discovered from the full transcript and each
-	// subagent's own transcript is re-read from its start on every call —
-	// see CalculateTotalTokenUsage in the claudecode/factoryaidroid
-	// packages), not a per-step delta like the rest of TokenUsage.
-	// accumulateTokenUsage already replaces (rather than adds) the
-	// SubagentTokens field for that reason, so state.TokenUsage ends up
-	// correctly holding the latest cumulative total. CheckpointTokenUsage
-	// additionally needs rescoping to "since last condensation" by
-	// subtracting the baseline captured at the last reset, otherwise the
-	// full cumulative subagent total would be reported again at every
-	// checkpoint instead of just this checkpoint's share.
-	//
-	// Derive the checkpoint delta FRESH each call from the session-wide
-	// cumulative (state.TokenUsage.SubagentTokens) minus the baseline —
-	// do NOT mutate CheckpointTokenUsage.SubagentTokens in place. A later
-	// step in the same window can carry usage != nil but
-	// SubagentTokens == nil (the subagent transcript was cleaned up, so
-	// CalculateTotalTokenUsage returned APICallCount==0 and left it nil);
-	// accumulateTokenUsage then leaves CheckpointTokenUsage.SubagentTokens
-	// at its already-rescoped value, and re-subtracting the baseline from
-	// that would double-subtract and (via clampSubtract) shrink or zero a
-	// real subagent total. Recomputing from the session-wide cumulative
-	// is idempotent regardless of whether this step carried a snapshot.
-	if state.CheckpointTokenUsage != nil && state.TokenUsage != nil {
-		complete := state.TokenUsage.SubagentTokensComplete
-		switch {
-		case complete != nil && !*complete:
-			state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
-		case state.SubagentTokensBaselineComplete != nil && !*state.SubagentTokensBaselineComplete:
-			// A known-incomplete baseline cannot yield an exact delta, even
-			// when the current inventory has become complete again.
-			state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
-		default:
-			state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
-				state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
-			if complete != nil {
-				value := *complete
-				state.CheckpointTokenUsage.SubagentTokensComplete = &value
-			}
-		}
-	}
-}
-
-// agentChangedFiles returns the snapshot's changed files that agent work
-// changed: every file whose content changed since the previous snapshot,
-// except the ones this window's human diff counted user edits in. Those
-// changed while no agent was busy; a file both the human and an agent changed
-// in one window is left to the transcript-derived lists. Files another session
-// in the worktree already claims stay that session's: the snapshot is of the
-// shared worktree. A window whose human diff is incomplete contributes
-// nothing: it cannot tell the two apart.
-func agentChangedFiles(changed []string, human PromptAttribution, others map[string]struct{}) []string {
-	if human.Incomplete {
-		return nil
-	}
-	var files []string
-	for _, f := range changed {
-		if human.UserAddedPerFile[f] > 0 || human.UserRemovedPerFile[f] > 0 {
-			continue
-		}
-		if _, theirs := others[f]; theirs {
-			continue
-		}
-		files = append(files, f)
-	}
-	return files
 }
 
 // mergeFilesTouched merges multiple file lists into existing touched files, deduplicating.

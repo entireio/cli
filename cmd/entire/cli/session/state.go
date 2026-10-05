@@ -437,17 +437,6 @@ type State struct {
 	// pointer ledger for subagent work. See TaskRecord.
 	TaskRecords []TaskRecord `json:"task_records,omitempty"`
 
-	// ClaimsSinceCommit is the shadow snapshot (or, with none yet, the base
-	// commit) this session measures the files its window changed from: the
-	// newest snapshot when its current turn started, moved forward by each
-	// of its own snapshots. Sessions in a worktree share the shadow branch:
-	// what another session snapshotted while this one was idle is not in its
-	// window, and what this session wrote while another snapshotted is.
-	// ClaimsSinceBaseCommit is the base commit it belongs to; it is ignored
-	// once BaseCommit has moved.
-	ClaimsSinceCommit     string `json:"claims_since_commit,omitempty"`
-	ClaimsSinceBaseCommit string `json:"claims_since_base_commit,omitempty"`
-
 	// SubagentInventory retains Codex child identities independently of task
 	// records so follow-up turns remain discoverable after materialization.
 	SubagentInventory []SubagentInventoryEntry `json:"subagent_inventory,omitempty"`
@@ -806,12 +795,6 @@ type PromptAttribution struct {
 	// Without this, global user removals would be subtracted from agent-file-only removals,
 	// incorrectly reducing agent deletion credit when users delete lines in non-agent files.
 	UserRemovedPerFile map[string]int `json:"user_removed_per_file,omitempty"`
-
-	// Incomplete marks a prompt whose user diff could not be computed (the
-	// worktree status failed or breached its budget). Nothing then tells
-	// which of the files the next snapshot changed were the user's, so the
-	// snapshot's changes are not added to FilesTouched for that window.
-	Incomplete bool `json:"incomplete,omitempty"`
 }
 
 // NormalizeAfterLoad applies backward-compatible migrations to state loaded from disk.
