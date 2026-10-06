@@ -76,7 +76,7 @@ type TestEnv struct {
 	gitConfigGuardSet  bool
 
 	// ExtraEnv holds additional environment variables appended to all CLI
-	// invocations (RunPrePush, GitCommitWithShadowHooks, etc.). Use this to
+	// invocations (RunPrePush, GitCommitWithHooks, etc.). Use this to
 	// pass ENTIRE_CHECKPOINT_TOKEN, GIT_SSL_CAINFO, and similar per-test env.
 	ExtraEnv []string
 
@@ -966,17 +966,17 @@ func (env *TestEnv) GetLatestCommitMessageOnBranch(branchName string) string {
 	return commit.Message
 }
 
-// GitCommitWithShadowHooks stages and commits files, simulating the prepare-commit-msg
+// GitCommitWithHooks stages and commits files, simulating the prepare-commit-msg
 // and post-commit hooks as a human (with TTY). This is the default for tests.
-func (env *TestEnv) GitCommitWithShadowHooks(message string, files ...string) {
+func (env *TestEnv) GitCommitWithHooks(message string, files ...string) {
 	env.T.Helper()
 	env.gitCommitWithShadowHooks(message, true, files...)
 }
 
-// GitCommitWithShadowHooksAsAgent is like GitCommitWithShadowHooks but simulates
+// GitCommitWithHooksAsAgent is like GitCommitWithHooks but simulates
 // an agent commit (no TTY). This triggers the fast path in PrepareCommitMsg that
 // skips content detection and interactive prompts for ACTIVE sessions.
-func (env *TestEnv) GitCommitWithShadowHooksAsAgent(message string, files ...string) {
+func (env *TestEnv) GitCommitWithHooksAsAgent(message string, files ...string) {
 	env.T.Helper()
 	env.gitCommitWithShadowHooks(message, false, files...)
 }

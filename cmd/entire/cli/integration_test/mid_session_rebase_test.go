@@ -10,7 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// TestShadow_MidSessionRebaseMigration tests that when Claude performs a rebase
+// TestManualCommit_MidSessionRebaseMigration tests that when Claude performs a rebase
 // mid-session (via a tool call), the shadow branch is automatically migrated
 // to the new HEAD and subsequent checkpoints are saved correctly.
 //
@@ -23,7 +23,7 @@ import (
 // - Checkpoints before rebase go to the original shadow branch
 // - Checkpoints after rebase go to the new (migrated) shadow branch
 // - The session state's BaseCommit is updated correctly
-func TestShadow_MidSessionRebaseMigration(t *testing.T) {
+func TestManualCommit_MidSessionRebaseMigration(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -208,7 +208,7 @@ func (env *TestEnv) gitCheckout(ref string) {
 	}
 }
 
-// TestShadow_CommitThenRebaseMidSession tests the scenario where Claude:
+// TestManualCommit_CommitThenRebaseMidSession tests the scenario where Claude:
 // 1. Creates checkpoints (shadow branch exists)
 // 2. Commits the work (triggers condensation, shadow branch is DELETED)
 // 3. Rebases onto another branch (HEAD changes)
@@ -216,7 +216,7 @@ func (env *TestEnv) gitCheckout(ref string) {
 //
 // This verifies there's no race condition between shadow branch cleanup
 // (from condensation) and the migration logic in SaveStep.
-func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
+func TestManualCommit_CommitThenRebaseMidSession(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -282,8 +282,8 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 
 	// Stage and commit the file
 	env.GitAdd("a.go")
-	// Use GitCommitWithShadowHooks to simulate the full commit flow with hooks
-	env.GitCommitWithShadowHooks("Add function A", "a.go")
+	// Use GitCommitWithHooks to simulate the full commit flow with hooks
+	env.GitCommitWithHooks("Add function A", "a.go")
 
 	postCommitHead := env.GetHeadHash()
 	t.Logf("After commit, feature HEAD: %s", postCommitHead[:7])

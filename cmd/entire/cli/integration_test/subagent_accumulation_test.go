@@ -57,7 +57,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 		// Commit the subagent's file BEFORE stopping, so FilesTouched is empty at stop time.
 		// This allows CondenseAndMarkFullyCondensed to eagerly condense at stop.
 		env.GitAdd(file)
-		env.GitCommitWithShadowHooks("Add "+file+" from subagent", file)
+		env.GitCommitWithHooks("Add "+file+" from subagent", file)
 
 		if err := env.SimulateStop(sub.ID, sub.TranscriptPath); err != nil {
 			t.Fatalf("SimulateStop for subagent %d failed: %v", i, err)
@@ -107,7 +107,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 		t.Fatalf("SimulateStop for parent failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Parent commit", parentFile)
+	env.GitCommitWithHooks("Parent commit", parentFile)
 
 	t.Log("Phase 3: verify FullyCondensed subagents were skipped or cleaned up by PostCommit")
 
@@ -149,7 +149,7 @@ func TestSubagentAccumulation_Issue591(t *testing.T) {
 		t.Fatalf("SimulateStop for follow-up session failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Follow-up commit", followUpFile)
+	env.GitCommitWithHooks("Follow-up commit", followUpFile)
 
 	for i, sub := range subagents {
 		state, err := env.GetSessionState(sub.SessionID)

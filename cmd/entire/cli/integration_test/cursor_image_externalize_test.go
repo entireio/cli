@@ -94,7 +94,7 @@ func TestCursorImageExternalization_SidecarCapture(t *testing.T) {
 		"model":           "cursor-default",
 		"loop_count":      1,
 	})
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	cpID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, cpID, "expected a condensed checkpoint after commit")
@@ -184,7 +184,7 @@ func TestCursorImageExternalization_SurvivesFinalizeRewrite(t *testing.T) {
 	// TurnCheckpointIDs so the later stop finalize runs over it. AsAgent takes the
 	// no-TTY active-session fast path (a human mid-turn commit path differs).
 	env.WriteFile("feature.go", "package main\n// new feature\n")
-	env.GitCommitWithShadowHooksAsAgent("Add feature", "feature.go")
+	env.GitCommitWithHooksAsAgent("Add feature", "feature.go")
 
 	cpID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, cpID, "expected a condensed checkpoint after the mid-turn commit")
@@ -270,7 +270,7 @@ func TestCursorImageExternalization_PreservesImagesOnFinalizeCaptureMiss(t *test
 
 	// Mid-turn commit: condensation captures the image into the checkpoint.
 	env.WriteFile("feature.go", "package main\n// new feature\n")
-	env.GitCommitWithShadowHooksAsAgent("Add feature", "feature.go")
+	env.GitCommitWithHooksAsAgent("Add feature", "feature.go")
 
 	cpID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, cpID, "expected a condensed checkpoint after the mid-turn commit")

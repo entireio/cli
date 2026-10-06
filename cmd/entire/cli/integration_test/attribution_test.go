@@ -116,7 +116,7 @@ func TestManualCommit_Attribution(t *testing.T) {
 	t.Log("User commits (condensation should happen)")
 
 	// Commit using hooks (this triggers condensation)
-	env.GitCommitWithShadowHooks("Add functions", "main.go")
+	env.GitCommitWithHooks("Add functions", "main.go")
 
 	// Get commit hash and checkpoint ID
 	headHash := env.GetHeadHash()
@@ -263,7 +263,7 @@ func TestManualCommit_AttributionDeletionOnly(t *testing.T) {
 	env.WriteFile("main.go", "package main\n")
 
 	// Commit using hooks
-	env.GitCommitWithShadowHooks("Remove remaining functions", "main.go")
+	env.GitCommitWithHooks("Remove remaining functions", "main.go")
 
 	// Get checkpoint ID
 	headHash := env.GetHeadHash()
@@ -414,7 +414,7 @@ func TestManualCommit_AttributionNoDoubleCount(t *testing.T) {
 	env.WriteFile("main.go", userEdit1Content)
 
 	// Commit with hooks (condensation happens)
-	env.GitCommitWithShadowHooks("First commit", "main.go")
+	env.GitCommitWithHooks("First commit", "main.go")
 
 	// Get first commit's checkpoint ID
 	repo, err := git.PlainOpen(env.RepoDir)
@@ -479,7 +479,7 @@ func TestManualCommit_AttributionNoDoubleCount(t *testing.T) {
 	env.WriteFile("main.go", userEdit2Content)
 
 	// Second commit (another condensation)
-	env.GitCommitWithShadowHooks("Second commit", "main.go")
+	env.GitCommitWithHooks("Second commit", "main.go")
 
 	// Get second commit's checkpoint ID
 	head, err = repo.Head()
@@ -576,7 +576,7 @@ func TestManualCommit_AttributionStaleBase(t *testing.T) {
 	}
 
 	// User commits (condensation happens, AttributionBaseCommit advances)
-	env.GitCommitWithShadowHooks("First agent commit", "main.go")
+	env.GitCommitWithHooks("First agent commit", "main.go")
 
 	firstCommitHead := env.GetHeadHash()
 	t.Logf("First commit: %s", firstCommitHead[:7])
@@ -623,7 +623,7 @@ func TestManualCommit_AttributionStaleBase(t *testing.T) {
 		fmt.Fprintf(&unrelated, "func util%d() { return %d }\n", i, i)
 	}
 	env.WriteFile("utils.go", unrelated.String())
-	env.GitCommitWithShadowHooks("Add utility functions", "utils.go")
+	env.GitCommitWithHooks("Add utility functions", "utils.go")
 
 	unrelatedHead := env.GetHeadHash()
 	t.Logf("Unrelated commit: %s", unrelatedHead[:7])
@@ -646,7 +646,7 @@ func TestManualCommit_AttributionStaleBase(t *testing.T) {
 	}
 
 	// User commits agent work (condensation happens)
-	env.GitCommitWithShadowHooks("Second agent commit", "main.go")
+	env.GitCommitWithHooks("Second agent commit", "main.go")
 
 	secondCommitHead := env.GetHeadHash()
 	t.Logf("Second commit: %s", secondCommitHead[:7])
@@ -742,7 +742,7 @@ func TestManualCommit_AttributionStaleBase_BranchSwitch(t *testing.T) {
 		t.Fatalf("SimulateStop (cycle 1) failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("First agent commit", "main.go")
+	env.GitCommitWithHooks("First agent commit", "main.go")
 	t.Logf("First commit on feature/polish: %s", env.GetHeadHash()[:7])
 
 	// ========================================
@@ -763,7 +763,7 @@ func TestManualCommit_AttributionStaleBase_BranchSwitch(t *testing.T) {
 		fmt.Fprintf(&unrelated, "func util%d() { return %d }\n", i, i)
 	}
 	env.WriteFile("utils.go", unrelated.String())
-	env.GitCommitWithShadowHooks("Other branch work", "utils.go")
+	env.GitCommitWithHooks("Other branch work", "utils.go")
 	t.Logf("Commit on feature/other-work: %s", env.GetHeadHash()[:7])
 
 	// Switch back to original branch
@@ -785,7 +785,7 @@ func TestManualCommit_AttributionStaleBase_BranchSwitch(t *testing.T) {
 		t.Fatalf("SimulateStop (cycle 2) failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Second agent commit", "main.go")
+	env.GitCommitWithHooks("Second agent commit", "main.go")
 
 	secondCommitHead := env.GetHeadHash()
 	t.Logf("Second commit on feature/polish: %s", secondCommitHead[:7])

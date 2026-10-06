@@ -10,7 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
-// TestShadow_CommitBeforeStop tests the "commit while agent is still working" flow.
+// TestManualCommit_CommitBeforeStop tests the "commit while agent is still working" flow.
 //
 // When the user commits while the agent is in the ACTIVE phase (between
 // SimulateUserPromptSubmit and SimulateStop), the session should stay ACTIVE
@@ -20,7 +20,7 @@ import (
 // State machine transitions tested:
 //   - ACTIVE + GitCommit -> ACTIVE + ActionCondense (immediate condensation)
 //   - ACTIVE + TurnEnd -> IDLE
-func TestShadow_CommitBeforeStop(t *testing.T) {
+func TestManualCommit_CommitBeforeStop(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -112,7 +112,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	t.Log("Phase 3: User commits while agent is ACTIVE")
 
 	headBefore := env.GetHeadHash()
-	env.GitCommitWithShadowHooks("Add feature and utils", "feature.go", "utils.go")
+	env.GitCommitWithHooks("Add feature and utils", "feature.go", "utils.go")
 	commitHash := env.GetHeadHash()
 
 	if commitHash == headBefore {
@@ -190,7 +190,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 	t.Log("CommitBeforeStop test completed successfully")
 }
 
-// TestShadow_AmendPreservesTrailer tests that `git commit --amend` preserves
+// TestManualCommit_AmendPreservesTrailer tests that `git commit --amend` preserves
 // the checkpoint trailer from the original commit.
 //
 // When a user amends a commit that has an Entire-Checkpoint trailer, the
@@ -200,7 +200,7 @@ func TestShadow_CommitBeforeStop(t *testing.T) {
 // Hook behavior tested:
 //   - prepare-commit-msg with source="commit": preserves existing trailer
 //   - post-commit after amend: no duplicate condensation
-func TestShadow_AmendPreservesTrailer(t *testing.T) {
+func TestManualCommit_AmendPreservesTrailer(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -225,7 +225,7 @@ func TestShadow_AmendPreservesTrailer(t *testing.T) {
 	}
 
 	// Commit with hooks (triggers condensation)
-	env.GitCommitWithShadowHooks("Initial implementation", "main.go")
+	env.GitCommitWithHooks("Initial implementation", "main.go")
 
 	originalCommitHash := env.GetHeadHash()
 	originalCheckpointID := env.GetCheckpointIDFromCommitMessage(originalCommitHash)
@@ -307,10 +307,10 @@ func TestShadow_AmendPreservesTrailer(t *testing.T) {
 	t.Log("AmendPreservesTrailer test completed successfully")
 }
 
-// TestShadow_PostRewriteAmendRemapsSessionState verifies that the git
+// TestManualCommit_PostRewriteAmendRemapsSessionState verifies that the git
 // post-rewrite hook updates local session linkage after an amend rewrites the
 // commit SHA.
-func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
+func TestManualCommit_PostRewriteAmendRemapsSessionState(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -328,7 +328,7 @@ func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Initial implementation", "main.go")
+	env.GitCommitWithHooks("Initial implementation", "main.go")
 
 	originalCommitHash := env.GetHeadHash()
 	originalCheckpointID := env.GetCheckpointIDFromCommitMessage(originalCommitHash)
@@ -384,7 +384,7 @@ func TestShadow_PostRewriteAmendRemapsSessionState(t *testing.T) {
 	}
 }
 
-func TestShadow_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
+func TestManualCommit_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -440,7 +440,7 @@ func TestShadow_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
 	}
 }
 
-func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
+func TestManualCommit_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 	t.Parallel()
 
 	env := NewTestEnv(t)
@@ -467,7 +467,7 @@ func TestShadow_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Feature work", "feature.txt")
+	env.GitCommitWithHooks("Feature work", "feature.txt")
 	originalFeatureCommit := env.GetHeadHash()
 
 	stateBeforeRebase, err := env.GetSessionState(sess.ID)

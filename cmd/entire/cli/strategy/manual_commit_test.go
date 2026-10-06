@@ -93,7 +93,7 @@ func TestCodexInventoryInitialization(t *testing.T) {
 // testTranscriptPromptResponse is a minimal transcript used across strategy tests.
 const testTranscriptPromptResponse = "{\"type\":\"human\",\"message\":{\"content\":\"test prompt\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":\"test response\"}}\n"
 
-func TestShadowStrategy_ValidateRepository(t *testing.T) {
+func TestManualCommit_ValidateRepository(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -106,7 +106,7 @@ func TestShadowStrategy_ValidateRepository(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_ValidateRepository_NotGitRepo(t *testing.T) {
+func TestManualCommit_ValidateRepository_NotGitRepo(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
@@ -117,7 +117,7 @@ func TestShadowStrategy_ValidateRepository_NotGitRepo(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_SessionState_SaveLoad(t *testing.T) {
+func TestManualCommit_SessionState_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -162,7 +162,7 @@ func TestShadowStrategy_SessionState_SaveLoad(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_SessionState_LoadNonExistent(t *testing.T) {
+func TestManualCommit_SessionState_LoadNonExistent(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -179,7 +179,7 @@ func TestShadowStrategy_SessionState_LoadNonExistent(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
+func TestManualCommit_ListAllSessionStates(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -239,11 +239,11 @@ func TestShadowStrategy_ListAllSessionStates(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions tests that
+// TestManualCommit_ListAllSessionStates_CleansUpStaleSessions tests that
 // listAllSessionStates cleans up stale sessions whose shadow branch no longer exists.
 // Deleted: ENDED never-condensed sessions. Kept: ACTIVE, condensed,
 // record-bearing, and IDLE sessions (see isOrphanedSessionState).
-func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
+func TestManualCommit_ListAllSessionStates_CleansUpStaleSessions(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -389,7 +389,7 @@ func TestShadowStrategy_ListAllSessionStates_CleansUpStaleSessions(t *testing.T)
 	}
 }
 
-func TestShadowStrategy_FindSessionsForCommit(t *testing.T) {
+func TestManualCommit_FindSessionsForCommit(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -476,7 +476,7 @@ func TestShadowStrategy_FindSessionsForCommit(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_ClearSessionState(t *testing.T) {
+func TestManualCommit_ClearSessionState(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -591,7 +591,7 @@ func TestClearSessionState_SerializesAgainstConcurrentMutation(t *testing.T) {
 	<-clearReturned
 }
 
-func TestShadowStrategy_ListPendingCheckpoints_NoShadowBranch(t *testing.T) {
+func TestManualCommit_ListPendingCheckpoints_NoShadowBranch(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -633,7 +633,7 @@ func TestShadowStrategy_ListPendingCheckpoints_NoShadowBranch(t *testing.T) {
 // Pending subagent work lives on task records now, so `checkpoint list
 // --pending`'s [Task] rows must come from TaskRecords. The session is ENDED
 // with no shadow branch — the shape the orphan cleanup used to discard.
-func TestShadowStrategy_ListPendingCheckpoints_TaskRecordRows(t *testing.T) {
+func TestManualCommit_ListPendingCheckpoints_TaskRecordRows(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "init")
@@ -669,7 +669,7 @@ func TestShadowStrategy_ListPendingCheckpoints_TaskRecordRows(t *testing.T) {
 // When the most-recent session of a multi-session condensed checkpoint has no
 // prompt, the picker must fall back to the latest non-empty session prompt
 // rather than displaying nothing.
-func TestShadowStrategy_ListPendingCheckpoints_MultiSessionFallsBackToEarlierPrompt(t *testing.T) {
+func TestManualCommit_ListPendingCheckpoints_MultiSessionFallsBackToEarlierPrompt(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "f.txt", "init")
@@ -718,7 +718,7 @@ func TestShadowStrategy_ListPendingCheckpoints_MultiSessionFallsBackToEarlierPro
 		"picker must fall back to the latest non-empty session prompt when the most-recent session is empty")
 }
 
-func TestShadowStrategy_GetSessionInfo_NoShadowBranch(t *testing.T) {
+func TestManualCommit_GetSessionInfo_NoShadowBranch(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -754,7 +754,7 @@ func TestShadowStrategy_GetSessionInfo_NoShadowBranch(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_GetTaskCheckpoint_NotTaskCheckpoint(t *testing.T) {
+func TestManualCommit_GetTaskCheckpoint_NotTaskCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -773,7 +773,7 @@ func TestShadowStrategy_GetTaskCheckpoint_NotTaskCheckpoint(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_GetTaskCheckpointTranscript_NotTaskCheckpoint(t *testing.T) {
+func TestManualCommit_GetTaskCheckpointTranscript_NotTaskCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 
@@ -838,7 +838,7 @@ func TestGetShadowBranchNameForCommit(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_PrepareCommitMsg_NoActiveSession(t *testing.T) {
+func TestManualCommit_PrepareCommitMsg_NoActiveSession(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -889,7 +889,7 @@ func TestShadowStrategy_PrepareCommitMsg_NoActiveSession(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_PrepareCommitMsg_SkipSources(t *testing.T) {
+func TestManualCommit_PrepareCommitMsg_SkipSources(t *testing.T) {
 	// Tests that merge, squash, and commit sources are skipped
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -926,7 +926,7 @@ func TestShadowStrategy_PrepareCommitMsg_SkipSources(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_PrepareCommitMsg_SkipsSessionWhenContentCheckFails(t *testing.T) {
+func TestManualCommit_PrepareCommitMsg_SkipsSessionWhenContentCheckFails(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
@@ -1096,7 +1096,7 @@ func TestAddCheckpointTrailer_ExistingTrailers(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
+func TestManualCommit_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 	// This test verifies that GetCheckpointLog correctly uses the checkpoint ID
 	// to look up the log. Since getCheckpointLog requires a full git setup
 	// with entire/checkpoints/v1 branch, we test the lookup logic by checking error behavior.
@@ -1128,7 +1128,7 @@ func TestShadowStrategy_GetCheckpointLog_WithCheckpointID(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_GetCheckpointLog_NoCheckpointID(t *testing.T) {
+func TestManualCommit_GetCheckpointLog_NoCheckpointID(t *testing.T) {
 	// Test that checkpoints without checkpoint ID return ErrNoMetadata
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -1154,7 +1154,7 @@ func TestShadowStrategy_GetCheckpointLog_NoCheckpointID(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_FilesTouched_OnlyModifiedFiles(t *testing.T) {
+func TestManualCommit_FilesTouched_OnlyModifiedFiles(t *testing.T) {
 	// This test verifies that files_touched only contains files that were actually
 	// modified during the session, not ALL files in the repository.
 	//
@@ -1495,9 +1495,9 @@ func TestSessionState_TokenUsagePersistence(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_PrepareCommitMsg_ReusesLastCheckpointID verifies that PrepareCommitMsg
+// TestManualCommit_PrepareCommitMsg_ReusesLastCheckpointID verifies that PrepareCommitMsg
 // reuses the LastCheckpointID when there's no new content to condense.
-func TestShadowStrategy_PrepareCommitMsg_ReusesLastCheckpointID(t *testing.T) {
+func TestManualCommit_PrepareCommitMsg_ReusesLastCheckpointID(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -1593,7 +1593,7 @@ func TestParsePostRewritePairs_InvalidLine(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T) {
+func TestManualCommit_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
@@ -1636,7 +1636,7 @@ func TestShadowStrategy_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T
 	}
 }
 
-func TestShadowStrategy_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
+func TestManualCommit_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "tracked.txt", "one\n")
@@ -1715,7 +1715,7 @@ func TestShadowStrategy_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
 	}
 }
 
-func TestShadowStrategy_MigrateAndPersistIfNeeded_PersistsBaseCommitWithoutShadowBranch(t *testing.T) {
+func TestManualCommit_MigrateAndPersistIfNeeded_PersistsBaseCommitWithoutShadowBranch(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	testutil.WriteFile(t, dir, "tracked.txt", "one\n")
@@ -1777,7 +1777,7 @@ func TestShadowStrategy_MigrateAndPersistIfNeeded_PersistsBaseCommitWithoutShado
 	}
 }
 
-func TestShadowStrategy_PostRewrite_DoesNotTouchOtherWorktrees(t *testing.T) {
+func TestManualCommit_PostRewrite_DoesNotTouchOtherWorktrees(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
@@ -1823,10 +1823,10 @@ func referenceExists(t *testing.T, repo *git.Repository, refName plumbing.Refere
 	return err == nil
 }
 
-// TestShadowStrategy_CondenseSession_EphemeralBranchTrailer verifies that checkpoint commits
+// TestManualCommit_CondenseSession_EphemeralBranchTrailer verifies that checkpoint commits
 // on the entire/checkpoints/v1 branch include the Ephemeral-branch trailer indicating which shadow
 // branch the checkpoint originated from.
-func TestShadowStrategy_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
+func TestManualCommit_CondenseSession_EphemeralBranchTrailer(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)

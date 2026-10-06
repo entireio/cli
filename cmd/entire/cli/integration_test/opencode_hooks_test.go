@@ -54,7 +54,7 @@ func TestOpenCodeHookFlow(t *testing.T) {
 	}
 
 	// 7. For manual-commit, user commits manually (triggers condensation).
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	// 8. session-end
 	if err := env.SimulateOpenCodeSessionEnd(session.ID, session.TranscriptPath); err != nil {
@@ -175,7 +175,7 @@ func TestOpenCodeMultiTurnCondensation(t *testing.T) {
 	}
 
 	// Commit with hooks (triggers condensation)
-	env.GitCommitWithShadowHooks("Implement app", "app.go")
+	env.GitCommitWithHooks("Implement app", "app.go")
 
 	// session-end
 	if err := env.SimulateOpenCodeSessionEnd(session.ID, transcriptPath); err != nil {
@@ -243,7 +243,7 @@ func TestOpenCodeMidTurnCommit(t *testing.T) {
 	// 6. Agent commits mid-turn (no turn-end yet!)
 	// This triggers: PrepareCommitMsg (adds trailer) → PostCommit (runs condensation)
 	// Condensation needs the transcript, which PrepareTranscript should provide.
-	env.GitCommitWithShadowHooksAsAgent("Add script", "script.sh")
+	env.GitCommitWithHooksAsAgent("Add script", "script.sh")
 
 	// 7. Verify commit has checkpoint trailer
 	commitHash := env.GetHeadHash()
@@ -306,7 +306,7 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 	}
 
 	// === User commits (triggers condensation) ===
-	env.GitCommitWithShadowHooks("Create app", "app.go")
+	env.GitCommitWithHooks("Create app", "app.go")
 
 	// Verify condensation happened
 	checkpointID := env.TryGetLatestCheckpointID()
@@ -342,7 +342,7 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 	}
 
 	// For manual-commit: commit turn 2 and verify second condensation
-	env.GitCommitWithShadowHooks("Add color output", "app.go")
+	env.GitCommitWithHooks("Add color output", "app.go")
 
 	checkpointID2 := env.TryGetLatestCheckpointID()
 	if checkpointID2 == "" {

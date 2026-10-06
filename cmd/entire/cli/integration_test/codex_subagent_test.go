@@ -60,7 +60,7 @@ func TestCodexSubagent_StoresDeclaredSubagentTranscript(t *testing.T) {
 
 	// Committing condenses the session, and the materializer must store the rollout
 	// itself — the storage guarantee this test is named for.
-	env.GitCommitWithShadowHooksAsAgent("Add red doc", editedFile)
+	env.GitCommitWithHooksAsAgent("Add red doc", editedFile)
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID, "expected a condensed checkpoint after committing the subagent's work")
 	stored, ok := env.ReadFileFromBranch(paths.MetadataBranchName,
@@ -152,7 +152,7 @@ func TestCodexSubagent_CommitBeforeParentTurnEnds_CompletesTaskRecord(t *testing
 	t.Parallel()
 	sc := newCodexSubagentScenario(t)
 
-	sc.env.GitCommitWithShadowHooksAsAgent("Add red doc", codexScenarioEditedFile)
+	sc.env.GitCommitWithHooksAsAgent("Add red doc", codexScenarioEditedFile)
 	checkpointID := sc.env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID, "expected a condensed checkpoint after committing the subagent's work")
 
@@ -191,7 +191,7 @@ func TestCodexSubagent_GuestLinkedCommit_CompletesTaskRecord(t *testing.T) {
 	state.Owner = &owner
 	require.NoError(t, sc.env.WriteSessionState(codexScenarioSessionID, state))
 
-	sc.env.GitCommitWithShadowHooksAsAgent("Add red doc", codexScenarioEditedFile)
+	sc.env.GitCommitWithHooksAsAgent("Add red doc", codexScenarioEditedFile)
 	checkpointID := sc.env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID, "the guest-linked session must be condensed into the commit's checkpoint")
 

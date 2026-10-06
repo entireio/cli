@@ -39,10 +39,10 @@ func TestSquashCommit_PendingWorkGetsItsOwnCheckpoint(t *testing.T) {
 		require.NoError(t, env.SimulateStop(sess.ID, sess.TranscriptPath))
 	}
 	turn("part one", "f1.txt", "one\n")
-	env.GitCommitWithShadowHooks("part one", "f1.txt")
+	env.GitCommitWithHooks("part one", "f1.txt")
 	t1 := env.LatestCheckpointID()
 	turn("part two", "f2.txt", "two\n")
-	env.GitCommitWithShadowHooks("part two", "f2.txt")
+	env.GitCommitWithHooks("part two", "f2.txt")
 	t2 := env.LatestCheckpointID()
 	require.NotEqual(t, t1, t2)
 	// Turn three is still uncommitted when the squash happens.
@@ -51,7 +51,7 @@ func TestSquashCommit_PendingWorkGetsItsOwnCheckpoint(t *testing.T) {
 
 	env.GitCheckoutBranch(masterBranch)
 	testutil.RunGit(t, env.RepoDir, "merge", "--squash", "feature/test-branch")
-	env.GitCommitWithShadowHooks("Feature (squashed)", "f3.txt")
+	env.GitCommitWithHooks("Feature (squashed)", "f3.txt")
 
 	var got []string
 	for _, cpID := range trailers.ParseAllCheckpoints(testutil.RunGit(t, env.RepoDir, "log", "-1", "--format=%B")) {

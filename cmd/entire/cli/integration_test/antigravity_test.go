@@ -430,7 +430,7 @@ func TestAntigravity_TokenUsageInCheckpointMetadata(t *testing.T) {
 	// 6. Commit: prepare-commit-msg adds the Entire-Checkpoint trailer, then
 	//    post-commit condenses the session (with its token usage) onto
 	//    entire/checkpoints/v1.
-	env.GitCommitWithShadowHooks("Add tok.txt", "tok.txt")
+	env.GitCommitWithHooks("Add tok.txt", "tok.txt")
 
 	// 7. Read the committed checkpoint metadata and assert the token usage
 	//    reached both the per-session metadata.json and the summary aggregate.
@@ -552,7 +552,7 @@ func TestAntigravity_PromptInCheckpointMetadata(t *testing.T) {
 
 	// Commit → PostCommit condensation. The fallback re-extracts the prompt from
 	// the now-populated live transcript.
-	env.GitCommitWithShadowHooks("Add foo.txt", "foo.txt")
+	env.GitCommitWithHooks("Add foo.txt", "foo.txt")
 
 	// Resolve the checkpoint ID from the user commit's Entire-Checkpoint trailer.
 	headHash := env.GetHeadHash()
@@ -719,11 +719,11 @@ func TestAntigravity_PromptInCheckpointMetadata_LaterTurnManualCommit(t *testing
 	}
 
 	runTurn("make a red note", "red.md", 1)
-	env.GitCommitWithShadowHooks("Add red note", "red.md")
+	env.GitCommitWithHooks("Add red note", "red.md")
 	require.Equal(t, "make a red note", promptOf("first manual commit"))
 
 	runTurn("add another", "blue.md", 3)
-	env.GitCommitWithShadowHooks("Add blue note", "blue.md")
+	env.GitCommitWithHooks("Add blue note", "blue.md")
 	require.Equal(t, "add another", promptOf("second manual commit"),
 		"a later turn's checkpoint must carry that turn's prompt, not the first turn's or none")
 }

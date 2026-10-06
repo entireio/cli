@@ -118,7 +118,7 @@ func TestOldIdleSession_BaseCommitNotUpdated(t *testing.T) {
 	t.Log("Phase 4: Committing from session2")
 
 	env.GitAdd("file2.txt")
-	env.GitCommitWithShadowHooks("Commit from session2", "file2.txt")
+	env.GitCommitWithHooks("Commit from session2", "file2.txt")
 
 	finalHead := env.GetHeadHash()
 	t.Logf("Final HEAD after session2 commit: %s", finalHead[:7])
@@ -261,7 +261,7 @@ func TestOldEndedSession_BaseCommitNotUpdated(t *testing.T) {
 	t.Log("Phase 4: Committing from session2")
 
 	env.GitAdd("file2.txt")
-	env.GitCommitWithShadowHooks("Commit from session2", "file2.txt")
+	env.GitCommitWithHooks("Commit from session2", "file2.txt")
 
 	finalHead := env.GetHeadHash()
 

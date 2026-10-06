@@ -267,7 +267,7 @@ func TestSessionEndCondensation_UnrelatedCommitDoesNotLinkInterruptedSession(t *
 	forgeInterruptedCondensation(t, env, sess.ID, snap, written)
 
 	env.WriteFile("unrelated.txt", "hand-written\n")
-	env.GitCommitWithShadowHooksAsAgent("Unrelated hand-written change", "unrelated.txt")
+	env.GitCommitWithHooksAsAgent("Unrelated hand-written change", "unrelated.txt")
 
 	if trailer := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); trailer != "" {
 		t.Errorf("unrelated commit got checkpoint trailer %q, want none", trailer)
@@ -320,7 +320,7 @@ func TestSessionEndCondensation_AgentCommitLeavesInterruptedSessionForDoctor(t *
 		t.Fatalf("live session must be ACTIVE for the agent fast path to fire, got %+v", liveState)
 	}
 
-	env.GitCommitWithShadowHooksAsAgent("Agent commit from the live session", "live.go")
+	env.GitCommitWithHooksAsAgent("Agent commit from the live session", "live.go")
 
 	trailer := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if trailer == "" {

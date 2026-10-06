@@ -16,7 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
-// TestShadow_FullWorkflow tests the complete shadow workflow as described in
+// TestManualCommit_FullWorkflow tests the complete shadow workflow as described in
 // docs/requirements/shadow-strategy/example.md
 //
 // This test simulates Alice's workflow:
@@ -27,7 +27,7 @@ import (
 // 5. Verify final state
 //
 //nolint:maintidx // End-to-end workflow across 5 sequential phases; the shadow-branch assertions that replaced the rewind observations pushed it over the threshold, and the phases share so much accumulated state that splitting them would obscure the flow this test exists to document.
-func TestShadow_FullWorkflow(t *testing.T) {
+func TestManualCommit_FullWorkflow(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -182,7 +182,7 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	t.Log("Phase 5: User commits - triggering condensation")
 
 	// Stage and commit with shadow hooks
-	env.GitCommitWithShadowHooks("Add user authentication with bcrypt", "src/auth.go", "src/bcrypt.go")
+	env.GitCommitWithHooks("Add user authentication with bcrypt", "src/auth.go", "src/bcrypt.go")
 
 	// Get the new commit
 	commit1Hash := env.GetHeadHash()
@@ -263,7 +263,7 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	// ========================================
 	t.Log("Phase 7: Second user commit")
 
-	env.GitCommitWithShadowHooks("Add session management", "src/session.go")
+	env.GitCommitWithHooks("Add session management", "src/session.go")
 
 	commit2Hash := env.GetHeadHash()
 	t.Logf("User commit 2: %s", commit2Hash[:7])
@@ -322,9 +322,9 @@ func TestShadow_FullWorkflow(t *testing.T) {
 	t.Log("Shadow full workflow test completed successfully!")
 }
 
-// TestShadow_SessionStateLocation verifies session state is stored in .git/
+// TestManualCommit_SessionStateLocation verifies session state is stored in .git/
 // (not .entire/) so it's never accidentally committed.
-func TestShadow_SessionStateLocation(t *testing.T) {
+func TestManualCommit_SessionStateLocation(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -358,10 +358,10 @@ func TestShadow_SessionStateLocation(t *testing.T) {
 	}
 }
 
-// TestShadow_MultipleConcurrentSessions tests that starting a second Claude session
+// TestManualCommit_MultipleConcurrentSessions tests that starting a second Claude session
 // while another session has uncommitted checkpoints triggers a warning.
 // The first prompt is blocked with continue:false, subsequent prompts proceed.
-func TestShadow_MultipleConcurrentSessions(t *testing.T) {
+func TestManualCommit_MultipleConcurrentSessions(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -436,9 +436,9 @@ func TestShadow_MultipleConcurrentSessions(t *testing.T) {
 	}
 }
 
-// TestShadow_ShadowBranchMigrationOnPull verifies that when the base commit changes
+// TestManualCommit_ShadowBranchMigrationOnPull verifies that when the base commit changes
 // (e.g., after stash → pull → apply), the shadow branch is moved to the new commit.
-func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
+func TestManualCommit_ShadowBranchMigrationOnPull(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -528,9 +528,9 @@ func TestShadow_ShadowBranchMigrationOnPull(t *testing.T) {
 	t.Log("Shadow branch successfully migrated after base commit change")
 }
 
-// TestShadow_ShadowBranchNaming verifies shadow branches follow the
+// TestManualCommit_ShadowBranchNaming verifies shadow branches follow the
 // entire/<base-sha[:7]> naming convention.
-func TestShadow_ShadowBranchNaming(t *testing.T) {
+func TestManualCommit_ShadowBranchNaming(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -582,9 +582,9 @@ func TestShadow_ShadowBranchNaming(t *testing.T) {
 	}
 }
 
-// TestShadow_TranscriptCondensation verifies that session transcripts are
+// TestManualCommit_TranscriptCondensation verifies that session transcripts are
 // included in the entire/checkpoints/v1 branch during condensation.
-func TestShadow_TranscriptCondensation(t *testing.T) {
+func TestManualCommit_TranscriptCondensation(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -619,7 +619,7 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	}
 
 	// Commit with hooks (triggers condensation)
-	env.GitCommitWithShadowHooks("Add main.go", "main.go")
+	env.GitCommitWithHooks("Add main.go", "main.go")
 
 	// Get checkpoint ID from entire/checkpoints/v1 branch (not from commit message)
 	checkpointID := env.GetLatestCheckpointID()
@@ -661,13 +661,13 @@ func TestShadow_TranscriptCondensation(t *testing.T) {
 	}
 }
 
-// TestShadow_FullTranscriptContext verifies that each checkpoint includes
+// TestManualCommit_FullTranscriptContext verifies that each checkpoint includes
 // only the prompts from its checkpoint portion, not the entire session.
 //
 // This tests checkpoint-scoped prompts:
 // - First commit: prompt.txt includes prompts 1-2 (from checkpoint start)
 // - Second commit: prompt.txt includes only prompt 3 (from second checkpoint start)
-func TestShadow_FullTranscriptContext(t *testing.T) {
+func TestManualCommit_FullTranscriptContext(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -725,7 +725,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	t.Log("Phase 2: First user commit")
 
 	// User commits
-	env.GitCommitWithShadowHooks("Add functions A and B", "a.go", "b.go")
+	env.GitCommitWithHooks("Add functions A and B", "a.go", "b.go")
 
 	// Get first checkpoint ID from commit message trailer
 	commit1Hash := env.GetHeadHash()
@@ -780,7 +780,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	t.Log("Phase 4: Second user commit")
 
 	// User commits again
-	env.GitCommitWithShadowHooks("Add function C", "c.go")
+	env.GitCommitWithHooks("Add function C", "c.go")
 
 	// Get second checkpoint ID from commit message trailer
 	commit2Hash := env.GetHeadHash()
@@ -812,7 +812,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 	t.Log("Shadow full transcript context test completed successfully!")
 }
 
-// TestShadow_IntermediateCommitsWithoutPrompts tests that commits without new Claude
+// TestManualCommit_IntermediateCommitsWithoutPrompts tests that commits without new Claude
 // content do NOT get checkpoint trailers.
 //
 // Scenario:
@@ -821,7 +821,7 @@ func TestShadow_FullTranscriptContext(t *testing.T) {
 // 3. User commits unrelated files without new Claude work - NO trailer (no new content)
 // 4. User enters new prompt, creates more files
 // 5. Second commit with Claude content gets a trailer
-func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
+func TestManualCommit_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -861,7 +861,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 
 	t.Log("Phase 2: First commit (with session content)")
 
-	env.GitCommitWithShadowHooks("Add function A", "a.go")
+	env.GitCommitWithHooks("Add function A", "a.go")
 	commit1Hash := env.GetHeadHash()
 	checkpoint1ID := env.GetCheckpointIDFromCommitMessage(commit1Hash)
 	t.Logf("First commit: %s, checkpoint from trailer: %s", commit1Hash[:7], checkpoint1ID)
@@ -876,7 +876,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	// User creates an unrelated file and commits without entering a new Claude prompt
 	// Since there's no new session content, this commit should NOT get a trailer
 	env.WriteFile("unrelated.txt", "This is an unrelated file")
-	env.GitCommitWithShadowHooks("Add unrelated file", "unrelated.txt")
+	env.GitCommitWithHooks("Add unrelated file", "unrelated.txt")
 
 	commit2Hash := env.GetHeadHash()
 	checkpoint2ID := env.GetCheckpointIDFromCommitMessage(commit2Hash)
@@ -912,7 +912,7 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Add function B", "b.go")
+	env.GitCommitWithHooks("Add function B", "b.go")
 
 	commit3Hash := env.GetHeadHash()
 	checkpoint3ID := env.GetCheckpointIDFromCommitMessage(commit3Hash)
@@ -942,14 +942,14 @@ func TestShadow_IntermediateCommitsWithoutPrompts(t *testing.T) {
 	t.Log("Intermediate commits test completed successfully!")
 }
 
-// TestShadow_FullTranscriptCondensationWithIntermediateCommits tests that checkpoints
+// TestManualCommit_FullTranscriptCondensationWithIntermediateCommits tests that checkpoints
 // contain only checkpoint-scoped prompts across multiple commits.
 //
 // Scenario:
 // 1. Session with prompts A and B, commit 1 → prompt.txt has A and B
 // 2. Continue session with prompt C, commit 2 (without intermediate prompt submit)
 // 3. Verify commit 2's prompt.txt has only C (checkpoint-scoped)
-func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) {
+func TestManualCommit_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -1000,7 +1000,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 
 	t.Log("Phase 2: First commit")
 
-	env.GitCommitWithShadowHooks("Add functions A and B", "a.go", "b.go")
+	env.GitCommitWithHooks("Add functions A and B", "a.go", "b.go")
 	commit1Hash := env.GetHeadHash()
 	checkpoint1ID := env.GetCheckpointIDFromCommitMessage(commit1Hash)
 	t.Logf("First commit: %s, checkpoint: %s", commit1Hash[:7], checkpoint1ID)
@@ -1041,7 +1041,7 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 
 	t.Log("Phase 4: Second commit")
 
-	env.GitCommitWithShadowHooks("Add function C", "c.go")
+	env.GitCommitWithHooks("Add function C", "c.go")
 	commit2Hash := env.GetHeadHash()
 	checkpoint2ID := env.GetCheckpointIDFromCommitMessage(commit2Hash)
 	t.Logf("Second commit: %s, checkpoint: %s", commit2Hash[:7], checkpoint2ID)
@@ -1074,10 +1074,10 @@ func TestShadow_FullTranscriptCondensationWithIntermediateCommits(t *testing.T) 
 	t.Log("Checkpoint-scoped prompt condensation with intermediate commits test completed successfully!")
 }
 
-// TestShadow_TrailerRemovalSkipsCondensation tests that removing the Entire-Checkpoint
+// TestManualCommit_TrailerRemovalSkipsCondensation tests that removing the Entire-Checkpoint
 // trailer during commit message editing causes condensation to be skipped.
 // This allows users to opt-out of linking a commit to their Claude session.
-func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
+func TestManualCommit_TrailerRemovalSkipsCondensation(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -1165,7 +1165,7 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 	}
 
 	// This time, keep the trailer (normal commit with hooks)
-	env.GitCommitWithShadowHooks("Add function B", "b.go")
+	env.GitCommitWithHooks("Add function B", "b.go")
 
 	commit2Hash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commit2Hash)
@@ -1194,9 +1194,9 @@ func TestShadow_TrailerRemovalSkipsCondensation(t *testing.T) {
 	t.Log("Trailer removal opt-out test completed successfully!")
 }
 
-// TestShadow_SessionsBranchCommitTrailers verifies that commits on the entire/checkpoints/v1
+// TestManualCommit_SessionsBranchCommitTrailers verifies that commits on the entire/checkpoints/v1
 // branch contain the expected trailers: Entire-Session, Entire-Strategy, and Entire-Agent.
-func TestShadow_SessionsBranchCommitTrailers(t *testing.T) {
+func TestManualCommit_SessionsBranchCommitTrailers(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -1224,7 +1224,7 @@ func TestShadow_SessionsBranchCommitTrailers(t *testing.T) {
 	}
 
 	// Commit to trigger condensation
-	env.GitCommitWithShadowHooks("Add main.go", "main.go")
+	env.GitCommitWithHooks("Add main.go", "main.go")
 
 	// Get the commit message on entire/checkpoints/v1 branch
 	sessionsCommitMsg := env.GetLatestCommitMessageOnBranch(paths.MetadataBranchName)

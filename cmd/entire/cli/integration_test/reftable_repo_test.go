@@ -90,7 +90,7 @@ func TestReftableRepository_EnableAndFirstCheckpoint(t *testing.T) {
 		t.Fatalf("expected shadow branch %s to resolve", shadowBranch)
 	}
 
-	env.GitCommitWithShadowHooks("Add reftable main", "main.go")
+	env.GitCommitWithHooks("Add reftable main", "main.go")
 	userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD")
 	if userHead == initialHead {
 		t.Fatal("expected user commit to advance HEAD")
@@ -221,7 +221,7 @@ func TestReftableRepository_GitRefsBackend(t *testing.T) {
 		t.Fatalf("expected shadow branch %s to resolve", shadowBranch)
 	}
 
-	env.GitCommitWithShadowHooks("Add reftable main", "main.go")
+	env.GitCommitWithHooks("Add reftable main", "main.go")
 	if userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD"); userHead == initialHead {
 		t.Fatal("expected user commit to advance HEAD")
 	}

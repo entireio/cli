@@ -78,7 +78,7 @@ func TestReview_EnvVarAdoptionCondensesReviewMetadataOnNextCommit(t *testing.T) 
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("add review target", "review_target.go")
+	env.GitCommitWithHooks("add review target", "review_target.go")
 
 	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if checkpointID == "" {

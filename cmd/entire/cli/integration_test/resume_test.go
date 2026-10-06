@@ -50,7 +50,7 @@ func TestResume_SwitchBranchWithSession(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 
 	// Remember the feature branch name
 	featureBranch := env.GetCurrentBranch()
@@ -114,7 +114,7 @@ func TestResume_AlreadyOnBranch(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create a test script", "test.js")
+	env.GitCommitWithHooks("Create a test script", "test.js")
 
 	currentBranch := env.GetCurrentBranch()
 
@@ -243,7 +243,7 @@ func TestResume_SessionLogAlreadyExists(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -324,7 +324,7 @@ func TestResume_MultipleSessionsOnBranch(t *testing.T) {
 	}
 
 	// Commit the sessions' changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Update to version 2", "file.txt")
+	env.GitCommitWithHooks("Update to version 2", "file.txt")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -372,7 +372,7 @@ func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create real file", "real.txt")
+	env.GitCommitWithHooks("Create real file", "real.txt")
 
 	// Create a new branch for the orphan checkpoint test
 	env.GitCheckoutNewBranch("feature/orphan-checkpoint")
@@ -433,7 +433,7 @@ func TestResume_AfterMergingMain(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 
 	// Remember the feature branch name
 	featureBranch := env.GetCurrentBranch()
@@ -600,7 +600,7 @@ func TestResume_ExistingLocalLog_KeptByDefault(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -663,7 +663,7 @@ func TestResume_LocalLogNewerTimestamp_ForceOverwrites(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -727,7 +727,7 @@ func TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -807,7 +807,7 @@ func TestResume_MultiSessionMixedTimestamps(t *testing.T) {
 
 	// Commit changes with hooks (this triggers prepare-commit-msg and post-commit hooks,
 	// which adds Entire-Checkpoint trailer and condenses both sessions to the same checkpoint)
-	env.GitCommitWithShadowHooks("Add hello and goodbye methods", "hello.rb", "goodbye.rb")
+	env.GitCommitWithHooks("Add hello and goodbye methods", "hello.rb", "goodbye.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -897,7 +897,7 @@ func TestResume_LocalLogNoTimestamp(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -963,7 +963,7 @@ func TestResume_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 
 	// Commit session 1 (triggers condensation → checkpoint 1 on entire/checkpoints/v1)
-	env.GitCommitWithShadowHooks("Create hello script", "hello.rb")
+	env.GitCommitWithHooks("Create hello script", "hello.rb")
 	checkpointID1 := env.GetLatestCheckpointID()
 	t.Logf("Session 1 checkpoint: %s", checkpointID1)
 
@@ -985,7 +985,7 @@ func TestResume_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 
 	// Commit session 2 (triggers condensation → checkpoint 2 on entire/checkpoints/v1)
-	env.GitCommitWithShadowHooks("Create goodbye script", "goodbye.rb")
+	env.GitCommitWithHooks("Create goodbye script", "goodbye.rb")
 	checkpointID2 := env.GetLatestCheckpointID()
 	t.Logf("Session 2 checkpoint: %s", checkpointID2)
 
@@ -1069,7 +1069,7 @@ func TestResume_RelocatedRepo(t *testing.T) {
 	}
 
 	// Commit the file (manual-commit requires user to commit with hooks)
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 	originalClaudeProjectDir := env.ClaudeProjectDir
@@ -1175,7 +1175,7 @@ func TestResume_HonorsClaudeConfigDir(t *testing.T) {
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 	featureBranch := env.GetCurrentBranch()
 	env.GitCheckoutBranch(masterBranch)
 
@@ -1243,7 +1243,7 @@ func TestResume_AsksClaudeForItsConfigDir(t *testing.T) {
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 	featureBranch := env.GetCurrentBranch()
 	env.GitCheckoutBranch(masterBranch)
 

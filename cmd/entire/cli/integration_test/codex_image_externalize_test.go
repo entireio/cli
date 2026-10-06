@@ -65,7 +65,7 @@ func TestCodexImageExternalization_FullHookFlow(t *testing.T) {
 
 	// Mid-turn commit -> post-commit condensation externalizes; stop -> finalize.
 	env.WriteFile("feature.txt", "hi\n")
-	env.GitCommitWithShadowHooks("add feature.txt", "feature.txt")
+	env.GitCommitWithHooks("add feature.txt", "feature.txt")
 	hook("stop", map[string]any{"hook_event_name": "Stop"})
 
 	if !env.BranchExists(paths.MetadataBranchName) {

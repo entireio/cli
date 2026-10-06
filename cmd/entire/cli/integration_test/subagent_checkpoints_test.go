@@ -493,7 +493,7 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 	// The next commit condenses the session; the materializer must store the
 	// record's transcript under the checkpoint's tasks/ subtree — the #2058
 	// end-to-end guarantee this whole pipeline exists for.
-	env.GitCommitWithShadowHooksAsAgent("Add background doc", editedFile)
+	env.GitCommitWithHooksAsAgent("Add background doc", editedFile)
 	checkpointID := env.TryGetLatestCheckpointID()
 	if checkpointID == "" {
 		t.Fatal("expected a condensed checkpoint after committing the subagent's work")

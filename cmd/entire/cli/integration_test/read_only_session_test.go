@@ -100,7 +100,7 @@ func TestReadOnlySession_NotCondensed(t *testing.T) {
 	// ========================================
 	t.Log("Phase 3: User commits; read-only session should NOT be condensed")
 
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	// Get the checkpoint ID from the commit
 	commitHash := env.GetHeadHash()
@@ -226,7 +226,7 @@ func TestReadOnlySession_ActiveDuringCommit_NotCondensed(t *testing.T) {
 	// ========================================
 	t.Log("Phase 3: User commits while read-only session is ACTIVE")
 
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	commitHash := env.GetHeadHash()
 	cpID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -323,7 +323,7 @@ func TestReadOnlySession_ActiveAcrossMultipleCommits(t *testing.T) {
 		t.Fatalf("session 1 stop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Add file1", "file1.go")
+	env.GitCommitWithHooks("Add file1", "file1.go")
 	firstCommitHash := env.GetHeadHash()
 	cpID1 := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	if cpID1 == "" {
@@ -372,7 +372,7 @@ func TestReadOnlySession_ActiveAcrossMultipleCommits(t *testing.T) {
 		t.Fatalf("session 2 stop failed: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Add file2", "file2.go")
+	env.GitCommitWithHooks("Add file2", "file2.go")
 	secondCommitHash := env.GetHeadHash()
 	cpID2 := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	if cpID2 == "" {
@@ -462,7 +462,7 @@ func TestMultipleReadOnlySessions_NoneCondensed(t *testing.T) {
 	// ========================================
 	t.Log("Phase 3: User commits")
 
-	env.GitCommitWithShadowHooks("Add main function", "main.go")
+	env.GitCommitWithHooks("Add main function", "main.go")
 
 	commitHash := env.GetHeadHash()
 	cpID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -548,7 +548,7 @@ func TestAllReadOnlySessions_NoCheckpointCreated(t *testing.T) {
 	t.Log("Phase 2: User manually commits a file — no other session claims it")
 
 	env.WriteFile("manual.txt", "manually created file\n")
-	env.GitCommitWithShadowHooks("Add manual file", "manual.txt")
+	env.GitCommitWithHooks("Add manual file", "manual.txt")
 
 	// ========================================
 	// Phase 3: Verify no checkpoint trailer was added
@@ -645,7 +645,7 @@ func TestEmptySession_NoTranscriptPath_NotCondensed(t *testing.T) {
 	// ========================================
 	t.Log("Phase 3: User commits; empty session should NOT be condensed")
 
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	commitHash := env.GetHeadHash()
 	cpID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -746,7 +746,7 @@ func TestEmptySession_ActiveDuringCommit_NotCondensed(t *testing.T) {
 	// ========================================
 	t.Log("Phase 3: User commits while empty session is ACTIVE")
 
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 
 	commitHash := env.GetHeadHash()
 	cpID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -892,7 +892,7 @@ func TestReviewSession_CodingSessionCommitsMidTurn_NotCondensed(t *testing.T) {
 				t.Fatalf("precondition: coding session's persisted FilesTouched should be empty before Stop, got %v", codingState.FilesTouched)
 			}
 
-			env.GitCommitWithShadowHooksAsAgent("Add feature", "feature.go")
+			env.GitCommitWithHooksAsAgent("Add feature", "feature.go")
 
 			cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 			if cpID == "" {
@@ -988,7 +988,7 @@ func TestReviewSession_FinishedReviewer_UnrelatedCommitNotLinked(t *testing.T) {
 
 	// No agent session touched this file; the user writes and commits it.
 	env.WriteFile("notes.md", "# Notes\n")
-	env.GitCommitWithShadowHooksAsAgent("Add notes", "notes.md")
+	env.GitCommitWithHooksAsAgent("Add notes", "notes.md")
 
 	if cpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()); cpID != "" {
 		t.Errorf("unrelated commit was linked to the finished review session (checkpoint %s)", cpID)

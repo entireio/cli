@@ -190,7 +190,7 @@ func TestExplain_BranchListingShowsCheckpointsAndPrompts(t *testing.T) {
 	err = env.SimulateStop(session.ID, session.TranscriptPath)
 	require.NoError(t, err)
 
-	env.GitCommitWithShadowHooks("Implement user authentication", "auth.go")
+	env.GitCommitWithHooks("Implement user authentication", "auth.go")
 
 	// `entire explain` (no flags) should show the branch listing with the checkpoint.
 	output, err := env.RunCLIWithError("checkpoint", "explain")
@@ -272,7 +272,7 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 	env.WriteFile("a.go", "package a")
 	env.GitAdd("a.go")
 	require.NoError(t, env.SimulateStop(sessionA.ID, transcriptA))
-	env.GitCommitWithShadowHooks("Add module A", "a.go")
+	env.GitCommitWithHooks("Add module A", "a.go")
 	env.RunPrePush("origin")
 
 	// Checkpoint B: commit locally, DO NOT push. Local entire/checkpoints/v1 is
@@ -285,7 +285,7 @@ func TestExplain_CheckpointFetchDoesNotRewindLocalAheadBranch(t *testing.T) {
 	env.WriteFile("b.go", "package b")
 	env.GitAdd("b.go")
 	require.NoError(t, env.SimulateStop(sessionB.ID, transcriptB))
-	env.GitCommitWithShadowHooks("Add module B", "b.go")
+	env.GitCommitWithHooks("Add module B", "b.go")
 
 	checkpointB := env.GetLatestCheckpointID()
 	require.NotEmpty(t, checkpointB, "should have a checkpoint ID for B")
@@ -388,7 +388,7 @@ func createAndPushCheckpoint(t *testing.T, env *TestEnv, fileName, prompt string
 	env.WriteFile(fileName, "package treeless")
 	env.GitAdd(fileName)
 	require.NoError(t, env.SimulateStop(session.ID, transcriptPath))
-	env.GitCommitWithShadowHooks("Add "+fileName, fileName)
+	env.GitCommitWithHooks("Add "+fileName, fileName)
 	cpID := env.GetLatestCheckpointID()
 	require.NotEmpty(t, cpID, "expected a checkpoint after condensation")
 	env.RunPrePush("origin")

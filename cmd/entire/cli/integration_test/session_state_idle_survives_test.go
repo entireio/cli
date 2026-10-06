@@ -33,7 +33,7 @@ func TestSessionStore_IdleSessionSurvivesAnotherWorktreesCommitHook(t *testing.T
 
 	// Another worktree's hook lists the shared store.
 	parent.WriteFile("notes.txt", "unrelated\n")
-	parent.GitCommitWithShadowHooks("Unrelated commit in the parent", "notes.txt")
+	parent.GitCommitWithHooks("Unrelated commit in the parent", "notes.txt")
 
 	state, err = parent.GetSessionState(sess.ID)
 	require.NoError(t, err)

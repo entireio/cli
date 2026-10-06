@@ -246,7 +246,7 @@ func TestCodexShadowBranch_GrowthStillDetectedAfterCommit(t *testing.T) {
 	applyPatchHook(hook, "call_1", "*** Begin Patch\n*** Add File: feature.txt\n+hi\n*** End Patch\n")
 	hook("stop", map[string]any{"hook_event_name": "Stop"})
 
-	env.GitCommitWithShadowHooks("add feature.txt", "feature.txt")
+	env.GitCommitWithHooks("add feature.txt", "feature.txt")
 
 	firstCheckpoint := env.GetLatestCheckpointIDFromHistory()
 	if firstCheckpoint == "" {
@@ -267,7 +267,7 @@ func TestCodexShadowBranch_GrowthStillDetectedAfterCommit(t *testing.T) {
 	applyPatchHook(hook, "call_2", "*** Begin Patch\n*** Add File: second.txt\n+yo\n*** End Patch\n")
 	hook("stop", map[string]any{"hook_event_name": "Stop"})
 
-	env.GitCommitWithShadowHooks("add second.txt", "second.txt")
+	env.GitCommitWithHooks("add second.txt", "second.txt")
 
 	secondCheckpoint := env.GetLatestCheckpointIDFromHistory()
 	if secondCheckpoint == "" {
@@ -344,7 +344,7 @@ func TestCodexCondense_NoAssetsFromSanitizedAwayContent(t *testing.T) {
 	})
 	env.WriteFile("feature.txt", "hi\n")
 	applyPatchHook(hook, "call_1", "*** Begin Patch\n*** Add File: feature.txt\n+hi\n*** End Patch\n")
-	env.GitCommitWithShadowHooks("add feature.txt", "feature.txt")
+	env.GitCommitWithHooks("add feature.txt", "feature.txt")
 	hook("stop", map[string]any{"hook_event_name": "Stop"})
 
 	cpID := env.GetLatestCheckpointIDFromHistory()

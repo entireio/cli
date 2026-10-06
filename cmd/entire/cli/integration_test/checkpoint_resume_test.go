@@ -27,7 +27,7 @@ func TestCheckpointResume_ByCheckpointID(t *testing.T) {
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 	checkpointID := env.GetLatestCheckpointID()
@@ -62,7 +62,7 @@ func TestCheckpointResume_BareNonTTY(t *testing.T) {
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
-	env.GitCommitWithShadowHooks("Create a listing script", "list.rb")
+	env.GitCommitWithHooks("Create a listing script", "list.rb")
 
 	checkpointID := env.GetLatestCheckpointID()
 	output := env.RunCLI("checkpoint", "resume")

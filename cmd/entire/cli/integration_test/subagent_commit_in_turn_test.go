@@ -50,7 +50,7 @@ func TestSubagentCheckpoints_CommittedMidTurn_LeavesNoShadowBranch(t *testing.T)
 
 	// The subagent writes the file and commits it itself, still inside the turn.
 	env.WriteFile(editedFile, "Red is a warm colour.\n")
-	env.GitCommitWithShadowHooksAsAgent("Add red.md", editedFile)
+	env.GitCommitWithHooksAsAgent("Add red.md", editedFile)
 
 	// Condensation ran on that commit and cleaned up the shadow branch.
 	if got := shadowBranches(env); len(got) != 0 {
@@ -205,7 +205,7 @@ func TestSubagentCheckpoints_CommitWhileIdleWithTaskRecord_LinksAndCondensesCont
 	// The commit lands while the session is IDLE, through the real
 	// prepare-commit-msg + post-commit hook chain, with no TTY (agent-mode
 	// commit) — the exact shape of the incident.
-	env.GitCommitWithShadowHooksAsAgent("Add idle-marker doc", editedFile)
+	env.GitCommitWithHooksAsAgent("Add idle-marker doc", editedFile)
 
 	headHash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(headHash)
@@ -308,9 +308,9 @@ func TestSubagentCheckpoints_CommitAfterBackgroundTaskCompletes_LinksViaFiles(t 
 			}
 
 			if tt.tty {
-				env.GitCommitWithShadowHooks("Add completed doc", editedFile)
+				env.GitCommitWithHooks("Add completed doc", editedFile)
 			} else {
-				env.GitCommitWithShadowHooksAsAgent("Add completed doc", editedFile)
+				env.GitCommitWithHooksAsAgent("Add completed doc", editedFile)
 			}
 
 			checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
@@ -389,7 +389,7 @@ func TestSubagentCheckpoints_JointCommitWithRunningSubagent_KeepsBothSessions(t 
 	env.WriteFile(codingFile, codingBody)
 	coding.CreateTranscript("Add the feature and commit everything", []FileChange{{Path: codingFile, Content: codingBody}})
 
-	env.GitCommitWithShadowHooksAsAgent("Add feature and joint doc", codingFile, subagentFile)
+	env.GitCommitWithHooksAsAgent("Add feature and joint doc", codingFile, subagentFile)
 
 	checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if checkpointID == "" {

@@ -13,7 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// TestShadowStrategy_MidSessionCommit_FromTranscript tests that when Claude commits
+// TestManualCommit_MidSessionCommit_FromTranscript tests that when Claude commits
 // mid-session (before Stop has been called), the prepare-commit-msg hook detects
 // the new work by checking the live transcript and adds a checkpoint trailer.
 //
@@ -22,7 +22,7 @@ import (
 // - Claude creates files and commits them
 // - No Stop has happened yet (no shadow branch)
 // - The commit should still get a checkpoint trailer because the transcript shows file modifications
-func TestShadowStrategy_MidSessionCommit_FromTranscript(t *testing.T) {
+func TestManualCommit_MidSessionCommit_FromTranscript(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -87,7 +87,7 @@ func TestShadowStrategy_MidSessionCommit_FromTranscript(t *testing.T) {
 	headBefore := env.GetHeadHash()
 
 	// Commit with shadow hooks - should add trailer because transcript shows file modifications
-	env.GitCommitWithShadowHooks("Add file from Claude (mid-session)", "claude_file.txt")
+	env.GitCommitWithHooks("Add file from Claude (mid-session)", "claude_file.txt")
 
 	// Get the commit
 	commitHash := env.GetHeadHash()
@@ -105,10 +105,10 @@ func TestShadowStrategy_MidSessionCommit_FromTranscript(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_MidSessionCommit_NoTrailerWithoutTranscriptPath tests that
+// TestManualCommit_MidSessionCommit_NoTrailerWithoutTranscriptPath tests that
 // when TranscriptPath is not set in session state, commits don't get erroneous
 // checkpoint trailers (graceful fallback).
-func TestShadowStrategy_MidSessionCommit_NoTrailerWithoutTranscriptPath(t *testing.T) {
+func TestManualCommit_MidSessionCommit_NoTrailerWithoutTranscriptPath(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -126,7 +126,7 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerWithoutTranscriptPath(t *testi
 	// Don't create transcript - simulating a case where transcript path isn't available
 
 	// Commit with shadow hooks
-	env.GitCommitWithShadowHooks("Manual commit without transcript", "manual_file.txt")
+	env.GitCommitWithHooks("Manual commit without transcript", "manual_file.txt")
 
 	// Commit should NOT have checkpoint trailer (no session activity detected)
 	commitHash := env.GetHeadHash()
@@ -136,10 +136,10 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerWithoutTranscriptPath(t *testi
 	}
 }
 
-// TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile tests that
+// TestManualCommit_MidSessionCommit_NoTrailerForUnrelatedFile tests that
 // when Claude has modified files but the committed file is unrelated,
 // no checkpoint trailer is added.
-func TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T) {
+func TestManualCommit_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -174,7 +174,7 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T)
 	env.WriteFile("unrelated_file.txt", "unrelated content")
 
 	// Commit with shadow hooks - should NOT add trailer because files don't overlap
-	env.GitCommitWithShadowHooks("Unrelated file commit", "unrelated_file.txt")
+	env.GitCommitWithHooks("Unrelated file commit", "unrelated_file.txt")
 
 	commitHash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -188,12 +188,12 @@ func TestShadowStrategy_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T)
 	}
 }
 
-// TestShadowStrategy_AgentCommit_GetsTrailerWhenSessionHasContent tests that when
+// TestManualCommit_AgentCommit_GetsTrailerWhenSessionHasContent tests that when
 // an agent commits (ACTIVE session + no TTY) and the session has content (transcript
 // path set), the trailer is added via the fast path that bypasses transcript analysis.
 // Sessions with no content (no transcript path, no files, no steps) are intentionally
 // skipped to avoid dangling trailers — see CondenseSession skip gate.
-func TestShadowStrategy_AgentCommit_GetsTrailerWhenSessionHasContent(t *testing.T) {
+func TestManualCommit_AgentCommit_GetsTrailerWhenSessionHasContent(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -207,7 +207,7 @@ func TestShadowStrategy_AgentCommit_GetsTrailerWhenSessionHasContent(t *testing.
 
 	// Create a file and commit as agent (no TTY)
 	env.WriteFile("agent_file.txt", "created by agent")
-	env.GitCommitWithShadowHooksAsAgent("Agent commit", "agent_file.txt")
+	env.GitCommitWithHooksAsAgent("Agent commit", "agent_file.txt")
 
 	// Agent commits with session content should get a trailer (fast path)
 	commitHash := env.GetHeadHash()
@@ -219,14 +219,14 @@ func TestShadowStrategy_AgentCommit_GetsTrailerWhenSessionHasContent(t *testing.
 	}
 }
 
-// TestShadowStrategy_MidSessionCommit_FilesTouchedFallback tests that when
+// TestManualCommit_MidSessionCommit_FilesTouchedFallback tests that when
 // FilesTouched is empty in session state (mid-session commit before SaveStep),
 // the fallback to committedFiles works correctly and the checkpoint metadata
 // contains the files that were actually committed.
 //
 // This is scenario 1 from the fix: when FilesTouched was originally empty,
 // fallback should assign committedFiles to files_touched.
-func TestShadowStrategy_MidSessionCommit_FilesTouchedFallback(t *testing.T) {
+func TestManualCommit_MidSessionCommit_FilesTouchedFallback(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -274,7 +274,7 @@ func TestShadowStrategy_MidSessionCommit_FilesTouchedFallback(t *testing.T) {
 
 	// Commit mid-session - FilesTouched in session state is still empty
 	// The fallback should assign committedFiles to files_touched in the checkpoint metadata
-	env.GitCommitWithShadowHooks("Mid-session commit testing fallback", "mid_session_file.txt")
+	env.GitCommitWithHooks("Mid-session commit testing fallback", "mid_session_file.txt")
 
 	// Get the checkpoint ID from the commit
 	commitHash := env.GetHeadHash()
@@ -297,7 +297,7 @@ func TestShadowStrategy_MidSessionCommit_FilesTouchedFallback(t *testing.T) {
 	t.Log("FilesTouched fallback worked correctly: checkpoint metadata contains the committed file")
 }
 
-// TestShadowStrategy_MidTurnCommit_DifferentFilesThanCheckpoint tests that when
+// TestManualCommit_MidTurnCommit_DifferentFilesThanCheckpoint tests that when
 // an agent's Turn 1 touches file A (saved via Stop/checkpoint), and Turn 2 commits
 // different files B and C, the PostCommit hook still condenses the session data
 // to entire/checkpoints/v1.
@@ -305,7 +305,7 @@ func TestShadowStrategy_MidSessionCommit_FilesTouchedFallback(t *testing.T) {
 // This is a regression test for the bug where shouldCondenseWithOverlapCheck
 // incorrectly skipped condensation for ACTIVE sessions because filesTouchedBefore
 // (from Turn 1) didn't overlap with the committed files (from Turn 2).
-func TestShadowStrategy_MidTurnCommit_DifferentFilesThanCheckpoint(t *testing.T) {
+func TestManualCommit_MidTurnCommit_DifferentFilesThanCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -358,7 +358,7 @@ func TestShadowStrategy_MidTurnCommit_DifferentFilesThanCheckpoint(t *testing.T)
 	env.WriteFile("main.py", "print('hello')")
 
 	// Agent commits the different files mid-turn (no Stop before commit)
-	env.GitCommitWithShadowHooksAsAgent("Add project files", "README.md", "main.py")
+	env.GitCommitWithHooksAsAgent("Add project files", "README.md", "main.py")
 
 	// --- Verify: checkpoint was condensed despite different files ---
 	commitHash := env.GetHeadHash()

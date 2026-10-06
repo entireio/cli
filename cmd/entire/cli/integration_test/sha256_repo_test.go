@@ -76,7 +76,7 @@ func TestSHA256Repository_EnableAndFirstCheckpoint(t *testing.T) {
 	shadowHead := gitOutput(t, env.RepoDir, "rev-parse", shadowBranch)
 	requireHexLen(t, "shadow checkpoint commit", shadowHead)
 
-	env.GitCommitWithShadowHooks("Add SHA-256 main", "main.go")
+	env.GitCommitWithHooks("Add SHA-256 main", "main.go")
 	userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD")
 	requireHexLen(t, "user commit", userHead)
 	if userHead == initialHead {
