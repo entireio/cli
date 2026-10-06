@@ -22,7 +22,7 @@ One JSON object per line, each line terminated by `\n`.
 | `type` | string | yes | `user` or `assistant`. |
 | `agent` | string | no | The CLI agent registry name (`claude-code`, `codex`, `copilot-cli`, `cursor`, `factoryai-droid`, `opencode`, `pi`, `antigravity`); otherwise the agent type string, e.g. for external agents. An open set. |
 | `cli_version` | string | no | Version of the producer that wrote the line. The name is historical. |
-| `ts` | string | no | RFC 3339 timestamp. Omitted when the source has none. |
+| `ts` | string | no | RFC 3339 timestamp. May be omitted or empty (codex, gemini and copilot write `""`). The generic JSONL converter copies the source timestamp verbatim, so a non-string value can occur; readers ignore it. |
 | `id` | string | no | Assistant message ID. Streaming fragments with the same ID are merged into one line. |
 | `input_tokens`, `output_tokens` | int | no | Assistant lines only. |
 | `content` | array of blocks, string, or `null` | yes | Normally an array. A string can appear when an assistant message's source content was a string. `null` can appear because the writer does not omit empty content. |
@@ -58,19 +58,21 @@ A line is skipped when it:
 - is not a JSON object (including malformed JSON),
 - has no `v`, or a `v` other than `1`,
 - has no `type`, or
-- has a known field of the wrong JSON type, for example `"agent": 42`,
-  `"input_tokens": "x"` or `"ts": 5` (reason `invalid field: <name>`).
+- has a known field of the wrong JSON type, for example `"agent": 42`
+  or `"input_tokens": "x"` (reason `invalid field: <name>`). A `ts` that is
+  not a string is ignored rather than skipped.
 
 `Decode` normalizes three v1 quirks:
 
-- A user block that has `text` but no `type` gets `Type` `"text"`.
+- A block that has `text` but no `type` gets `Type` `"text"`, on any line type.
 - A `content` value that is a JSON string becomes a single text block.
 - A `content` value that is `null`, absent, or any other non-array, non-string
   JSON value becomes no blocks. The line is still returned.
 
-Every block carries `Raw`, the block exactly as stored (for string content, the synthesized text block). A block that is not a
-JSON object, or whose known fields have the wrong JSON type, is returned with
-only `Raw` set; it never causes its line to be skipped.
+Every block carries `Raw`, the block exactly as stored (for string content,
+the synthesized text block). A block that is not a JSON object, or whose known
+fields have the wrong JSON type, is returned with only `Raw` set; it never
+causes its line to be skipped.
 
 ```go
 lines, err := transcript.Decode(b)

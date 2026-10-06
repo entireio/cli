@@ -3,6 +3,7 @@ package compact
 import (
 	"testing"
 
+	"github.com/entireio/cli/transcript"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -77,4 +78,17 @@ func TestBuildCondensedEntries_SkipsToolUseWithoutName(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "assistant", entries[0].Type)
+}
+
+func TestBuildCondensedEntries_NumericTimestampFromConverter(t *testing.T) {
+	t.Parallel()
+
+	native := []byte(`{"type":"user","timestamp":1712345678000,"message":{"role":"user","content":"hi"}}` + "\n")
+	compact, err := transcript.Convert(native, transcript.Options{Agent: "claude-code", CLIVersion: "0.5.1"})
+	require.NoError(t, err)
+
+	entries, err := BuildCondensedEntries(compact)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "hi", entries[0].Content)
 }

@@ -121,6 +121,11 @@ func TestDecode_Blocks(t *testing.T) {
 			want:  Line{Version: 1, Type: TypeAssistant},
 		},
 		{
+			name:  "non-string ts is tolerated and ignored",
+			input: `{"v":1,"type":"user","ts":1712345678000}`,
+			want:  Line{Version: 1, Type: TypeUser},
+		},
+		{
 			name:  "unknown fields are ignored",
 			input: `{"v":1,"type":"user","future":{"x":1},"content":[{"text":"a","extra":true}]}`,
 			want: Line{
@@ -163,7 +168,6 @@ func TestDecode_SkippedLines(t *testing.T) {
 		{"empty type", `{"v":1,"type":"","content":[]}`, "missing type"},
 		{"wrong-typed agent", `{"v":1,"type":"user","agent":42}`, "invalid field: agent"},
 		{"wrong-typed tokens", `{"v":1,"type":"assistant","input_tokens":"x"}`, "invalid field: input_tokens"},
-		{"wrong-typed ts", `{"v":1,"type":"user","ts":5}`, "invalid field: ts"},
 	}
 
 	for _, tc := range tests {
@@ -235,8 +239,8 @@ func TestDecode_VeryLongLine(t *testing.T) {
 	assert.Len(t, lines[0].Blocks[0].Text, len(text))
 }
 
-func TestSkippedLinesError_EmptyDoesNotPanic(t *testing.T) {
+func TestSkippedLinesError_Empty(t *testing.T) {
 	t.Parallel()
 
-	assert.NotPanics(t, func() { _ = (&SkippedLinesError{}).Error() })
+	assert.Equal(t, "transcript: skipped 0 lines", (&SkippedLinesError{}).Error())
 }

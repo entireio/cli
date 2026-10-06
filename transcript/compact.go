@@ -1,6 +1,7 @@
 // Package transcript converts native agent transcripts into the Entire Transcript
-// Format (also called compact or unified transcripts). This API is versioned with
-// the CLI and may change; consumers should pin a version.
+// Format (also called compact or unified transcripts) and decodes that format
+// into typed lines (Decode, Parse). The format is specified in README.md. This
+// API is versioned with the CLI and may change; consumers should pin a version.
 package transcript
 
 import (

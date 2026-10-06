@@ -31,7 +31,7 @@ type wireLine struct {
 	Type         *string         `json:"type"`
 	Agent        string          `json:"agent"`
 	CLIVersion   string          `json:"cli_version"`
-	TS           string          `json:"ts"`
+	TS           json.RawMessage `json:"ts"`
 	ID           string          `json:"id"`
 	InputTokens  int             `json:"input_tokens"`
 	OutputTokens int             `json:"output_tokens"`
@@ -59,9 +59,10 @@ type wireBlock struct {
 //	// tolerant: log err; use lines
 //
 // A line is skipped when it is not a JSON object, has no "v", has a "v" other
-// than 1, has no "type", or has a known field of the wrong JSON type. Blank
-// lines are ignored. Unknown fields are ignored, and lines with an unknown
-// "type" are returned as they are.
+// than 1, has no "type", or has a known field of the wrong JSON type ("ts" is
+// the exception: a non-string "ts" is ignored). Blank lines are ignored.
+// Unknown fields are ignored, and lines with an unknown "type" are returned as
+// they are.
 func Decode(b []byte) ([]Line, error) {
 	var lines []Line
 	var skipped []SkippedLine
@@ -103,12 +104,16 @@ func decodeLine(raw []byte) (Line, string) {
 	case w.Type == nil || *w.Type == "":
 		return Line{}, "missing type"
 	}
+	var ts string
+	if json.Unmarshal(w.TS, &ts) != nil {
+		ts = ""
+	}
 	return Line{
 		Version:      *w.V,
 		Type:         *w.Type,
 		Agent:        w.Agent,
 		CLIVersion:   w.CLIVersion,
-		Timestamp:    w.TS,
+		Timestamp:    ts,
 		ID:           w.ID,
 		InputTokens:  w.InputTokens,
 		OutputTokens: w.OutputTokens,

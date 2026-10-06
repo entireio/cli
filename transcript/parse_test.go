@@ -72,7 +72,9 @@ func TestParse_PropagatesConvertError(t *testing.T) {
 	t.Parallel()
 
 	lines, err := Parse([]byte(`{"sessionId":"s","messages":"not-an-array"}`), defaultOpts)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "parsing gemini session")
+	var skipped *SkippedLinesError
+	assert.NotErrorAs(t, err, &skipped)
 	assert.Nil(t, lines)
 }
 
