@@ -27,6 +27,7 @@ var (
 	_ agent.ToolInvocationScanner  = (*ClaudeCodeAgent)(nil)
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
 	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
+	_ agent.TaskTranscriptMatcher  = (*ClaudeCodeAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.

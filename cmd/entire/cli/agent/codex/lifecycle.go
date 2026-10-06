@@ -22,6 +22,7 @@ var (
 	_ agent.HookResponseWriter       = (*CodexAgent)(nil)
 	_ agent.ContextInjector          = (*CodexAgent)(nil)
 	_ agent.SessionEndBudgeter       = (*CodexAgent)(nil)
+	_ agent.TaskTranscriptMatcher    = (*CodexAgent)(nil)
 )
 
 // OwnsEffectiveHookDiagnostics keeps Codex's discovered-file state out of the

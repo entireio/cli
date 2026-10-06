@@ -1088,7 +1088,7 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 		CheckpointTranscriptStart: 9,
 		CondensedTranscriptLines:  9, //nolint:staticcheck // legacy field, asserted so migration keeps working
 		TranscriptLinesAtStart:    9, //nolint:staticcheck // legacy field, asserted so migration keeps working
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("buildAdoptedSessionState failed: %v", err)
 	}
@@ -1145,7 +1145,7 @@ func TestSessionAdopt_RebaselinesSubagentTokens(t *testing.T) {
 					SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 250, APICallCount: 5},
 				},
 				SubagentTokensBaseline: tc.sourceBaseline,
-			})
+			}, "")
 			if err != nil {
 				t.Fatalf("buildAdoptedSessionState failed: %v", err)
 			}
@@ -1198,7 +1198,7 @@ func TestSessionAdopt_PreservesReviewAndInvestigateMetadata(t *testing.T) {
 				PromptWindowBase:  3,
 				SessionTurnCount:  7,
 				AttachedManually:  true,
-			})
+			}, "")
 			if err != nil {
 				t.Fatalf("buildAdoptedSessionState failed: %v", err)
 			}
@@ -1234,6 +1234,13 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 		TurnCheckpointIDs:     []string{"source-checkpoint"},
 		UntrackedFilesAtStart: []string{"untracked.txt"},
 		FilesTouched:          []string{"source.txt"},
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID:              "toolu_1",
+			DeclaredTranscriptPath: "source.jsonl",
+			Files:                  []string{"task.txt"},
+			TokenUsage:             &agent.TokenUsage{InputTokens: 5},
+		}},
+		SubagentInventory: []session.SubagentInventoryEntry{{AgentID: "child", ObservedTurnIDs: []string{"turn-1"}}},
 		TokenUsage: &agent.TokenUsage{
 			InputTokens: 1,
 			SubagentTokens: &agent.TokenUsage{
@@ -1267,6 +1274,10 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 	adopted.ReviewSkills[0] = "/changed"
 	adopted.TurnCheckpointIDs[0] = "changed-checkpoint"
 	adopted.UntrackedFilesAtStart[0] = "changed-untracked.txt"
+	adopted.TaskRecords[0].DeclaredTranscriptPath = ""
+	adopted.TaskRecords[0].Files[0] = "changed-task.txt"
+	adopted.TaskRecords[0].TokenUsage.InputTokens = 99
+	adopted.SubagentInventory[0].ObservedTurnIDs[0] = "changed-turn"
 	adopted.FilesTouched[0] = "changed-source.txt"
 	adopted.TokenUsage.SubagentTokens.OutputTokens = 99
 	adopted.SkillEvents[0].TranscriptAnchor.EntryIDs[0] = "changed-entry"
@@ -1293,6 +1304,13 @@ func TestSessionAdopt_CloneSourceStateDoesNotShareMutableFields(t *testing.T) {
 	}
 	if source.FilesTouched[0] != "source.txt" {
 		t.Fatalf("source FilesTouched = %v, want unchanged", source.FilesTouched)
+	}
+	if record := source.TaskRecords[0]; record.DeclaredTranscriptPath != "source.jsonl" ||
+		record.Files[0] != "task.txt" || record.TokenUsage.InputTokens != 5 {
+		t.Fatalf("source TaskRecords = %+v, want unchanged", source.TaskRecords)
+	}
+	if source.SubagentInventory[0].ObservedTurnIDs[0] != "turn-1" {
+		t.Fatalf("source SubagentInventory = %+v, want unchanged", source.SubagentInventory)
 	}
 	if source.TokenUsage.SubagentTokens.OutputTokens != 2 {
 		t.Fatalf("source TokenUsage.SubagentTokens.OutputTokens = %d, want unchanged", source.TokenUsage.SubagentTokens.OutputTokens)

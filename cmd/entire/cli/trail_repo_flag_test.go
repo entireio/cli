@@ -214,7 +214,6 @@ func TestTrailRepoRequiresExplicitTarget(t *testing.T) {
 		{name: "show", args: []string{"show", "--repo", "gh/acme/app"}},
 		{name: "watch", args: []string{"watch", "--repo", "gh/acme/app"}},
 		{name: "update", args: []string{"update", "--repo", "gh/acme/app"}},
-		{name: "delete", args: []string{"delete", "--repo", "gh/acme/app"}},
 		{name: "finding list", args: []string{"finding", "list", "--repo", "gh/acme/app"}},
 		{name: "approve", args: []string{"approve", "--repo", "gh/acme/app"}},
 		{name: "request-changes", args: []string{"request-changes", "--repo", "gh/acme/app", "-m", "why"}},

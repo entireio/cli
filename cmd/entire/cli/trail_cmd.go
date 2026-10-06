@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trail"
 
@@ -1924,147 +1923,28 @@ func parseTrailNumberArg(args []string) (int, error) {
 	return n, nil
 }
 
+// Trail deletion was removed server-side (owned trails always 409). The command
+// stays registered but hidden so existing scripts get a clear error pointing at
+// the close workflow instead of "unknown command".
 func newTrailDeleteCmd() *cobra.Command {
-	var branch string
-	var force bool
-
 	cmd := &cobra.Command{
-		Use:   "delete [<number>]",
-		Short: "Delete a trail",
-		Long: `Delete a trail by number, or the trail for a branch.
-
-If <number> is omitted, the trail for --branch (or the current branch) is used.
-Deletion is permanent; you are prompted to confirm unless --force is passed.`,
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			number, err := parseTrailNumberArg(args)
-			if err != nil {
-				return err
-			}
-			if number > 0 && cmd.Flags().Changed("branch") {
-				return errors.New("cannot combine a trail <number> with --branch")
-			}
-			if err := ensureTrailRepoHasTarget(cmd, number > 0 || strings.TrimSpace(branch) != "", "pass a trail number or --branch"); err != nil {
-				return err
-			}
-			return runTrailDelete(cmd, number, branch, force)
+		Use:    "delete [<number>]",
+		Short:  "Deprecated: Mark the trail as Closed instead",
+		Args:   cobra.MaximumNArgs(1),
+		Hidden: true,
+		RunE: func(*cobra.Command, []string) error {
+			return errTrailDeleteRemoved
 		},
 	}
 
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch whose trail to delete (defaults to current)")
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip the confirmation prompt")
+	cmd.Flags().String("branch", "", "Unused; trail deletion was removed")
+	cmd.Flags().BoolP("force", "f", false, "Unused; trail deletion was removed")
 
 	return cmd
 }
 
-func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) error {
-	ctx := cmd.Context()
-	w := cmd.OutOrStdout()
-
-	return runAuthenticatedTrailAPI(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), func(ctx context.Context, client *api.Client, repoID string) error {
-		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, trailRepoFlag(cmd))
-		if err != nil {
-			return err
-		}
-		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
-		if err != nil {
-			return err
-		}
-
-		// Resolve the target trail. An explicit number is authoritative (a
-		// lookup is best-effort, only to label the confirmation); otherwise the
-		// branch's trail supplies the number.
-		title := ""
-		if number == 0 {
-			if branch == "" {
-				branch, err = GetCurrentBranch(ctx)
-				if err != nil {
-					return fmt.Errorf("failed to determine current branch: %w", err)
-				}
-			}
-			found, ferr := findTrailByBranchAtPath(ctx, client, basePath, branch)
-			if ferr != nil {
-				return ferr
-			}
-			if found == nil {
-				return fmt.Errorf("no trail found for branch %q", branch)
-			}
-			if found.Number <= 0 {
-				return fmt.Errorf("trail for branch %q has no number yet; cannot delete", branch)
-			}
-			number = found.Number
-			title = found.Title
-		} else if found, ferr := findTrailByNumberAtPath(ctx, client, basePath, number); ferr == nil && found != nil {
-			title = found.Title
-		}
-
-		proceed, err := confirmTrailDeletion(ctx, w, number, title, force, interactive.CanPromptInteractively())
-		if err != nil {
-			return err
-		}
-		if !proceed {
-			return nil
-		}
-
-		if err := deleteTrailByNumberAtPath(ctx, client, basePath, number); err != nil {
-			return err
-		}
-
-		fmt.Fprintf(w, "Deleted trail #%d\n", number)
-		return nil
-	})
-}
-
-// deleteTrailByNumberAtPath deletes a trail; entire-api answers 204 No Content,
-// so any 2xx is a successful delete and the body is not read.
-func deleteTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath string, number int) error {
-	resp, err := client.Delete(ctx, trailNumberPathForBase(basePath, number))
-	if err != nil {
-		return fmt.Errorf("failed to delete trail: %w", err)
-	}
-	defer resp.Body.Close()
-	return checkTrailResponse(resp)
-}
-
-// confirmTrailDeletion decides whether a trail delete should proceed. With
-// force it proceeds silently. Otherwise it requires an interactive terminal:
-// when none is available it refuses (returns an error) rather than deleting
-// unprompted; when one is, it shows a confirmation form. canPrompt is passed in
-// (rather than queried) so the decision is unit-testable without a TTY.
-func confirmTrailDeletion(ctx context.Context, w io.Writer, number int, title string, force, canPrompt bool) (bool, error) {
-	if force {
-		return true, nil
-	}
-	if !canPrompt {
-		return false, fmt.Errorf("refusing to delete trail #%d without confirmation; pass --force", number)
-	}
-	// huh opens the TTY during form startup regardless of context state, so
-	// guard explicitly to honor an already-cancelled command context.
-	if ctx.Err() != nil {
-		return false, nil //nolint:nilerr // cancelled context is a clean skip, not an error
-	}
-	prompt := fmt.Sprintf("Delete trail #%d?", number)
-	if title != "" {
-		prompt = fmt.Sprintf("Delete trail #%d (%s)?", number, title)
-	}
-	confirmed := false
-	form := NewAccessibleForm(
-		huh.NewGroup(huh.NewConfirm().Title(prompt).Value(&confirmed)),
-	)
-	if err := form.RunWithContext(ctx); err != nil {
-		// A user abort (Esc) or context cancel (Ctrl+C) is a clean cancel, not
-		// an error — mirror confirmDoctorFix / uiform.PromptYN.
-		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
-			return false, nil
-		}
-		return false, fmt.Errorf("trail deletion prompt: %w", err)
-	}
-	if !confirmed {
-		fmt.Fprintln(w, "Trail deletion cancelled.")
-		return false, nil
-	}
-	return true, nil
-}
+var errTrailDeleteRemoved = errors.New(
+	"trails can no longer be deleted; close the trail instead: entire trail update --status closed")
 
 // defaultBaseBranch is the fallback base branch name when it cannot be determined.
 const defaultBaseBranch = "main"

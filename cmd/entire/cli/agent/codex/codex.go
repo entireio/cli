@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -591,6 +592,17 @@ func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) strin
 		return filepath.Join(sessionDir, agentSessionID+".jsonl")
 	}
 	return agentSessionID
+}
+
+// TaskTranscriptMatches reports whether path is named as the rollout of the
+// child thread agentID: rollout-<timestamp>-<agentID>.jsonl. Codex keeps child
+// rollouts in its dated session stores, not relative to the parent, so
+// parentPath and sessionID are not consulted.
+func (c *CodexAgent) TaskTranscriptMatches(_, _, agentID, path string) bool {
+	name := filepath.Base(path)
+	return agentID != "" &&
+		strings.HasPrefix(name, "rollout-") &&
+		strings.HasSuffix(name, "-"+agentID+".jsonl")
 }
 
 // ResolveRestoredSessionFile returns the canonical Codex rollout path for a

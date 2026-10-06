@@ -134,6 +134,19 @@ func (f *FactoryAIDroidAgent) ResolveSessionFile(sessionDir, agentSessionID stri
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
+// TaskTranscriptMatches reports whether path is the transcript of task agentID
+// beside the session transcript or in its subagents directory. A Worker runs as
+// a session of its own and writes <agentID>.jsonl; a subagent captured by its
+// stop hook writes agent-<agentID>.jsonl.
+func (f *FactoryAIDroidAgent) TaskTranscriptMatches(parentPath, sessionID, agentID, path string) bool {
+	if agentID == "" {
+		return false
+	}
+	name := filepath.Base(path)
+	return (name == agentID+".jsonl" || name == paths.AgentTranscriptFileName(agentID)) &&
+		agent.TaskTranscriptBesideParent(parentPath, sessionID, path)
+}
+
 // ReadSession reads a session from Factory AI Droid's storage (JSONL transcript file).
 // The session data is stored in NativeData as raw JSONL bytes.
 // ModifiedFiles is computed by parsing the transcript.

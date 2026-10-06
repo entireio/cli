@@ -173,6 +173,19 @@ the session's branch/worktree/base metadata to the target, clears target-local
 checkpoint windows and checkpoint IDs, and snapshots the target's current file
 changes so the next commit can link to the adopted session.
 
+Condensation reads a declared task transcript path whole into the checkpoint, so
+adoption validates each one (`validateAdoptTaskTranscript`). The path must be
+absolute and lie in the session directory of the session's agent; a session
+recorded without an agent type takes it from the agent that owns its
+transcript. Agents implementing `agent.TaskTranscriptMatcher` (Claude Code,
+Codex, Droid) also require the path to name that task's transcript in their
+layout. A path that fails is cleared, logged, and counted in adopt's output.
+The checks are lexical: symbolic links are still followed when the transcript
+is read. Subagent inventory paths get the same check, and their resolved paths
+are cleared until Codex verifies the rollout again. A cleared task falls back to
+the Claude-layout lookup (`agent-<id>.jsonl`) and, for Codex, the verified
+inventory; a cleared Droid Worker transcript is not recovered.
+
 #### Commit-to-session linking
 
 The commit hooks (prepare-commit-msg / post-commit) resolve which sessions a

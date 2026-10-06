@@ -86,6 +86,15 @@ func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) 
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
+// TaskTranscriptMatches reports whether path is agent-<agentID>.jsonl in the
+// session's subagents directory or, for older Claude versions, beside the
+// session transcript.
+func (c *ClaudeCodeAgent) TaskTranscriptMatches(parentPath, sessionID, agentID, path string) bool {
+	return agentID != "" &&
+		filepath.Base(path) == paths.AgentTranscriptFileName(agentID) &&
+		agent.TaskTranscriptBesideParent(parentPath, sessionID, path)
+}
+
 // ProtectedDirs returns directories that Claude uses for config/state.
 func (c *ClaudeCodeAgent) ProtectedDirs() []string { return []string{".claude"} }
 
