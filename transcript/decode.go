@@ -228,7 +228,7 @@ func isEntireFormat(raw []byte) bool {
 		if json.Unmarshal(l, &head) != nil || head.V == nil {
 			return false
 		}
-		return head.Type == TypeUser || head.Type == TypeAssistant
+		return head.Type != ""
 	}
 	return false
 }

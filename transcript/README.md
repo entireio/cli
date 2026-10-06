@@ -88,8 +88,8 @@ if errors.As(err, &skipped) {
 ```
 
 `Parse` accepts any supported format. Input whose first non-blank line is a JSON
-object with an integer `v` and a `type` of `user` or `assistant` is decoded as
-is and the options are ignored. Anything else is converted first.
+object with an integer `v` and a non-empty string `type` is decoded as is and
+the options are ignored. Anything else is converted first.
 
 ```go
 lines, err := transcript.Parse(native, transcript.Options{Agent: "claude-code", CLIVersion: "0.5.1"})
