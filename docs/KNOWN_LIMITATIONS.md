@@ -23,7 +23,7 @@ fatal: unable to read <hash>
 error: invalid sha1 pointer in cache-tree of .git/worktrees/<n>/index
 ```
 
-**Root cause:** Checkpoint saves use go-git's `SetEncodedObject` which creates loose objects. When the count exceeds the `gc.auto` threshold (default 6700), any git operation (e.g., VS Code or Sourcetree background fetch) triggers `git gc --auto`. GC doesn't fully account for worktree index references when pruning, so objects get deleted while the worktree index still points to them.
+**Root cause:** Checkpoint writes at commit time use go-git's `SetEncodedObject`, which creates loose objects. (Turn ends no longer write git objects; older versions also wrote them to shadow branches on every turn.) When the count exceeds the `gc.auto` threshold (default 6700), any git operation (e.g., VS Code or Sourcetree background fetch) triggers `git gc --auto`. GC doesn't fully account for worktree index references when pruning, so objects get deleted while the worktree index still points to them.
 
 **Impact:**
 - `git status` fails in the affected worktree
@@ -51,4 +51,4 @@ When multiple sessions are ACTIVE in the same directory and one session's agent 
 
 **Impact:** Cosmetic — extra metadata entries on `entire/checkpoints/v1` with minimal content. No data loss or corruption.
 
-**Workaround:** Use separate git worktrees for concurrent sessions. Each worktree gets its own shadow branch namespace, so sessions in different worktrees don't interfere.
+**Workaround:** Use separate git worktrees for concurrent sessions. A commit condenses the sessions with pending work in its own worktree (plus any session whose agent process made the commit), so sessions in different worktrees don't interfere.

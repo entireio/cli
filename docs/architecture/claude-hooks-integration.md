@@ -10,26 +10,13 @@ Entire integrates with Claude Code through six hooks that fire at different poin
 | ------------------------ | ------------------------------ | ---------------------------------------------- |
 | `SessionStart`           | New chat session begins        | Generate and persist Entire session ID         |
 | `UserPromptSubmit`       | User submits a prompt          | Capture pre-prompt state, check for conflicts  |
-| `Stop`                   | Claude finishes responding     | Create checkpoint with code + metadata         |
+| `Stop`                   | Claude finishes responding     | Record the turn end in session state           |
 | `PreToolUse[Agent]`      | Subagent is about to start     | Capture pre-task state for diff computation    |
-| `PostToolUse[Agent]`     | Subagent finishes              | Create final checkpoint for subagent work      |
-| `PostToolUse[TaskCreate\|TaskUpdate]` | Subagent updates its task list | Create incremental checkpoint if files changed |
+| `PostToolUse[Agent]`     | Subagent finishes              | Complete the subagent's task record            |
 
-> **Tool matcher note.** Claude Code's subagent dispatch tool is `Agent` (there
-> was never a `Task` tool), and the `TodoWrite` tool was disabled by default in
-> v2.1.142 in favor of `TaskCreate`/`TaskUpdate`. Older CLI versions installed
-> these hooks under `Task`/`TodoWrite`, where they silently never fired. A normal
-> `entire enable` does not rewrite existing hook config in place; re-run with
-> `--force` (`entire enable --force`) to strip the stale entries and reinstall
-> under the matchers above. See
-> [tools-reference](https://code.claude.com/docs/en/tools-reference.md) and
-> [hooks matcher rules](https://code.claude.com/docs/en/hooks.md).
+> **Tool matcher note.** Claude Code's subagent dispatch tool is `Agent` (there was never a `Task` tool). Older CLI versions installed the subagent hooks under `Task`, where they silently never fired; re-run `entire enable --force` to strip the stale entries and reinstall under the matchers above. See [tools-reference](https://code.claude.com/docs/en/tools-reference.md) and [hooks matcher rules](https://code.claude.com/docs/en/hooks.md).
 >
-> The incremental-checkpoint handler still parses the legacy `TodoWrite`
-> `tool_input` schema for its checkpoint message label; under `TaskCreate`/
-> `TaskUpdate` the checkpoint is still created (file-change detection is
-> independent) but the label falls back to `Checkpoint #N`. Richer labels from
-> the Task* payloads are a follow-up.
+> Older CLI versions also installed a `post-todo` hook under `TodoWrite` and later `TaskCreate|TaskUpdate`, which wrote incremental subagent checkpoints to a shadow branch. It is no longer installed: any install (`entire enable`, with or without `--force`) prunes it as a stale managed hook. The `entire hooks claude-code post-todo` subcommand stays registered and only reads its input, so configs that still carry the hook keep working until then.
 
 ### Critical Capabilities
 
@@ -85,8 +72,7 @@ Fires every time the user submits a prompt. Prepares the repository state tracki
 
 3.  **Initialize Session Strategy**:
     - For strategies that implement `SessionInitializer`, calls `InitializeSession()`.
-    - **Manual-commit strategy**: Creates or validates the shadow branch (`entire/<HEAD-hash[:7]>`), saves session state to `.git/entire-sessions/<session-id>.json` with `BaseCommit`, `WorktreePath`, and `AgentType`.
-    - Handles shadow branch conflicts (from other worktrees) and session ID conflicts with appropriate error messages and recovery options.
+    - **Manual-commit strategy**: saves session state to `.git/entire-sessions/<session-id>.json` with `BaseCommit`, `WorktreePath`, and `AgentType`. No branch is created.
 
 ### `Stop`
 
@@ -109,10 +95,11 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
     - `prompt.txt` - Checkpoint-scoped user prompts, separated by `---`.
 
     Both files are a staging buffer for the checkpoint writer, not the durable
-    copy. The durable copy lives in the checkpoint tree on the shadow branch
-    and on `entire/checkpoints/v1`. `clearFilesystemStagedFiles` releases both
-    (plus a legacy `full.log`) once the session's work is condensed and no
-    carry-forward files remain.
+    copy. The durable copy is written to the checkpoint store
+    (`entire/checkpoints/v1` or per-checkpoint refs) when the work is
+    committed. `clearFilesystemStagedFiles` releases both (plus a legacy
+    `full.log`) once the session's work is condensed and no carry-forward
+    files remain.
 
 3.  **Compute File Changes**:
 
@@ -135,10 +122,9 @@ Fires when Claude finishes responding. Does **not** fire on user interrupt (Ctrl
 
 6.  **Invoke Strategy**:
 
-    - Builds a `SaveContext` with session ID, file lists, metadata paths, git author info, and token usage.
-    - Calls `strategy.SaveChanges(ctx)` to create the checkpoint.
-    - **Manual-commit**: Builds a git tree in-memory and commits to the shadow branch.
-    - Token usage is stored in `metadata.json` for later analysis and reporting.
+    - Builds a `StepContext` with session ID, file lists, metadata paths, and token usage.
+    - Calls `ManualCommitStrategy.SaveStep`, which records the step in session state (step count, files touched, and each touched file's blob hash). No git objects are written; the checkpoint is written at commit time.
+    - Token usage accumulates on session state and is stored in the checkpoint's `metadata.json` at condensation.
 
 7.  **Update Session State**: Updates `CheckpointTranscriptStart` to track transcript position for detecting new content in future checkpoints.
 
@@ -165,14 +151,14 @@ Fires just before a subagent (Agent tool) begins execution. Captures the current
     - Runs `git status` to get current untracked files.
     - Saves to `.entire/tmp/pre-task-<tool-use-id>.json`.
     - This baseline is used by `PostToolUse[Agent]` to determine which files the subagent created.
-    - **Note**: No checkpoint/commit is created at this stage. Commits are only created during task completion (`PostToolUse[Agent]` or `PostToolUse[TaskCreate|TaskUpdate]`) and only if there are actual file changes.
+    - **Note**: No checkpoint/commit is created at this stage. Nothing is written to git during a subagent run; its work reaches a checkpoint when the parent session is condensed at commit time.
 
 ### `PostToolUse[Agent]`
 
 - **Command**: `entire hooks claude-code post-task`
 - **Handler**: `handlePostTask()` in `hooks_claudecode_handlers.go:770`
 
-Fires after a subagent finishes its work. Creates the final checkpoint for the subagent's task.
+Fires after a subagent finishes its work. Completes the subagent's task record on session state; the record is materialized into the parent session's checkpoint at the next condensation.
 
 **What it does:**
 
@@ -196,56 +182,7 @@ Fires after a subagent finishes its work. Creates the final checkpoint for the s
 
 5.  **Find Checkpoint UUID**: Scans the main transcript for any checkpoint UUID associated with this `tool_use_id` (used for rewind linking).
 
-6.  **Save Final Checkpoint**:
-
-    - Builds `TaskCheckpointContext` with all file changes, transcript paths, subagent info, and checkpoint UUID.
-    - Calls `strategy.SaveTaskCheckpoint(ctx)`.
-    - Creates a commit with the subagent's file changes and metadata including the subagent transcript.
+6.  **Complete the Task Record**: `strategy.CompleteTaskRecord` attaches the files, declared transcript path, and token usage to the session's `TaskRecord` exactly once and merges the files into `FilesTouched` (without hashes, so they are matched by name at commit time). No git objects are written.
 
 7.  **Cleanup**: Deletes `.entire/tmp/pre-task-<tool-use-id>.json`.
 
-### `PostToolUse[TaskCreate|TaskUpdate]`
-
-- **Command**: `entire hooks claude-code post-todo`
-- **Handler**: `handlePostTodo()` in `hooks_claudecode_handlers.go:550`
-
-Fires whenever a subagent updates its task list. Enables fine-grained, incremental checkpointing _during_ subagent execution. (The `post-todo` command name predates Claude Code's TodoWrite→Task* rename; the matcher now targets `TaskCreate`/`TaskUpdate`.)
-
-**What it does:**
-
-1.  **Subagent Context Check**:
-
-    - Looks for an active pre-task file (`.entire/tmp/pre-task-*.json`).
-    - If no pre-task file exists, this is a main agent `TodoWrite` - skip silently.
-    - This ensures incremental checkpoints only happen inside subagent Task tool invocations.
-
-2.  **Detect File Changes**:
-
-    - Calls `DetectFileChanges()` to check for modifications since the last checkpoint.
-    - Compares against git worktree status for modified, new, and deleted files.
-
-3.  **Skip if No Changes**: If no files have changed, logs a message and returns without creating a checkpoint.
-
-4.  **Extract Todo Content**:
-
-    - Parses the `tool_input.todos` array from the hook payload.
-    - Looks for the **last completed** todo item - this represents the work just finished.
-    - If no completed items (first TodoWrite), uses "Planning: N todos" format.
-    - This becomes the checkpoint description (e.g., "Completed: Add user authentication endpoint").
-
-5.  **Get Checkpoint Sequence**: Calls `GetNextCheckpointSequence()` to get an incrementing number for this task.
-
-6.  **Save Incremental Checkpoint**:
-    - Builds `TaskCheckpointContext` with `IsIncremental: true`, sequence number, and todo content.
-    - Calls `strategy.SaveTaskCheckpoint(ctx)`.
-    - Creates a small commit capturing the incremental progress.
-
-**Example sequence during a subagent Task:**
-
-```
-PreToolUse[Task]       → (no checkpoint - only captures pre-task state)
-PostToolUse[TodoWrite] → Checkpoint #1: "Planning: 5 todos" (if files changed)
-PostToolUse[TodoWrite] → Checkpoint #2: "Completed: Create user model"
-PostToolUse[TodoWrite] → Checkpoint #3: "Completed: Add login endpoint"
-PostToolUse[Task]      → Checkpoint #4: Final checkpoint with all changes
-```

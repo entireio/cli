@@ -5,10 +5,9 @@ This document describes how the one-to-one checkpoint system handles various use
 ## Overview
 
 The system uses:
-- **Shadow branches** (`entire/<commit-hash>-<worktree-hash>`) - temporary storage for checkpoint data
-- **FilesTouched** - accumulates files modified during the session
+- **Session state** - each turn end records `FilesTouched` (files modified during the session, accumulated across prompts) and `TouchedFileHashes` (the git blob hash of each file as the agent left it); no git objects are written until a commit
 - **1:1 checkpoints** - each commit gets its own unique checkpoint ID
-- **Content-aware overlap** - prevents linking commits where user reverted session changes
+- **Name-based linking, content-aware carry-forward** - a commit that carries any path the session touched links the session; recorded hashes only decide what work is left to carry forward
 
 ## State Machine
 
@@ -39,7 +38,6 @@ sequenceDiagram
     participant C as Claude
     participant G as Git Hooks
     participant S as Session State
-    participant SB as Shadow Branch
 
     U->>C: Submit prompt
     Note over G: UserPromptSubmit hook
@@ -47,9 +45,8 @@ sequenceDiagram
     S->>S: TurnID generated
 
     C->>C: Makes changes (A, B, C)
-    C->>G: SaveChanges (Stop hook)
-    G->>SB: Write checkpoint (A, B, C + transcript)
-    G->>S: FilesTouched = [A, B, C]
+    C->>G: SaveStep (Stop hook)
+    G->>S: FilesTouched = [A, B, C], hashes of A, B, C
     Note over G: TurnEnd: ACTIVE→IDLE
 
     Note over U: Later...
@@ -61,13 +58,12 @@ sequenceDiagram
 
     Note over G: PostCommit hook
     G->>G: EventGitCommit (IDLE)
-    G->>SB: Condense to entire/checkpoints/v1
-    G->>SB: Delete shadow branch
-    G->>S: FilesTouched = nil
+    G->>G: Condense to entire/checkpoints/v1
+    G->>S: FilesTouched = nil, hashes cleared
 ```
 
 ### Key Points
-- Shadow branch holds checkpoint data until user commits
+- Session state and the local transcript copy hold the pending work until the user commits; nothing is written to git at turn end
 - PrepareCommitMsg adds `Entire-Checkpoint` trailer
 - PostCommit condenses to permanent storage and cleans up
 
@@ -83,7 +79,6 @@ sequenceDiagram
     participant C as Claude
     participant G as Git Hooks
     participant S as Session State
-    participant SB as Shadow Branch
 
     U->>C: "Make changes and commit them"
     Note over G: UserPromptSubmit hook
@@ -97,7 +92,7 @@ sequenceDiagram
 
     Note over G: PostCommit hook (ACTIVE)
     G->>G: EventGitCommit (ACTIVE→ACTIVE)
-    G->>SB: Condense with provisional transcript
+    G->>G: Condense with provisional transcript
     G->>S: TurnCheckpointIDs += [checkpoint-id]
     G->>S: FilesTouched = nil
 
@@ -174,15 +169,13 @@ sequenceDiagram
     participant C as Claude
     participant G as Git Hooks
     participant S as Session State
-    participant SB as Shadow Branch
 
     U->>C: Submit prompt
     Note over G: UserPromptSubmit → ACTIVE
 
     C->>C: Makes changes (A, B, C, D)
-    C->>G: SaveChanges (Stop hook)
-    G->>SB: Write checkpoint (A, B, C, D)
-    G->>S: FilesTouched = [A, B, C, D]
+    C->>G: SaveStep (Stop hook)
+    G->>S: FilesTouched = [A, B, C, D], hashes recorded
     Note over G: TurnEnd: ACTIVE→IDLE
 
     Note over U: User commits A, B only
@@ -191,9 +184,8 @@ sequenceDiagram
     Note over G: PostCommit (IDLE)
     G->>G: committedFiles = {A, B}
     G->>G: remaining = [C, D]
-    G->>SB: Condense checkpoint-1
-    G->>SB: Carry-forward C, D to new shadow branch
-    G->>S: FilesTouched = [C, D]
+    G->>G: Condense checkpoint-1
+    G->>S: Carry-forward: FilesTouched = [C, D]
 
     Note over U: User commits C, D
     U->>G: git add C D && git commit
@@ -201,12 +193,12 @@ sequenceDiagram
     Note over G: PostCommit (IDLE)
     G->>G: committedFiles = {C, D}
     G->>G: remaining = []
-    G->>SB: Condense checkpoint-2
+    G->>G: Condense checkpoint-2
     G->>S: FilesTouched = nil
 ```
 
 ### Key Points
-- **Carry-forward logic**: uncommitted files get a new shadow branch
+- **Carry-forward logic**: uncommitted files stay in session state (`StepCount = 1`, transcript offsets reset) so the next commit links to the session
 - Each commit gets its own checkpoint ID (1:1 model)
 - Both checkpoints link to the same session transcript
 
@@ -214,183 +206,20 @@ sequenceDiagram
 
 The carry-forward logic uses **content-aware comparison** to determine which files have remaining uncommitted changes:
 
-1. **File not in commit** → definitely has remaining changes
-2. **File in commit, hash matches shadow branch** → fully committed, no carry-forward
-3. **File in commit, hash differs from shadow branch, but the clean-filtered working-tree hash matches the commit** → the user replaced the agent content and committed it fully, no carry-forward
-4. **File in commit, hash differs from both the shadow branch and clean-filtered working tree** → partial commit (e.g., `git add -p`), carry forward
+1. **File not in commit** → has remaining changes
+2. **File in commit, hash matches the recorded turn-end hash** → fully committed, no carry-forward
+3. **File in commit, hash differs from the recorded one, but the clean-filtered working-tree hash matches the commit** → the user replaced the agent content and committed it fully, no carry-forward
+4. **File in commit, hash differs from both the recorded hash and the clean-filtered working tree** → partial commit (e.g., `git add -p`), carry forward
+5. **Recorded deletion** → nothing to carry forward
+6. **No recorded hash** (hashing failed, a symlink, or a path from a task record) → dropped if committed or missing from the worktree, kept otherwise
 
-The working-tree hash is computed by native Git so `core.autocrlf`, Git LFS,
-`ident`, and custom clean filters do not create phantom differences. If Git
-cannot hash a path, carry-forward falls back conservatively to a confined raw
-representation comparison and records a warning. Symlink blobs always take the
-confined path because `git hash-object` follows the link rather than hashing its
-target-path string.
+The recorded hashes and the working-tree hash are computed by native Git (`git hash-object`), so `core.autocrlf`, Git LFS, `ident`, and custom clean filters do not create phantom differences. Symlinks are never hashed at turn end because `git hash-object` follows the link rather than hashing its target-path string; they fall back to name matching.
 
-This enables splitting changes within a single file across multiple commits (see Scenario 7).
+This enables splitting changes within a single file across multiple commits (see Scenario 5).
 
 ---
 
-## Scenario 5: Partial Commit → Stash → Next Prompt
-
-User commits some changes, stashes the rest, then runs another prompt.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant C as Claude
-    participant G as Git Hooks
-    participant S as Session State
-    participant SB as Shadow Branch
-
-    U->>C: Prompt 1
-    Note over G: UserPromptSubmit → ACTIVE
-
-    C->>C: Makes changes (A, B, C)
-    C->>G: Stop hook
-    G->>SB: Checkpoint (A, B, C)
-    G->>S: FilesTouched = [A, B, C]
-    Note over G: ACTIVE→IDLE
-
-    Note over U: User commits A only
-    U->>G: git add A && git commit
-    Note over G: PostCommit
-    G->>SB: Condense checkpoint-1
-    G->>SB: Carry-forward B, C
-    G->>S: FilesTouched = [B, C]
-
-    Note over U: User stashes B, C
-    U->>U: git stash
-    Note right of U: B, C removed from working directory<br/>FilesTouched still = [B, C]
-
-    U->>C: Prompt 2
-    Note over G: UserPromptSubmit (IDLE→ACTIVE)
-    G->>S: TurnID = new, TurnCheckpointIDs = nil
-    Note right of G: FilesTouched NOT cleared<br/>(accumulates across prompts)
-
-    C->>C: Makes changes (D, E)
-    C->>G: SaveChanges
-    G->>SB: Add D, E to shadow branch tree
-    Note right of SB: Tree now has: B, C (old) + D, E (new)
-    G->>S: FilesTouched = merge([B,C], [D,E]) = [B,C,D,E]
-    Note over G: ACTIVE→IDLE
-
-    Note over U: User commits D, E
-    U->>G: git add D E && git commit
-    Note over G: PrepareCommitMsg
-    G->>G: staged [D,E] ∩ FilesTouched [B,C,D,E] → D,E match ✓
-    G->>G: checkpoint-2 trailer added
-
-    Note over G: PostCommit
-    G->>G: committedFiles = {D, E}
-    G->>G: remaining = [B, C]
-    G->>SB: Condense checkpoint-2
-    Note right of G: Checkpoint has FULL session transcript<br/>(both Prompt 1 and Prompt 2)
-
-    G->>G: Carry-forward attempt for B, C
-    Note right of G: B, C don't exist on disk (stashed)<br/>→ removed from tree
-    G->>S: FilesTouched = [B, C]
-```
-
-### Key Points
-- **FilesTouched accumulates** across prompts (not cleared at TurnStart)
-- **Checkpoints have full session context**: D, E commit links to transcript showing BOTH prompts
-- **No wrong attribution**: Looking at checkpoint-2, you can see D, E were created by Prompt 2
-
-### Edge Case: Stashed Files Lose Shadow Content
-
-After user commits D, E, the carry-forward for B, C creates an "empty" checkpoint:
-- `buildTreeWithChanges` removes non-existent files (B, C are stashed) from the tree
-- A shadow branch commit is created, but its tree is just HEAD (no B, C content)
-- `FilesTouched` is set to `[B, C]` - the files are still **tracked by name**
-
-**If user later unstashes B, C and commits them:**
-- PrepareCommitMsg: staged [B, C] overlaps with FilesTouched [B, C] by filename → trailer added ✓
-- PostCommit: checkpoint is created and linked
-- But the shadow branch doesn't have the original B, C content from Prompt 1
-
-This is acceptable behavior - stashing files mid-session and committing other files first is an explicit user action. The files are still tracked, but the shadow branch content chain is broken.
-
----
-
-## Scenario 6: Stash → Second Prompt → Unstash → Commit All
-
-User stashes files, runs another prompt, then unstashes and commits everything together.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant C as Claude
-    participant G as Git Hooks
-    participant S as Session State
-    participant SB as Shadow Branch
-
-    U->>C: Prompt 1
-    Note over G: UserPromptSubmit → ACTIVE
-
-    C->>C: Makes changes (A, B, C)
-    C->>G: Stop hook
-    G->>SB: Checkpoint (A, B, C)
-    G->>S: FilesTouched = [A, B, C]
-    Note over G: ACTIVE→IDLE
-
-    Note over U: User commits A only
-    U->>G: git add A && git commit
-    Note over G: PostCommit
-    G->>SB: Condense checkpoint-1
-    G->>SB: Carry-forward B, C
-    G->>S: FilesTouched = [B, C]
-
-    Note over U: User stashes B, C
-    U->>U: git stash
-    Note right of U: B, C removed from working directory<br/>Shadow branch still has B, C
-
-    U->>C: Prompt 2
-    Note over G: UserPromptSubmit (IDLE→ACTIVE)
-
-    C->>C: Makes changes (D, E)
-    C->>G: Stop hook (SaveChanges)
-    G->>SB: Add D, E to existing shadow branch
-    Note right of SB: Tree: B, C (from base) + D, E (new)
-    G->>S: FilesTouched = merge([B,C], [D,E]) = [B,C,D,E]
-    Note over G: ACTIVE→IDLE
-
-    Note over U: User unstashes B, C
-    U->>U: git stash pop
-    Note right of U: B, C back in working directory
-
-    Note over U: User commits ALL files
-    U->>G: git add B C D E && git commit
-    Note over G: PrepareCommitMsg
-    G->>G: staged [B,C,D,E] ∩ FilesTouched [B,C,D,E] → all match ✓
-    G->>G: checkpoint-2 trailer added
-
-    Note over G: PostCommit
-    G->>G: committedFiles = {B, C, D, E}
-    G->>G: remaining = []
-    G->>SB: Condense checkpoint-2
-    Note right of G: Checkpoint includes ALL files (B,C,D,E)<br/>and FULL transcript (both prompts)
-    G->>S: FilesTouched = nil
-```
-
-### Key Points
-- **Shadow branch accumulates**: D, E added on top of existing B, C from carry-forward
-- **All files tracked**: When user commits all together, all four files link to checkpoint
-- **Full session context**: Checkpoint transcript shows Prompt 1 created B, C and Prompt 2 created D, E
-
-### Contrast with Scenario 5
-
-| Scenario | User Action | Result |
-|----------|-------------|--------|
-| **5**: Commit D, E first, then B, C later | Commits D, E while B, C stashed | B, C "fall out" - carry-forward fails, later commit of B, C has no shadow content |
-| **6**: Commit all together after unstash | Unstashes B, C, commits B, C, D, E together | All files linked to single checkpoint |
-
-The key difference is **when the commit happens relative to the unstash**:
-- If you commit while files are stashed → those files lose their shadow branch content
-- If you unstash first, then commit → all files are preserved together
-
----
-
-## Scenario 7: Partial Staging with `git add -p`
+## Scenario 5: Partial Staging with `git add -p`
 
 User uses interactive staging to commit only some hunks of a file, leaving other agent changes uncommitted.
 
@@ -400,7 +229,6 @@ sequenceDiagram
     participant C as Claude
     participant G as Git Hooks
     participant S as Session State
-    participant SB as Shadow Branch
 
     U->>C: Submit prompt
     Note over G: UserPromptSubmit → ACTIVE
@@ -408,8 +236,7 @@ sequenceDiagram
     C->>C: Makes multiple changes to file A
     Note right of C: A now has lines 1-100<br/>(was empty before)
     C->>G: Stop hook
-    G->>SB: Checkpoint (A with lines 1-100)
-    G->>S: FilesTouched = [A]
+    G->>S: FilesTouched = [A], hash of A (lines 1-100)
     Note over G: ACTIVE→IDLE
 
     Note over U: User stages partial content
@@ -422,28 +249,26 @@ sequenceDiagram
     Note over G: PostCommit
     G->>G: committedFiles = {A}
     G->>G: Content check: committed A (lines 1-50)
-    G->>G: Shadow A hash ≠ committed A hash
+    G->>G: Recorded A hash ≠ committed A hash, worktree ≠ commit
     G->>G: remaining = [A] (has uncommitted changes)
-    G->>SB: Condense checkpoint-1
-    G->>SB: Carry-forward A to new shadow branch
-    Note right of SB: New shadow has A with<br/>current worktree (lines 1-100)
-    G->>S: FilesTouched = [A]
+    G->>G: Condense checkpoint-1
+    G->>S: Carry-forward: FilesTouched = [A], recorded hash kept
 
     Note over U: User commits remaining
     U->>G: git add A && git commit
     Note over G: PrepareCommitMsg: checkpoint-2
 
     Note over G: PostCommit
-    G->>G: Content check: committed A == shadow A
+    G->>G: Content check: committed A == recorded A
     G->>G: remaining = []
-    G->>SB: Condense checkpoint-2
+    G->>G: Condense checkpoint-2
     G->>S: FilesTouched = nil
 ```
 
 ### Key Points
 - **Content-aware carry-forward**: Compares git blob hashes, not just filenames
 - Partial staging (`git add -p`) within a single file is detected
-- Each commit gets proper attribution, even when splitting one file's changes
+- Each commit links to the session, even when splitting one file's changes
 
 ### How Content Comparison Works
 
@@ -451,12 +276,14 @@ sequenceDiagram
 flowchart TD
     A[PostCommit: Carry-forward check] --> B{File in committedFiles?}
     B -->|No| C[✓ Add to remaining<br/>File not committed at all]
-    B -->|Yes| D[Get shadow branch file hash]
-    D --> E{Shadow file exists?}
-    E -->|No| F[Skip file<br/>Nothing to compare against]
-    E -->|Yes| G{Committed hash == shadow hash?}
+    B -->|Yes| D[Look up recorded turn-end hash]
+    D --> E{Hash recorded?}
+    E -->|No| F[Skip file<br/>Committed by name]
+    E -->|Yes| G{Committed hash == recorded hash?}
     G -->|Yes| H[Skip file<br/>Fully committed]
-    G -->|No| I[✓ Add to remaining<br/>Partial commit detected]
+    G -->|No| K{Worktree hash == committed hash?}
+    K -->|Yes| L[Skip file<br/>User replaced and committed]
+    K -->|No| I[✓ Add to remaining<br/>Partial commit detected]
 
     C --> J[Carry forward remaining files]
     I --> J
@@ -464,26 +291,20 @@ flowchart TD
 
 ---
 
-## Content-Aware Overlap Detection
+## Linking a Commit to a Session
 
-Prevents linking commits where user reverted session changes and wrote different content.
+A commit links the session when it carries any path in `FilesTouched`, matched by name: modified, deleted, and new files alike, whatever their committed content. A user editing an agent-created file before committing it is far more common than a user overwriting it wholesale, so the committed blob is not compared with the recorded hash for linking. The one exception is a path the session recorded as deleted: if the commit adds it as a new file, someone else re-created it after the agent deleted it, and it does not link.
 
 ```mermaid
 flowchart TD
-    A[PostCommit: Check files overlap] --> B{File in commit AND in FilesTouched?}
+    A[PrepareCommitMsg / PostCommit: check overlap] --> B{File in commit AND in FilesTouched?}
     B -->|No| Z[No checkpoint trailer]
-    B -->|Yes| C{File existed in parent commit?}
-    C -->|Yes: Modified file| D[✓ Counts as overlap<br/>User edited session's work]
-    C -->|No: New file| E{Content hash matches shadow branch?}
-    E -->|Yes| F[✓ Counts as overlap<br/>Session's content preserved]
-    E -->|No| G[✗ No overlap<br/>User reverted & replaced]
-
-    D --> H[Add checkpoint trailer]
-    F --> H
-    G --> Z
+    B -->|Yes| C{New file at a path the session recorded as deleted?}
+    C -->|No| H[Add checkpoint trailer]
+    C -->|Yes| Z
 ```
 
-### Example: Reverted and Replaced
+### Example: User Rewrites an Agent-Created File
 
 ```mermaid
 sequenceDiagram
@@ -492,24 +313,21 @@ sequenceDiagram
     participant G as Git Hooks
 
     C->>C: Creates file X with content "hello"
-    Note over G: Shadow branch: X (hash: abc123)
+    Note over G: Turn end records X (hash: abc123)
 
-    U->>U: Reverts: git checkout -- X
-    U->>U: Writes completely different content
+    U->>U: Rewrites X
     Note right of U: X now has content "world"<br/>(hash: def456)
 
     U->>G: git add X && git commit
     Note over G: PrepareCommitMsg
     G->>G: X in FilesTouched? Yes
-    G->>G: X is new file (not in parent)
-    G->>G: Compare hashes: abc123 ≠ def456
-    G->>G: Content mismatch → NO overlap
-    Note over G: No Entire-Checkpoint trailer added
+    Note over G: Entire-Checkpoint trailer added
+    Note over G: PostCommit: carry-forward compares def456<br/>with abc123 and the worktree; both agree<br/>on def456, so nothing is left to carry
 ```
 
 ---
 
-## Scenario 8: git-refs Backend — Condensation and Push
+## Scenario 6: git-refs Backend — Condensation and Push
 
 All scenarios above describe the default **git-branch** backend, which condenses to the single `entire/checkpoints/v1` branch. When the primary backend is **git-refs**, the session/timing/overlap logic is **identical** — the only differences are *where* condensation writes and *how* the result is pushed. Everything about when a checkpoint is created, what it contains, and content-aware carry-forward is unchanged.
 
@@ -522,7 +340,6 @@ Two differences:
 sequenceDiagram
     participant U as User
     participant G as Git Hooks
-    participant SB as Shadow Branch
     participant R as refs/entire/checkpoints/*
     participant PQ as Push Queue
     participant Rem as Remote
@@ -530,10 +347,9 @@ sequenceDiagram
     U->>G: git commit -a
     Note over G: PrepareCommitMsg (adds Entire-Checkpoint trailer)
     Note over G: PostCommit hook
-    G->>SB: Read accumulated shadow state
+    G->>G: Read session state + transcript
     G->>R: Commit checkpoint subtree at refs/.../<shard>/<id>
     G->>PQ: Enqueue the ref (best-effort)
-    G->>SB: Delete shadow branch
 
     Note over U: Later...
     U->>G: git push
@@ -567,10 +383,8 @@ See [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md) for the full backe
 | 2. Claude commits in turn | PostCommit (ACTIVE) + HandleTurnEnd | Full transcript (finalized at stop) | Deferred finalization |
 | 3. Multiple Claude commits | Each PostCommit (ACTIVE) + HandleTurnEnd | Full transcript per checkpoint | TurnCheckpointIDs tracking |
 | 4. User splits commits | Each PostCommit (IDLE) | Full transcript per checkpoint | Content-aware carry-forward |
-| 5. Partial commit + stash + new prompt + commit new | PostCommit (IDLE) | Full transcript (both prompts) | FilesTouched accumulation, stashed files "fall out" |
-| 6. Stash + new prompt + unstash + commit all | PostCommit (IDLE) | All files + full transcript | Shadow branch accumulation |
-| 7. Partial staging with `git add -p` | Each PostCommit (IDLE) | Full transcript per checkpoint | Content-aware carry-forward (hash comparison) |
-| 8. git-refs backend | Same timing as 1–7 (backend-orthogonal) | Same as 1–7 | Condense to `refs/entire/checkpoints/<shard>/<id>` + push-queue drain at pre-push |
+| 5. Partial staging with `git add -p` | Each PostCommit (IDLE) | Full transcript per checkpoint | Content-aware carry-forward (hash comparison) |
+| 6. git-refs backend | Same timing as 1–5 (backend-orthogonal) | Same as 1–5 | Condense to `refs/entire/checkpoints/<shard>/<id>` + push-queue drain at pre-push |
 
 ---
 
@@ -578,7 +392,7 @@ See [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md) for the full backe
 
 ### 1. Redundant Transcript Data Across Commits
 
-Each checkpoint stores the **full session transcript** up to that point. If a session results in multiple commits (Scenarios 3, 4, 5, 6), each checkpoint contains overlapping transcript data.
+Each checkpoint stores the **full session transcript** up to that point. If a session results in multiple commits (Scenarios 3, 4, 5), each checkpoint contains overlapping transcript data.
 
 **Example**: Session with 3 commits
 - Checkpoint 1: transcript lines 1-100
@@ -599,21 +413,17 @@ Each checkpoint's `metadata.json` contains cumulative token usage for the entire
 
 **Correct approach**: Use the token count from the **last checkpoint** of a session, or track incremental deltas separately.
 
-### 3. Stashed Files Lose Shadow Content
-
-As described in Scenario 5, if files are stashed and other files are committed first, the stashed files lose their content in the shadow branch. They remain tracked by filename in `FilesTouched`, but subsequent checkpoints won't have the original file content preserved.
-
-### 4. No Per-File Prompt Attribution
+### 3. No Per-File Prompt Attribution
 
 Checkpoints don't explicitly tag which prompt created which file. To determine this, you must parse the transcript and correlate `tool_use` entries with preceding `user` messages. The `files_touched` list in metadata is cumulative across all prompts.
 
-### 5. Carry-Forward Checkpoints Include Full Transcript
+### 4. Carry-Forward Checkpoints Include Full Transcript
 
 When files are carried forward (Scenario 4), `CheckpointTranscriptStart` is reset to 0. This means each carry-forward checkpoint includes the **entire transcript**, not just new content since the last checkpoint.
 
 **Impact**: For long sessions with many partial commits, checkpoint storage grows linearly with session length × number of commits.
 
-### 6. Crash Before HandleTurnEnd Leaves Provisional Transcripts
+### 5. Crash Before HandleTurnEnd Leaves Provisional Transcripts
 
 In Scenarios 2 and 3 (Claude commits during turn), checkpoints are saved with "provisional" transcripts during PostCommit. The full transcript is written at HandleTurnEnd (Stop hook).
 
@@ -622,49 +432,49 @@ If the session crashes or is killed before the Stop hook fires:
 - `TurnCheckpointIDs` in session state tracks which need finalization
 - Next session start does **not** automatically finalize orphaned checkpoints
 
-### 7. Two Different Content-Aware Checks
+### 6. Two Different Checks
 
-The system uses two separate content-aware checks with different purposes:
+The system uses two separate checks with different purposes; only the second compares content:
 
-**A. Overlap Detection** (`filesOverlapWithContent`) - Determines if commit should be linked to session:
-- Only applies to **newly created files**
-- Modified files (existed in parent) **always count as overlap**
+**A. Overlap Detection** (`filesOverlapWithContent`, `stagedFilesOverlapWithContent`) - Determines if commit should be linked to session:
+- Matches by **name** for modified, deleted, and new files alike; no content comparison
+- Exception: a new file at a path the session recorded as deleted does not link
 - Used in PrepareCommitMsg/PostCommit for non-ACTIVE sessions
-- **Purpose**: Prevent linking commits where user reverted session content
+- **Purpose**: Link every commit that carries the session's work, including after the user edited it
 
 **B. Carry-Forward Detection** (`filesWithRemainingAgentChanges`) - Determines which files to carry forward:
 - Applies to **all committed files**
-- Compares committed content hash vs shadow branch hash
-- Hash mismatch = partial commit, file carried forward
-- **Purpose**: Enable splitting changes within a file across commits (Scenario 7)
+- Compares committed content hash vs the recorded turn-end hash
+- Hash mismatch with the worktree still differing = partial commit, file carried forward
+- **Purpose**: Enable splitting changes within a file across commits (Scenario 5)
 
-### 8. Carry-Forward Content Superseded by New Prompts
+### 7. Carry-Forward Content Superseded by New Prompts
 
 When files are carried forward and then a new prompt modifies the same file:
-- The shadow branch gets the **new** content (from the new prompt's SaveChanges)
-- The carried-forward content is overwritten
+- The new prompt's turn end records a **new** hash for the file
+- The carried-forward hash is overwritten
 - Subsequent commits compare against the **new prompt's content**, not the original carried-forward content
 
 **Example**:
 1. Prompt 1: Agent writes 100 lines to file A
 2. User commits 50 lines via `git add -p`
-3. Carry-forward: A (with 100 lines) goes to new shadow branch
+3. Carry-forward: A stays in `FilesTouched` with its 100-line hash
 4. Prompt 2: Agent adds 50 more lines to A (now 150 lines total in worktree)
-5. SaveChanges: Shadow branch now has A with 150 lines
+5. Turn end: the recorded hash for A is now the 150-line version
 6. User commits: Comparison is against 150 lines, not original 100 lines
 
-This is correct behavior - the shadow branch reflects the **current combined state** of the session's work.
+This is correct behavior - the recorded hash reflects the **current combined state** of the session's work.
 
-### 9. Automatic Cleanup During Normal Operations
+### 8. Automatic Cleanup During Normal Operations
 
 Most orphaned data is cleaned up automatically:
 
-- **Shadow branches**: Deleted after condensation if no other sessions reference them
-- **Session states**: Cleaned up during session listing when shadow branch no longer exists (and session is not ACTIVE, has no `LastCheckpointID`)
+- **Session states**: An ended session with no pending work (`State.HasPendingWork`) and no `LastCheckpointID` is removed during session listing
+- **Legacy shadow branches**: Branches older CLI versions wrote (`entire/<hex>-<hex>`) are deleted once at the first session start after upgrading
 
 For anything that slips through, run `entire clean --all` manually:
 
 ```bash
-entire clean --all          # Preview orphaned items
+entire clean --all          # Preview orphaned items, including legacy shadow branches
 entire clean --all --force  # Delete orphaned items
 ```

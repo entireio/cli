@@ -172,8 +172,8 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
 ## Session, checkpoint, and API contracts
 
 - `*strategy.ManualCommitStrategy` is the only strategy; there is no interface or
-  worktree restore path. Checkpoints use shadow/metadata refs, not working-branch
-  commits. Log resume is distinct from restoring worktree files.
+  worktree restore path. Turn ends write session state only; checkpoints are
+  metadata refs written at commit, never working-branch commits. Log resume is distinct from restoring worktree files.
 - Caller identity comes from `strategy.ResolveCallerSession`, not newest state.
   Preserve resolution provenance; do not narrate worktree fallback or ambiguous
   matches as identified callers. `IsCaller()` excludes those guesses; consult

@@ -26,7 +26,6 @@ Always open via `gitrepo.OpenCurrent` / `OpenPath`, not a new direct `PlainOpen`
 
 - Literal branch-name validation uses `plumbing.ValidateBranchName`; repository-dependent `@{...}` expressions retain native Git.
 - HEAD checkpoint messages and metadata tracking tips use `gitrepo.CommitAtReference`, including symbolic-ref resolution and nested tag peeling. Replace refs, explicit store selectors, and missing objects retain native compatibility paths.
-- Shadow-branch existence checks reuse the caller's repository after native deletion; go-git rereads packed refs on lookup. Explicit store selectors and bare repositories retain native Git. Branch deletion and its pre-check are unchanged.
 - Pre-push tracking-ref detection (`remoteHasTrackingRefs`) stays on native `for-each-ref --count=1`. go-git has no prefix-scoped ref iterator, so it enumerates every ref first: with 5,000 loose refs that measured about 400 ms against about 10 ms native, and one empty loose ref file aborts the whole enumeration. Revisit once go-git gains prefix iteration ([go-git#2424](https://github.com/go-git/go-git/pull/2424)).
 
 These migrations apply to files-backed worktrees without explicit store selectors, not all local reads. Discovery stays native; reftable is detected before opening its adapter and these reads retain their single native commands. A `GIT_DIR` naming the discovered Git directory, as Git exports to linked-worktree hooks, keeps the go-git path; any other store selector retains native reads. `ENTIRE_NATIVE_GIT_READS=1` forces every migrated read back to native Git. The retained compatibility boundaries are documented in [Git safety](git-safety.md#local-ref-and-commit-reads). Arbitrary revision expressions, history counts, doctor ref reports, and object-tree diffs remain follow-ups.
@@ -68,7 +67,6 @@ reuse it rather than repeatedly opening the repository.
 | `strategy/telemetry_signals.go:369` | bounded `log --name-only` | Log iterator + commit message + parent-tree diffs. Preserve skip-one, lookback ordering, and the deliberate exclusion of merge-commit file lists. |
 | `review/scope.go:222` | `diff --name-only base...HEAD` | Find merge base, then diff its tree against HEAD. A two-dot tree comparison is not equivalent. |
 | `experts_cmd.go:594`; `strategy/manual_commit_hooks.go:2891` | staged `diff --cached --name-only` | Compare HEAD tree against index entries using go-git index/merkle-tree plumbing. Do not replace with a full worktree status walk. Cover unborn HEAD, conflict stages, intent-to-add, modes, submodules, renames, and `ACMRD` filtering. |
-| `attribution.go:652` | `blame --line-porcelain -- file` | `git.Blame(commit, path)` exists, but is **not** a drop-in: native invocation includes uncommitted working-file changes. Need dirty-line attribution and parity for renames/merges/config, or retain CLI. |
 | `repo_remote.go:177,185` | `remote add/set-url` | `CreateRemote` / config mutation. Preserve fetch refspec creation, all existing URL/pushURL entries, unrelated config, and safe concurrent updates. Do not replace a whole remote config just to change its fetch URL. |
 | `checkpoint/remote/git.go:327,349`; `strategy/checkpoint_sync_remote.go:231`; `setup_checkpoint_remote.go:265` | local config writes/enumeration/raw URL reads | Config `Raw` sections can represent these. Verify include semantics and avoid read-modify-write loss of concurrent/unrelated settings; raw ownership checks must not use rewritten URLs. |
 
@@ -102,15 +100,15 @@ that every existing fallback is redundant.
 
 ### Branch deletion
 
-- `checkpoint/ephemeral.go:714`: shadow branch deletion.
-- `strategy/common.go:1614`: shared `DeleteBranchCLI`.
+- `strategy/common.go`: shared `DeleteBranchCLI` (legacy shadow branch deletion in `entire clean --all` and uninstall).
+- `strategy/cleanup.go`: the one-time legacy shadow cleanup uses `git update-ref -d <ref> <old>` so a branch that moved since it was listed survives.
 
-Both explain the subprocess using v5 packed-ref/worktree deletion bugs. Main's
+`DeleteBranchCLI` explains the subprocess using v5 packed-ref/worktree deletion bugs. Main's
 `Storer.RemoveReference` removes loose and packed references, so that specific
 reason deserves fresh tests. However, `git branch -D` also refuses branches checked
 out in another worktree and handles branch config/reflog cleanup. A raw ref deletion
-is not a general branch-delete replacement. Internal shadow refs are the narrower
-candidate; test packed refs, linked worktrees, and concurrent native Git writes.
+is not a general branch-delete replacement; test packed refs, linked worktrees,
+and concurrent native Git writes before migrating either site.
 
 ### Checkout and hard reset
 
@@ -252,7 +250,7 @@ filter, and subprocess-environment incompatibilities.
   but matching binary stats, date filtering, and merge behavior costs more code;
   low priority outside the shipped CLI. `tools/complexity/render.py` also resolves
   HEAD using Git; go-git would require a Go bridge/rewrite.
-- `scripts/{create-nightly-tag,check-pr-binaries,migrate-sessions,test-attribution-e2e,test-copilot-token-metadata}.sh`,
+- `scripts/{create-nightly-tag,check-pr-binaries,migrate-sessions,test-copilot-token-metadata}.sh`,
   `.claude/skills/test-repo/test-harness.sh`, `mise-tasks/{bench/compare,dup/staged,lint/gomod,lint/secretpatterns,release}`,
   and release/nightly/publish workflows: keep native Git in shell/CI. Replacing
   these with go-git means porting tooling to Go, not replacing a Go subprocess.

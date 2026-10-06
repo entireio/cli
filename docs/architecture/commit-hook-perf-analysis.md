@@ -1,5 +1,7 @@
 # Commit Hook Performance Analysis
 
+> **Historical.** This analysis predates the removal of shadow branches: turn ends now record pending work in session state only, so the shadow-branch resolution, ref scans, and tree reads measured below no longer exist on the commit hook path. The numbers are kept for context; re-measure before relying on them.
+
 ## Test Results (2026-02-27)
 
 Measured on a full-history single-branch clone of `entireio/cli` with 200 seeded branches and packed refs.

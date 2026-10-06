@@ -47,9 +47,9 @@ Key files: `gitrepo/repository.go` (open entry points) and
 
 #### Local ref and commit reads
 
-HEAD checkpoint messages, metadata tracking-tip checks, and shadow-branch existence checks use go-git for files-backed worktrees without explicit Git store selectors. Pre-push tracking-ref detection stays native: go-git enumerates every ref before a prefix filter can apply, which is tens of times slower with many loose refs, and one empty loose ref file aborts that enumeration. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git. Detect reftable before opening its CLI-backed storer and keep these reads as single native commands, rather than expanding one read into multiple adapter subprocesses. Git exports `GIT_DIR` to hooks in linked worktrees; when it names the discovered Git directory (compared by file identity), the reads stay on go-git. A `GIT_DIR` naming any other directory, or any other selector including `GIT_WORK_TREE`, keeps native reads.
+HEAD checkpoint messages and metadata tracking-tip checks use go-git for files-backed worktrees without explicit Git store selectors. Pre-push tracking-ref detection stays native: go-git enumerates every ref before a prefix filter can apply, which is tens of times slower with many loose refs, and one empty loose ref file aborts that enumeration. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git. Detect reftable before opening its CLI-backed storer and keep these reads as single native commands, rather than expanding one read into multiple adapter subprocesses. Git exports `GIT_DIR` to hooks in linked worktrees; when it names the discovered Git directory (compared by file identity), the reads stay on go-git. A `GIT_DIR` naming any other directory, or any other selector including `GIT_WORK_TREE`, keeps native reads.
 
-`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence. Shadow-branch existence verification reuses the repository already held by `ResetSession`: the pinned go-git version rereads `packed-refs` on lookup, so native deletion is visible through the same handle. Branch deletion and its native pre-check remain unchanged.
+`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence.
 
 Keep the native compatibility paths: explicit repository/object-store selectors and reftable storage (`gitrepo.ReadsNeedNativeGit`), repositories the worktree opener cannot handle (including bare repositories), and HEAD/commit reads requiring replace-ref interpretation or promisor-object backfill. Do not replace these with a guessed CWD repository. No migrated read uses status, refreshes the index, or mutates worktree files.
 
@@ -69,8 +69,7 @@ expensive git read on the hook paths. Avoid calling it more than once per hook.
 Do not memoize it either: a context-scoped cache was tried and removed, because
 the write-free window it required cost more to maintain than the walk saved (see
 `git log` on `gitrepo/status.go` for the measurements). The turn-start hook
-currently walks twice — `CapturePrePromptState` and the strategy's prompt
-attribution each read their own status.
+walks once, in `CapturePrePromptState`.
 
 Agent-hook capture paths must use `gitrepo.StatusWithBudget` instead: it bounds
 the walk with a wall-clock budget (`gitrepo.StatusWalkBudget`) because go-git's walk is

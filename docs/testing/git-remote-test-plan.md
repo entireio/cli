@@ -131,7 +131,7 @@ Systematize the ahead/behind/diverged/disconnected × operation matrix that item
 ### G. E2E additions (real agents optional, vogon default) — P1
 
 - G1: extend `resume_remote_test.go` + `explain_test.go` clone tests to rely on the real hook (drop `PushCheckpointRefs`, see A5) and run under both `E2E_CHECKPOINT_STORE` values in the CI canary matrix.
-- G2: one e2e worktree scenario: session in a linked worktree, commit, push from the worktree, clone elsewhere, resume (covers worktree shadow-branch namespace + shared queue end-to-end).
+- G2: one e2e worktree scenario: session in a linked worktree, commit, push from the worktree, clone elsewhere, resume (covers per-worktree session state + shared queue end-to-end).
 - G3: doctor e2e on a repo with unreachable remote (today `TestDoctorNoIssues` only covers healthy).
 
 ### H. Explicit non-goals (for now)

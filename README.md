@@ -257,7 +257,7 @@ Your Branch                      Checkpoint storage
      ▼
 ```
 
-Work in progress is held on a short-lived shadow branch as you go. When you commit, that work is condensed into a permanent checkpoint and linked to your commit by an `Entire-Checkpoint` trailer.
+As you work, Entire tracks which files the agent touched (and their content hashes) in local session state, alongside a local copy of the transcript; nothing is written to git until you commit. When you commit, that work is condensed into a permanent checkpoint and linked to your commit by an `Entire-Checkpoint` trailer.
 
 ### Strategy
 
@@ -652,7 +652,7 @@ Two exceptions to field-by-field merging:
 
 Entire automatically redacts detected secrets (API keys, tokens, credentials) from transcripts and metadata before writing a checkpoint, but redaction is best-effort.
 
-The temporary shadow branches used during a session get the same redaction for transcripts and metadata, but their **code-file snapshots are raw blobs of your working tree**, so a secret hardcoded in your source appears unredacted there. Entire never pushes shadow branches — don't push them manually. See [docs/security-and-privacy.md](docs/security-and-privacy.md) for the full picture, including the configurable scanner layers, opt-in PII redaction, and the OpenAI Privacy Filter pass.
+Older Entire versions also kept local `entire/<commit>-<worktree>` shadow branches whose code-file snapshots were raw blobs of your working tree; current versions no longer create them and delete leftover ones automatically the first time a session starts in the repository (or run `entire clean`). See [docs/security-and-privacy.md](docs/security-and-privacy.md) for the full picture, including the configurable scanner layers, opt-in PII redaction, and the OpenAI Privacy Filter pass.
 
 ## Troubleshooting
 

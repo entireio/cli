@@ -67,7 +67,7 @@ IDs are minted by `checkpoint.GenerateCheckpointID`, which picks the format from
 
 The git-refs store (`gitRefsStore`, `checkpoint/refs_store.go`) shares the checkpoint-subtree machinery with the git-branch store via an embedded `*treeWriter`. Both build the exact same checkpoint subtree; they differ only in the **base path** they write it at and in **where the result is committed**. The git-branch store writes each checkpoint under its shard prefix `<id[:2]>/<id[2:]>/` inside the single `v1` tree, so many checkpoints share one tree. The git-refs store writes with **no prefix** (an empty base path), so the checkpoint subtree *is* the root of that checkpoint's own commit tree, and the commit is the tip of a per-checkpoint ref rather than a subtree of the v1 branch.
 
-Every persistent write (`WriteSession`, and the `Backfill*` operations for transcript / summary / attribution) follows the same shape:
+Every persistent write (`WriteSession`, and the `Backfill*` operations for transcript / summary) follows the same shape:
 
 1. **Resolve the ref's current tip.** Creates (`WriteSession`) use the local-only `refBase`: a missing ref → `(ZeroHash, nil)`, so the first write to a checkpoint becomes an **orphan commit**. The `Backfill*` operations use `refBaseForBackfill`, which first on-demand fetches a locally-missing ref (when a ref fetcher is configured — the checkpoint may have been written or migrated on another machine); a ref still absent after the fetch surfaces as `ErrCheckpointNotFound` rather than orphaning, and a fetch failure surfaces as a real error, never as absence. A real lookup failure (IO/corruption) is surfaced, never silently treated as "new checkpoint".
 2. **Build the updated checkpoint subtree** from the existing tree plus the new content (shared `treeWriter` logic).
@@ -102,7 +102,7 @@ Rewrites are atomic (temp file + rename under the lock) so a concurrent reader n
 1. **Drains** the queue.
 2. **Partitions** the drained refs into those that still exist locally and stale ones (dropped from the queue).
 3. **Batch-pushes** the existing refs in one network round-trip (`batchPushRefs`, `strategy/push_common.go`).
-4. On success, **removes** the pushed refs from the queue and runs shadow-branch cleanup.
+4. On success, **removes** the pushed refs from the queue.
 5. On a batch failure (typically a non-fast-forward rejection), **falls back to per-ref recovery** (`pushCheckpointRefWithRecovery`) and removes from the queue only the refs that land.
 
 Confirmed remote policy/hook rejections skip fetch/replay: replay cannot fix a
@@ -166,7 +166,7 @@ To close that gap `List` supports **opt-in remote discovery**:
 - The `firstResolved` helper tries stores in priority order; a non-final store that reports absent *or* errors falls through to the next, so a transient git-refs fetch error cannot hide a checkpoint that resolves on the branch. The final store's result (hit, absent, or error) is returned verbatim.
 - The optional `AuthorReader` capability (`explain` relies on it) is preserved and routed by the same rules when both read stores provide it.
 - **Creates (`Session`) are not kind-routed.** They target the configured primary (+ mirrors); the minted ID already matches the primary's format.
-- **Backfills (`SessionSummary`, `SessionTranscript`, `CheckpointAttribution`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
+- **Backfills (`SessionSummary`, `SessionTranscript`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
 
 All general read paths — resume, explain, attribution, blame, tokens, attach — inherit this routing for free through `checkpoint.Open`; there is no per-command config knob.
 
