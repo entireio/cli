@@ -184,10 +184,10 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 // RemoveIfUnchanged deletes refs only when each local ref still points at the
 // hash captured before the corresponding push. If a ref advanced while the
 // push was in flight, all queue entries for that ref are retained so the newer
-// tip is retried. The comparison and queue rewrite happen under the same queue
-// lock: an enqueue that races with this operation either happens before the
-// comparison (and is retained by the hash mismatch) or after the rewrite (and
-// appends a fresh entry).
+// tip is retried. A zero-hash expectation represents a ref observed as absent.
+// The comparison and queue rewrite happen under the same queue lock: an enqueue
+// that races with this operation either happens before the comparison (and is
+// retained by the hash mismatch) or after the rewrite (and appends a fresh entry).
 func (q *PushQueue) RemoveIfUnchanged(refs []plumbing.ReferenceName, expected map[string]plumbing.Hash) error {
 	if len(refs) == 0 {
 		return nil
@@ -209,13 +209,23 @@ func (q *PushQueue) RemoveIfUnchanged(refs []plumbing.ReferenceName, expected ma
 		}
 		local, err := q.repo.Reference(ref, false)
 
+		if expectedHash.Equal(plumbing.ZeroHash) {
+			if errors.Is(err, plumbing.ErrReferenceNotFound) {
+				removable[ref.String()] = struct{}{}
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("read local ref %s: %w", ref, err)
+			}
+			continue
+		}
 		if err != nil {
 			if errors.Is(err, plumbing.ErrReferenceNotFound) {
 				continue
 			}
 			return fmt.Errorf("read local ref %s: %w", ref, err)
 		}
-		if local.Hash() == expectedHash {
+		if local.Hash().Equal(expectedHash) {
 			removable[ref.String()] = struct{}{}
 		}
 	}

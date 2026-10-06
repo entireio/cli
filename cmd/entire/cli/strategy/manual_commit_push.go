@@ -501,7 +501,7 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 
 	existing, stale, expectedHashes := partitionLocalRefs(repo, queued)
 	if len(stale) > 0 {
-		if err := queue.Remove(stale); err != nil {
+		if err := queue.RemoveIfUnchanged(stale, expectedHashes); err != nil {
 			logging.Warn(ctx, "git-refs push: prune stale queue entries failed",
 				slog.String("error", err.Error()))
 		}

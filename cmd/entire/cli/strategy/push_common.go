@@ -37,6 +37,7 @@ func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (ex
 		case errors.Is(err, plumbing.ErrReferenceNotFound):
 			// Genuinely gone (e.g. deleted by cleanup) — never pushable, drop it.
 			stale = append(stale, ref)
+			hashes[ref.String()] = plumbing.ZeroHash
 		default:
 			// A transient/IO lookup error: keep the ref as pushable so a real
 			// entry isn't dropped from the queue forever over a flaky read.

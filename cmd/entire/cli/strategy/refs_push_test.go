@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -46,7 +47,82 @@ func TestPartitionLocalRefs(t *testing.T) {
 
 	assert.ElementsMatch(t, refs, existing, "local refs are pushable")
 	assert.Equal(t, []plumbing.ReferenceName{stale}, missing, "absent ref is stale")
-	assert.Len(t, hashes, len(refs), "hash snapshots cover only local refs")
+	assert.Len(t, hashes, len(refs)+1, "hash snapshots include local refs and the stale sentinel")
+	assert.Equal(t, plumbing.ZeroHash, hashes[stale.String()])
+}
+
+func TestFlushCheckpointRefsQueuePreservesLinkedWorktreeAdvance(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	ref := refs[0]
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	localBefore, err := repo.Reference(ref, false)
+	require.NoError(t, err)
+	firstTip := localBefore.Hash()
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
+
+	linkedDir := filepath.Join(t.TempDir(), "linked")
+	testutil.RunGit(t, workDir, "worktree", "add", "--detach", linkedDir, "HEAD")
+	linkedRepo, err := git.PlainOpen(linkedDir)
+	require.NoError(t, err)
+	linkedQueue, err := checkpoint.PushQueueForRepo(context.Background(), linkedRepo)
+	require.NoError(t, err)
+
+	started := filepath.Join(t.TempDir(), "push-started")
+	release := filepath.Join(t.TempDir(), "release-push")
+	defer func() {
+		if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+			t.Errorf("release blocked pre-receive hook: %v", err)
+		}
+	}()
+	hook := "#!/bin/sh\n: > '" + started + "'\nwhile [ ! -e '" + release + "' ]; do sleep 0.01; done\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bareDir, "hooks", "pre-receive"), []byte(hook), 0o755))
+
+	type flushResult struct {
+		pushed int
+		err    error
+	}
+	done := make(chan flushResult, 1)
+	go func() {
+		pushed, err := flushCheckpointRefsQueue(context.Background(), repo, pushSettings{remote: bareDir})
+		done <- flushResult{pushed: pushed, err: err}
+	}()
+
+	startDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(startDeadline) {
+			t.Fatal("push hook did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	testutil.WriteFile(t, linkedDir, "linked-update.txt", "new tip")
+	testutil.GitAdd(t, linkedDir, "linked-update.txt")
+	testutil.GitCommit(t, linkedDir, "advance linked-worktree checkpoint")
+	newTip, err := linkedRepo.Head()
+	require.NoError(t, err)
+	require.NoError(t, linkedRepo.Storer.SetReference(plumbing.NewHashReference(ref, newTip.Hash())))
+	require.NoError(t, linkedQueue.Enqueue(ref))
+
+	require.NoError(t, os.WriteFile(release, []byte("continue"), 0o600))
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		assert.Equal(t, 1, result.pushed)
+	case <-time.After(15 * time.Second):
+		t.Fatal("checkpoint ref flush did not finish")
+	}
+
+	assert.Equal(t, firstTip.String(), remoteRefHash(t, bareDir, ref), "the in-flight push published its original tip")
+	remaining, err := queue.Peek()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{ref}, remaining, "the newer linked-worktree tip stays queued")
 }
 
 func TestBatchPushRefs(t *testing.T) {
