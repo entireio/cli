@@ -146,27 +146,6 @@ func specFor(t *testing.T, name string) hookSpec {
 	return hookSpec{}
 }
 
-func TestInstallHooks_ChangedHookKeepsEveryVersion(t *testing.T) {
-	t.Parallel()
-	f := newHooksFixture(t)
-	spec := specFor(t, "pre-push")
-	f.write("pre-push"+backupSuffix, userHookV1)
-	f.write("pre-push", userHookV2)
-
-	f.install(spec)
-
-	if got := f.read("pre-push"); got != generateChainedContent(spec.content, spec.name) {
-		t.Errorf("hook = %q, want Entire's chained hook", got)
-	}
-	if got := f.read("pre-push" + backupSuffix); got != userHookV2 {
-		t.Errorf("backup = %q, want the current hook", got)
-	}
-	older := f.olderCopies()
-	if len(older) != 1 || f.read(older[0]) != userHookV1 {
-		t.Errorf("older copies = %v, want one holding the previous backup", older)
-	}
-}
-
 func TestInstallHooks_IdenticalHookKeepsNoCopy(t *testing.T) {
 	t.Parallel()
 	f := newHooksFixture(t)
@@ -197,6 +176,22 @@ func TestInstallHooks_AlternatingHookKeepsOneCopyPerVersion(t *testing.T) {
 	older := f.olderCopies()
 	if got := f.contents(older...); !slices.Equal(got, []string{userHookV1, userHookV2}) {
 		t.Errorf("older copies hold %q, want one each of v1 and v2", got)
+	}
+}
+
+func TestInstallHooks_RemovesLeftoverTemps(t *testing.T) {
+	t.Parallel()
+	f := newHooksFixture(t)
+	f.write(tempPrefix+"commit-msg"+backupSuffix, userHookV2)
+	f.write("pre-push", userHookV1)
+
+	f.install(specFor(t, "pre-push"))
+
+	if f.exists(tempPrefix + "commit-msg" + backupSuffix) {
+		t.Error("leftover temp copy still present")
+	}
+	if got := f.read("pre-push" + backupSuffix); got != userHookV1 {
+		t.Errorf("backup = %q, want the hook", got)
 	}
 }
 
@@ -544,6 +539,28 @@ func TestRemoveHooks_AfterReclaimRestoresPreCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.write("commit-msg", wrapper)
+
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err != nil {
+		t.Fatalf("removeHooks: %v", err)
+	}
+
+	assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg" + legacySuffix: userHookV1})
+	for _, name := range []string{"commit-msg" + keepSuffix, "commit-msg" + backupSuffix} {
+		if f.exists(name) {
+			t.Errorf("%s left behind", name)
+		}
+	}
+}
+
+func TestRemoveHooks_RightAfterReclaimKeepsUserHookInLegacy(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	wrapper := preCommitWrapper("commit-msg")
+	f := newHooksFixture(t)
+	f.write("commit-msg", wrapper)
+	f.write("commit-msg"+legacySuffix, generateChainedContent(spec.content, spec.name))
+	f.write("commit-msg"+backupSuffix, userHookV1)
+	f.install(spec)
 
 	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err != nil {
 		t.Fatalf("removeHooks: %v", err)
