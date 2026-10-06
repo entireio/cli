@@ -1253,6 +1253,30 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RawOversizedRefDoesNotBlockLaterRef(
 	require.True(t, trailers.HasOPFApplied(fitting.Message))
 }
 
+// A broken OPF runtime withholds every ref after it, so it outranks an earlier
+// ref's cap error: reporting only the cap would send the user after the wrong
+// problem.
+func TestRewriteQueuedCheckpointRefsWithOPF_RuntimeFailureOutranksEarlierCapError(t *testing.T) {
+	const oversizedID, fitsID = "a1b2c3d4e5f6", "b2c3d4e5f6a1"
+	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+	_, repo, refs := setupGitRefsOPFRepo(t, oversizedID, fitsID)
+	addGitRefsSessionWithTranscript(t, repo, oversizedID, "sess-raw-oversized",
+		strings.Repeat("the quick brown fox jumps over PERSONABC again ", 800))
+
+	oversizedRaw, _ := refRewriteSizes(t, repo, refs[0])
+	fitsRaw, fitsLeaf := refRewriteSizes(t, repo, refs[1])
+	limit := max(fitsLeaf, (fitsRaw+rawByteCapMultiplier-1)/rawByteCapMultiplier)
+	require.Greater(t, oversizedRaw, rawByteCapForBatchLimit(limit))
+	t.Setenv(batchEnvVar, strconv.Itoa(limit))
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+
+	var runtimeErr *OPFRuntimeFailedError
+	require.ErrorAs(t, err, &runtimeErr, "the runtime failure must not be hidden behind the first ref's cap error")
+	assert.Equal(t, before, refHashes(t, repo, refs), "neither ref may move")
+}
+
 // Per-ref cap scoping: the leaf-byte cap is enforced per ref, not across the
 // whole flush, so one oversized ref no longer poisons the rewrite of every ref
 // queued alongside it. The ref that fits is redacted, tagged, and moved; the
@@ -1324,6 +1348,56 @@ func TestRunOPFScan_RuntimeFailureDeliversNothing(t *testing.T) {
 	require.NoError(t, RunOPFScan(t.Context(), "origin"), "the worker is best-effort and never fails the process")
 	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "refs stay queued after a failed scan")
 	assertRefsAbsentFromRemote(t, bareDir, refs, "no ref may reach the remote when OPF failed")
+}
+
+// cancelOPFPrompt makes the git-refs decision an explicit Ctrl-C at the prompt,
+// which no environment variable or setting can express.
+func cancelOPFPrompt(t *testing.T) {
+	t.Helper()
+	old := opfCheckpointRefsDecision
+	opfCheckpointRefsDecision = func(context.Context) (OPFDecision, error) { return OPFAbort, nil }
+	t.Cleanup(func() { opfCheckpointRefsDecision = old })
+}
+
+// Ctrl-C at the OPF prompt ships nothing, not even a ref an earlier push already
+// redacted and tagged: cancel means the checkpoint refs stay queued.
+func TestPrePushCheckpointRefs_OPFCancelShipsNothing(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	tagged := refHashes(t, repo, refs)
+	commit, err := repo.CommitObject(tagged[0])
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message), "fixture: the queued ref must already be deliverable")
+	cancelOPFPrompt(t)
+
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = oldWriter })
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
+		"cancelling OPF must not block the user's git push")
+
+	assert.Contains(t, buf.String(), "1 checkpoint ref(s) were not pushed")
+	assert.Equal(t, tagged, refHashes(t, repo, refs))
+	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "cancelled refs stay queued")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "a cancelled push must not reach the remote")
+}
+
+func TestPushQueuedCheckpointRefs_OPFCancelShipsNothing(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	cancelOPFPrompt(t)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(t.Context(), repo, bareDir)
+
+	require.ErrorIs(t, err, ErrOPFAbortedByUser)
+	assert.False(t, pushDisabled)
+	assert.Zero(t, pushed)
+	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "cancelled refs stay queued")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "a cancelled push must not reach the remote")
 }
 
 // With OPF off the git-refs path is unchanged: refs push as written, unrewritten.

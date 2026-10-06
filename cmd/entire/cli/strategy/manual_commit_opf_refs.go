@@ -95,9 +95,9 @@ func rewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		// conditions (the size cap); a broken runtime is broken for the whole
 		// process. Refs already rewritten above were scanned before the trip.
 		if mode == opfScanThenApply && redact.OPFBreakerTripped() {
-			if firstErr == nil {
-				firstErr = &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
-			}
+			// Replaces any earlier per-ref error: a broken runtime is what
+			// withholds every remaining ref, so it is the error to report.
+			firstErr = &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
 			break
 		}
 
@@ -118,12 +118,13 @@ func rewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		if errors.Is(rewriteErr, redact.ErrOPFNoEnabledCategories) {
 			return &OPFNoCategoriesError{}
 		}
-		if firstErr == nil {
-			firstErr = rewriteErr
-		}
 		var runtimeErr *OPFRuntimeFailedError
 		if errors.As(rewriteErr, &runtimeErr) {
+			firstErr = rewriteErr // takes precedence, as for the breaker above
 			break
+		}
+		if firstErr == nil {
+			firstErr = rewriteErr
 		}
 	}
 	return firstErr

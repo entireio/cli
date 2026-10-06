@@ -34,6 +34,10 @@ var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled
 
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
+// opfCheckpointRefsDecision is opfPrePushDecision for the git-refs paths; the
+// prompt is the only way to an explicit abort otherwise.
+var opfCheckpointRefsDecision = opfPrePushDecision //nolint:gochecknoglobals // explicit-abort test seam
+
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes each ref in refs.Push alongside the user's push.
 //
@@ -283,7 +287,7 @@ func opfDecisionForCheckpointRefs(ctx context.Context) (OPFDecision, error) {
 	if !redact.OPFEnabled() {
 		return OPFSkip, nil
 	}
-	decision, err := opfPrePushDecision(ctx)
+	decision, err := opfCheckpointRefsDecision(ctx)
 	if err != nil {
 		return OPFAbort, err
 	}
@@ -330,11 +334,11 @@ func rewriteCheckpointRefsForPush(ctx context.Context, repo *git.Repository, mod
 // withheld and the queue ships as-is, untagged. Returning false also keeps the
 // OPF-off fast path free of the per-ref commit loads a trailer check would cost.
 //
-// OPFAbort is treated as OPFRun rather than withholding everything: an abort is
-// the user declining to run inference THIS push, not relitigating whether
-// content redacted earlier may ship. The two are orthogonal, and a ref that
-// already carries the trailer is no less redacted for the user having declined
-// a scan it does not need.
+// OPFAbort reaches here only for a decision that could not be resolved, and is
+// treated as OPFRun: a ref that already carries the trailer is no less redacted
+// for the decision having failed. An explicit cancel never gets this far; the
+// callers withhold the whole flush for ErrOPFAbortedByUser (see
+// opfCancelledCheckpointRefs).
 func deliveryRequiresOPFTrailer(decision OPFDecision) bool {
 	return decision != OPFSkip
 }
@@ -371,6 +375,29 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error, withheld int)
 // opfScanPendingNotice is what the user sees when checkpoints are held for the
 // background scan. It is not an error: nothing is lost and no action is needed.
 const opfScanPendingNotice = "[entire] Checkpoints are being scanned by the OpenAI Privacy Filter in the background and will be pushed when it finishes."
+
+// opfCancelledCheckpointRefs reports whether the user explicitly cancelled OPF
+// at the prompt. That withholds the whole flush, already-trailered refs
+// included: cancel means nothing ships, and the docs promise the refs stay
+// queued.
+func opfCancelledCheckpointRefs(opfErr error) bool {
+	return errors.Is(opfErr, ErrOPFAbortedByUser)
+}
+
+// queuedCheckpointRefCount is how many refs a withheld flush leaves queued, for
+// the user-facing warning. A queue that cannot be read counts as zero, which
+// keeps the warning in the log only.
+func queuedCheckpointRefCount(ctx context.Context, repo *git.Repository) int {
+	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
+	if err != nil {
+		return 0
+	}
+	entries, err := queue.PeekEntries()
+	if err != nil {
+		return 0
+	}
+	return len(entries)
+}
 
 // deferCheckpointPushOnEmptyRemote reports whether publication of the git-branch
 // v1 metadata should be held back because the push remote may be brand new.
@@ -485,6 +512,10 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// nothing un-OPF'd ships, those refs stay queued, and the user's push
 	// proceeds.
 	opfDecision, opfErr := opfDecisionForCheckpointRefs(ctx)
+	if opfCancelledCheckpointRefs(opfErr) {
+		warnOPFCheckpointRefsWithheld(ctx, opfErr, queuedCheckpointRefCount(ctx, repo))
+		return nil
+	}
 	if opfDecision == OPFRun && opfErr == nil {
 		// Each queued ref is rewritten from the OPF span cache on its own; a
 		// ref the scan worker has not covered yet stays untrailered while its
@@ -539,6 +570,9 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		return 0, true, nil
 	}
 	opfDecision, opfErr := opfDecisionForCheckpointRefs(ctx)
+	if opfCancelledCheckpointRefs(opfErr) {
+		return 0, false, opfErr
+	}
 	if opfDecision == OPFRun && opfErr == nil {
 		// The migration push promises an immediate push, so it waits for the
 		// scan here instead of handing it to the background worker.

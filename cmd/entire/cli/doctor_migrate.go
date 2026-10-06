@@ -137,11 +137,11 @@ func pushMigratedRefs(ctx context.Context, out io.Writer, repo *git.Repository, 
 			return NewSilentError(err)
 		}
 		// Ctrl-C at the OPF prompt is the same gesture as declining the push
-		// prompt, and lands in the same place for the refs OPF had not reached:
-		// nothing more shipped, they stay queued. confirmDoctorFix reports that
-		// as a clean decline, so this must not report it as a failure.
+		// prompt, and lands in the same place: nothing shipped, the refs stay
+		// queued. confirmDoctorFix reports that as a clean decline, so this
+		// must not report it as a failure.
 		if errors.Is(err, strategy.ErrOPFAbortedByUser) {
-			fmt.Fprintln(out, "OPF cancelled; the remaining refs stay queued for the next push.")
+			fmt.Fprintln(out, "OPF cancelled; the refs stay queued for the next push.")
 			return nil
 		}
 		return fmt.Errorf("push migrated refs: %w", err)
