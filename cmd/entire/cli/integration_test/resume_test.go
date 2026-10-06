@@ -219,6 +219,40 @@ func TestResume_UncommittedChanges(t *testing.T) {
 	}
 }
 
+func TestResume_RefusesToOverwriteIgnoredFile(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	env.WriteFile(".gitignore", ".entire/\nlocal-only.env\n")
+	env.GitAdd(".gitignore")
+	env.GitCommit("Ignore local environment file")
+
+	env.GitCheckoutNewBranch("feature/target")
+	env.WriteFile("local-only.env", "tracked target content\n")
+	testutil.GitAddForce(t, env.RepoDir, "local-only.env")
+	env.GitCommit("Track environment file on target")
+	env.GitCheckoutBranch("feature/test-branch")
+
+	const localContent = "local credentials must survive\n"
+	env.WriteFile("local-only.env", localContent)
+	output, err := env.RunResume("feature/target")
+	if err == nil {
+		t.Fatalf("resume succeeded and could overwrite an ignored file; output: %s", output)
+	}
+	if !strings.Contains(output, "failed to checkout branch") {
+		t.Errorf("resume failed before reporting the checkout refusal; output: %s", output)
+	}
+	if strings.Contains(output, "Switched to branch feature/target") {
+		t.Errorf("resume reported a successful switch after checkout refusal; output: %s", output)
+	}
+	if branch := env.GetCurrentBranch(); branch != "feature/test-branch" {
+		t.Errorf("current branch = %q, want feature/test-branch after refused resume", branch)
+	}
+	if content := env.ReadFile("local-only.env"); content != localContent {
+		t.Errorf("ignored file content = %q, want %q", content, localContent)
+	}
+}
+
 // TestResume_SessionLogAlreadyExists tests that resume overwrites existing session logs
 // with the checkpoint's version. This ensures consistency when resuming from a different device.
 func TestResume_SessionLogAlreadyExists(t *testing.T) {
