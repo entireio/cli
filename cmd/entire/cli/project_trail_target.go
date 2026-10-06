@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -30,6 +31,9 @@ type projectTrailTarget struct {
 	Project   string
 	BasePath  string
 	TrailID   string
+	// Number is the project-local trail number when the resolution path
+	// learned it (a numeric selector or a parent reference); 0 otherwise.
+	Number int
 }
 
 func projectTrailBasePath(host, project string) string {
@@ -88,7 +92,7 @@ func projectTrailTargetForReference(ref api.TrailParentReference) (*projectTrail
 	if ref.ID != "" && (!looksLikeULID(ref.ID) || ref.Path != base+"/"+ref.ID) {
 		return nil, errors.New("parent reference has an invalid trail ID or canonical path")
 	}
-	return &projectTrailTarget{ProjectID: ref.ProjectID, Host: host, Project: project, BasePath: base, TrailID: ref.ID}, nil
+	return &projectTrailTarget{ProjectID: ref.ProjectID, Host: host, Project: project, BasePath: base, TrailID: ref.ID, Number: ref.Number}, nil
 }
 
 // Branch parent navigation currently supplies a cell ID but no apiUrl. Keep
@@ -265,6 +269,9 @@ func resolveProjectTrailBySelector(cmd *cobra.Command, selector string) (*projec
 	return target.resolveSelector(cmd.Context(), selector)
 }
 
+// resolveSelector sets TrailID from a ULID, or from a project-local number
+// with one GET: the detail route accepts a number (projectTrailDetail), unlike
+// PATCH and subresources, which take only the ULID used from here on.
 func (t *projectTrailTarget) resolveSelector(ctx context.Context, selector string) (*projectTrailTarget, error) {
 	if err := validateProjectTrailSelector(selector); err != nil {
 		return nil, err
@@ -274,29 +281,23 @@ func (t *projectTrailTarget) resolveSelector(ctx context.Context, selector strin
 		return t, nil
 	}
 	number, _ := parseTrailNumberSelector(selector)
-	pageToken := ""
-	seen := map[string]bool{}
-	for range trailFindMaxPages {
-		page, err := t.list(ctx, trailListServerMaxLimit, pageToken, "", "")
-		if err != nil {
-			return nil, err
+	ctx, cancel := context.WithTimeout(ctx, projectTrailListTimeout)
+	defer cancel()
+	var out api.ProjectTrail
+	if _, err := t.Client.ProjectTrailRequest(ctx, http.MethodGet, t.BasePath+"/"+strconv.Itoa(number), nil, nil, &out); err != nil {
+		if api.IsHTTPErrorStatus(err, http.StatusNotFound) {
+			return nil, fmt.Errorf("project trail #%d not found in %s/%s", number, t.Host, t.Project)
 		}
-		for _, item := range page.Items {
-			if item.Number == number {
-				t.TrailID = item.ID
-				return t, nil
-			}
-		}
-		if page.NextPageToken == nil || *page.NextPageToken == "" {
-			return nil, fmt.Errorf("project trail #%d not found", number)
-		}
-		pageToken = *page.NextPageToken
-		if seen[pageToken] {
-			return nil, errors.New("project trail pagination repeated a cursor")
-		}
-		seen[pageToken] = true
+		return nil, fmt.Errorf("read project trail #%d: %w", number, err)
 	}
-	return nil, errors.New("project trail number lookup exceeded its page budget; use the trail ID")
+	if err := t.validateResponse(out); err != nil {
+		return nil, err
+	}
+	if out.Number != number {
+		return nil, errors.New("project trail response identity does not match the request")
+	}
+	t.TrailID, t.Number = out.ID, out.Number
+	return t, nil
 }
 
 func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (*projectTrailTarget, error) {
@@ -352,6 +353,15 @@ func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, subjec
 	ctx, cancel := context.WithTimeout(cmd.Context(), requiredCellResolveTimeout)
 	defer cancel()
 	return openProjectTrailTarget(ctx, core, parent, trailInsecureHTTP(cmd))
+}
+
+// label names the trail for people: its project number when the resolution
+// path learned it, otherwise the ULID the caller gave.
+func (t *projectTrailTarget) label() string {
+	if t.Number > 0 {
+		return "trail #" + strconv.Itoa(t.Number)
+	}
+	return "trail " + t.TrailID
 }
 
 func (t *projectTrailTarget) path() string { return t.BasePath + "/" + url.PathEscape(t.TrailID) }

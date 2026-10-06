@@ -52,8 +52,9 @@ uses the following routing shapes, mirroring the entire.io BFF:
   by `experts --repo owner/repo`, which sends that placement id to entire-api
   instead of re-deriving it from a data-plane repo listing.
 - **Project-scoped trails → assigned project cell** (`ENTIRE_PROJECT_TRAILS=1`):
-  Core resolves the required `--project`; list and numeric lookups use
-  `GET /api/v1/trails?projectId=<ID>` at its assigned API URL. `--repo` only
+  Core resolves the required `--project`; list uses
+  `GET /api/v1/trails?projectId=<ID>` at its assigned API URL, and a numeric
+  selector is one `GET /api/v1/{host}/{project}/trails/{number}` there. `--repo` only
   filters within that project. No fanout or fallback; server cursors pass through.
   See [Project trails CLI](../architecture/project-trails-cli.md).
 - **User-scoped `/me` → home cell, never fan out**:

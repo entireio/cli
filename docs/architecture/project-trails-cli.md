@@ -46,8 +46,9 @@ Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one
 
 - List requires `--project` and reads `GET /api/v1/trails?projectId=<ID>` from
   Core's assigned project cell. `--repo` only filters within that project.
-  Numeric lookups use the same collection; server pagination tokens pass through
-  unchanged. JSON preserves counts, groups, jurisdiction, and capabilities.
+  Server pagination tokens pass through unchanged. A numeric selector is one
+  `GET /{host}/{project}/trails/{number}` (the detail route accepts a
+  project-local number); later requests use the returned ULID. JSON preserves counts, groups, jurisdiction, and capabilities.
 - Explicit selectors resolve through Core `/projects/resolve/{host}/{project}`.
   Branch discovery follows the backing row's parent. Neither falls back to
   legacy semantics or another cell on failure.

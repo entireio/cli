@@ -93,3 +93,29 @@ func TestProjectTrailDiscussionMissingETagRefusesWrite(t *testing.T) {
 	_, _, err := executeProjectTrailTest(t, "comment", "resolve", "discussion-one", "--project", "gh/acme", "--trail", projectTrailTestID)
 	require.ErrorContains(t, err, "no ETag")
 }
+
+// An empty discussion list names the trail by the number the user knows it by
+// when resolution learned one, and by the ULID they passed otherwise.
+func TestProjectTrailEmptyDiscussionsNameTheTrail(t *testing.T) {
+	for _, tt := range []struct{ selector, want string }{
+		{"42", "No discussions on trail #42"},
+		{projectTrailTestID, "No discussions on trail " + projectTrailTestID},
+	} {
+		t.Run(tt.selector, func(t *testing.T) {
+			setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/gh/acme/trails/42":
+					assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
+				case projectTrailTestPath + "/discussions":
+					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"items": []any{}}))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			})
+			out, _, err := executeProjectTrailTest(t, "comment", "list", "--trail", tt.selector, "--project", "gh/acme")
+			require.NoError(t, err)
+			require.Equal(t, tt.want+"\n", out)
+		})
+	}
+}

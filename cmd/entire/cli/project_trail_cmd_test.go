@@ -213,32 +213,50 @@ func TestProjectTrailCreateWithoutRepo(t *testing.T) {
 	require.Contains(t, out, projectTrailTestID)
 }
 
-// Numeric selectors use the same required-project collection as trail list.
+// A numeric selector is one GET on the project detail route, which accepts a
+// project-local number (projectTrailDetail); later requests use the ULID.
 func TestProjectTrailNumberSelector(t *testing.T) {
-	pages := 0
-	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == projectTrailTestPath {
-			assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
-			return
-		}
-		pages++
-		assert.Equal(t, "/api/v1/trails", r.URL.Path)
-		assert.Equal(t, projectTrailTestProject, r.URL.Query().Get("projectId"))
-		assert.Empty(t, r.URL.Query().Get("status"), "lookup must include all lifecycle states")
-		switch r.URL.Query().Get("pageToken") {
-		case "":
-			next := "page-two"
-			assert.NoError(t, json.NewEncoder(w).Encode(api.ProjectTrailListResponse{Items: []api.ProjectTrail{}, NextPageToken: &next}))
-		case "page-two":
-			assert.NoError(t, json.NewEncoder(w).Encode(api.ProjectTrailListResponse{Items: []api.ProjectTrail{projectTrailTestResource()}}))
-		default:
-			t.Errorf("unexpected cursor: %s", r.URL.RawQuery)
-		}
-	})
-	out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
-	require.NoError(t, err)
-	require.Contains(t, out, projectTrailTestID)
-	require.Equal(t, 2, pages)
+	for _, tt := range []struct {
+		name    string
+		number  int
+		status  int
+		failure string
+	}{
+		{"found", 42, http.StatusOK, ""},
+		{"not found", 42, http.StatusNotFound, "project trail #42 not found"},
+		{"different number", 43, http.StatusOK, "identity does not match"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var paths []string
+			setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.Method+" "+r.URL.Path)
+				switch r.URL.Path {
+				case "/api/v1/gh/acme/trails/42":
+					if tt.status != http.StatusOK {
+						http.Error(w, `{"title":"Trail not found"}`, tt.status)
+						return
+					}
+					item := projectTrailTestResource()
+					item.Number = tt.number
+					assert.NoError(t, json.NewEncoder(w).Encode(item))
+				case projectTrailTestPath:
+					assert.NoError(t, json.NewEncoder(w).Encode(projectTrailTestResource()))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+					http.NotFound(w, r)
+				}
+			})
+			out, _, err := executeProjectTrailTest(t, "show", "42", "--project", "gh/acme", "--json")
+			if tt.failure != "" {
+				require.ErrorContains(t, err, tt.failure)
+				require.Equal(t, []string{"GET /api/v1/gh/acme/trails/42"}, paths)
+				return
+			}
+			require.NoError(t, err)
+			require.Contains(t, out, projectTrailTestID)
+			require.Equal(t, []string{"GET /api/v1/gh/acme/trails/42", "GET " + projectTrailTestPath}, paths)
+		})
+	}
 }
 
 func TestProjectTrailCellRoutingFailsClosed(t *testing.T) {

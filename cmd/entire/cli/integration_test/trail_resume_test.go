@@ -204,9 +204,7 @@ func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *
 				},
 				"reference": map[string]string{"host": "gh", "project": "entireio"},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails" && r.URL.Query().Get("projectId") == projectID:
-			writeTrailResumeIntegrationJSON(t, w, api.ProjectTrailListResponse{Items: []api.ProjectTrail{parent}})
-		case r.Method == http.MethodGet && r.URL.Path == parentPath:
+		case r.Method == http.MethodGet && (r.URL.Path == parentPath || r.URL.Path == "/api/v1/gh/entireio/trails/321"):
 			writeTrailResumeIntegrationJSON(t, w, parent)
 		case r.Method == http.MethodGet && r.URL.Path == parentPath+"/changes/"+trail.ID:
 			writeTrailResumeIntegrationJSON(t, w, api.ChangeResource{TrailResource: trail, TrailID: parentID, RepositoryID: "placement-primary"})

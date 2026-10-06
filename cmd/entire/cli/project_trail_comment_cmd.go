@@ -100,7 +100,7 @@ func runProjectDiscussion(cmd *cobra.Command, action string, args []string, body
 		if err != nil {
 			return err
 		}
-		return printTrailDiscussions(cmd.OutOrStdout(), items, "trail "+target.TrailID, jsonRequested(cmd), true)
+		return printTrailDiscussions(cmd.OutOrStdout(), items, target.label(), jsonRequested(cmd), true)
 	}
 	if len(args) > 0 {
 		path += "/" + url.PathEscape(args[0])
