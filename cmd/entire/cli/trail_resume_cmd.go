@@ -138,8 +138,8 @@ func newTrailResumeCmd(mode *trailMode) *cobra.Command {
 		Use:   "resume [<trail>]",
 		Short: "Resume a trail's agent session",
 		Long: "Resume an agent session for a trail.\n\n" + mode.help(`The trail may be given as the first argument or via --trail, as a number, id, or
-branch. Without one, the trail for the current branch is used.`, `The trail may be given as the first argument or via --trail, as a project number
-or ID. Without one, the current branch's parent is used. --branch selects its
+branch. Without one, the trail for the current branch is used.`, `The trail may be given as the first argument or via --trail, as a project number,
+ID, or <repo>/<number>. Without one, the current branch's parent is used. --branch selects its
 working branch in this repository. Multiple matches require an explicit branch.`) + `
 
 By default, interactive terminals show the trail context, restore the checkpoint
@@ -170,7 +170,7 @@ resume stops before checking anything out.`,
 
 	cmd.Flags().StringVar(&opts.Selector, "trail", "", mode.help(
 		"Trail to resume (number, id, or branch; defaults to the current branch's trail)",
-		"Project trail number or ID (defaults to the current branch's parent)"))
+		"Project trail number, ID, or <repo>/<number> (defaults to the current branch's parent)"))
 	cmd.Flags().StringVar(&opts.ExpectedRepo, "repo", "", "Expected GitHub repository (owner/name); fails if the current checkout points elsewhere")
 	cmd.Flags().StringVar(&opts.ExpectedBranch, "branch", "", "Expected trail branch; fails if the trail is attached to a different branch")
 	cmd.Flags().StringVar(&opts.SessionID, "session", "", "Resume a specific known local session on the trail branch")

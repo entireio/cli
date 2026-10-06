@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,6 +37,12 @@ func (t *trailWorkingContext) description() string {
 // localOnly is used by checkout/resume: --repo may assert a local repository,
 // but must never cause these commands to check out a foreign branch here.
 func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch string, localOnly bool) (*trailWorkingContext, error) {
+	if change, ok := parseProjectTrailChangeSelector(selector); ok {
+		if strings.TrimSpace(branch) != "" {
+			return nil, errChangeSelectorWithBranch
+		}
+		return resolveProjectTrailChangeContext(cmd, change, localOnly)
+	}
 	ctx := cmd.Context()
 	if selector != "" {
 		if err := validateProjectTrailSelector(selector); err != nil {
@@ -71,7 +78,7 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 		if err != nil {
 			return nil, err
 		}
-		target, err = openTrailParentTarget(cmd, work, branch)
+		target, err = openTrailParentTarget(cmd, work, fmt.Sprintf("branch %q", branch))
 		if err != nil {
 			return nil, err
 		}
@@ -101,17 +108,47 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 	if err != nil {
 		return nil, err
 	}
+	return finishTrailWorkingContext(ctx, target, parent, etag, selected, client, base, host, owner, repo, repoID)
+}
+
+// resolveProjectTrailChangeContext selects branch work by its <repo>/<number>
+// and reaches its project trail through the change's parent, so it needs no
+// collection lookup and works for merged work whose branch is gone.
+func resolveProjectTrailChangeContext(cmd *cobra.Command, sel projectTrailChangeSelector, localOnly bool) (*trailWorkingContext, error) {
+	ctx := cmd.Context()
+	change, err := resolveProjectTrailChange(cmd, sel, localOnly)
+	if err != nil {
+		return nil, err
+	}
+	target, err := openTrailParentTarget(cmd, change.Work, "change "+sel.String())
+	if err != nil {
+		return nil, err
+	}
+	parent, etag, err := target.read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range parent.Changes {
+		if item.ID == change.Work.ID && item.RepositoryID == change.RepoID {
+			return finishTrailWorkingContext(ctx, target, parent, etag, item, change.Client, change.BasePath, change.Host, change.Owner, change.Repo, change.RepoID)
+		}
+	}
+	return nil, fmt.Errorf("trail #%d does not list %s (it may be hidden by access filtering)", parent.Number, sel)
+}
+
+// finishTrailWorkingContext rereads the selected work through the owning
+// project route to recheck containment, not a repo-local number that could
+// name unrelated work. The repo client is retained for reviews.
+func finishTrailWorkingContext(ctx context.Context, target *projectTrailTarget, parent api.ProjectTrail, etag string, selected api.ChangeSummary, client *api.Client, base, host, owner, repo, repoID string) (*trailWorkingContext, error) {
 	if !looksLikeULID(selected.ID) {
 		return nil, errors.New("selected branch has no valid backing identity")
 	}
-	// Read via the owned route to recheck containment, not a repo-local number
-	// that could name unrelated work. The repo client is retained for reviews.
 	var out api.ChangeResource
-	_, err = target.Client.ProjectTrailRequest(ctx, http.MethodGet, target.path()+"/changes/"+url.PathEscape(selected.ID), nil, nil, &out)
+	_, err := target.Client.ProjectTrailRequest(ctx, http.MethodGet, target.path()+"/changes/"+url.PathEscape(selected.ID), nil, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("read trail branch: %w", err)
 	}
-	if out.ID != selected.ID || out.TrailID != parent.ID || out.RepositoryID != repoID || out.Branch != selected.Branch || out.Number <= 0 {
+	if out.ID != selected.ID || out.TrailID != parent.ID || out.RepositoryID != repoID || changeBranchName(out.TrailResource) != selected.Branch || out.Number <= 0 {
 		return nil, errors.New("trail branch response does not match the selected repository/branch")
 	}
 	out.Parent = &api.TrailParentReference{ID: parent.ID, Number: parent.Number, ProjectID: parent.ProjectID,
@@ -119,6 +156,15 @@ func resolveProjectTrailWorkingContext(cmd *cobra.Command, selector, branch stri
 	client.SetTrailRoute(out.ID, trailNumberPathForBase(base, out.Number))
 	return &trailWorkingContext{Target: target, Parent: parent, ETag: etag, Client: client, BasePath: base,
 		Host: host, Owner: owner, Repo: repo, Work: out.TrailResource}, nil
+}
+
+// changeBranchName is the branch a change summary lists: a merged change's
+// read returns branch null and keeps the name in original_branch.
+func changeBranchName(work api.TrailResource) string {
+	if work.Branch != "" {
+		return work.Branch
+	}
+	return work.OriginalBranch
 }
 
 func selectTrailWorkingBranch(changes []api.ChangeSummary, repoID, explicit, preferred string) (api.ChangeSummary, error) {

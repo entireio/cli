@@ -56,7 +56,7 @@ func newTrailApproveCmd(mode *trailMode) *cobra.Command {
 		Use:   "approve [<trail>]",
 		Short: "Approve a trail",
 		Long: "Approve a trail.\n\n" + mode.help(`If <trail> is omitted, approves the trail for the current branch (or --branch).
-The trail must be open and have a linked branch.`, `<trail> is a project trail number or ID. Without one, follow the current branch's
+The trail must be open and have a linked branch.`, `<trail> is a project trail number, ID, or <repo>/<number>. Without one, follow the current branch's
 parent. --repo and --branch select a working context. Only that branch is approved,
 not every repository on the trail. The branch work must be open.`),
 		Args: cobra.MaximumNArgs(1),
@@ -75,7 +75,7 @@ func newTrailRequestChangesCmd(mode *trailMode) *cobra.Command {
 		Use:   "request-changes [<trail>]",
 		Short: "Request changes on a trail",
 		Long: "Request changes on a trail.\n\n" + mode.help(`If <trail> is omitted, targets the trail for the current branch (or --branch).
-A reason (--message) is required. The trail must be open and have a linked branch.`, `<trail> is a project trail number or ID. Without one, follow the current branch's
+A reason (--message) is required. The trail must be open and have a linked branch.`, `<trail> is a project trail number, ID, or <repo>/<number>. Without one, follow the current branch's
 parent. --repo and --branch select a working context. A reason (--message) is
 required. The decision applies only to the selected branch.`),
 		Args: cobra.MaximumNArgs(1),

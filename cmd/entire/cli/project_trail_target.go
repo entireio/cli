@@ -212,7 +212,7 @@ func validateProjectTrailSelector(selector string) error {
 		return nil
 	}
 	if _, ok := parseTrailNumberSelector(selector); !ok {
-		return errors.New("use a project trail ID or number; select a branch with --branch")
+		return errors.New("use a project trail ID or number, or <repo>/<number> for one repository's work; select a branch with --branch")
 	}
 	return nil
 }
@@ -224,6 +224,12 @@ func validateProjectTrailSelector(selector string) error {
 // verified to belong to that trail.
 func resolveProjectTrail(cmd *cobra.Command, selector string) (*projectTrailTarget, error) {
 	branch := trailBranchFlag(cmd)
+	if change, ok := parseProjectTrailChangeSelector(selector); ok {
+		if branch != "" {
+			return nil, errChangeSelectorWithBranch
+		}
+		return resolveProjectTrailChangeParent(cmd, change)
+	}
 	switch {
 	case selector == "":
 		return resolveBranchProjectTrail(cmd, branch)
@@ -236,6 +242,16 @@ func resolveProjectTrail(cmd *cobra.Command, selector string) (*projectTrailTarg
 		}
 		return selected.Target, nil
 	}
+}
+
+// resolveProjectTrailChangeParent is the project trail a <repo>/<number>
+// change belongs to, for intent-level commands (show, update, comment).
+func resolveProjectTrailChangeParent(cmd *cobra.Command, sel projectTrailChangeSelector) (*projectTrailTarget, error) {
+	change, err := resolveProjectTrailChange(cmd, sel, false)
+	if err != nil {
+		return nil, err
+	}
+	return openTrailParentTarget(cmd, change.Work, "change "+sel.String())
 }
 
 func resolveProjectTrailBySelector(cmd *cobra.Command, selector string) (*projectTrailTarget, error) {
@@ -308,15 +324,16 @@ func resolveBranchProjectTrail(cmd *cobra.Command, branch string) (*projectTrail
 	if err != nil {
 		return nil, err
 	}
-	return openTrailParentTarget(cmd, change, branch)
+	return openTrailParentTarget(cmd, change, fmt.Sprintf("branch %q", branch))
 }
 
 // openTrailParentTarget routes to the project parent a branch's Change points
 // at. An absent parent may be inaccessible or unresolved, so this never falls
 // back to a repo-scoped read; --project, when given, must name that parent.
-func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, branch string) (*projectTrailTarget, error) {
+// subject names the work in errors, e.g. `branch "feature/x"` or `change cli/7`.
+func openTrailParentTarget(cmd *cobra.Command, change *api.TrailResource, subject string) (*projectTrailTarget, error) {
 	if change == nil || change.Parent == nil || !looksLikeULID(change.Parent.ID) {
-		return nil, fmt.Errorf("branch %q has no discoverable project trail; pass a project trail ID with --project (a missing parent may be inaccessible or unresolved)", branch)
+		return nil, fmt.Errorf("%s has no discoverable project trail; pass a project trail ID with --project (a missing parent may be inaccessible or unresolved)", subject)
 	}
 	parent := *change.Parent
 	if ref := projectTrailProjectFlag(cmd); ref != "" {

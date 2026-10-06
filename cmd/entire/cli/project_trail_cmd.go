@@ -32,7 +32,7 @@ func addProjectTrailSelectorFlags(cmd *cobra.Command) {
 func newProjectTrailShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "show [<trail>]", Short: "Show trail intent and its repositories and branches",
-		Long: "Show a project trail by its project-local number or ULID. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent.",
+		Long: "Show a project trail by its project-local number or ULID, or the trail of <repo>/<number> branch work. Without a selector, follow the current branch's parent. Use --branch to follow another branch's parent.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, err := resolveProjectTrail(cmd, projectTrailSelector(args))

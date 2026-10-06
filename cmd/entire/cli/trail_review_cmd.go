@@ -84,7 +84,7 @@ func newTrailFindingCmd(mode *trailMode) *cobra.Command {
 branch's trail. Pass a trail selector (number, id, or branch) to inspect another
 trail in the same repo. Use 'entire trail list --status any' when you need to
 discover a trail selector first.`, `Running 'entire trail finding' shows the finding dashboard for the current
-branch's trail. Pass a project trail number or ID to inspect another trail.
+branch's trail. Pass a project trail number, ID, or <repo>/<number> to inspect another trail.
 --repo and --branch select the working context; findings apply only to that
 branch, not the whole trail. Use 'entire trail list' to discover trails.`),
 		Args: cobra.MaximumNArgs(1),
@@ -99,7 +99,7 @@ branch, not the whole trail. Use 'entire trail list' to discover trails.`),
 	}
 	cmd.PersistentFlags().StringVar(&targetOpts.Selector, "trail", "", mode.help(
 		"Trail selector (number, id, or branch); defaults to the current branch's trail",
-		"Project trail number or ID (defaults to the current branch's parent)"))
+		"Project trail number, ID, or <repo>/<number> (defaults to the current branch's parent)"))
 	cmd.PersistentFlags().StringVar(&targetOpts.Branch, "branch", "", mode.help(
 		"Resolve the trail for this branch instead of the current branch; cannot be combined with a trail selector",
 		"Select a repository branch within the trail"))

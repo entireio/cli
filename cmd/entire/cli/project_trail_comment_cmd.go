@@ -32,7 +32,7 @@ type projectDiscussionResponse struct {
 
 func newProjectTrailCommentCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "comment", Short: "Discuss the whole trail across repositories", Args: cobra.NoArgs}
-	cmd.PersistentFlags().String("trail", "", "Project trail number or ID (defaults to the current branch's parent)")
+	cmd.PersistentFlags().String("trail", "", "Project trail number, ID, or <repo>/<number> (defaults to the current branch's parent)")
 	cmd.PersistentFlags().String("branch", "", "Discover the trail through this repository branch")
 	for _, action := range []struct {
 		name, description string

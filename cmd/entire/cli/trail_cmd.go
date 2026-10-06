@@ -1790,8 +1790,8 @@ func newTrailCheckoutCmd(mode *trailMode) *cobra.Command {
 		Short: "Check out a trail's branch",
 		Long: "Check out the branch of a trail.\n\n" + mode.help(`The trail may be given as the first argument or via --trail, as a number, id, or
 branch. Without one, the trail for the current branch is used. The trail's branch
-is checked out, fetching it from origin first when it only exists there.`, `The trail may be given as the first argument or via --trail, as a project number
-or ID. Without one, the current branch's parent is used. --branch selects the
+is checked out, fetching it from origin first when it only exists there.`, `The trail may be given as the first argument or via --trail, as a project number,
+ID, or <repo>/<number>. Without one, the current branch's parent is used. --branch selects the
 working branch; otherwise the current branch or sole branch in this repository
 is selected. Ambiguity requires --branch. Remote-only branches are fetched.`) + `
 
@@ -1826,7 +1826,7 @@ trail is looked up against that repository's origin remote.`,
 
 	cmd.Flags().StringVar(&trailSelector, "trail", "", mode.help(
 		"Trail to check out (number, id, or branch; defaults to the current branch's trail)",
-		"Project trail number or ID (defaults to the current branch's trail)"))
+		"Project trail number, ID, or <repo>/<number> (defaults to the current branch's trail)"))
 	cmd.Flags().StringVar(&branch, "branch", "", mode.help(
 		"Resolve the trail for this branch instead of the current branch",
 		"Select a branch within the trail in this repository"))

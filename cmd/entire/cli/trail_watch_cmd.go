@@ -55,7 +55,7 @@ current branch is used.`, `Subscribe to the selected repository/branch's SSE str
 Reconnects automatically when the server caps the connection (~50s) and on
 transient network errors.
 
-<trail> is a project trail number or ID. If omitted, the current branch's
+<trail> is a project trail number, ID, or <repo>/<number>. If omitted, the current branch's
 parent is used. --repo and --branch select the working context; this does not
 aggregate streams from every repository.`) + `
 

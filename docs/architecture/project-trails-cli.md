@@ -36,14 +36,11 @@ entire trail update 42 --body 'Updated intent'
 entire trail link 42 --repo gh/entireio/api --branch feature/api
 entire trail unlink 42 --repo gh/entireio/api --branch feature/api
 entire trail finding list 42 --repo gh/entireio/cli --branch feature/work
+entire trail finding list cli/1503 --project gh/entireio
 entire trail comment add --trail 42 --body 'Cross-repository plan'
 ```
 
-Selectors are project-local numbers or trail ULIDs. Without a selector, commands
-follow the current branch's parent. `--branch` selects branch work; ambiguous
-matches require it. Checkout and resume operate on the local clone. Findings,
-approvals, and watch apply to the selected branch; comments apply to the whole
-trail. Project mode has `link`/`unlink`, not `delete` or a `change` subgroup.
+Selectors are project-local numbers or trail ULIDs, or `<repo>/<number>` for one repository's branch work, the form a change's web URL ends in (`…/trails/2074/changes/cli/1503` → `cli/1503`). The repository is looked up in `--project`, or origin's owner without it; the work's parent names the trail, so no collection lookup is needed, and merged work whose branch is gone still resolves. Branch-level commands act on that work; `show`, `update`, and `comment` act on its trail. It cannot be combined with `--branch`, and an explicit `--repo` must name the same repository. Legacy mode does not accept it: there a slash-containing selector is a branch name and a bare number is already repository-local work. Without a selector, commands follow the current branch's parent. `--branch` selects branch work; ambiguous matches require it. Checkout and resume operate on the local clone. Findings, approvals, and watch apply to the selected branch; comments apply to the whole trail. Project mode has `link`/`unlink`, not `delete` or a `change` subgroup.
 
 ## API and safety
 
