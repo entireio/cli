@@ -4,14 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-
-	"github.com/entireio/cli/cmd/entire/cli/paths"
-
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// Reset deletes the shadow branch and session state for the current HEAD.
-// This allows starting fresh without existing checkpoints.
+// Reset clears the session state of every session based on the current HEAD,
+// and deletes the shadow branches older CLIs left behind (see
+// ListRemovableLegacyShadowBranches). File changes remain in the working
+// directory.
 func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -19,76 +17,61 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 	}
 	defer repo.Close()
 
-	// Get current HEAD
 	head, err := repo.Head()
 	if err != nil {
 		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
-	// Get current worktree ID for shadow branch naming
-	worktreePath, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree path: %w", err)
-	}
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree ID: %w", err)
-	}
-
-	// Get shadow branch name for current HEAD
-	shadowBranchName := getShadowBranchNameForCommit(head.Hash().String(), worktreeID)
-
-	// Check if shadow branch exists
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	_, err = repo.Reference(refName, true)
-	hasShadowBranch := err == nil
-
-	// Find sessions for this commit
 	sessions, err := s.findSessionsForCommit(ctx, head.Hash().String())
 	if err != nil {
 		sessions = nil // Ignore error, treat as no sessions
 	}
+	legacyBranches, err := ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to list legacy shadow branches: %v\n", err)
+		legacyBranches = nil
+	}
 
-	// If nothing to clean, return early
-	if !hasShadowBranch && len(sessions) == 0 {
-		fmt.Fprintf(w, "Nothing to clean for %s\n", shadowBranchName)
+	if len(sessions) == 0 && len(legacyBranches) == 0 {
+		fmt.Fprintln(w, "Nothing to clean for current HEAD.")
 		return nil
 	}
 
-	// Clear all sessions for this commit
-	clearedSessions := make([]string, 0)
 	for _, state := range sessions {
 		if err := withLockWaitNotice(state.SessionID, errW, SessionLockNoticeDelay, func() error {
 			return s.clearSessionState(ctx, state.SessionID)
 		}); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to clear session state for %s: %v\n", state.SessionID, err)
-		} else {
-			clearedSessions = append(clearedSessions, state.SessionID)
+			continue
 		}
+		fmt.Fprintf(w, "✓ Cleared session state for %s\n", state.SessionID)
 	}
 
-	// Report cleared session states with session IDs
-	if len(clearedSessions) > 0 {
-		for _, sessionID := range clearedSessions {
-			fmt.Fprintf(w, "✓ Cleared session state for %s\n", sessionID)
-		}
+	deleted, failed := DeleteLegacyShadowBranches(ctx, legacyBranches)
+	for _, branch := range deleted {
+		fmt.Fprintf(w, "✓ Deleted legacy shadow branch %s\n", branch)
 	}
-
-	// Delete the shadow branch if it exists
-	if hasShadowBranch {
-		if err := DeleteBranchCLI(ctx, shadowBranchName); err != nil {
-			return fmt.Errorf("failed to delete shadow branch: %w", err)
-		}
-		fmt.Fprintf(w, "✓ Deleted shadow branch %s\n", shadowBranchName)
+	for _, branch := range failed {
+		fmt.Fprintf(errW, "Warning: failed to delete legacy shadow branch %s\n", branch)
 	}
-
 	return nil
 }
 
-// ResetSession clears a single session's state and removes the shadow branch
-// if no other sessions reference it. File changes remain in the working directory.
+// ListRemovableLegacyShadowBranches returns the local shadow branches older
+// CLIs left behind that are safe to delete without listing them for a human
+// first: the strict worktree-suffixed shape only (see
+// autoDeletableLegacyShadowBranchPattern), sorted.
+func ListRemovableLegacyShadowBranches(ctx context.Context) ([]string, error) {
+	heads, err := listLegacyShadowBranchHeads(ctx, isAutoDeletableLegacyShadowBranch)
+	if err != nil {
+		return nil, err
+	}
+	return sortedBranchNames(heads), nil
+}
+
+// ResetSession clears a single session's state. File changes remain in the
+// working directory.
 func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writer, sessionID string) error {
-	// Load the session state
 	state, err := s.loadSessionState(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to load session state: %w", err)
@@ -105,26 +88,5 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
 	fmt.Fprintf(w, "✓ Cleared session state for %s\n", sessionID)
-
-	// Determine the shadow branch for this session
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-
-	// Open repository
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	// Clean up shadow branch if no other sessions need it
-	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to clean up shadow branch %s: %v\n", shadowBranchName, err)
-	} else {
-		// The existing handle observes native deletion of both loose and packed refs.
-		if err := branchExists(ctx, repo, shadowBranchName); err != nil {
-			fmt.Fprintf(w, "✓ Deleted shadow branch %s\n", shadowBranchName)
-		}
-	}
-
 	return nil
 }

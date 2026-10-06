@@ -389,7 +389,7 @@ func TestCondenseAndMarkFullyCondensed_FilesWaitingForCommitDoesNotWaitForStateL
 }
 
 // TestCondenseAndMarkFullyCondensed_WithDataNoFiles verifies that a session with
-// uncondensed data (StepCount > 0, shadow branch exists) but no FilesTouched
+// uncondensed data (StepCount > 0) but no FilesTouched
 // is condensed and marked FullyCondensed. This is the subagent case from #591:
 // the subagent's files were already committed by the parent session.
 func TestCondenseAndMarkFullyCondensed_WithDataNoFiles(t *testing.T) {
@@ -411,7 +411,7 @@ func TestCondenseAndMarkFullyCondensed_WithDataNoFiles(t *testing.T) {
 	// Write a file the agent "modified" (but it will be committed by parent)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent_file.txt"), []byte("agent work"), 0o644))
 
-	// SaveStep creates the shadow branch
+	// SaveStep records a turn-end step
 	err = s.SaveStep(context.Background(), StepContext{
 		SessionID:     sessionID,
 		ModifiedFiles: []string{},

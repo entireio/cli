@@ -15,9 +15,10 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-// TestSessionIDConflict_OrphanedBranchIsReset tests that starting a new session
-// resets an orphaned shadow branch (one with no session state file).
-func TestSessionIDConflict_OrphanedBranchIsReset(t *testing.T) {
+// TestSessionIDConflict_ClearedSessionDoesNotBlockNewSession tests that a new
+// session starts and records turn-end work after an earlier session's state
+// file was removed.
+func TestSessionIDConflict_ClearedSessionDoesNotBlockNewSession(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -31,10 +32,7 @@ func TestSessionIDConflict_OrphanedBranchIsReset(t *testing.T) {
 	env.GitCheckoutNewBranch("feature/test")
 	env.InitEntire()
 
-	baseHead := env.GetHeadHash()
-	shadowBranch := env.GetShadowBranchNameForCommit(baseHead)
-
-	// Create a session and checkpoint (this creates the shadow branch)
+	// Create a session and checkpoint
 	session1 := env.NewSession()
 	if err := env.SimulateUserPromptSubmit(session1.ID); err != nil {
 		t.Fatalf("SimulateUserPromptSubmit (session1) failed: %v", err)
@@ -46,14 +44,9 @@ func TestSessionIDConflict_OrphanedBranchIsReset(t *testing.T) {
 		t.Fatalf("SimulateStop (session1) failed: %v", err)
 	}
 
-	// Verify shadow branch exists
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("Shadow branch %s should exist after first session", shadowBranch)
-	}
-	t.Logf("Created shadow branch: %s", shadowBranch)
+	env.AssertTurnEndRecorded(session1.ID, "test.txt")
 
-	// Clear the session state file but keep the shadow branch
-	// This simulates an orphaned shadow branch scenario
+	// Clear the session state file
 	sessionStateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
 	entries, err := os.ReadDir(sessionStateDir)
 	if err != nil {
@@ -67,12 +60,11 @@ func TestSessionIDConflict_OrphanedBranchIsReset(t *testing.T) {
 		}
 	}
 
-	// Try to start a new session - should succeed by resetting the orphaned branch
+	// Start a new session
 	session2 := env.NewSession()
 	err = env.SimulateUserPromptSubmit(session2.ID)
-	// Expect success - orphaned branch is reset
 	if err != nil {
-		t.Errorf("Expected success when starting new session with orphaned shadow branch, got: %v", err)
+		t.Errorf("Expected success when starting a new session, got: %v", err)
 	}
 
 	// Verify the new session can create checkpoints
@@ -82,16 +74,8 @@ func TestSessionIDConflict_OrphanedBranchIsReset(t *testing.T) {
 		t.Fatalf("SimulateStop (session2) failed: %v", err)
 	}
 
-	// Verify shadow branch now has session2's checkpoint
-	state2, err := env.GetSessionState(session2.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState (session2) failed: %v", err)
-	}
-	if state2 == nil || state2.StepCount == 0 {
-		t.Error("Session 2 should have checkpoints after orphaned branch was reset")
-	} else {
-		t.Logf("Session 2 has %d checkpoint(s)", state2.StepCount)
-	}
+	// Verify session2 recorded its turn end
+	env.AssertTurnEndRecorded(session2.ID, "test2.txt")
 }
 
 // TestSessionIDConflict_NoConflictWithSameSession tests that resuming the same session
@@ -130,95 +114,58 @@ func TestSessionIDConflict_NoConflictWithSameSession(t *testing.T) {
 	}
 }
 
-// TestSessionIDConflict_NoShadowBranch tests that starting a new session succeeds
-// when no shadow branch exists (fresh start).
-func TestSessionIDConflict_NoShadowBranch(t *testing.T) {
+// TestSessionStart_RemovesLegacyShadowBranches verifies the one-time upgrade
+// cleanup: the first session start deletes the per-session shadow branches
+// older CLIs wrote (entire/<commit>-<worktree-hash>), leaves anything that only
+// looks similar (the bare entire/<hex> form, the metadata branch) alone, and
+// records a marker so later session starts skip the ref scan.
+func TestSessionStart_RemovesLegacyShadowBranches(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
 
-	// Setup
 	env.InitRepo()
 	env.WriteFile("README.md", "# Test")
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
-
 	env.GitCheckoutNewBranch("feature/test")
 	env.InitEntire()
 
 	baseHead := env.GetHeadHash()
-	shadowBranch := env.GetShadowBranchNameForCommit(baseHead)
+	legacy := "entire/" + baseHead[:7] + "-e3b0c4"
+	bareLookalike := "entire/" + baseHead[:7]
+	createLegacyShadowBranch(t, env.RepoDir, legacy, "legacy-session-id")
+	createLegacyShadowBranch(t, env.RepoDir, bareLookalike, "not-ours")
 
-	// Verify no shadow branch exists
-	if env.BranchExists(shadowBranch) {
-		t.Fatalf("Shadow branch %s should not exist before first session", shadowBranch)
+	session := env.NewSession()
+	if out := env.SimulateSessionStartWithOutput(session.ID); out.Err != nil {
+		t.Fatalf("session-start failed: %v\n%s", out.Err, out.Stderr)
 	}
 
-	// Create a new session - should succeed without conflict
-	session := env.NewSession()
-	err := env.SimulateUserPromptSubmit(session.ID)
-	if err != nil {
-		t.Errorf("Starting new session with no shadow branch should succeed, got: %v", err)
+	if env.BranchExists(legacy) {
+		t.Errorf("legacy shadow branch %s should be removed at session start", legacy)
+	}
+	if !env.BranchExists(bareLookalike) {
+		t.Errorf("bare-format branch %s must be left for `entire clean --all` to confirm", bareLookalike)
+	}
+	marker := filepath.Join(env.RepoDir, ".git", "entire-legacy-shadow-branches-removed")
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("expected the one-time cleanup marker at %s: %v", marker, err)
+	}
+
+	// One-time: a branch appearing later is not touched by the next start.
+	createLegacyShadowBranch(t, env.RepoDir, legacy, "legacy-session-id")
+	if out := env.SimulateSessionStartWithOutput(session.ID); out.Err != nil {
+		t.Fatalf("second session-start failed: %v\n%s", out.Err, out.Stderr)
+	}
+	if !env.BranchExists(legacy) {
+		t.Errorf("legacy cleanup should run once; %s was deleted again", legacy)
 	}
 }
 
-// TestSessionIDConflict_ManuallyCreatedOrphanedBranch tests that a manually created
-// orphaned shadow branch (simulating a crash scenario) is reset when a new session starts.
-func TestSessionIDConflict_ManuallyCreatedOrphanedBranch(t *testing.T) {
-	t.Parallel()
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	// Setup
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-
-	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire()
-
-	baseHead := env.GetHeadHash()
-	shadowBranch := env.GetShadowBranchNameForCommit(baseHead)
-
-	// Manually create a shadow branch with a different session ID
-	// This simulates a shadow branch that was left behind (e.g., from a crash)
-	createOrphanedShadowBranch(t, env.RepoDir, shadowBranch, "orphaned-session-id")
-
-	// Verify shadow branch exists
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("Shadow branch %s should exist after manual creation", shadowBranch)
-	}
-
-	// Try to start a new session - should succeed by resetting the orphaned branch
-	session := env.NewSession()
-	err := env.SimulateUserPromptSubmit(session.ID)
-	if err != nil {
-		t.Errorf("Expected success when orphaned shadow branch is reset, got: %v", err)
-	}
-
-	// Verify the new session can create checkpoints
-	env.WriteFile("new_file.txt", "new content")
-	session.CreateTranscript("Add new file", []FileChange{{Path: "new_file.txt", Content: "new content"}})
-	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
-		t.Fatalf("SimulateStop failed: %v", err)
-	}
-
-	// Verify session has checkpoints
-	state, err := env.GetSessionState(session.ID)
-	if err != nil {
-		t.Fatalf("GetSessionState failed: %v", err)
-	}
-	if state == nil || state.StepCount == 0 {
-		t.Error("Session should have checkpoints after orphaned branch was reset")
-	} else {
-		t.Logf("New session has %d checkpoint(s)", state.StepCount)
-	}
-}
-
-// createOrphanedShadowBranch creates a shadow branch with a specific session ID
-// without creating a corresponding session state file.
-func createOrphanedShadowBranch(t *testing.T, repoDir, branchName, sessionID string) {
+// createLegacyShadowBranch creates a branch shaped like the per-session shadow
+// branches older CLIs wrote, with no corresponding session state file.
+func createLegacyShadowBranch(t *testing.T, repoDir, branchName, sessionID string) {
 	t.Helper()
 
 	repo, err := git.PlainOpen(repoDir)
@@ -273,41 +220,6 @@ func createOrphanedShadowBranch(t *testing.T, repoDir, branchName, sessionID str
 	ref := plumbing.NewHashReference(refName, commitHash)
 	if err := repo.Storer.SetReference(ref); err != nil {
 		t.Fatalf("Failed to create branch reference: %v", err)
-	}
-}
-
-// TestSessionIDConflict_ShadowBranchWithoutTrailer tests that a shadow branch without
-// an Entire-Session trailer does not cause a conflict (backwards compatibility).
-func TestSessionIDConflict_ShadowBranchWithoutTrailer(t *testing.T) {
-	t.Parallel()
-	env := NewTestEnv(t)
-	defer env.Cleanup()
-
-	// Setup
-	env.InitRepo()
-	env.WriteFile("README.md", "# Test")
-	env.GitAdd("README.md")
-	env.GitCommit("Initial commit")
-
-	env.GitCheckoutNewBranch("feature/test")
-	env.InitEntire()
-
-	baseHead := env.GetHeadHash()
-	shadowBranch := env.GetShadowBranchNameForCommit(baseHead)
-
-	// Create a shadow branch without Entire-Session trailer (simulating old format)
-	createShadowBranchWithoutTrailer(t, env.RepoDir, shadowBranch)
-
-	// Verify shadow branch exists
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("Shadow branch %s should exist", shadowBranch)
-	}
-
-	// Starting a new session should succeed (no trailer = no conflict)
-	session := env.NewSession()
-	err := env.SimulateUserPromptSubmit(session.ID)
-	if err != nil {
-		t.Errorf("Starting session with shadow branch without trailer should succeed, got: %v", err)
 	}
 }
 
@@ -464,57 +376,5 @@ func TestSessionStart_InformationalMessageNoConcurrentSessions(t *testing.T) {
 	// Verify concurrent session info is NOT shown (no other sessions)
 	if strings.Contains(msg, "other active conversation") {
 		t.Errorf("Message should NOT mention other active conversations when none exist, got:\n%s", msg)
-	}
-}
-
-// createShadowBranchWithoutTrailer creates a shadow branch without an Entire-Session trailer.
-func createShadowBranchWithoutTrailer(t *testing.T, repoDir, branchName string) {
-	t.Helper()
-
-	repo, err := git.PlainOpen(repoDir)
-	if err != nil {
-		t.Fatalf("Failed to open repo: %v", err)
-	}
-
-	head, err := repo.Head()
-	if err != nil {
-		t.Fatalf("Failed to get HEAD: %v", err)
-	}
-
-	headCommit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		t.Fatalf("Failed to get HEAD commit: %v", err)
-	}
-
-	// Create commit without Entire-Session trailer
-	commit := &object.Commit{
-		Author: object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-			When:  time.Now(),
-		},
-		Committer: object.Signature{
-			Name:  "Test User",
-			Email: "test@example.com",
-			When:  time.Now(),
-		},
-		Message:  "Legacy checkpoint without session trailer",
-		TreeHash: headCommit.TreeHash,
-	}
-
-	obj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		t.Fatalf("Failed to encode commit: %v", err)
-	}
-
-	commitHash, err := repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		t.Fatalf("Failed to store commit: %v", err)
-	}
-
-	refName := plumbing.NewBranchReferenceName(branchName)
-	ref := plumbing.NewHashReference(refName, commitHash)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		t.Fatalf("Failed to create branch reference: %v", err)
 	}
 }

@@ -11,19 +11,18 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 
 	"github.com/go-git/go-git/v6"
 )
 
-// SaveStep saves a checkpoint to the shadow branch.
-// Uses checkpoint.EphemeralStore.Write with a checkpoint.Step request.
+// SaveStep records a turn-end step in session state: it merges the step's
+// files into FilesTouched, records their content hashes (TouchedFileHashes),
+// and accumulates token usage. Nothing is written to git — the transcript and
+// files are read from disk again when a commit condenses the session.
 func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) error {
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
 	repo, err := OpenRepository(ctx)
@@ -45,54 +44,23 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return err
 	}
 
+	// Hash the step's files before taking the session lock: it is a git
+	// subprocess, and the lock serializes every hook of this session.
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get worktree root: %w", err)
+	}
+	changedFiles := make([]string, 0, len(step.ModifiedFiles)+len(step.NewFiles))
+	changedFiles = append(changedFiles, step.ModifiedFiles...)
+	changedFiles = append(changedFiles, step.NewFiles...)
+	_, hashSpan := perf.Start(ctx, "hash_touched_files")
+	stepFileHashes := hashTouchedFiles(ctx, worktreeRoot, changedFiles)
+	hashSpan.End()
+
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 		invalidateStaleSubagentSnapshot(&step, state)
-		_, migrateSpan := perf.Start(ctx, "migrate_shadow_branch")
-		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
-			migrateSpan.RecordError(err)
-			migrateSpan.End()
-			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
-		}
-		migrateSpan.End()
-
-		store, err := s.getEphemeralStore(ctx, repo)
-		if err != nil {
+		if err := syncBaseCommitToHead(ctx, repo, state); err != nil {
 			return err
-		}
-
-		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
-
-		_, writeCheckpointSpan := perf.Start(ctx, "write_temporary_checkpoint")
-		isFirstCheckpointOfSession := state.StepCount == 0
-		result, err := store.Write(ctx, checkpoint.Step{
-			SessionID:         sessionID,
-			BaseCommit:        state.BaseCommit,
-			WorktreeID:        state.WorktreeID,
-			ModifiedFiles:     step.ModifiedFiles,
-			NewFiles:          step.NewFiles,
-			DeletedFiles:      step.DeletedFiles,
-			MetadataDir:       step.MetadataDir,
-			CommitMessage:     step.CommitMessage,
-			AuthorName:        step.AuthorName,
-			AuthorEmail:       step.AuthorEmail,
-			IsFirstCheckpoint: isFirstCheckpointOfSession,
-		})
-		writeCheckpointSpan.RecordError(err)
-		writeCheckpointSpan.End()
-		if err != nil {
-			return fmt.Errorf("failed to write temporary checkpoint: %w", err)
-		}
-
-		if result.Skipped {
-			logCtx := logging.WithComponent(ctx, "checkpoint")
-			logging.Info(logCtx, "checkpoint skipped (no changes)",
-				slog.String("strategy", "manual-commit"),
-				slog.String("checkpoint_type", "session"),
-				slog.Int("checkpoint_count", state.StepCount),
-				slog.String("shadow_branch", shadowBranchName),
-			)
-			return ErrMutationSkip
 		}
 
 		// LastCheckpointID is intentionally NOT cleared here. It is set during
@@ -100,6 +68,8 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// trailers on amend operations.
 		state.StepCount++
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
+		applyTouchedFileHashes(state, changedFiles, stepFileHashes, step.DeletedFiles)
+		dropPhantomFilesTouched(worktreeRoot, state, changedFiles)
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
@@ -150,14 +120,6 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			}
 		}
 
-		if !branchExisted {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed changes",
-				slog.String("shadow_branch", shadowBranchName))
-		} else {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "committed changes to shadow branch",
-				slog.String("shadow_branch", shadowBranchName))
-		}
-
 		logCtx := logging.WithComponent(ctx, "checkpoint")
 		logging.Info(logCtx, "checkpoint saved",
 			slog.String("strategy", "manual-commit"),
@@ -166,8 +128,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			slog.Int("modified_files", len(step.ModifiedFiles)),
 			slog.Int("new_files", len(step.NewFiles)),
 			slog.Int("deleted_files", len(step.DeletedFiles)),
-			slog.String("shadow_branch", shadowBranchName),
-			slog.Bool("branch_created", !branchExisted),
+			slog.Int("files_touched", len(state.FilesTouched)),
 		)
 		return nil
 	})
@@ -204,113 +165,6 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 	return nil
 }
 
-// SaveTaskStep saves an incremental task step checkpoint to the shadow branch
-// (checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request). It
-// exists for post-todo incrementals only — its sole production caller is
-// handleClaudeCodePostTodo — so non-incremental steps are rejected: final
-// subagent captures write task records instead (CompleteTaskRecord /
-// UpsertCompletedTaskRecord).
-func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
-	if !step.IsIncremental {
-		return errors.New("SaveTaskStep only writes incremental task checkpoints; final captures write task records")
-	}
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	if err := s.ensureSessionInitialized(ctx, repo, step.SessionID, step.AgentType); err != nil {
-		return err
-	}
-
-	mutErr := MutateSessionState(ctx, step.SessionID, func(state *SessionState) error {
-		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
-			return fmt.Errorf("failed to check/migrate shadow branch: %w", err)
-		}
-
-		store, err := s.getEphemeralStore(ctx, repo)
-		if err != nil {
-			return err
-		}
-
-		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
-
-		sessionMetadataDir := paths.SessionMetadataDirFromSessionID(step.SessionID)
-		taskMetadataDir := TaskMetadataDir(sessionMetadataDir, step.ToolUseID)
-
-		shortToolUseID := step.ToolUseID
-		if len(shortToolUseID) > id.ShortIDLength {
-			shortToolUseID = shortToolUseID[:id.ShortIDLength]
-		}
-
-		messageSubject := FormatIncrementalMessage(step.TodoContent, step.IncrementalSequence, shortToolUseID)
-		commitMsg := trailers.FormatShadowTaskCommit(
-			messageSubject,
-			taskMetadataDir,
-			step.SessionID,
-		)
-
-		if _, err := store.Write(ctx, checkpoint.TaskStep{
-			SessionID:              step.SessionID,
-			BaseCommit:             state.BaseCommit,
-			WorktreeID:             state.WorktreeID,
-			ToolUseID:              step.ToolUseID,
-			AgentID:                step.AgentID,
-			Agent:                  step.AgentType,
-			ModifiedFiles:          step.ModifiedFiles,
-			NewFiles:               step.NewFiles,
-			DeletedFiles:           step.DeletedFiles,
-			TranscriptPath:         step.TranscriptPath,
-			SubagentTranscriptPath: step.SubagentTranscriptPath,
-			CheckpointUUID:         step.CheckpointUUID,
-			CommitMessage:          commitMsg,
-			AuthorName:             step.AuthorName,
-			AuthorEmail:            step.AuthorEmail,
-			IsIncremental:          step.IsIncremental,
-			IncrementalSequence:    step.IncrementalSequence,
-			IncrementalType:        step.IncrementalType,
-			IncrementalData:        step.IncrementalData,
-		}); err != nil {
-			return fmt.Errorf("failed to write task checkpoint: %w", err)
-		}
-
-		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
-
-		if !branchExisted {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "created shadow branch and committed task checkpoint",
-				slog.String("shadow_branch", shadowBranchName))
-		} else {
-			logging.Info(logging.WithComponent(ctx, "checkpoint"), "committed task checkpoint to shadow branch",
-				slog.String("shadow_branch", shadowBranchName))
-		}
-
-		logCtx := logging.WithComponent(ctx, "checkpoint")
-		attrs := []any{
-			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_type", "task"),
-			slog.String("checkpoint_uuid", step.CheckpointUUID),
-			slog.String("tool_use_id", step.ToolUseID),
-			slog.String("subagent_type", step.SubagentType),
-			slog.Int("modified_files", len(step.ModifiedFiles)),
-			slog.Int("new_files", len(step.NewFiles)),
-			slog.Int("deleted_files", len(step.DeletedFiles)),
-			slog.String("shadow_branch", shadowBranchName),
-			slog.Bool("branch_created", !branchExisted),
-			slog.String("incremental_type", step.IncrementalType),
-			slog.Int("incremental_sequence", step.IncrementalSequence),
-		}
-		logging.Info(logCtx, "task checkpoint saved", attrs...)
-
-		return nil
-	})
-	if errors.Is(mutErr, ErrStateNotFound) {
-		return nil
-	}
-	return mutErr
-}
-
 // mergeFilesTouched merges multiple file lists into existing touched files, deduplicating.
 // All paths are normalized to forward slashes for platform-agnostic storage.
 func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
@@ -335,9 +189,8 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	return result
 }
 
-// EnsureSessionExists creates sessionID's state when missing — SaveTaskStep's
-// old parent-state guarantee, for producers that write task records instead
-// of shadow task steps.
+// EnsureSessionExists creates sessionID's state when missing, for producers
+// that record subagent task records before the parent session has a turn.
 func (s *ManualCommitStrategy) EnsureSessionExists(ctx context.Context, sessionID string, agentType types.AgentType) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
@@ -363,8 +216,8 @@ func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
 
 // applyTaskRecordCompletion attaches a completed task's results to its record
 // and to the session: files merge into FilesTouched (invariant: carry-forward
-// and PostCommit gating must see task files exactly as the shadow task write
-// used to provide). The record itself is what condensation triggers key on
+// and PostCommit gating must see task files). They carry no recorded hash, so
+// commit decisions match them by name. The record itself is what condensation triggers key on
 // (State.HasTaskContent), so a zero-file read-only completion needs no
 // separate counter.
 // Callers must pre-merge rec.Files with any existing record's files — this
@@ -389,7 +242,7 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) erro
 	if live.AgentID == "" {
 		live.AgentID = rec.AgentID
 	}
-	state.FilesTouched = mergeFilesTouched(state.FilesTouched, rec.Files)
+	MergeUnhashedFilesTouched(state, rec.Files)
 	return nil
 }
 
@@ -541,20 +394,4 @@ func removeCompletedTaskRecords(state *SessionState) {
 	for _, toolUseID := range completedIDs {
 		state.RemoveTaskRecord(toolUseID)
 	}
-}
-
-// deleteShadowBranch deletes a shadow branch by name.
-// Returns nil if the branch doesn't exist (idempotent).
-// Uses git CLI instead of go-git's RemoveReference because go-git v5
-// doesn't properly persist deletions with packed refs or worktrees.
-func deleteShadowBranch(ctx context.Context, _ *git.Repository, branchName string) error {
-	err := DeleteBranchCLI(ctx, branchName)
-	if err != nil {
-		// If the branch doesn't exist, treat as idempotent - not an error condition.
-		if errors.Is(err, ErrBranchNotFound) {
-			return nil
-		}
-		return err
-	}
-	return nil
 }

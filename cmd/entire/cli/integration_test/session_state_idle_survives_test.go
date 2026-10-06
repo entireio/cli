@@ -12,7 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// An idle session with no shadow branch and no checkpoint is a live session
+// An idle session with no pending work and no checkpoint is a live session
 // between turns; another worktree's commit hook must not delete it.
 func TestSessionStore_IdleSessionSurvivesAnotherWorktreesCommitHook(t *testing.T) {
 	t.Parallel()

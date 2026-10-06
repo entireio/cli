@@ -29,9 +29,8 @@ const endedSessionSweepAge = 24 * time.Hour
 // session-start hook caller stays cheap. The sweep itself re-validates
 // before acting (see runSessionSweep's safety notes).
 //
-// Condense-only contract: ENDED sessions whose steps turn out to have no
-// shadow branch are doctor's discard case, filtered later — this
-// predicate only ever nominates sessions, it never acts.
+// Condense-only contract: this predicate only ever nominates sessions, it
+// never acts.
 func isSweepableZombie(st *session.State, now time.Time) bool {
 	// Imported sessions are historical records: complete by design, never
 	// condensable (no BaseCommit), and exempt from the stale purge — so they
@@ -43,8 +42,11 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 	if !st.IsEnded() {
 		return st.OwnerExited()
 	}
-	if st.Phase != session.PhaseEnded || st.FullyCondensed ||
-		(st.StepCount <= 0 && !st.HasTaskContent()) {
+	// FullyCondensed sessions are excluded outright, as before: condensing one
+	// again resets its phase to IDLE while FullyCondensed and EndedAt stay set,
+	// so PostCommit's FullyCondensed+ENDED skip stops matching and the dead
+	// session is re-evaluated on every commit.
+	if st.Phase != session.PhaseEnded || st.FullyCondensed || !st.HasPendingWork() {
 		return false
 	}
 	ref := st.EndedAt
@@ -66,19 +68,17 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 //
 // Safety contract: condense-only, enforced by OUR pre-checks, not by the
 // engine.
-// CondenseSessionByID's locked closure re-checks only shadow-branch
-// existence; we therefore re-load each candidate and re-run the full zombie
+// CondenseSessionByID's locked closure re-checks only that work is pending
+// (State.HasPendingWork); we therefore re-load each candidate and re-run the full zombie
 // predicate immediately before condensing. That narrows — does not close —
 // the window in which a resumed (ENDED→ACTIVE) session gets condensed
 // anyway: acceptable, because the precondition is >24h idle (a seconds-wide
 // race against a day-old zombie) and a condense of a just-resumed session is
 // coherent. The cost of losing that race: the resumed turn's phase is reset to
-// IDLE and its pending prompt attribution is lost — recoverable, and
-// acceptable at a seconds-vs-24h race. If the shadow branch vanishes between
-// our check and the engine's lock, the engine clears the state — correct
-// cleanup, since in practice that typically happens when a concurrent condense
-// already succeeded; an out-of-band branch deletion (git branch -D,
-// entire clean) in the window also lands here. The reverse
+// IDLE — recoverable, and acceptable at a seconds-vs-24h race. If the pending
+// work disappears between our check and the engine's lock, the engine clears
+// the state — correct cleanup, since in practice that happens when a
+// concurrent condense already succeeded. The reverse
 // direction is also safe: an ACTIVE session with a dead owner that is being
 // resumed right now can be finalized by the sweep mid-resume, because
 // finalizeExitedSessions re-validates under the per-session lock and the
@@ -138,12 +138,7 @@ func runSessionSweep(ctx context.Context) error {
 		if fresh.Phase != session.PhaseEnded || !isSweepableZombie(fresh, now) {
 			continue
 		}
-		if !strategy.IsCondensableEndedSession(repo, fresh) {
-			// Uncondensed steps but no shadow branch: fixing this means
-			// discarding state, which the sweep never initiates — it is
-			// doctor's discard case.
-			logging.Info(logCtx, "sweep skipping non-condensable ended session: uncondensed steps but no shadow branch — run `entire doctor` to resolve",
-				slog.String("session_id", fresh.SessionID))
+		if !strategy.IsCondensableEndedSession(fresh) {
 			continue
 		}
 		if condErr := GetStrategy(ctx).CondenseSessionByID(ctx, fresh.SessionID); condErr != nil {

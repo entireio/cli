@@ -221,8 +221,6 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if deliveredCount > 0 {
 		warnIgnoredCheckpointRemote(ctx, ps)
 	}
-
-	cleanupPushedShadowBranches(ctx)
 	return nil
 }
 
@@ -440,8 +438,6 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		logging.Warn(ctx, "git-refs pre-push: checkpoint ref push failed; refs left queued",
 			slog.String("error", err.Error()))
 	}
-
-	cleanupPushedShadowBranches(ctx)
 	return nil
 }
 
@@ -467,11 +463,6 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		return 0, false, fmt.Errorf("checkpoint refs stay queued: %w", opfErr)
 	}
 	pushed, err = flushCheckpointRefsQueue(ctx, repo, ps)
-	// Clean up even on a partial/failed flush: a diverged batch can push some
-	// refs and still return an error, and the shadow branches for the refs that
-	// *did* land must still be cleaned up — parity with the pre-push path, which
-	// always runs cleanup after flush regardless of its error.
-	cleanupPushedShadowBranches(ctx)
 	return pushed, false, err
 }
 
@@ -669,19 +660,4 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 			attempted-len(pushed), attempted, firstErr)
 	}
 	return len(pushed), nil
-}
-
-// cleanupPushedShadowBranches runs post-push shadow-branch cleanup. Failures are
-// non-fatal — shadow branches just accumulate until `entire clean` or the next
-// successful push.
-func cleanupPushedShadowBranches(ctx context.Context) {
-	if deleted, cleanupErr := CleanupPushedShadowBranches(ctx); cleanupErr != nil {
-		logging.Warn(ctx, "post-push shadow branch cleanup failed",
-			slog.String("error", cleanupErr.Error()),
-		)
-	} else if deleted > 0 {
-		logging.Info(ctx, "cleaned up vestigial shadow branches",
-			slog.Int("count", deleted),
-		)
-	}
 }

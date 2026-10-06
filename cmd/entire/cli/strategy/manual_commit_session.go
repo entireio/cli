@@ -12,7 +12,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -21,10 +20,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// Shadow strategy session state methods.
+// Manual-commit strategy session state methods.
 // Uses session.StateStore for persistence.
 
 // loadSessionState loads session state using the StateStore.
@@ -106,7 +104,7 @@ func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID 
 }
 
 // listAllSessionStates returns all active session states.
-// It filters out orphaned sessions whose shadow branch no longer exists.
+// It clears orphaned sessions (see isOrphanedSessionState) as it lists.
 func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*SessionState, error) {
 	store, err := s.getStateStore(ctx)
 	if err != nil {
@@ -138,31 +136,26 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 			continue
 		}
 
-		// Imported sessions are read-only historical records: no shadow branch
-		// and (by design) no BaseCommit. Keep them regardless of the
-		// shadow-branch orphan check below. Gate on Kind, not on commit
-		// presence, so this stays correct once imports are linked to a commit.
+		// Imported sessions are read-only historical records with (by design)
+		// no BaseCommit. Keep them regardless of the orphan check below. Gate
+		// on Kind, not on commit presence, so this stays correct once imports
+		// are linked to a commit.
 		if state.Kind.IsImported() {
 			states = append(states, state)
 			continue
 		}
 
-		// Skip and cleanup orphaned sessions whose shadow branch no longer exists.
-		// Keep non-ended sessions (including legacy empty phases normalized to IDLE)
-		// and sessions with LastCheckpointID (needed for checkpoint ID reuse on
-		// subsequent commits). Ended states that were never condensed are cleared.
-		// Record-bearing sessions hold condensable content off the shadow branch — never orphaned.
-		shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranch)
-		if _, err := repo.Reference(refName, true); err != nil {
-			if isOrphanedSessionState(state) {
-				logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state without a shadow branch",
-					slog.String("session_id", state.SessionID),
-					slog.String("phase", string(state.Phase)))
-				//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
-				store.Clear(ctx, state.SessionID)
-				continue
-			}
+		// Skip and clean up orphaned sessions: ended, never condensed, and
+		// holding no pending work. Keep non-ended sessions (including legacy
+		// empty phases normalized to IDLE) and sessions with LastCheckpointID
+		// (needed for checkpoint ID reuse on subsequent commits).
+		if isOrphanedSessionState(state) {
+			logging.Debug(logging.WithComponent(ctx, "session"), "removing orphaned session state with no pending work",
+				slog.String("session_id", state.SessionID),
+				slog.String("phase", string(state.Phase)))
+			//nolint:errcheck,gosec // G104: Cleanup is best-effort, shouldn't fail the list operation
+			store.Clear(ctx, state.SessionID)
+			continue
 		}
 
 		states = append(states, state)
@@ -170,63 +163,23 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	return states, nil
 }
 
-// isOrphanedSessionState reports whether a state with no shadow branch may be
-// deleted: only a finalized session (State.IsEnded) that was never condensed
-// and carries no task records. IDLE states — including legacy empty phases,
-// which normalize to IDLE — are live sessions between turns or belong to the
-// exited-owner finalizer, so they age out through StaleSessionThreshold.
+// isOrphanedSessionState reports whether a listed state may be deleted: only a
+// finalized session (State.IsEnded) that was never condensed and holds no
+// pending work (State.HasPendingWork). IDLE states — including legacy empty
+// phases, which normalize to IDLE — are live sessions between turns or belong
+// to the exited-owner finalizer, so they age out through StaleSessionThreshold.
 func isOrphanedSessionState(state *SessionState) bool {
-	return state.IsEnded() && state.LastCheckpointID.IsEmpty() && !state.HasTaskContent()
+	return state.IsEnded() && state.LastCheckpointID.IsEmpty() && !state.HasPendingWork()
 }
 
-// IsCondensableEndedSession reports whether an ENDED session still carries
-// uncondensed content AND can be salvaged by condensing
-// (CondenseSessionByID). Two shapes qualify: checkpoint steps whose shadow
-// branch still exists, and record-bearing sessions (pending subagent task
-// records), whose content never lives on the shadow branch and so needs no
-// branch to condense. ENDED sessions with steps but no shadow branch and no
-// task records are NOT condensable; fixing those means discarding state,
-// which the background sweep never initiates — those sessions are left to
-// `entire doctor` (and the existing orphan cleanup in listAllSessionStates).
-// Used by the PostCommit stale-session warning and the background zombie
-// sweep.
-func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
-	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
-		(state.StepCount <= 0 && !state.HasTaskContent()) {
-		return false
-	}
-
-	// Record-bearing sessions qualify without a shadow branch: task records
-	// are stored off-branch, so condensation can materialize them regardless.
-	if state.HasTaskContent() {
-		return true
-	}
-
-	// Check shadow branch existence. For PostCommit this is a re-check —
-	// its list arrives via listAllSessionStates, which already filters
-	// orphaned sessions — and it is intentional even there: condensation
-	// deletes shadow branches, so a branch that existed at list-load time may
-	// be gone by the time the warning re-checks here, and we'd otherwise warn
-	// about a session this commit (or a concurrent condense) just cleaned up.
-	// The background zombie sweep, by contrast, arrives via the raw
-	// ListSessionStates, so for the sweep this is the PRIMARY shadow-branch
-	// check, not a re-check — it is what keeps the sweep condense-only.
-	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, err := repo.Reference(refName, true)
-	return err == nil
-}
-
-// countWarnableStaleEndedSessions returns the number of ENDED sessions that
-// still remain slow and fixable after PostCommit finishes processing.
-func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionState) int {
-	n := 0
-	for _, state := range sessions {
-		if IsCondensableEndedSession(repo, state) {
-			n++
-		}
-	}
-	return n
+// IsCondensableEndedSession reports whether an ENDED, not fully condensed
+// session still carries uncondensed content (State.HasPendingWork), which condensing
+// (CondenseSessionByID) can always salvage: turn-end steps condense from the
+// session's transcript and recorded files, task records from their own
+// transcripts. Used by the PostCommit stale-session warning and the
+// background zombie sweep.
+func IsCondensableEndedSession(state *SessionState) bool {
+	return state.Phase == session.PhaseEnded && !state.FullyCondensed && state.HasPendingWork()
 }
 
 // findExactSessionsForWorktree returns sessions recorded for exactly this
@@ -422,9 +375,8 @@ func sessionsFromSingleWorktree(candidates []*SessionState) []*SessionState {
 // Repointing a linked-worktree session (WorktreeID != "") onto the main worktree
 // would leave WorktreeID describing a different worktree than WorktreePath, and
 // that disalignment breaks every consumer that re-derives the worktree id from
-// the current directory — `entire clean` and `entire explain` compute the wrong
-// shadow-branch name (orphaning or hiding the session's checkpoints), and the
-// post-commit base/attribution updates follow the wrong worktree's HEAD.
+// the current directory, and the post-commit base updates follow the wrong
+// worktree's HEAD.
 // Linked-worktree relocation is a rare, documented non-goal; the zero-match path
 // still warns so the trailer loss is not silent.
 //
@@ -470,8 +422,7 @@ func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionStat
 	old := state.WorktreePath
 	state.WorktreePath = current
 	// WorktreeID stays "" — both the recorded and current worktrees are the main
-	// worktree, so WorktreePath and WorktreeID remain aligned and the shadow branch
-	// (entire/<base>-hash("")) is unchanged.
+	// worktree, so WorktreePath and WorktreeID remain aligned.
 	logging.Info(logging.WithComponent(ctx, "hooks"), "reconciled main-worktree session path after relocation",
 		slog.String("session_id", state.SessionID),
 		slog.String("from", old),
@@ -532,21 +483,40 @@ func remapRewriteSHA(sha string, rewrites []rewritePair) (string, bool) {
 	return sha, false
 }
 
-func (s *ManualCommitStrategy) remapSessionForRewrite(ctx context.Context, repo *git.Repository, state *SessionState, rewrites []rewritePair) (bool, error) {
-	if state == nil {
-		return false, nil
+// syncBaseCommitToHead moves state.BaseCommit to the current HEAD when HEAD
+// has moved since the session last saw it (a user commit, pull, rebase,
+// reset). BaseCommit records the commit a session's pending work sits on top
+// of; nothing else is keyed on it anymore, so following HEAD is all there is
+// to do. A state with no BaseCommit yet is left for initialization.
+func syncBaseCommitToHead(ctx context.Context, repo *git.Repository, state *SessionState) error {
+	if state == nil || state.BaseCommit == "" {
+		return nil
 	}
-
-	newBaseCommit, baseChanged := remapRewriteSHA(state.BaseCommit, rewrites)
-	if !baseChanged {
-		return false, nil
-	}
-
-	changed, err := s.migrateShadowBranchToBaseCommit(ctx, repo, state, newBaseCommit)
+	head, err := repo.Head()
 	if err != nil {
-		return false, fmt.Errorf("failed to migrate rewritten shadow branch: %w", err)
+		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
-	return changed, nil
+	if currentHead := head.Hash().String(); state.BaseCommit != currentHead {
+		logging.Debug(logging.WithComponent(ctx, "session"), "updated session base commit",
+			slog.String("session_id", state.SessionID),
+			slog.String("new_base", truncateHash(currentHead)))
+		state.BaseCommit = currentHead
+	}
+	return nil
+}
+
+// remapSessionForRewrite moves a session's BaseCommit through an amend or
+// rebase rewrite. It reports whether the state changed.
+func remapSessionForRewrite(state *SessionState, rewrites []rewritePair) bool {
+	if state == nil {
+		return false
+	}
+	newBaseCommit, baseChanged := remapRewriteSHA(state.BaseCommit, rewrites)
+	if !baseChanged || newBaseCommit == state.BaseCommit {
+		return false
+	}
+	state.BaseCommit = newBaseCommit
+	return true
 }
 
 // findSessionsForCommit finds all sessions where base_commit matches the given SHA.
@@ -631,7 +601,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		return fmt.Errorf("failed to get worktree path: %w", err)
 	}
 
-	// Get worktree ID for shadow branch naming
+	// Get the worktree ID that identifies this session's worktree
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree ID: %w", err)
@@ -727,10 +697,4 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		state.SubagentTokensBaselineComplete = &incomplete
 	}
 	return s.saveSessionState(ctx, state)
-}
-
-// getShadowBranchNameForCommit returns the shadow branch name for the given base commit and worktree ID.
-// worktreeID should be empty for the main worktree or the internal git worktree name for linked worktrees.
-func getShadowBranchNameForCommit(baseCommit, worktreeID string) string {
-	return checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
 }

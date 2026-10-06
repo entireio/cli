@@ -60,7 +60,7 @@ func TestReconcileWorktreePathForResumedTurn_LeavesValidSiblingUntouched(t *test
 // covers the disalignment guard: a session started in a linked worktree
 // (WorktreeID != "") whose path is later gone must NOT be reconciled. Repointing
 // its WorktreePath to the main worktree while keeping WorktreeID would leave the
-// two describing different worktrees, which breaks the shadow-branch derivation
+// two describing different worktrees, which breaks the worktree derivation
 // in `entire clean`/`entire explain` and the post-commit base/attribution
 // updates. Linked-worktree relocation is a documented non-goal.
 func TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouched(t *testing.T) {

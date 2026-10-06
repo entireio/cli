@@ -57,7 +57,6 @@ func TestPartialCommitStashNewPrompt(t *testing.T) {
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -105,7 +104,6 @@ func TestStashSecondPromptUnstashCommitAll(t *testing.T) {
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -157,8 +155,5 @@ func TestStashModificationsToTrackedFiles(t *testing.T) {
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		// Shadow branch cleanup can lag behind condensation when carry-forward
-		// creates intermediate branches, so poll instead of instant-assert.
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

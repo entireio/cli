@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -622,31 +624,6 @@ func (env *TestEnv) GetHeadHash() string {
 	return head.Hash().String()
 }
 
-// GetShadowBranchName returns the worktree-specific shadow branch name for the current HEAD.
-// Format: entire/<commit[:7]>-<hash(worktreeID)[:6]>
-func (env *TestEnv) GetShadowBranchName() string {
-	env.T.Helper()
-
-	headHash := env.GetHeadHash()
-	worktreeID, err := paths.GetWorktreeID(env.RepoDir)
-	if err != nil {
-		env.T.Fatalf("failed to get worktree ID: %v", err)
-	}
-	return checkpoint.ShadowBranchNameForCommit(headHash, worktreeID)
-}
-
-// GetShadowBranchNameForCommit returns the worktree-specific shadow branch name for a given commit.
-// Format: entire/<commit[:7]>-<hash(worktreeID)[:6]>
-func (env *TestEnv) GetShadowBranchNameForCommit(commitHash string) string {
-	env.T.Helper()
-
-	worktreeID, err := paths.GetWorktreeID(env.RepoDir)
-	if err != nil {
-		env.T.Fatalf("failed to get worktree ID: %v", err)
-	}
-	return checkpoint.ShadowBranchNameForCommit(commitHash, worktreeID)
-}
-
 // GetGitLog returns a list of commit hashes from HEAD.
 func (env *TestEnv) GetGitLog() []string {
 	env.T.Helper()
@@ -970,7 +947,7 @@ func (env *TestEnv) GetLatestCommitMessageOnBranch(branchName string) string {
 // and post-commit hooks as a human (with TTY). This is the default for tests.
 func (env *TestEnv) GitCommitWithHooks(message string, files ...string) {
 	env.T.Helper()
-	env.gitCommitWithShadowHooks(message, true, files...)
+	env.gitCommitWithHooks(message, true, files...)
 }
 
 // GitCommitWithHooksAsAgent is like GitCommitWithHooks but simulates
@@ -978,7 +955,7 @@ func (env *TestEnv) GitCommitWithHooks(message string, files ...string) {
 // skips content detection and interactive prompts for ACTIVE sessions.
 func (env *TestEnv) GitCommitWithHooksAsAgent(message string, files ...string) {
 	env.T.Helper()
-	env.gitCommitWithShadowHooks(message, false, files...)
+	env.gitCommitWithHooks(message, false, files...)
 }
 
 // prepareCommitMsgCmd builds the prepare-commit-msg hook command. When
@@ -1000,8 +977,8 @@ func (env *TestEnv) prepareCommitMsgCmd(simulateTTY bool, hookArgs ...string) *e
 	return cmd
 }
 
-// gitCommitWithShadowHooks is the shared implementation for committing with shadow hooks.
-func (env *TestEnv) gitCommitWithShadowHooks(message string, simulateTTY bool, files ...string) {
+// gitCommitWithHooks is the shared implementation for committing with Entire's git hooks.
+func (env *TestEnv) gitCommitWithHooks(message string, simulateTTY bool, files ...string) {
 	env.T.Helper()
 
 	// Stage files using go-git
@@ -1075,10 +1052,10 @@ func (env *TestEnv) gitHookEnv(extra ...string) []string {
 	return append(envVars, extra...)
 }
 
-// GitCommitAmendWithShadowHooks amends the last commit with shadow hooks.
+// GitCommitAmendWithHooks amends the last commit with Entire's git hooks.
 // This simulates `git commit --amend` with the prepare-commit-msg and post-commit hooks.
 // The prepare-commit-msg hook is called with "commit" source to indicate an amend.
-func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...string) {
+func (env *TestEnv) GitCommitAmendWithHooks(message string, files ...string) {
 	env.T.Helper()
 
 	// Stage any additional files
@@ -1140,9 +1117,9 @@ func (env *TestEnv) GitCommitAmendWithShadowHooks(message string, files ...strin
 	}
 }
 
-// GitPostRewriteWithShadowHooks runs the git post-rewrite hook with the provided
+// GitPostRewriteWithHooks runs the git post-rewrite hook with the provided
 // old->new commit mappings. Each mapping is a pair of commit SHAs.
-func (env *TestEnv) GitPostRewriteWithShadowHooks(rewriteType string, mappings ...[2]string) {
+func (env *TestEnv) GitPostRewriteWithHooks(rewriteType string, mappings ...[2]string) {
 	env.T.Helper()
 
 	var input strings.Builder
@@ -1258,16 +1235,16 @@ func (env *TestEnv) GitRm(paths ...string) {
 	}
 }
 
-// GitCommitStagedWithShadowHooks commits whatever is already staged (without adding files first),
+// GitCommitStagedWithHooks commits whatever is already staged (without adding files first),
 // running the prepare-commit-msg and post-commit hooks like a real workflow.
 // Use this after GitRm or when files are already staged.
-func (env *TestEnv) GitCommitStagedWithShadowHooks(message string) {
+func (env *TestEnv) GitCommitStagedWithHooks(message string) {
 	env.T.Helper()
-	env.gitCommitStagedWithShadowHooks(message, true)
+	env.gitCommitStagedWithHooks(message, true)
 }
 
-// gitCommitStagedWithShadowHooks is the shared implementation for committing staged changes with hooks.
-func (env *TestEnv) gitCommitStagedWithShadowHooks(message string, simulateTTY bool) {
+// gitCommitStagedWithHooks is the shared implementation for committing staged changes with hooks.
+func (env *TestEnv) gitCommitStagedWithHooks(message string, simulateTTY bool) {
 	env.T.Helper()
 
 	// Create a temp file for the commit message (prepare-commit-msg hook modifies this)
@@ -2082,4 +2059,69 @@ func findModuleRoot() string {
 		}
 		dir = parent
 	}
+}
+
+// legacyShadowBranchShape matches the per-session shadow branches older CLIs
+// wrote: entire/<commit[:7+]>-<worktreeHash[:6]>.
+var legacyShadowBranchShape = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}-[0-9a-fA-F]{6}$`)
+
+// LegacyShadowBranches returns the local branches shaped like the shadow
+// branches older CLIs wrote. Current CLIs never create them.
+func (env *TestEnv) LegacyShadowBranches() []string {
+	env.T.Helper()
+	var out []string
+	for _, b := range env.ListBranchesWithPrefix("entire/") {
+		if legacyShadowBranchShape.MatchString(b) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// AssertNoShadowBranches fails if any legacy-shaped shadow branch exists: the
+// CLI writes no git objects at turn end.
+func (env *TestEnv) AssertNoShadowBranches() {
+	env.T.Helper()
+	if branches := env.LegacyShadowBranches(); len(branches) > 0 {
+		env.T.Errorf("no shadow branch should exist, found %v", branches)
+	}
+}
+
+// AssertTurnEndRecorded verifies that a session recorded a turn-end step in
+// session state: StepCount > 0, every file in FilesTouched, and a content hash
+// recorded for each file (TouchedFileHashes) that equals the worktree blob
+// (`git hash-object`), or "" for a file the turn deleted.
+// Returns the loaded state for further checks.
+func (env *TestEnv) AssertTurnEndRecorded(sessionID string, files ...string) *strategy.SessionState {
+	env.T.Helper()
+	state, err := env.GetSessionState(sessionID)
+	if err != nil {
+		env.T.Fatalf("GetSessionState(%s) failed: %v", sessionID, err)
+	}
+	if state == nil {
+		env.T.Fatalf("session state %s should exist after turn end", sessionID)
+	}
+	if state.StepCount <= 0 {
+		env.T.Errorf("session %s StepCount = %d, want > 0 after a turn end with file changes", sessionID, state.StepCount)
+	}
+	for _, f := range files {
+		if !slices.Contains(state.FilesTouched, f) {
+			env.T.Errorf("session %s FilesTouched = %v, want it to contain %q", sessionID, state.FilesTouched, f)
+		}
+		recorded, ok := state.TouchedFileHashes[f]
+		switch {
+		case !ok:
+			env.T.Errorf("session %s TouchedFileHashes = %v, want an entry for %q", sessionID, state.TouchedFileHashes, f)
+		case !env.FileExists(f):
+			if recorded != "" {
+				env.T.Errorf("session %s recorded hash %q for %q, want a recorded deletion (\"\")", sessionID, recorded, f)
+			}
+		default:
+			if want := strings.TrimSpace(testutil.RunGit(env.T, env.RepoDir, "hash-object", "--", f)); recorded != want {
+				env.T.Errorf("session %s recorded hash %q for %q, want the worktree blob %q", sessionID, recorded, f, want)
+			}
+		}
+	}
+	env.AssertNoShadowBranches()
+	return state
 }

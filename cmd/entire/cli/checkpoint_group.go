@@ -79,14 +79,14 @@ func newCheckpointListCmd() *cobra.Command {
 		Long: `List checkpoints on the current branch.
 
 By default shows condensed checkpoints from the checkpoints branch for the
-current branch. Use --pending for the resume view instead: live checkpoints on
-the session's shadow branch (not yet condensed), plus logs-only resume points
+current branch. Use --pending for the resume view instead: subagent task
+records of sessions on HEAD (not yet condensed), plus logs-only resume points
 recovered from commits whose logs are already condensed.
 
 Output modes:
   --json             Machine-readable JSON instead of the human view.
-  --pending          Select the pending dataset: live shadow-branch
-                     checkpoints plus logs-only resume points.
+  --pending          Select the pending dataset: uncondensed subagent task
+                     records plus logs-only resume points.
   --pending --json   Pending checkpoints as JSON (replaces the deprecated rewind --list).
 
 Optionally filter condensed checkpoints by session ID with --session
@@ -121,6 +121,6 @@ Optionally filter condensed checkpoints by session ID with --session
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Filter checkpoints by session ID (or prefix)")
 	cmd.Flags().BoolVar(&noPagerFlag, "no-pager", false, "Disable pager output")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON instead of the human view")
-	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List pending checkpoints — live shadow-branch state plus logs-only resume points")
+	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List pending checkpoints — uncondensed subagent task records plus logs-only resume points")
 	return cmd
 }

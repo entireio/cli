@@ -11,8 +11,8 @@ import (
 // reader/writer interfaces, and the Write request union) lives in the
 // api/checkpoint package so storage backends can depend on it without the CLI's
 // agent/git machinery. These aliases re-export it under this package so existing
-// CLI call sites are unaffected; the git implementation (GitStore, Open, the
-// facade, and the ephemeral shadow-branch surface) stays here.
+// CLI call sites are unaffected; the git implementation (GitStore, Open, and
+// the facade) stays here.
 type (
 	// Persisted document types.
 	Metadata = apicheckpoint.Metadata

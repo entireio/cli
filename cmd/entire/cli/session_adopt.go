@@ -217,6 +217,7 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	retired.FullyCondensed = true
 	retired.Owner = nil
 	retired.FilesTouched = nil
+	retired.TouchedFileHashes = nil
 	retired.TurnID = ""
 	retired.TurnCheckpointIDs = nil
 	retired.AdoptedIntoWorktreePath = target.WorktreePath
@@ -576,6 +577,9 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, source
 	adopted.Phase = session.PhaseActive
 	adopted.EndedAt = nil
 	adopted.FilesTouched = filesTouched
+	// Recorded hashes describe the source worktree's files; the target's
+	// FilesTouched is recomputed from its own status, so none of them apply.
+	adopted.TouchedFileHashes = nil
 
 	// Reset target-local checkpoint bookkeeping. Source checkpoint IDs can point
 	// at metadata in another repository or checkpoint branch; carrying them into
@@ -624,6 +628,7 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.TurnCheckpointIDs = slices.Clone(source.TurnCheckpointIDs)
 	adopted.UntrackedFilesAtStart = slices.Clone(source.UntrackedFilesAtStart)
 	adopted.FilesTouched = slices.Clone(source.FilesTouched)
+	adopted.TouchedFileHashes = maps.Clone(source.TouchedFileHashes)
 	adopted.TaskRecords = cloneTaskRecords(source.TaskRecords)
 	adopted.SubagentInventory = cloneSubagentInventory(source.SubagentInventory)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)

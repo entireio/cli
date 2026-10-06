@@ -17,7 +17,7 @@ import (
 
 // TestSeam_GitRefsPrimaryWithGitBranchMirror drives the branch->refs rollout
 // topology through checkpoint.Open: a git-refs primary with a git-branch mirror.
-// It writes all five WriteRequest variants and asserts reads resolve from the
+// It writes all four WriteRequest variants and asserts reads resolve from the
 // git-refs primary while the git-branch mirror (the v1 branch) independently
 // received every write.
 //

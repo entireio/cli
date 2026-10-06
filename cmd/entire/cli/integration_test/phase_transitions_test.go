@@ -73,12 +73,9 @@ func TestManualCommit_CommitBeforeStop(t *testing.T) {
 		t.Errorf("StepCount after first checkpoint should be 1, got %d", state.StepCount)
 	}
 
-	// Verify shadow branch was created
+	// Verify the turn end recorded its pending work (and wrote no shadow branch)
 	initialHead := state.BaseCommit
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("Shadow branch %s should exist after first checkpoint", shadowBranch)
-	}
+	env.AssertNoShadowBranches()
 
 	// ========================================
 	// Phase 2: Start new turn and create more work
@@ -122,7 +119,7 @@ func TestManualCommit_CommitBeforeStop(t *testing.T) {
 	// Verify checkpoint trailer was added
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
 	if checkpointID == "" {
-		t.Log("Note: checkpoint trailer may not be present if no shadow branch content was detected (mid-session commit scenario)")
+		t.Log("Note: checkpoint trailer may not be present if no pending content was detected (mid-session commit scenario)")
 	} else {
 		t.Logf("Commit has checkpoint trailer: %s", checkpointID)
 	}
@@ -141,9 +138,7 @@ func TestManualCommit_CommitBeforeStop(t *testing.T) {
 	}
 	t.Logf("Session phase after mid-turn commit: %s", state.Phase)
 
-	// Verify shadow branch was migrated to the new HEAD
-	// The old shadow branch (based on initialHead) may still exist or be cleaned up.
-	// The important thing is that the session's BaseCommit was updated.
+	// The session's BaseCommit should follow the new HEAD.
 	if state.BaseCommit == initialHead {
 		t.Logf("Note: BaseCommit not yet updated (may happen during migration)")
 	}
@@ -249,7 +244,7 @@ func TestManualCommit_AmendPreservesTrailer(t *testing.T) {
 	t.Log("Phase 2: Amend the commit")
 
 	// Amend with the same message (simulating a minor message edit or staging additional files)
-	env.GitCommitAmendWithShadowHooks("Initial implementation (amended)")
+	env.GitCommitAmendWithHooks("Initial implementation (amended)")
 
 	amendedCommitHash := env.GetHeadHash()
 	t.Logf("Amended commit: %s", amendedCommitHash[:7])
@@ -347,7 +342,7 @@ func TestManualCommit_PostRewriteAmendRemapsSessionState(t *testing.T) {
 		t.Fatalf("BaseCommit before amend = %q, want %q", stateBeforeAmend.BaseCommit, originalCommitHash)
 	}
 
-	env.GitCommitAmendWithShadowHooks("Initial implementation (amended)")
+	env.GitCommitAmendWithHooks("Initial implementation (amended)")
 	amendedCommitHash := env.GetHeadHash()
 	if amendedCommitHash == originalCommitHash {
 		t.Fatal("Amended commit should have a different hash")
@@ -364,7 +359,7 @@ func TestManualCommit_PostRewriteAmendRemapsSessionState(t *testing.T) {
 		t.Fatalf("BaseCommit after amend = %q, want original %q before post-rewrite", stateAfterAmend.BaseCommit, originalCommitHash)
 	}
 
-	env.GitPostRewriteWithShadowHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
+	env.GitPostRewriteWithHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
 
 	stateAfterRewrite, err := env.GetSessionState(sess.ID)
 	if err != nil {
@@ -381,7 +376,7 @@ func TestManualCommit_PostRewriteAmendRemapsSessionState(t *testing.T) {
 	}
 }
 
-func TestManualCommit_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T) {
+func TestManualCommit_PostRewriteAmendRemapsPendingSession(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -400,27 +395,18 @@ func TestManualCommit_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T)
 	}
 
 	originalCommitHash := env.GetHeadHash()
-	originalShadowBranch := env.GetShadowBranchNameForCommit(originalCommitHash)
-	if !env.BranchExists(originalShadowBranch) {
-		t.Fatalf("expected original shadow branch %q to exist", originalShadowBranch)
-	}
+	env.AssertTurnEndRecorded(sess.ID, "main.go")
 
-	env.GitCommitAmendWithShadowHooks("Initial commit (amended)")
+	env.GitCommitAmendWithHooks("Initial commit (amended)")
 
 	amendedCommitHash := env.GetHeadHash()
 	if amendedCommitHash == originalCommitHash {
 		t.Fatal("Amended commit should have a different hash")
 	}
 
-	env.GitPostRewriteWithShadowHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
+	env.GitPostRewriteWithHooks("amend", [2]string{originalCommitHash, amendedCommitHash})
 
-	newShadowBranch := env.GetShadowBranchNameForCommit(amendedCommitHash)
-	if !env.BranchExists(newShadowBranch) {
-		t.Fatalf("expected migrated shadow branch %q to exist", newShadowBranch)
-	}
-	if env.BranchExists(originalShadowBranch) {
-		t.Fatalf("expected original shadow branch %q to be removed", originalShadowBranch)
-	}
+	env.AssertNoShadowBranches()
 
 	stateAfterRewrite, err := env.GetSessionState(sess.ID)
 	if err != nil {
@@ -508,7 +494,7 @@ func TestManualCommit_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 		t.Fatalf("BaseCommit after rebase = %q, want original %q before post-rewrite", stateAfterRebase.BaseCommit, originalFeatureCommit)
 	}
 
-	env.GitPostRewriteWithShadowHooks("rebase", [2]string{originalFeatureCommit, rebasedFeatureCommit})
+	env.GitPostRewriteWithHooks("rebase", [2]string{originalFeatureCommit, rebasedFeatureCommit})
 
 	stateAfterRewrite, err := env.GetSessionState(sess.ID)
 	if err != nil {

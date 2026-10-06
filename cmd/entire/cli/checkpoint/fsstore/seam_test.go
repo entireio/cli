@@ -20,7 +20,7 @@ import (
 
 // TestSeam_GitPrimaryWithFsMirror exercises the full pluggable seam: a git
 // primary with the fsstore as a configured mirror, driven through
-// checkpoint.Open. It writes all five WriteRequest variants and asserts each
+// checkpoint.Open. It writes all four WriteRequest variants and asserts each
 // lands in BOTH backends, while reads resolve from the git primary.
 //
 // Not parallel: uses t.Chdir so settings + ref resolution target the test repo.
@@ -82,7 +82,7 @@ func TestSeam_GitPrimaryWithFsMirror(t *testing.T) {
 	})
 }
 
-// assertAllVariants verifies that all five writes are visible in a backend.
+// assertAllVariants verifies that all four writes are visible in a backend.
 func assertAllVariants(t *testing.T, store cp.PersistentStore, cid, reservedCID id.CheckpointID) {
 	t.Helper()
 	ctx := context.Background()

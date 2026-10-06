@@ -14,7 +14,7 @@ import (
 //
 // This is a regression test for the bug where old sessions (IDLE/ENDED) would
 // have their BaseCommit incorrectly updated, causing them to be condensed on
-// future commits because their BaseCommit matched the new shadow branch.
+// future commits because their BaseCommit matched the new HEAD.
 //
 // Scenario:
 // 1. Create an old session (session1), run full workflow, set to IDLE

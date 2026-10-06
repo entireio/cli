@@ -31,7 +31,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
-	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
@@ -79,11 +78,11 @@ Checks performed:
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
-  - It is in ENDED phase with uncondensed checkpoint data on a shadow branch
+  - It is in ENDED phase with uncondensed checkpoint data
 
 For each stuck session, you can choose to:
   - Condense: Save session data to permanent storage
-  - Discard: Remove the session state and shadow branch data
+  - Discard: Remove the session state
   - Skip: Leave the session as-is
 
 Use --force to condense all fixable sessions without prompting.  Sessions that can't
@@ -129,8 +128,6 @@ points at --force instead of prompting.`,
 type stuckSession struct {
 	State             *strategy.SessionState
 	Reason            string
-	ShadowBranch      string
-	HasShadowBranch   bool
 	CheckpointCount   int
 	FilesTouchedCount int
 }
@@ -213,13 +210,6 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		return nil
 	}
 
-	// Open repository to check shadow branches (uses worktree-aware helper)
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
 	// Finalize any non-ended session whose agent process has exited (no SessionStop
 	// hook fired). A gone process is unambiguous, so these are condensed on the
 	// spot rather than left for the interactive prompt below; the sweep marks
@@ -233,7 +223,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	var stuck []stuckSession
 
 	for _, state := range states {
-		ss := classifySession(state, repo, now)
+		ss := classifySession(state, now)
 		if ss != nil {
 			stuck = append(stuck, *ss)
 		}
@@ -266,7 +256,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 				}
 			} else {
 				// Discard if we can't condense
-				if err := discardSession(ctx, ss, repo, cmd.ErrOrStderr()); err != nil {
+				if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
 				} else {
 					fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
@@ -307,7 +297,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Condensed session %s\n\n", ss.State.SessionID)
 			}
 		case "discard":
-			if err := discardSession(ctx, ss, repo, cmd.ErrOrStderr()); err != nil {
+			if err := discardSession(ctx, ss, cmd.ErrOrStderr()); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to discard session %s: %v\n", ss.State.SessionID, err)
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "  ✓ Discarded session %s\n\n", ss.State.SessionID)
@@ -326,19 +316,11 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 // classifySession determines if a session is stuck and returns diagnostic info.
 // Returns nil if the session is healthy.
-func classifySession(state *strategy.SessionState, repo *git.Repository, now time.Time) *stuckSession {
-	// Determine shadow branch info
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranch)
-	_, refErr := repo.Reference(refName, true)
-	hasShadowBranch := refErr == nil
-
+func classifySession(state *strategy.SessionState, now time.Time) *stuckSession {
 	stuck := func(reason string) *stuckSession {
 		return &stuckSession{
 			State:             state,
 			Reason:            reason,
-			ShadowBranch:      shadowBranch,
-			HasShadowBranch:   hasShadowBranch,
 			CheckpointCount:   state.StepCount + len(state.TaskRecords),
 			FilesTouchedCount: len(state.FilesTouched),
 		}
@@ -370,15 +352,9 @@ func classifySession(state *strategy.SessionState, repo *git.Repository, now tim
 
 	case state.Phase == session.PhaseEnded:
 		// FullyCondensed = everything worth keeping is materialized; a leftover
-		// live record can never complete (owner gone) and must not re-flag forever.
-		if state.FullyCondensed {
-			return nil
-		}
-		// Task records never live on the shadow branch, so branch absence must not hide them.
-		if state.HasTaskContent() {
-			return stuck("ended with uncondensed checkpoint data")
-		}
-		if state.StepCount <= 0 || !hasShadowBranch {
+		// live record can never complete (owner gone) and must not re-flag
+		// forever.
+		if state.FullyCondensed || !state.HasPendingWork() {
 			return nil
 		}
 		return stuck("ended with uncondensed checkpoint data")
@@ -404,20 +380,14 @@ func displayStuckSession(cmd *cobra.Command, ss stuckSession) {
 		fmt.Fprintf(w, "  Last interaction: %s\n", ss.State.LastInteractionTime.Format(time.RFC3339))
 	}
 
-	shadowStatus := "not found"
-	if ss.HasShadowBranch {
-		shadowStatus = fmt.Sprintf("exists (%s)", ss.ShadowBranch)
-	}
-	fmt.Fprintf(w, "  Shadow branch: %s\n", shadowStatus)
 	fmt.Fprintf(w, "  Checkpoints: %d, Files touched: %d\n", ss.CheckpointCount, ss.FilesTouchedCount)
 }
 
 // canCondenseStuckSession reports whether a stuck session has content the
-// condense path can save: shadow-branch checkpoints, or task records — which
-// never live on the shadow branch, so a record-bearing dead-owner session
-// must be condensed (materialized), never discarded.
+// condense path can save (State.HasPendingWork). A record-bearing dead-owner
+// session must be condensed (materialized), never discarded.
 func canCondenseStuckSession(ss stuckSession) bool {
-	return (ss.HasShadowBranch && ss.CheckpointCount > 0) || ss.State.HasTaskContent()
+	return ss.State.HasPendingWork()
 }
 
 // promptSessionAction asks the user what to do with a stuck session.
@@ -449,27 +419,11 @@ func promptSessionAction(ss stuckSession) (string, error) {
 	return action, nil
 }
 
-// discardSession removes session state and cleans up the shadow branch.
-func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, errW io.Writer) error {
-	// Clear session state file
+// discardSession removes session state.
+func discardSession(ctx context.Context, ss stuckSession, errW io.Writer) error {
 	if err := strategy.ClearSessionStateWithProgress(ctx, ss.State.SessionID, errW, strategy.SessionLockNoticeDelay); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
-
-	// Delete shadow branch if it exists and no other sessions need it
-	if ss.HasShadowBranch {
-		if shouldDelete, err := canDeleteShadowBranch(ctx, ss.ShadowBranch, ss.State.SessionID); err != nil {
-			fmt.Fprintf(errW, "Warning: could not check other sessions for shadow branch: %v\n", err)
-		} else if shouldDelete {
-			if err := strategy.DeleteBranchCLI(ctx, ss.ShadowBranch); err != nil {
-				// Branch already gone is not an error — keeps discard idempotent
-				if !errors.Is(err, strategy.ErrBranchNotFound) {
-					return fmt.Errorf("failed to delete shadow branch: %w", err)
-				}
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -1748,27 +1702,4 @@ func writeCodexPrimaryCheckoutRemedy(w io.Writer) {
 func writeCodexTrackedHooksRemedy(w io.Writer) {
 	fmt.Fprintln(w, "  .codex/hooks.json is tracked — commit it and make sure the root worktree has it")
 	fmt.Fprintln(w, "  (merge to the default branch, or check that branch out there).")
-}
-
-// canDeleteShadowBranch checks if a shadow branch can be safely deleted.
-// Returns true if no other sessions (besides excludeSessionID) need this branch.
-func canDeleteShadowBranch(ctx context.Context, shadowBranch, excludeSessionID string) (bool, error) {
-	states, err := strategy.ListSessionStates(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	for _, state := range states {
-		if state.SessionID == excludeSessionID {
-			continue
-		}
-		// Task records never live on the shadow branch, so only SaveStep
-		// checkpoints pin it alive.
-		otherShadow := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		if otherShadow == shadowBranch && state.StepCount > 0 {
-			return false, nil
-		}
-	}
-
-	return true, nil
 }

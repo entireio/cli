@@ -113,11 +113,11 @@ func parsePreInvocation(stdin io.Reader) (*agent.Event, error) {
 // still running (fullyIdle=false) so the session isn't finalized prematurely.
 //
 // We map fullyIdle=true to TurnEnd (not SessionEnd) because the framework's
-// TurnEnd handler invokes SaveStep — which increments StepCount, writes a
-// checkpoint to the shadow branch, and persists FilesTouched into the per-
-// session metadata. Without that, the eventual `git commit` finds no shadow
-// branch for the session and the cleanup pass at listAllSessionStates removes
-// the state file before any checkpoint is condensed. Mapping to SessionEnd
+// TurnEnd handler invokes SaveStep — which increments StepCount and persists
+// FilesTouched into session state. Without that, the eventual `git commit`
+// finds no pending work for the session and the cleanup pass at
+// listAllSessionStates removes the state file before any checkpoint is
+// condensed. Mapping to SessionEnd
 // would mark the session ENDED but never run SaveStep, leaving files_touched
 // in a state that never produces a checkpoint commit.
 //

@@ -261,7 +261,7 @@ func TestManualCommitStrategy_PostCommitBaseUpdate_DoesNotRewriteSiblingSessionB
 
 	// Trailer-less commit in the sibling worktree: the fallback would match
 	// the recorded session here, but BaseCommit must only follow the HEAD of
-	// the session's own worktree (shadow branches are keyed off it).
+	// the session's own worktree.
 	t.Chdir(commitWorktree)
 	clearSessionMatchCaches()
 	testutil.WriteFile(t, commitWorktree, "untracked.txt", "manual\n")

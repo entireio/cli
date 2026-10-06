@@ -57,6 +57,5 @@ func TestMidTurnCommit_DifferentFilesThanPreviousTurn(t *testing.T) {
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

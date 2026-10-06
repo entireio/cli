@@ -13,10 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // codexCiphertext stands in for a Codex encrypted reasoning payload: long enough
@@ -49,56 +46,24 @@ func countJSONLLines(s string) int {
 	return n
 }
 
-// findShadowSessionTranscript locates the session transcript blob inside a shadow
-// branch tree. It searches rather than reconstructing the path because the metadata
-// directory is named after the date-prefixed Entire session ID, not the agent's
-// raw session_id.
-func findShadowSessionTranscript(t *testing.T, repoDir, branchName string) (string, bool) {
+// findStoredSessionTranscript reads the session transcript copy the Stop hook
+// stores under .entire/metadata/<session>/. It searches rather than
+// reconstructing the path because the metadata directory is named after the
+// date-prefixed Entire session ID, not the agent's raw session_id.
+func findStoredSessionTranscript(t *testing.T, repoDir string) (string, bool) {
 	t.Helper()
-
-	repo, err := gitrepo.OpenPath(repoDir)
+	matches, err := filepath.Glob(filepath.Join(repoDir, filepath.FromSlash(paths.EntireMetadataDir), "*", paths.TranscriptFileName))
 	if err != nil {
-		t.Fatalf("open repo: %v", err)
+		t.Fatalf("glob stored transcripts: %v", err)
 	}
-	defer repo.Close()
-
-	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branchName), true)
-	if err != nil {
+	if len(matches) == 0 {
 		return "", false
 	}
-	commit, err := repo.CommitObject(ref.Hash())
+	content, err := os.ReadFile(matches[0])
 	if err != nil {
-		return "", false
+		t.Fatalf("read stored transcript: %v", err)
 	}
-	tree, err := commit.Tree()
-	if err != nil {
-		return "", false
-	}
-
-	var content string
-	var found bool
-	err = tree.Files().ForEach(func(f *object.File) error {
-		if found {
-			return nil
-		}
-		if !strings.HasPrefix(f.Name, paths.EntireMetadataDir+"/") {
-			return nil
-		}
-		if !strings.HasSuffix(f.Name, "/"+paths.TranscriptFileName) {
-			return nil
-		}
-		c, cErr := f.Contents()
-		if cErr != nil {
-			return cErr
-		}
-		content = c
-		found = true
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk shadow tree: %v", err)
-	}
-	return content, found
+	return string(content), true
 }
 
 // codexHooker returns a helper that drives the real Codex hook binary.
@@ -136,21 +101,17 @@ func applyPatchHook(hook func(string, map[string]any), toolUseID, patch string) 
 	})
 }
 
-// TestCodexShadowBranch_SanitizesTranscript proves that the shadow-branch copy of a
-// Codex rollout has the non-portable payloads stripped.
-//
-// Before the fix, lifecycle wrote the raw rollout to .entire/metadata/<session>/full.jsonl
-// and the generic metadata-dir walker (addDirectoryToChanges -> createRedactedBlobFromFile)
-// redacted every blob without ever sanitizing — so encrypted_content ciphertext landed in
-// the shadow tree, and the 8 redaction layers had to scan all of it first (base64 is the
-// pathological input for the entropy layer).
-func TestCodexShadowBranch_SanitizesTranscript(t *testing.T) {
+// TestCodexStoredTranscript_SanitizesTranscript proves that the copy of a Codex
+// rollout the Stop hook stores under .entire/metadata/<session>/full.jsonl has the
+// non-portable payloads stripped. Condensation falls back to that copy when the
+// live rollout is unreadable, and its size is the growth baseline's coordinate.
+func TestCodexStoredTranscript_SanitizesTranscript(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 
 	// Long enough to be unmistakable in the blob, and shaped like the real thing.
 	ciphertext := codexCiphertext
 
-	sessionID := "codex-shadow-sanitize"
+	sessionID := "codex-stored-sanitize"
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-rollout.jsonl")
 
 	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {
@@ -163,9 +124,7 @@ func TestCodexShadowBranch_SanitizesTranscript(t *testing.T) {
 
 	hook := codexHooker(t, env.RepoDir, sessionID, transcriptPath)
 
-	// Turn start, then a file-mutating tool use so SaveStep writes a shadow checkpoint.
-	// The file must exist on disk (uncommitted) when Stop fires, so the ephemeral
-	// write has worktree changes to snapshot.
+	// Turn start, then a file-mutating tool use so the turn end records a step.
 	hook("user-prompt-submit", map[string]any{
 		"prompt": "add feature.txt", "hook_event_name": "UserPromptSubmit",
 	})
@@ -173,21 +132,16 @@ func TestCodexShadowBranch_SanitizesTranscript(t *testing.T) {
 	applyPatchHook(hook, "call_1", "*** Begin Patch\n*** Add File: feature.txt\n+hi\n*** End Patch\n")
 	hook("stop", map[string]any{"hook_event_name": "Stop"})
 
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after Codex stop", shadowBranch)
-	}
-
-	stored, ok := findShadowSessionTranscript(t, env.RepoDir, shadowBranch)
+	stored, ok := findStoredSessionTranscript(t, env.RepoDir)
 	if !ok {
-		t.Fatalf("shadow branch %s has no session transcript", shadowBranch)
+		t.Fatal("Codex stop stored no session transcript")
 	}
 
 	if strings.Contains(stored, ciphertext) {
-		t.Error("shadow-branch transcript still contains encrypted_content ciphertext (not sanitized)")
+		t.Error("stored transcript still contains encrypted_content ciphertext (not sanitized)")
 	}
 	if strings.Contains(stored, `"encrypted_content"`) {
-		t.Error("shadow-branch transcript still has an encrypted_content key")
+		t.Error("stored transcript still has an encrypted_content key")
 	}
 
 	// The compaction item is stripped in place, not dropped: its line survives so
@@ -203,26 +157,26 @@ func TestCodexShadowBranch_SanitizesTranscript(t *testing.T) {
 
 	// Sanitization must not eat the actual conversation.
 	if !strings.Contains(stored, "add feature.txt") {
-		t.Error("shadow-branch transcript lost the user prompt")
+		t.Error("stored transcript lost the user prompt")
 	}
 	if !strings.Contains(stored, "added feature.txt") {
-		t.Error("shadow-branch transcript lost the assistant reply")
+		t.Error("stored transcript lost the assistant reply")
 	}
 }
 
-// TestCodexShadowBranch_GrowthStillDetectedAfterCommit is the regression guard for the
-// coordinate coupling that sanitization introduces.
+// TestCodexStoredTranscript_GrowthStillDetectedAfterCommit is the regression guard
+// for the coordinate coupling that sanitization introduces.
 //
-// sessionHasNewContent compares the shadow transcript blob's size against
+// sessionHasNewContent compares the stored turn-end transcript's size against
 // state.CheckpointTranscriptSize, the baseline recorded at the previous condensation.
-// Sanitizing the shadow blob shrinks it by ~99% for Codex, so if the baseline keeps
-// being measured on the raw transcript, `transcriptBlobSize > CheckpointTranscriptSize`
+// Sanitizing the stored copy shrinks it by ~99% for Codex, so if the baseline keeps
+// being measured on the raw transcript, `storedSize > CheckpointTranscriptSize`
 // is false forever and the session never condenses again after its first commit.
-func TestCodexShadowBranch_GrowthStillDetectedAfterCommit(t *testing.T) {
+func TestCodexStoredTranscript_GrowthStillDetectedAfterCommit(t *testing.T) {
 	env := NewFeatureBranchEnv(t)
 
 	ciphertext := codexCiphertext
-	sessionID := "codex-shadow-growth"
+	sessionID := "codex-stored-growth"
 	transcriptPath := filepath.Join(env.RepoDir, ".entire", "tmp", "codex-rollout.jsonl")
 
 	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o755); err != nil {

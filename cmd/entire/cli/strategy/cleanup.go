@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -26,6 +27,10 @@ import (
 type CleanupType string
 
 const (
+	// CleanupTypeShadowBranch is a legacy shadow branch: older CLIs kept each
+	// session's in-progress work on a local "entire/<commit>-<worktree>" branch.
+	// Nothing writes them anymore; `entire clean` and a one-time pass at session
+	// start remove what upgraded repositories still carry.
 	CleanupTypeShadowBranch CleanupType = "shadow-branch"
 	CleanupTypeSessionState CleanupType = "session-state"
 	CleanupTypeCheckpoint   CleanupType = "checkpoint"
@@ -49,18 +54,19 @@ type CleanupItem struct {
 // CleanupResult contains the results of a cleanup operation.
 type CleanupResult struct {
 	RedactCaches      []string // Deleted redaction prefix cache directories
-	ShadowBranches    []string // Deleted shadow branches
+	ShadowBranches    []string // Deleted legacy shadow branches
 	SessionStates     []string // Deleted session state files
 	Checkpoints       []string // Deleted checkpoint metadata
-	FailedBranches    []string // Shadow branches that failed to delete
+	FailedBranches    []string // Legacy shadow branches that failed to delete
 	FailedStates      []string // Session states that failed to delete
 	FailedCheckpoints []string // Checkpoints that failed to delete
 	FailedRedactCache []string // Redaction caches that failed to delete
 }
 
-// shadowBranchPattern matches shadow branch names in both old and new formats:
+// legacyShadowBranchPattern matches the shadow branch names older CLIs wrote,
+// in both of their formats:
 //   - Old format: entire/<commit[:7+]>
-//   - New format: entire/<commit[:7+]>-<worktreeHash[:6]>
+//   - Newer format: entire/<commit[:7+]>-<worktreeHash[:6]>
 //
 // The pattern requires at least 7 hex characters for the commit, optionally followed
 // by a dash and exactly 6 hex characters for the worktree hash.
@@ -70,101 +76,67 @@ type CleanupResult struct {
 // suffix) is also a plausible human branch-naming convention (e.g. tracking a
 // short commit SHA), and nothing here is namespace-reserved. Use this broad
 // pattern only for listing/reporting paths that a human confirms before any
-// deletion happens (ListShadowBranches, ListAllItems, `entire clean --all`'s
-// interactive picker). For unattended, no-confirmation deletion, use
-// isAutoDeletableShadowBranch instead -- see its doc comment.
-var shadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-F]{6})?$`)
+// deletion happens (ListLegacyShadowBranches, ListAllItems, `entire clean
+// --all`'s interactive picker). For unattended deletion, use
+// isAutoDeletableLegacyShadowBranch instead.
+var legacyShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-F]{6})?$`)
 
-// autoDeletableShadowBranchPattern is the SAME pattern with the worktree-hash
-// suffix made mandatory rather than optional. Every shadow branch this
-// codebase actually creates today goes through checkpoint.ShadowBranchNameForCommit
-// (aliased here as getShadowBranchNameForCommit), which always appends
-// "-<6-hex worktree hash>" -- even for the main worktree, since
-// checkpoint.HashWorktreeID hashes the empty string to a real 6-hex value
-// rather than an empty one. So a branch in this shape is not just
-// name-plausible: it is the exact, unspoofable-in-practice output shape of
-// the one function in this codebase that mints shadow branches, which is why
-// it is safe to treat as positive-enough proof of Entire ownership for a
-// path that deletes with no human in the loop. The bare "entire/<hex>" form
-// (no dash) is deliberately excluded here even though it is Entire's own
-// legacy naming from before the worktree-hash suffix was introduced --
-// see isAutoDeletableShadowBranch's doc comment for why.
-var autoDeletableShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}-[0-9a-fA-F]{6}$`)
+// autoDeletableLegacyShadowBranchPattern is the SAME pattern with the
+// worktree-hash suffix made mandatory. Every shadow branch the CLI wrote since
+// the suffix was introduced has this shape (the worktree hash was a real 6-hex
+// value even for the main worktree), and a human branch would have to
+// coincidentally match "entire/<7+ hex>-<exactly 6 hex>" to be at risk. The
+// bare "entire/<hex>" form is deliberately excluded from unattended deletion
+// even though it is Entire's own oldest naming: a human short-SHA branch looks
+// exactly like it. Old-format branches stay listed and deletable through the
+// interactive `entire clean --all` path, where a human confirms first.
+var autoDeletableLegacyShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}-[0-9a-fA-F]{6}$`)
 
-// IsShadowBranch returns true if the branch name matches the shadow branch pattern.
-// Shadow branches have the format "entire/<commit-hash>-<worktree-hash>" where the
-// commit hash is at least 7 hex characters and worktree hash is 6 hex characters.
-// The "entire/checkpoints/v1" branch is NOT a shadow branch.
+// IsLegacyShadowBranch reports whether the branch name has the shape of a
+// shadow branch written by an older CLI. The metadata and trails branches are
+// never shadow branches.
 //
-// This is a name-shape check, not an ownership check -- see the shadowBranchPattern
-// doc comment. Do not use it to gate unattended deletion; use
-// isAutoDeletableShadowBranch for that.
-func IsShadowBranch(branchName string) bool {
-	// Explicitly exclude metadata and trails branches
+// This is a name-shape check, not an ownership check -- see the
+// legacyShadowBranchPattern doc comment. Do not use it to gate unattended
+// deletion; use isAutoDeletableLegacyShadowBranch for that.
+func IsLegacyShadowBranch(branchName string) bool {
 	if branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName {
 		return false
 	}
-	return shadowBranchPattern.MatchString(branchName)
+	return legacyShadowBranchPattern.MatchString(branchName)
 }
 
-// isAutoDeletableShadowBranch returns true only for the strict, worktree-suffixed
-// shadow branch shape that checkpoint.ShadowBranchNameForCommit always produces.
-//
-// It exists to close a real branch-deletion hazard: CleanupPushedShadowBranches
-// runs unattended after every successful push, with no confirmation, and
-// previously trusted the broad shadowBranchPattern above -- which also matches
-// a bare "entire/1234567"-style branch a human could plausibly create by hand
-// (short-SHA branch naming is a common convention, and Entire reserves no
-// documented namespace). That branch has no session-state entry to protect it
-// and would be silently, permanently force-deleted on the next push.
-//
-// The worktree-suffixed form is a much stronger ownership signal: every current
-// code path that mints a shadow branch goes through
-// checkpoint.ShadowBranchNameForCommit, which always appends the worktree-hash
-// suffix (HashWorktreeID hashes even an empty worktree ID to a real 6-hex
-// value, so there is no "main worktree, no suffix" case). A human branch would
-// have to coincidentally match "entire/<7+ hex>-<exactly 6 hex>" AND not be
-// referenced by any session state to be at risk here -- a collision far less
-// plausible than the bare-hex case.
-//
-// The bare, unsuffixed "entire/<hex>" form is Entire's OLD format, from before
-// the worktree-hash suffix existed, and genuinely-old repos may still carry
-// leftover branches in that shape. Excluding it from auto-delete eligibility
-// does not orphan cleanup of those, though: nothing in this codebase can ever
-// protect a bare-format branch (protectedShadowBranchForSession only ever
-// computes the new suffixed name), so a genuine old-format Entire branch has
-// been unconditionally eligible for automatic deletion on every push for as
-// long as this pattern existed -- restricting auto-delete here does not change
-// whether they get caught, it removes a class of user branches that should
-// never have been eligible in the first place. Old-format branches remain
-// listed and deletable through the interactive `entire clean --all` path
-// (ListShadowBranches / ListAllItems keep using the broader shadowBranchPattern),
-// where a human sees the branch name and confirms before anything is deleted.
-func isAutoDeletableShadowBranch(branchName string) bool {
+// isAutoDeletableLegacyShadowBranch returns true only for the strict,
+// worktree-suffixed shadow branch shape; see
+// autoDeletableLegacyShadowBranchPattern.
+func isAutoDeletableLegacyShadowBranch(branchName string) bool {
 	if branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName {
 		return false
 	}
-	return autoDeletableShadowBranchPattern.MatchString(branchName)
+	return autoDeletableLegacyShadowBranchPattern.MatchString(branchName)
 }
 
-// ListShadowBranches returns all shadow branches in the repository.
-// Shadow branches match the pattern "entire/<commit-hash>" (7+ hex chars).
-// The "entire/checkpoints/v1" branch is excluded as it stores permanent metadata.
-// Returns an empty slice (not nil) if no shadow branches exist.
-func ListShadowBranches(ctx context.Context) ([]string, error) {
-	heads, err := listShadowBranchHeads(ctx)
+// ListLegacyShadowBranches returns the local branches that look like shadow
+// branches written by an older CLI (IsLegacyShadowBranch), sorted. Returns an
+// empty slice (not nil) if there are none.
+func ListLegacyShadowBranches(ctx context.Context) ([]string, error) {
+	heads, err := listLegacyShadowBranchHeads(ctx, IsLegacyShadowBranch)
 	if err != nil {
 		return nil, err
 	}
+	return sortedBranchNames(heads), nil
+}
+
+func sortedBranchNames(heads map[string]plumbing.Hash) []string {
 	branches := make([]string, 0, len(heads))
 	for branch := range heads {
 		branches = append(branches, branch)
 	}
 	sort.Strings(branches)
-	return branches, nil
+	return branches
 }
 
-func listShadowBranchHeads(ctx context.Context) (map[string]plumbing.Hash, error) {
+func listLegacyShadowBranchHeads(ctx context.Context, match func(string) bool) (map[string]plumbing.Hash, error) {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
@@ -176,146 +148,82 @@ func listShadowBranchHeads(ctx context.Context) (map[string]plumbing.Hash, error
 		return nil, fmt.Errorf("failed to get references: %w", err)
 	}
 
-	shadowBranches := map[string]plumbing.Hash{}
-
+	heads := map[string]plumbing.Hash{}
 	err = refs.ForEach(func(ref *plumbing.Reference) error {
 		if err := ctx.Err(); err != nil {
 			return err //nolint:wrapcheck // Propagating context cancellation
 		}
-		// Only look at branch references
 		if !ref.Name().IsBranch() {
 			return nil
 		}
-
-		// Extract branch name without refs/heads/ prefix
-		branchName := strings.TrimPrefix(ref.Name().String(), "refs/heads/")
-
-		if IsShadowBranch(branchName) {
-			shadowBranches[branchName] = ref.Hash()
+		if branchName := ref.Name().Short(); match(branchName) {
+			heads[branchName] = ref.Hash()
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to iterate references: %w", err)
 	}
-
-	return shadowBranches, nil
+	return heads, nil
 }
 
-// CleanupPushedShadowBranches deletes shadow branches whose sessions
-// have fully condensed into committed checkpoint metadata (no active
-// session referencing them, no pending turn-checkpoints awaiting
-// finalization, and no ended-but-uncondensed session still relying on
-// shadow-only data). Intended to be called only after a successful push
-// so the caller knows any condensed checkpoint data already reached
-// the remote.
+// legacyShadowCleanupMarker records, in the git common dir, that the one-time
+// unattended legacy shadow branch cleanup has run for this repository.
+const legacyShadowCleanupMarker = "entire-legacy-shadow-branches-removed"
+
+// CleanupLegacyShadowBranches deletes, once per repository, the shadow
+// branches older CLIs left behind. The real protection for other people's
+// branches is the name: only the strict worktree-suffixed shape
+// `entire/<7+hex>-<6hex>` (isAutoDeletableLegacyShadowBranch) is touched.
+// Each delete is `git update-ref -d <ref> <observed hash>`, which only guards
+// against a branch moving during this pass; a branch that moved fails once,
+// leaves the marker unwritten, and is deleted at its new hash on the next
+// session start. Nothing reads or writes these branches anymore — session
+// work in progress lives in session state — so there is no session to protect.
 //
-// Returns the count of branches deleted. Failures (e.g., one branch
-// fails to delete due to a stale lock) are logged but don't abort
-// the operation — remaining branches are still attempted.
+// A marker in the git common dir makes the pass one-time: the first call that
+// finishes without failures records it, and every later call returns
+// immediately. Old-format bare "entire/<hex>" branches are never touched here;
+// `entire clean --all` lists them for a human to confirm.
 //
-// Safety properties:
-//   - Skips any shadow branch referenced by a session with EndedAt
-//     == nil (still active).
-//   - Skips any shadow branch whose session has TurnCheckpointIDs
-//     pending (mid-finalize race window).
-//   - Skips ended sessions until PhaseEnded and FullyCondensed prove the
-//     shadow branch contents have been copied to committed metadata.
-//   - Multiple sessions can share the same shadow branch (same base
-//     commit + worktree); ALL must satisfy the criteria above.
-//   - Shadow branches with no associated session state are deleted
-//     (no session to lose data from).
-func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
-	branchHeads, err := listShadowBranchHeads(ctx)
+// Best-effort: callers log the error and continue.
+func CleanupLegacyShadowBranches(ctx context.Context) (int, error) {
+	root, err := gitdir.Open(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list shadow branches: %w", err)
+		return 0, fmt.Errorf("open git common dir: %w", err)
 	}
-	if len(branchHeads) == 0 {
+	if _, statErr := root.Lstat(legacyShadowCleanupMarker); statErr == nil {
 		return 0, nil
 	}
 
-	states, err := ListSessionStates(ctx)
+	heads, err := listLegacyShadowBranchHeads(ctx, isAutoDeletableLegacyShadowBranch)
 	if err != nil {
-		return 0, fmt.Errorf("list session states: %w", err)
+		return 0, err
 	}
-
-	// Build a set of shadow branch names that must be preserved
-	// because at least one session still depends on them.
-	protected := map[string]bool{}
-	for _, s := range states {
-		shadow, ok := protectedShadowBranchForSession(s)
-		if ok {
-			protected[shadow] = true
-		}
-	}
-
-	toDelete := map[string]plumbing.Hash{}
-	for b, hash := range branchHeads {
-		// Only the strict, worktree-suffixed shape is eligible for
-		// unattended deletion -- see isAutoDeletableShadowBranch's doc
-		// comment. A branch matching only the broader shadowBranchPattern
-		// (e.g. a human's own "entire/1234567"-style branch) is left alone
-		// here entirely; it never even reaches the deleted/failed counts
-		// below.
-		if !isAutoDeletableShadowBranch(b) {
-			continue
-		}
-		if !protected[b] {
-			toDelete[b] = hash
-		}
-	}
-	if len(toDelete) == 0 {
-		return 0, nil
-	}
-
-	deleted, failed := DeleteShadowBranchesIfUnchanged(ctx, toDelete)
+	deleted, failed := deleteLegacyShadowBranchesIfUnchanged(ctx, heads)
 	if len(failed) > 0 {
-		logging.Warn(ctx, "some shadow branches failed to delete during post-push cleanup",
-			slog.Int("failed_count", len(failed)),
-			slog.Int("deleted_count", len(deleted)),
-		)
+		return len(deleted), fmt.Errorf("%d legacy shadow branch(es) could not be deleted", len(failed))
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, legacyShadowCleanupMarker, []byte{}, 0o644); err != nil {
+		return len(deleted), fmt.Errorf("record legacy shadow branch cleanup: %w", err)
 	}
 	return len(deleted), nil
 }
 
-// DeleteShadowBranchesIfUnchanged deletes shadow branches only if each branch
-// still points at the hash observed by the caller. This avoids deleting a
-// branch that another session advanced after cleanup's initial scan.
-//
-// Callers performing unattended deletion (CleanupPushedShadowBranches) should
-// already have filtered to isAutoDeletableShadowBranch before calling this --
-// the same check is repeated here as a second, independent gate rather than
-// relying solely on the caller's filtering, since this function is the one
-// place that actually deletes a ref with no human confirmation.
-func DeleteShadowBranchesIfUnchanged(ctx context.Context, branches map[string]plumbing.Hash) (deleted []string, failed []string) {
-	if len(branches) == 0 {
-		return []string{}, []string{}
-	}
+// deleteLegacyShadowBranchesIfUnchanged deletes each branch only if it still
+// points at the hash the caller observed. That protects only against a
+// concurrent move between this pass's scan and its delete (e.g. an older CLI
+// version still writing the branch); it is not a lasting exemption, since the
+// next pass lists the branch at its new hash.
+func deleteLegacyShadowBranchesIfUnchanged(ctx context.Context, branches map[string]plumbing.Hash) (deleted []string, failed []string) {
 	for branch, expected := range branches {
-		if !isAutoDeletableShadowBranch(branch) || expected.IsZero() {
+		if !isAutoDeletableLegacyShadowBranch(branch) || expected.IsZero() {
 			failed = append(failed, branch)
 			continue
 		}
-		protected, err := shadowBranchProtectedByCurrentState(ctx, branch)
-		if err != nil {
-			logging.Debug(ctx, "shadow branch unchanged-delete skipped after protection recheck failed",
-				slog.String("branch", branch),
-				slog.String("error", err.Error()),
-			)
-			failed = append(failed, branch)
-			continue
-		}
-		if protected {
-			logging.Debug(ctx, "shadow branch unchanged-delete skipped because current session state protects it",
-				slog.String("branch", branch),
-			)
-			failed = append(failed, branch)
-			continue
-		}
-		ref := "refs/heads/" + branch
-		cmd := exec.CommandContext(ctx, "git", "update-ref", "-d", ref, expected.String())
+		cmd := exec.CommandContext(ctx, "git", "update-ref", "-d", "refs/heads/"+branch, expected.String())
 		if output, runErr := cmd.CombinedOutput(); runErr != nil {
-			logging.Debug(ctx, "shadow branch unchanged-delete skipped",
+			logging.Debug(ctx, "legacy shadow branch unchanged-delete skipped",
 				slog.String("branch", branch),
 				slog.String("expected", expected.String()),
 				slog.String("output", strings.TrimSpace(string(output))),
@@ -329,33 +237,12 @@ func DeleteShadowBranchesIfUnchanged(ctx context.Context, branches map[string]pl
 	return deleted, failed
 }
 
-func protectedShadowBranchForSession(s *SessionState) (string, bool) {
-	if s.Phase == session.PhaseEnded && s.FullyCondensed && len(s.TurnCheckpointIDs) == 0 {
-		return "", false // safe — session ended cleanly and finalized
-	}
-	return getShadowBranchNameForCommit(s.BaseCommit, s.WorktreeID), true
-}
-
-func shadowBranchProtectedByCurrentState(ctx context.Context, branch string) (bool, error) {
-	states, err := ListSessionStates(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, s := range states {
-		shadow, ok := protectedShadowBranchForSession(s)
-		if ok && shadow == branch {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// DeleteShadowBranches deletes the specified branches from the repository.
+// DeleteLegacyShadowBranches deletes the specified branches from the repository.
 // Returns two slices: successfully deleted branches and branches that failed to delete.
 // Individual branch deletion failures do not stop the operation - all branches are attempted.
-func DeleteShadowBranches(ctx context.Context, branches []string) (deleted []string, failed []string, err error) { //nolint:unparam // already present in codebase
+func DeleteLegacyShadowBranches(ctx context.Context, branches []string) (deleted []string, failed []string) {
 	if len(branches) == 0 {
-		return []string{}, []string{}, nil
+		return []string{}, []string{}
 	}
 
 	for _, branch := range branches {
@@ -369,7 +256,7 @@ func DeleteShadowBranches(ctx context.Context, branches []string) (deleted []str
 		deleted = append(deleted, branch)
 	}
 
-	return deleted, failed, nil
+	return deleted, failed
 }
 
 // DeleteOrphanedSessionStates deletes the specified session state files.
@@ -489,17 +376,14 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	return checkpointIDs, []string{}, nil
 }
 
-// ListAllItems returns all Entire items for full cleanup.
-// This includes all shadow branches and all session states regardless of
-// whether they have checkpoints or active shadow branches.
+// ListAllItems returns all Entire items for full cleanup: legacy shadow
+// branches left by older CLIs, all session states, and the redaction cache.
 func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 	var cleanupItems []CleanupItem
 
-	// All shadow branches (using ListShadowBranches directly, not
-	// ListOrphanedItems, so this won't break if orphan filtering is added)
-	branches, err := ListShadowBranches(ctx)
+	branches, err := ListLegacyShadowBranches(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing shadow branches: %w", err)
+		return nil, fmt.Errorf("listing legacy shadow branches: %w", err)
 	}
 	for _, branch := range branches {
 		cleanupItems = append(cleanupItems, CleanupItem{
@@ -595,18 +479,15 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 	}
 
-	// Delete shadow branches
+	// Delete legacy shadow branches
 	if len(branches) > 0 {
-		deleted, failed, err := DeleteShadowBranches(ctx, branches)
-		if err != nil {
-			return result, err
-		}
+		deleted, failed := DeleteLegacyShadowBranches(ctx, branches)
 		result.ShadowBranches = deleted
 		result.FailedBranches = failed
 
 		// Log deleted branches
 		for _, id := range deleted {
-			logging.Info(logCtx, "deleted shadow branch",
+			logging.Info(logCtx, "deleted legacy shadow branch",
 				slog.String("type", string(CleanupTypeShadowBranch)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),
@@ -614,7 +495,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 		// Log failed branches
 		for _, id := range failed {
-			logging.Warn(logCtx, "failed to delete shadow branch",
+			logging.Warn(logCtx, "failed to delete legacy shadow branch",
 				slog.String("type", string(CleanupTypeShadowBranch)),
 				slog.String("id", id),
 				slog.String("reason", reasonMap[id]),

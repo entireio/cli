@@ -84,11 +84,8 @@ func TestReftableRepository_EnableAndFirstCheckpoint(t *testing.T) {
 		t.Fatalf("session StepCount after first checkpoint = %#v, want 1", state)
 	}
 
-	// The shadow branch is created and advanced via reftable ref writes.
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	if got := gitOutput(t, env.RepoDir, "rev-parse", shadowBranch); got == "" {
-		t.Fatalf("expected shadow branch %s to resolve", shadowBranch)
-	}
+	// The turn end records its work in session state; no ref is written.
+	env.AssertTurnEndRecorded(sess.ID, "main.go")
 
 	env.GitCommitWithHooks("Add reftable main", "main.go")
 	userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD")
@@ -215,11 +212,8 @@ func TestReftableRepository_GitRefsBackend(t *testing.T) {
 		t.Fatalf("session StepCount after first checkpoint = %#v, want 1", state)
 	}
 
-	// The shadow branch is created and advanced via reftable ref writes.
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	if got := gitOutput(t, env.RepoDir, "rev-parse", shadowBranch); got == "" {
-		t.Fatalf("expected shadow branch %s to resolve", shadowBranch)
-	}
+	// The turn end records its work in session state; no ref is written.
+	env.AssertTurnEndRecorded(sess.ID, "main.go")
 
 	env.GitCommitWithHooks("Add reftable main", "main.go")
 	if userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD"); userHead == initialHead {

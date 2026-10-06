@@ -182,7 +182,7 @@ func TestManualCommit_LastCheckpointID_NotSetWithoutCondensation(t *testing.T) {
 	// Create a file directly (not through a Claude session)
 	env.WriteFile("manual.txt", "manual content")
 
-	// Commit with shadow hooks - should not add trailer since no session exists
+	// Commit with hooks - should not add trailer since no session exists
 	env.GitCommitWithHooks("Manual commit without session", "manual.txt")
 
 	commitHash := env.GetHeadHash()
@@ -260,9 +260,10 @@ func TestManualCommit_NewSessionIgnoresOldCheckpointIDs(t *testing.T) {
 	}
 }
 
-// TestManualCommit_ShadowBranchCleanedUpAfterCondensation verifies that the
-// shadow branch is deleted after successful condensation.
-func TestManualCommit_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
+// TestManualCommit_PendingWorkClearedAfterCondensation verifies that
+// successful condensation clears the session's pending files and recorded
+// hashes, and that no shadow branch is ever written.
+func TestManualCommit_PendingWorkClearedAfterCondensation(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -273,14 +274,6 @@ func TestManualCommit_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	// Get the base commit to determine shadow branch name
-	state, err := env.GetSessionState(session.ID)
-	if err != nil {
-		t.Fatalf("Failed to get session state: %v", err)
-	}
-	// Shadow branch uses worktree-specific naming
-	shadowBranchName := env.GetShadowBranchNameForCommit(state.BaseCommit)
-
 	env.WriteFile("test.txt", "test content")
 	session.CreateTranscript("Create test file", []FileChange{
 		{Path: "test.txt", Content: "test content"},
@@ -290,18 +283,21 @@ func TestManualCommit_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	// Verify shadow branch exists before commit
-	if !env.BranchExists(shadowBranchName) {
-		t.Fatalf("Shadow branch %s should exist before commit", shadowBranchName)
-	}
+	// Verify the turn end left pending work in session state before commit
+	env.AssertTurnEndRecorded(session.ID, "test.txt")
 
-	// Commit with hooks (triggers condensation and cleanup)
+	// Commit with hooks (triggers condensation)
 	env.GitCommitWithHooks("Test commit", "test.txt")
 
-	// Verify shadow branch was cleaned up
-	if env.BranchExists(shadowBranchName) {
-		t.Errorf("Shadow branch %s should be deleted after condensation", shadowBranchName)
+	// Verify condensation consumed the pending work
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("Failed to get session state: %v", err)
 	}
+	if state != nil && (len(state.FilesTouched) != 0 || len(state.TouchedFileHashes) != 0) {
+		t.Errorf("condensation should clear pending files, got FilesTouched=%v TouchedFileHashes=%v", state.FilesTouched, state.TouchedFileHashes)
+	}
+	env.AssertNoShadowBranches()
 
 	// Verify data exists on entire/checkpoints/v1
 	checkpointID := env.GetLatestCheckpointID()

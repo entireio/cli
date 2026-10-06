@@ -527,7 +527,7 @@ func localBranchNames(repo *git.Repository) ([]string, error) {
 	var names []string
 	if err := iter.ForEach(func(ref *plumbing.Reference) error {
 		name := ref.Name().Short()
-		if strings.HasPrefix(name, checkpoint.ShadowBranchPrefix) {
+		if strings.HasPrefix(name, checkpoint.InternalBranchPrefix) {
 			return nil
 		}
 		names = append(names, name)

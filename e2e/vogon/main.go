@@ -171,9 +171,8 @@ func runTurn(dir, sessionID, transcriptPath, prompt string) {
 
 // subagentPromptRe matches the delegation phrasing the e2e prompts use ("use a
 // subagent: …", "using a subagent", "delegate to a subagent"). Vogon has no real
-// subagents; it simulates one so the pre-task/post-task hooks, the task
-// checkpoint, and the shadow-branch lifecycle around them are exercised on every
-// canary run. Before this, the canary fired no subagent hooks at all, so a whole
+// subagents; it simulates one so the pre-task/post-task hooks and the task
+// record they produce are exercised on every canary run. Before this, the canary fired no subagent hooks at all, so a whole
 // class of regression was invisible to it (see TestSubagentCommitFlow).
 var subagentPromptRe = regexp.MustCompile(`(?i)\b(use|using|via|with|delegate to)\s+(a\s+)?sub-?agent`)
 

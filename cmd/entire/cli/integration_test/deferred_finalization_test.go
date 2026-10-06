@@ -198,7 +198,7 @@ func TestManualCommit_DeferredTranscriptFinalization(t *testing.T) {
 
 // TestManualCommit_CarryForward_ActiveSession tests that when a user commits only
 // some of the files touched by an ACTIVE session, the remaining files are
-// carried forward to a new shadow branch.
+// carried forward as the session's pending work.
 //
 // Flow:
 // 1. Agent touches files A, B, C while ACTIVE
@@ -257,10 +257,6 @@ func TestManualCommit_CarryForward_ActiveSession(t *testing.T) {
 	}
 	t.Logf("After first commit: FilesTouched=%v, CheckpointTranscriptStart=%d, BaseCommit=%s, TurnCheckpointIDs=%v",
 		state.FilesTouched, state.CheckpointTranscriptStart, state.BaseCommit[:7], state.TurnCheckpointIDs)
-
-	// List branches to see if shadow branch was created
-	branches := env.ListBranchesWithPrefix("entire/")
-	t.Logf("Entire branches after first commit: %v", branches)
 
 	// Stage file B to see what the commit would include
 	env.GitAdd("fileB.go")
@@ -329,16 +325,8 @@ func TestManualCommit_CarryForward_ActiveSession(t *testing.T) {
 		t.Errorf("FilesTouched should be empty after all files committed, got %v", state.FilesTouched)
 	}
 
-	// CRITICAL: No shadow branches should remain after all files are committed.
-	// Only entire/checkpoints/v1 should exist. Extra shadow branches (entire/<hash>-<hash>)
-	// indicate a regression in carry-forward cleanup.
-	branchesAfterAll := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfterAll {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
-	t.Logf("Entire branches after all commits: %v", branchesAfterAll)
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	// Validate third checkpoint (file C)
 	env.ValidateCheckpoint(CheckpointValidation{
@@ -497,10 +485,6 @@ func TestManualCommit_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	t.Logf("After stop: phase=%s, FilesTouched=%v, CheckpointTranscriptStart=%d",
 		state.Phase, state.FilesTouched, state.CheckpointTranscriptStart)
 
-	// Log branches before user commit
-	branchesBefore := env.ListBranchesWithPrefix("entire/")
-	t.Logf("Branches before user commit: %v", branchesBefore)
-
 	// User commits remaining file A
 	env.GitCommitWithHooks("Add file A", "fileA.go")
 	userCommitHash := env.GetHeadHash()
@@ -542,14 +526,8 @@ func TestManualCommit_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 		FilesTouched: []string{"fileC.go"},
 	})
 
-	// No shadow branches should remain after all files are committed
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
-	t.Logf("Branches after all commits: %v", branchesAfter)
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 }
 
 // TestManualCommit_MultipleCommits_SameActiveTurn tests that multiple commits
@@ -872,8 +850,8 @@ func TestManualCommit_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 // uncommitted session files, manual edits with completely different content
 // do NOT get checkpoint trailers.
 //
-// The overlap check is content-aware: it compares file hashes between the
-// committed content and the shadow branch content. If they don't match,
+// The overlap check is content-aware: it compares the committed blob hash with
+// the hash recorded at turn end (TouchedFileHashes). If they don't match,
 // the file is not considered session-related.
 //
 // Flow:
@@ -881,7 +859,7 @@ func TestManualCommit_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 // 2. User commits files A and B → checkpoint #1
 // 3. User reverts file C (deletes it)
 // 4. User manually creates file C with different content
-// 5. User commits file C → NO checkpoint (content doesn't match shadow branch)
+// 5. User commits file C → NO checkpoint (content doesn't match the recorded hash)
 func TestManualCommit_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 	t.Parallel()
 
@@ -942,7 +920,7 @@ func TestManualCommit_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 
 	if secondCheckpointID != "" {
 		t.Errorf("Second commit should NOT have checkpoint trailer "+
-			"(content doesn't match shadow branch), got %s", secondCheckpointID)
+			"(content doesn't match the recorded hash), got %s", secondCheckpointID)
 	} else {
 		t.Log("Second commit correctly has no checkpoint trailer (content mismatch)")
 	}
@@ -1146,13 +1124,8 @@ func TestManualCommit_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 		ExpectedPrompts: []string{"Create files A and B"},
 	})
 
-	// No shadow branches should remain
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	t.Log("EndedSession_UserCommitsRemainingFiles test completed successfully")
 }
@@ -1216,7 +1189,7 @@ func TestManualCommit_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 
 	// User does git rm old_a.go and commits the deletion
 	env.GitRm("old_a.go")
-	env.GitCommitStagedWithShadowHooks("Remove old_a.go")
+	env.GitCommitStagedWithHooks("Remove old_a.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	// Deleted files may get a trailer via carry-forward, but condensation may not
@@ -1238,15 +1211,8 @@ func TestManualCommit_DeletedFiles_CheckpointAndCarryForward(t *testing.T) {
 		ExpectedPrompts: []string{"Create new_file.go and delete old_a.go"},
 	})
 
-	// Check for remaining shadow branches.
-	// Note: deleted file carry-forward may leave shadow branches if condensation
-	// doesn't produce full metadata (known limitation).
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Logf("Shadow branch remaining after commits (may be expected for deleted files): %s", b)
-		}
-	}
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	t.Log("DeletedFiles_CheckpointAndCarryForward test completed successfully")
 }
@@ -1334,13 +1300,8 @@ func TestManualCommit_CarryForward_ModifiedExistingFiles(t *testing.T) {
 		})
 	}
 
-	// No shadow branches should remain
-	branchesAfter := env.ListBranchesWithPrefix("entire/")
-	for _, b := range branchesAfter {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			t.Errorf("Unexpected shadow branch after all files committed: %s", b)
-		}
-	}
+	// No shadow branch exists: nothing writes git objects at turn end.
+	env.AssertNoShadowBranches()
 
 	t.Log("CarryForward_ModifiedExistingFiles test completed successfully")
 }

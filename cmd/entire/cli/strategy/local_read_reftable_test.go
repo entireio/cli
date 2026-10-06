@@ -19,7 +19,6 @@ func TestLocalRefReads_ReftableProcessCount(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			gitenv.IsolateRepository(t)
 			root, _, head := initCountTestRepo(t)
-			testutil.RunGit(t, root, "update-ref", "refs/heads/shadow", head)
 			testutil.RunGit(t, root, "update-ref", "refs/remotes/origin/topic", head)
 			testutil.MigrateToReftable(t, root)
 			if linked {
@@ -32,16 +31,6 @@ func TestLocalRefReads_ReftableProcessCount(t *testing.T) {
 			t.Cleanup(paths.ClearWorktreeRootCache)
 			_, err := paths.WorktreeRoot(t.Context())
 			require.NoError(t, err)
-			t.Run("branch", func(t *testing.T) {
-				repo, err := OpenRepository(t.Context())
-				require.NoError(t, err)
-				defer repo.Close()
-				commands := gitenv.TraceCommands(t)
-				require.NoError(t, branchExists(t.Context(), repo, "shadow"))
-				calls := commands()
-				require.Len(t, calls, 1, "%v", calls)
-				require.Contains(t, calls[0], "show-ref")
-			})
 			t.Run("tracking", func(t *testing.T) {
 				commands := gitenv.TraceCommands(t)
 				require.True(t, remoteHasTrackingRefs(t.Context(), "origin"))

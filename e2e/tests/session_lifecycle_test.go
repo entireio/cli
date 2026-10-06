@@ -44,7 +44,6 @@ func TestEndedSessionUserCommitsAfterExit(t *testing.T) {
 		assert.NotEqual(t, cpID1, cpID2, "each commit should have its own checkpoint ID")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -81,7 +80,6 @@ func TestSessionDepletedManualEditNoCheckpoint(t *testing.T) {
 		assert.Equal(t, cpBranchAfterAgent, cpBranchAfterManual,
 			"manual edit after session depletion should not advance checkpoint state")
 		testutil.AssertNoCheckpointTrailer(t, s.Dir, "HEAD")
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -106,7 +104,5 @@ func TestTrailerRemovalSkipsCondensation(t *testing.T) {
 
 		time.Sleep(5 * time.Second)
 		testutil.AssertCheckpointNotAdvanced(t, s)
-		// Shadow branch legitimately persists: hooks were bypassed so
-		// post-commit cleanup never ran.
 	})
 }

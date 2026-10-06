@@ -10,20 +10,18 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// TestManualCommit_MidSessionRebaseMigration tests that when Claude performs a rebase
-// mid-session (via a tool call), the shadow branch is automatically migrated
-// to the new HEAD and subsequent checkpoints are saved correctly.
+// TestManualCommit_MidSessionRebaseFollowsHead tests that when Claude performs a rebase
+// mid-session (via a tool call), the session's BaseCommit follows HEAD at the
+// next turn end and the earlier pending steps survive.
 //
 // This is a critical scenario because:
 // 1. Claude can run `git rebase` via the Bash tool
 // 2. No new prompt is submitted between the rebase and the next checkpoint
-// 3. Without migration in SaveStep, checkpoints go to an orphaned shadow branch
 //
 // The test validates that:
-// - Checkpoints before rebase go to the original shadow branch
-// - Checkpoints after rebase go to the new (migrated) shadow branch
+// - Turn-end steps before and after the rebase are both pending
 // - The session state's BaseCommit is updated correctly
-func TestManualCommit_MidSessionRebaseMigration(t *testing.T) {
+func TestManualCommit_MidSessionRebaseFollowsHead(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -82,16 +80,9 @@ func TestManualCommit_MidSessionRebaseMigration(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
 	}
 
-	// Verify shadow branch exists at original commit
-	originalShadowBranch := env.GetShadowBranchNameForCommit(initialFeatureHead)
-	if !env.BranchExists(originalShadowBranch) {
-		t.Fatalf("Shadow branch %s should exist after first checkpoint", originalShadowBranch)
-	}
-	t.Logf("Checkpoint 1 created on shadow branch: %s", originalShadowBranch)
-
-	// Verify checkpoint 1 content landed on the shadow branch
-	if !env.FileExistsInBranch(originalShadowBranch, "a.go") {
-		t.Fatalf("a.go should exist on shadow branch %s after first checkpoint", originalShadowBranch)
+	// Verify checkpoint 1 was recorded in session state on the original base
+	if state := env.AssertTurnEndRecorded(session.ID, "a.go"); state.BaseCommit != initialFeatureHead {
+		t.Fatalf("BaseCommit = %s, want %s", state.BaseCommit, initialFeatureHead)
 	}
 
 	// ========================================
@@ -131,38 +122,15 @@ func TestManualCommit_MidSessionRebaseMigration(t *testing.T) {
 	)
 
 	// This is the critical test: SimulateStop calls SaveStep which should
-	// detect HEAD has changed and migrate the shadow branch
+	// detect HEAD has changed and move the session's BaseCommit
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
 		t.Fatalf("SimulateStop (checkpoint 2 after rebase) failed: %v", err)
 	}
 
 	// ========================================
-	// Phase 5: Verify migration happened
+	// Phase 5: Verify BaseCommit followed HEAD
 	// ========================================
-	t.Log("Phase 5: Verifying shadow branch migration")
-
-	// The new shadow branch should exist (based on rebased HEAD)
-	newShadowBranch := env.GetShadowBranchNameForCommit(newFeatureHead)
-
-	// Verify the new shadow branch exists
-	if !env.BranchExists(newShadowBranch) {
-		t.Errorf("New shadow branch %s should exist after migration", newShadowBranch)
-		t.Logf("Available branches: %v", env.ListBranchesWithPrefix("entire/"))
-
-		// Check if old shadow branch still exists (would indicate no migration)
-		if env.BranchExists(originalShadowBranch) {
-			t.Errorf("Original shadow branch %s still exists - migration did not happen!", originalShadowBranch)
-		}
-	} else {
-		t.Logf("✓ New shadow branch exists: %s", newShadowBranch)
-	}
-
-	// Verify old shadow branch is gone (renamed/migrated)
-	if env.BranchExists(originalShadowBranch) {
-		t.Errorf("Original shadow branch %s should have been deleted after migration", originalShadowBranch)
-	} else {
-		t.Logf("✓ Original shadow branch %s was cleaned up", originalShadowBranch)
-	}
+	t.Log("Phase 5: Verifying BaseCommit followed HEAD")
 
 	// Verify session state has updated BaseCommit
 	state, err := env.GetSessionState(session.ID)
@@ -179,20 +147,15 @@ func TestManualCommit_MidSessionRebaseMigration(t *testing.T) {
 		t.Logf("✓ Session BaseCommit updated to: %s", state.BaseCommit[:7])
 	}
 
-	// Verify both checkpoints' content is on the new shadow branch
-	if !env.FileExistsInBranch(newShadowBranch, "a.go") {
-		t.Error("a.go (checkpoint 1) should exist on migrated shadow branch")
-	}
-	if !env.FileExistsInBranch(newShadowBranch, "b.go") {
-		t.Error("b.go (checkpoint 2) should exist on migrated shadow branch")
-	}
+	// Verify both checkpoints' files are still pending in session state
+	env.AssertTurnEndRecorded(session.ID, "a.go", "b.go")
 	if state.StepCount != 2 {
-		t.Errorf("Expected 2 checkpoints after migration, got %d", state.StepCount)
+		t.Errorf("Expected 2 steps after BaseCommit sync, got %d", state.StepCount)
 	} else {
-		t.Logf("✓ Found %d checkpoints after migration", state.StepCount)
+		t.Logf("✓ Found %d steps after BaseCommit sync", state.StepCount)
 	}
 
-	t.Log("Mid-session rebase migration test completed successfully!")
+	t.Log("Mid-session rebase test completed successfully!")
 }
 
 // gitCheckout is a helper to checkout a specific ref using git CLI.
@@ -209,13 +172,13 @@ func (env *TestEnv) gitCheckout(ref string) {
 }
 
 // TestManualCommit_CommitThenRebaseMidSession tests the scenario where Claude:
-// 1. Creates checkpoints (shadow branch exists)
-// 2. Commits the work (triggers condensation, shadow branch is DELETED)
+// 1. Creates checkpoints (pending turn-end steps)
+// 2. Commits the work (triggers condensation)
 // 3. Rebases onto another branch (HEAD changes)
 // 4. Creates more checkpoints
 //
-// This verifies there's no race condition between shadow branch cleanup
-// (from condensation) and the migration logic in SaveStep.
+// This verifies condensation's state reset and the BaseCommit sync in SaveStep
+// compose.
 func TestManualCommit_CommitThenRebaseMidSession(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
@@ -268,15 +231,11 @@ func TestManualCommit_CommitThenRebaseMidSession(t *testing.T) {
 		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
 	}
 
-	// Verify shadow branch exists
-	originalShadowBranch := env.GetShadowBranchNameForCommit(initialFeatureHead)
-	if !env.BranchExists(originalShadowBranch) {
-		t.Fatalf("Shadow branch %s should exist after first checkpoint", originalShadowBranch)
-	}
-	t.Logf("Checkpoint 1 created on shadow branch: %s", originalShadowBranch)
+	// Verify checkpoint 1 was recorded
+	env.AssertTurnEndRecorded(session.ID, "a.go")
 
 	// ========================================
-	// Phase 3: Claude commits (triggers condensation which DELETES shadow branch)
+	// Phase 3: Claude commits (triggers condensation)
 	// ========================================
 	t.Log("Phase 3: Claude commits (triggers condensation)")
 
@@ -287,13 +246,6 @@ func TestManualCommit_CommitThenRebaseMidSession(t *testing.T) {
 
 	postCommitHead := env.GetHeadHash()
 	t.Logf("After commit, feature HEAD: %s", postCommitHead[:7])
-
-	// Verify shadow branch was deleted by condensation
-	if env.BranchExists(originalShadowBranch) {
-		t.Logf("Note: Shadow branch %s still exists after commit (condensation may not have deleted it)", originalShadowBranch)
-	} else {
-		t.Logf("✓ Shadow branch %s was deleted by condensation", originalShadowBranch)
-	}
 
 	// Verify data was condensed to metadata branch
 	if !env.BranchExists(paths.MetadataBranchName) {
@@ -337,7 +289,7 @@ func TestManualCommit_CommitThenRebaseMidSession(t *testing.T) {
 	}
 
 	// This should NOT fail even though:
-	// - Original shadow branch was deleted by condensation
+	// - Condensation reset the session's pending work
 	// - HEAD changed twice (commit, then rebase)
 	// - Session state still has old BaseCommit
 	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
@@ -348,15 +300,6 @@ func TestManualCommit_CommitThenRebaseMidSession(t *testing.T) {
 	// Phase 6: Verify correct behavior
 	// ========================================
 	t.Log("Phase 6: Verifying correct behavior")
-
-	// New shadow branch should exist (based on rebased HEAD)
-	newShadowBranch := env.GetShadowBranchNameForCommit(postRebaseHead)
-	if !env.BranchExists(newShadowBranch) {
-		t.Errorf("New shadow branch %s should exist", newShadowBranch)
-		t.Logf("Available branches: %v", env.ListBranchesWithPrefix("entire/"))
-	} else {
-		t.Logf("✓ New shadow branch exists: %s", newShadowBranch)
-	}
 
 	// Session state should have updated BaseCommit
 	state, err := env.GetSessionState(session.ID)
@@ -373,12 +316,8 @@ func TestManualCommit_CommitThenRebaseMidSession(t *testing.T) {
 		t.Logf("✓ Session BaseCommit updated to: %s", state.BaseCommit[:7])
 	}
 
-	// The new checkpoint's content should be on the new shadow branch
-	if !env.FileExistsInBranch(newShadowBranch, "b.go") {
-		t.Error("b.go should exist on the new shadow branch")
-	} else {
-		t.Log("✓ b.go found on the new shadow branch")
-	}
+	// The new turn-end step recorded b.go
+	env.AssertTurnEndRecorded(session.ID, "b.go")
 
 	t.Log("Commit-then-rebase mid-session test completed successfully!")
 }

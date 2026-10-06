@@ -59,8 +59,9 @@ type CondenseResult struct {
 	// TranscriptSizeBaseline is the byte size to record as
 	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
 	// pre-externalization transcript so it lives in the same coordinate as the
-	// shadow-branch blob it is later compared against in sessionHasNewContent. A
-	// raw-transcript size makes `blobSize > baseline` false forever for agents with
+	// stored turn-end transcript it is later compared against in
+	// sessionHasNewContent (storedTranscriptSize). A raw-transcript size makes
+	// `storedSize > baseline` false forever for agents with
 	// a TranscriptSanitizer, so the session silently stops condensing after its
 	// first commit.
 	TranscriptSizeBaseline int64
@@ -74,7 +75,7 @@ type CondenseResult struct {
 	NewSkillEvents []agent.SkillEvent
 }
 
-// ExtractedSessionData contains data extracted from a shadow branch.
+// ExtractedSessionData contains the session data a condensation stores.
 type ExtractedSessionData struct {
 	Transcript          []byte   // Full transcript content for the session
 	FullTranscriptLines int      // Total line count in full transcript

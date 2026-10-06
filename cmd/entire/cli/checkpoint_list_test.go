@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
@@ -42,7 +44,7 @@ func TestPendingCheckpointJSON_MatchesRewindListContract(t *testing.T) {
 		SessionID:        "s1",
 		SessionPrompt:    "do the thing",
 	}
-	// A task (shadow, uncommitted) point: has tool_use_id; condensation_id,
+	// A task-record (uncommitted) point: has tool_use_id; condensation_id,
 	// session_id, session_prompt are empty and must be omitted. metadata_dir and
 	// the two bools have no omitempty and must always render.
 	task := pendingCheckpointJSON{
@@ -118,13 +120,12 @@ func TestRunCheckpointPendingListHuman_Empty(t *testing.T) {
 
 // TestCheckpointListCmd_Routing drives the real `checkpoint list` command
 // end-to-end and asserts each flag combination routes to the right
-// dataset/renderer. The repo is seeded with a shadow checkpoint so the
-// condensed dataset is non-empty; the pending dataset stays empty because
-// ListPendingCheckpoints requires active-session state (created by lifecycle hooks,
-// exercised by the integration canary), which a raw ephemeral-store seed does
-// not register — this also demonstrates the two datasets are distinct.
+// dataset/renderer. The repo is seeded with a committed checkpoint, which the
+// condensed dataset lists by checkpoint ID and the pending dataset lists as a
+// logs-only resume point keyed by the commit — the two shapes differ, which is
+// what the assertions pin.
 func TestCheckpointListCmd_Routing(t *testing.T) {
-	setupCheckpointListRepoWithShadowCheckpoint(t)
+	setupCheckpointListRepoWithCommittedCheckpoint(t)
 
 	// --json → condensed dataset, branchCheckpointJSON shape.
 	condensed := runListCmd(t, "--json")
@@ -132,16 +133,19 @@ func TestCheckpointListCmd_Routing(t *testing.T) {
 	require.Contains(t, condensed, `"checkpoint_id"`, "condensed --json must use branchCheckpointJSON shape")
 	require.NotContains(t, condensed, `"metadata_dir"`, "condensed --json must not carry pending-only fields")
 
-	// --pending (human) → pending renderer, empty here.
+	// --pending (human) → pending renderer: the commit's logs-only row.
 	pendingHuman := runListCmd(t, "--pending")
-	require.Contains(t, pendingHuman, "No pending checkpoints found.",
+	require.Contains(t, pendingHuman, "Second change",
 		"--pending (human) must route to the pending human renderer")
+	require.NotContains(t, pendingHuman, "No pending checkpoints found.")
 
-	// --pending --json → pending JSON renderer, empty array (distinct from the
-	// human renderer above and from the condensed dataset).
+	// --pending --json → pending JSON renderer (distinct from the human
+	// renderer above and from the condensed dataset).
 	pendingJSON := runListCmd(t, "--pending", "--json")
-	require.JSONEq(t, "[]", pendingJSON,
+	require.True(t, json.Valid([]byte(pendingJSON)), "pending --json must be valid JSON, got: %s", pendingJSON)
+	require.Contains(t, pendingJSON, `"condensation_id": "c1c2c3d4e5f6"`,
 		"--pending --json must route to the pending JSON renderer")
+	require.Contains(t, pendingJSON, `"is_logs_only": true`)
 	require.NotContains(t, pendingJSON, `"checkpoint_id"`, "pending --json must never carry condensed-only fields")
 }
 
@@ -197,48 +201,29 @@ func setupCheckpointListRepo(t *testing.T) (*git.Repository, string) {
 	return repo, tmpDir
 }
 
-// setupCheckpointListRepoWithShadowCheckpoint extends setupCheckpointListRepo by
-// seeding a checkpoint on the v1 metadata branch with real code changes, so the
-// condensed branch view is non-empty for routing tests.
-func setupCheckpointListRepoWithShadowCheckpoint(t *testing.T) {
+// setupCheckpointListRepoWithCommittedCheckpoint extends setupCheckpointListRepo
+// by writing a checkpoint to the v1 metadata branch and committing a code change
+// whose Entire-Checkpoint trailer links it, so the condensed branch view is
+// non-empty for routing tests.
+func setupCheckpointListRepoWithCommittedCheckpoint(t *testing.T) {
 	t.Helper()
 	repo, tmpDir := setupCheckpointListRepo(t)
 
-	sessionID := "2026-07-09-list-test-session"
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", sessionID)
-	require.NoError(t, os.MkdirAll(metadataDir, 0o750))
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, paths.PromptFileName), []byte("seed prompt"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644))
+	cpID := checkpointid.MustCheckpointID("c1c2c3d4e5f6")
+	require.NoError(t, checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(context.Background(), checkpoint.Session(checkpoint.WriteOptions{
+		CheckpointID: cpID,
+		SessionID:    "2026-07-09-list-test-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}` + "\n")),
+		Prompts:      []string{"seed prompt"},
+		FilesTouched: []string{"test.txt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	})))
 
-	head, err := repo.Head()
-	require.NoError(t, err)
-	baseCommit := head.Hash().String()[:7]
-
-	store := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs())
-	_, err = store.Write(context.Background(), checkpoint.Step{
-		SessionID:         sessionID,
-		BaseCommit:        baseCommit,
-		ModifiedFiles:     []string{"test.txt"},
-		MetadataDir:       ".entire/metadata/" + sessionID,
-		CommitMessage:     "First checkpoint (baseline)",
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-		IsFirstCheckpoint: true,
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("second modification"), 0o644))
-	_, err = store.Write(context.Background(), checkpoint.Step{
-		SessionID:         sessionID,
-		BaseCommit:        baseCommit,
-		ModifiedFiles:     []string{"test.txt"},
-		MetadataDir:       ".entire/metadata/" + sessionID,
-		CommitMessage:     "Second checkpoint with code changes",
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-		IsFirstCheckpoint: false,
-	})
-	require.NoError(t, err)
+	testutil.WriteFile(t, tmpDir, "test.txt", "second modification")
+	testutil.GitAdd(t, tmpDir, "test.txt")
+	testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint("Second change", cpID))
 
 	// Sanity: the seeded checkpoint must be visible to the condensed branch view,
 	// otherwise the routing assertions below would pass vacuously on an empty array.

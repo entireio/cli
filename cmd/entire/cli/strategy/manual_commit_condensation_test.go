@@ -1105,7 +1105,7 @@ func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testi
 const taskTranscriptSecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
 
 // setupCondensableSessionWithTranscript creates a git repo, writes a session
-// transcript, and runs SaveStep so the session has a shadow branch and passes
+// transcript, and runs SaveStep so the session has a turn-end step and passes
 // CondenseSession's existing no-transcript-no-files skip gate — the fixture
 // shared by the task-record materializer tests below.
 func setupCondensableSessionWithTranscript(t *testing.T, sessionID string) (*git.Repository, *SessionState) {
@@ -1584,7 +1584,7 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 
 // TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes is the
 // trigger half of invariant 7: a records-only session (read-only background
-// subagent; no SaveStep, no shadow branch, no files, no parent transcript)
+// subagent; no SaveStep, no files, no parent transcript)
 // must condense into a real checkpoint carrying tasks/<id>/. FullyCondensed is
 // already true here because the task may complete after SessionEnd condensed
 // the earlier state; the new task content must make the session eligible again.

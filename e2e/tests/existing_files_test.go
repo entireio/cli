@@ -42,7 +42,6 @@ func TestModifyExistingTrackedFile(t *testing.T) {
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -84,16 +83,14 @@ func TestMixedNewAndModifiedFiles(t *testing.T) {
 		assert.NotEqual(t, cpID1, cpID2, "checkpoint IDs should be distinct")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID1)
 		testutil.AssertCheckpointExists(t, s.Dir, cpID2)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
 // TestInteractiveContentOverlapRevertNewFile: agent creates a file, user replaces its
 // content entirely with different text and commits while the session is still
 // idle (not ended). The content-aware overlap detection should prevent a
-// checkpoint trailer (content mismatch on new file). The shadow branch
-// correctly persists because the session is still active and no condensation
-// occurred.
+// checkpoint trailer: the committed blob does not match the hash recorded for
+// the new file at turn end.
 func TestInteractiveContentOverlapRevertNewFile(t *testing.T) {
 	testutil.ForEachAgent(t, 2*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		prompt := s.Agent.PromptPattern()
@@ -128,9 +125,6 @@ func TestInteractiveContentOverlapRevertNewFile(t *testing.T) {
 
 		testutil.AssertNoCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointNotAdvanced(t, s)
-		// Shadow branch correctly persists: session is idle and no
-		// condensation occurred (content mismatch on new file).
-		testutil.AssertHasShadowBranches(t, s.Dir)
 	})
 }
 
@@ -170,6 +164,5 @@ func TestModifiedFileAlwaysGetsCheckpoint(t *testing.T) {
 
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

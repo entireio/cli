@@ -16,14 +16,8 @@ const (
 	// MetadataTrailerKey points to the metadata directory within a commit tree.
 	MetadataTrailerKey = "Entire-Metadata"
 
-	// MetadataTaskTrailerKey points to the task metadata directory for subagent checkpoints.
-	MetadataTaskTrailerKey = "Entire-Metadata-Task"
-
 	// StrategyTrailerKey indicates which strategy created the commit.
 	StrategyTrailerKey = "Entire-Strategy"
-
-	// BaseCommitTrailerKey links shadow commits to their base code commit.
-	BaseCommitTrailerKey = "Base-Commit"
 
 	// SessionTrailerKey identifies which session created a commit.
 	SessionTrailerKey = "Entire-Session"
@@ -31,7 +25,7 @@ const (
 	// CondensationTrailerKey identifies the condensation ID for a commit (legacy).
 	CondensationTrailerKey = "Entire-Condensation"
 
-	// SourceRefTrailerKey links code commits to their metadata on a shadow/metadata branch.
+	// SourceRefTrailerKey links code commits to their metadata on the metadata branch.
 	// Format: "<branch>@<commit-hash>" e.g. "entire/metadata@abc123def456"
 	SourceRefTrailerKey = "Entire-Source-Ref"
 
@@ -40,11 +34,6 @@ const (
 	// or a 26-char ULID (see checkpoint/id.CheckpointPattern).
 	// This trailer survives git amend and rebase operations.
 	CheckpointTrailerKey = "Entire-Checkpoint"
-
-	// EphemeralBranchTrailerKey identifies the shadow branch that a checkpoint originated from.
-	// Used in manual-commit strategy checkpoint commits on entire/checkpoints/v1 branch.
-	// Format: full branch name e.g. "entire/2b4c177"
-	EphemeralBranchTrailerKey = "Ephemeral-branch"
 
 	// AgentTrailerKey identifies the agent that created a checkpoint.
 	// Format: human-readable agent name e.g. "Claude Code", "Cursor"
@@ -66,26 +55,15 @@ const (
 
 // Pre-compiled regexes for trailer parsing.
 var (
-	metadataTrailerRegex     = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
-	taskMetadataTrailerRegex = regexp.MustCompile(MetadataTaskTrailerKey + `:\s*(.+)`)
-	sessionTrailerRegex      = regexp.MustCompile(SessionTrailerKey + `:\s*(.+)`)
-	checkpointTrailerRegex   = regexp.MustCompile(CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)(?:\s|$)`)
+	metadataTrailerRegex   = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
+	sessionTrailerRegex    = regexp.MustCompile(SessionTrailerKey + `:\s*(.+)`)
+	checkpointTrailerRegex = regexp.MustCompile(CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)(?:\s|$)`)
 )
 
 // ParseMetadata extracts metadata dir from commit message.
 // Returns the metadata directory and true if found, empty string and false otherwise.
 func ParseMetadata(commitMessage string) (string, bool) {
 	matches := metadataTrailerRegex.FindStringSubmatch(commitMessage)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1]), true
-	}
-	return "", false
-}
-
-// ParseTaskMetadata extracts task metadata dir from commit message.
-// Returns the task metadata directory and true if found, empty string and false otherwise.
-func ParseTaskMetadata(commitMessage string) (string, bool) {
-	matches := taskMetadataTrailerRegex.FindStringSubmatch(commitMessage)
 	if len(matches) > 1 {
 		return strings.TrimSpace(matches[1]), true
 	}
@@ -151,30 +129,6 @@ func FormatSourceRef(branch, commitHash string) string {
 		shortHash = shortHash[:checkpointID.ShortIDLength]
 	}
 	return fmt.Sprintf("%s@%s", branch, shortHash)
-}
-
-// FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.
-// Includes Entire-Metadata, Entire-Session, and Entire-Strategy trailers.
-func FormatShadowCommit(message, metadataDir, sessionID string) string {
-	var sb strings.Builder
-	sb.WriteString(message)
-	sb.WriteString("\n\n")
-	fmt.Fprintf(&sb, "%s: %s\n", MetadataTrailerKey, metadataDir)
-	fmt.Fprintf(&sb, "%s: %s\n", SessionTrailerKey, sessionID)
-	fmt.Fprintf(&sb, "%s: %s\n", StrategyTrailerKey, "manual-commit")
-	return sb.String()
-}
-
-// FormatShadowTaskCommit creates a commit message for manual-commit task checkpoints.
-// Includes Entire-Metadata-Task, Entire-Session, and Entire-Strategy trailers.
-func FormatShadowTaskCommit(message, taskMetadataDir, sessionID string) string {
-	var sb strings.Builder
-	sb.WriteString(message)
-	sb.WriteString("\n\n")
-	fmt.Fprintf(&sb, "%s: %s\n", MetadataTaskTrailerKey, taskMetadataDir)
-	fmt.Fprintf(&sb, "%s: %s\n", SessionTrailerKey, sessionID)
-	fmt.Fprintf(&sb, "%s: %s\n", StrategyTrailerKey, "manual-commit")
-	return sb.String()
 }
 
 // FormatCheckpoint creates a commit message with a checkpoint trailer.

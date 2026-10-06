@@ -173,14 +173,11 @@ type WriteOptions struct {
 	// historical name/JSON tag, it is no longer a count of checkpoints.
 	CheckpointsCount int
 
-	// SaveStepCount is the number of SaveStep-recorded steps (shadow-branch
-	// commits) for this session. Distinct from CheckpointsCount (the displayed
-	// prompt count): this is the honest "did real checkpoint work happen" signal
-	// used to gate combined attribution. 0 means a commit-only / fallback session.
+	// SaveStepCount is the number of SaveStep-recorded turn-end steps for this
+	// session. Distinct from CheckpointsCount (the displayed prompt count): this
+	// is the honest "did real checkpoint work happen" signal. 0 means a
+	// commit-only / fallback session.
 	SaveStepCount int
-
-	// EphemeralBranch is the shadow branch name (for manual-commit strategy)
-	EphemeralBranch string
 
 	// AuthorName is the name to use for commits
 	AuthorName string

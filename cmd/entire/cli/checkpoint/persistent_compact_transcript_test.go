@@ -44,7 +44,7 @@ func readBranchFile(t *testing.T, store *GitStore, path string) (string, bool) {
 
 func TestWriteCommitted_WritesCompactTranscript(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a1b2c3d4e5f6")
 
@@ -107,7 +107,7 @@ func TestWriteCommitted_WritesCompactTranscript(t *testing.T) {
 // recover this checkpoint's content as fullCompactLines[marker:].
 func TestWriteCommitted_CompactTranscriptFullWithMarker(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("b2c3d4e5f6a1")
 
@@ -153,7 +153,7 @@ func TestWriteCommitted_CompactTranscriptFullWithMarker(t *testing.T) {
 
 func TestWriteCommitted_NonCompactableTranscriptPointsAtFull(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("c3d4e5f6a1b2")
 
@@ -192,7 +192,7 @@ func TestWriteCommitted_NonCompactableTranscriptPointsAtFull(t *testing.T) {
 // at it rather than staying omitted.
 func TestUpdateCommitted_RefreshesCompactTranscriptPointer(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("f6a1b2c3d4e5")
 
@@ -261,7 +261,7 @@ func codexTranscriptWithCompactionBeforeStart() []byte {
 // compact transcript.
 func TestUpdateCommitted_CodexCompactSanitizedLikeInitialWrite(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("e5f6a1b2c3d4")
 
@@ -361,7 +361,7 @@ func assertCompactSliceScoped(t *testing.T, compactContent string, marker int, w
 // left pointing at content that no longer matches the re-redacted full.jsonl.
 func TestUpdateCommitted_DropsStaleCompactWhenRegenerationProducesNone(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a7b8c9d0e1f2")
 
@@ -412,7 +412,7 @@ func TestUpdateCommitted_DropsStaleCompactWhenRegenerationProducesNone(t *testin
 
 func TestUpdateCommitted_RegeneratesCompactTranscript(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("d4e5f6a1b2c3")
 

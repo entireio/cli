@@ -99,50 +99,6 @@ func WaitForCheckpoint(t *testing.T, s *RepoState, timeout time.Duration) {
 	t.Fatalf("checkpoint state did not advance within %s", timeout)
 }
 
-// ShadowBranches returns all shadow branches (entire/*) excluding entire/checkpoints/*.
-func ShadowBranches(t *testing.T, dir string) []string {
-	t.Helper()
-	branches := GitOutput(t, dir, "for-each-ref", "--format=%(refname:short)", "refs/heads/entire/")
-	var shadow []string
-	for _, b := range strings.Split(branches, "\n") {
-		b = strings.TrimSpace(b)
-		if b == "" || strings.HasPrefix(b, "entire/checkpoints") {
-			continue
-		}
-		shadow = append(shadow, b)
-	}
-	return shadow
-}
-
-// WaitForNoShadowBranches polls until all shadow branches are cleaned up or
-// the timeout expires. Shadow branch cleanup can lag slightly behind checkpoint
-// condensation (carry-forward creates intermediate branches that are deleted
-// asynchronously).
-func WaitForNoShadowBranches(t *testing.T, dir string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		shadow := ShadowBranches(t, dir)
-		if len(shadow) == 0 {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	shadow := ShadowBranches(t, dir)
-	require.Emptyf(t, shadow,
-		"shadow branches should be cleaned up within %s after commit, found: %v", timeout, shadow)
-}
-
-// AssertHasShadowBranches asserts that at least one shadow branch (entire/*)
-// exists, excluding entire/checkpoints/*. Use this when the shadow branch is
-// expected to persist (e.g., session is still idle).
-func AssertHasShadowBranches(t *testing.T, dir string) {
-	t.Helper()
-	shadow := ShadowBranches(t, dir)
-	assert.NotEmpty(t, shadow,
-		"expected at least one shadow branch to persist, but none found")
-}
-
 // AssertCheckpointAdvanced asserts the committed checkpoint state moved forward.
 func AssertCheckpointAdvanced(t *testing.T, s *RepoState) {
 	t.Helper()

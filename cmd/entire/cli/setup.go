@@ -1312,7 +1312,7 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - .entire/ directory (settings, logs, metadata)
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
   - Session state files (.git/entire-sessions/)
-  - Shadow branches (entire/<hash>)
+  - Shadow branches older versions left behind (entire/<hash>)
   - Agent hooks
 
 An external agent's hooks live inside its plugin, so removing them means asking the
@@ -2950,7 +2950,8 @@ func uninstallEntireDir(ctx context.Context, p *uninstallPrinter, dirExists bool
 	return true
 }
 
-// uninstallShadowBranches removes all shadow branches and reports what it did.
+// uninstallShadowBranches removes the legacy shadow branches older versions
+// left behind and reports what it did.
 func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 	branchesRemoved, err := removeAllShadowBranches(ctx)
 	if err != nil {
@@ -3058,9 +3059,10 @@ func countSessionStates(ctx context.Context) int {
 	return len(states)
 }
 
-// countShadowBranches returns the number of shadow branches.
+// countShadowBranches returns the number of legacy shadow branches older CLI
+// versions left behind.
 func countShadowBranches(ctx context.Context) int {
-	branches, err := strategy.ListShadowBranches(ctx)
+	branches, err := strategy.ListLegacyShadowBranches(ctx)
 	if err != nil {
 		return 0
 	}
@@ -3337,15 +3339,19 @@ func removeEntireDirectory(ctx context.Context) error {
 	return root.RemoveAll(paths.EntireDir) //nolint:wrapcheck // caller names the directory; os error carries operation
 }
 
-// removeAllShadowBranches removes all shadow branches.
+// removeAllShadowBranches removes the legacy shadow branches older CLI
+// versions left behind.
 func removeAllShadowBranches(ctx context.Context) (int, error) {
-	branches, err := strategy.ListShadowBranches(ctx)
+	branches, err := strategy.ListLegacyShadowBranches(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to list shadow branches: %w", err)
+		return 0, fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
 	if len(branches) == 0 {
 		return 0, nil
 	}
-	deleted, _, err := strategy.DeleteShadowBranches(ctx, branches)
-	return len(deleted), err
+	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
+	if len(failed) > 0 {
+		return len(deleted), fmt.Errorf("failed to delete %d legacy shadow branch(es)", len(failed))
+	}
+	return len(deleted), nil
 }

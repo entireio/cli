@@ -2,8 +2,6 @@ package strategy
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,46 +48,4 @@ func TestGitCommitRefExists_PeelingAndAbsence(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	require.False(t, gitCommitRefExists(ctx, "HEAD"))
-}
-
-func TestBranchExists_RepositoryStates(t *testing.T) {
-	for _, state := range []string{"loose", "packed", "linked", "missing", "corrupt", "unborn", "canceled"} {
-		t.Run(state, func(t *testing.T) {
-			gitenv.IsolateRepository(t)
-			dir := t.TempDir()
-			testutil.InitRepo(t, dir)
-			t.Chdir(dir)
-			testutil.RunGit(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
-			if state != "unborn" {
-				testutil.RunGit(t, dir, "commit", "--allow-empty", "--no-gpg-sign", "-m", "initial")
-			}
-			branch := "main"
-			ctx := t.Context()
-			switch state {
-			case "packed":
-				testutil.RunGit(t, dir, "pack-refs", "--all")
-			case "linked":
-				linked := filepath.Join(t.TempDir(), "linked")
-				testutil.RunGit(t, dir, "worktree", "add", "--detach", linked)
-				t.Chdir(linked)
-			case "missing":
-				branch = "absent"
-			case "corrupt":
-				require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "refs", "heads", "main"), []byte("not an object id\n"), 0o600))
-			case "canceled":
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-			repo, err := OpenRepository(t.Context())
-			require.NoError(t, err)
-			defer repo.Close()
-			err = branchExists(ctx, repo, branch)
-			if state == "loose" || state == "packed" || state == "linked" {
-				require.NoError(t, err)
-			} else {
-				require.Error(t, err)
-			}
-		})
-	}
 }

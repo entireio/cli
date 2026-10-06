@@ -12,7 +12,6 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -21,20 +20,20 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
-	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
 
 func cleanLongDescription() string {
 	description := `Clean up Entire session data for the current HEAD commit.
 
-By default, cleans session state and shadow branches for the current HEAD:
+By default, cleans session state for the current HEAD:
   - Session state files (.git/entire-sessions/<session-id>.json)
-  - Shadow branch (entire/<commit-hash>-<worktree-hash>)
+  - Legacy shadow branches older CLI versions left behind
+    (entire/<commit-hash>-<worktree-hash>)
 
 Use --all to clean all Entire session data across the repository:
   - All session state files (.git/entire-sessions/)
-  - All shadow branches
+  - All legacy shadow branches, including the old entire/<commit-hash> form
   - Temporary files (.entire/tmp/)`
 
 	description += `
@@ -162,21 +161,10 @@ func previewCurrentHead(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("failed to get HEAD: %w", err)
 	}
 
-	worktreePath, err := paths.WorktreeRoot(ctx)
+	legacyBranches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get worktree path: %w", err)
+		return fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		return fmt.Errorf("failed to get worktree ID: %w", err)
-	}
-
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(head.Hash().String(), worktreeID)
-
-	// Check if shadow branch exists
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	_, refErr := repo.Reference(refName, true)
-	hasShadowBranch := refErr == nil
 
 	// Find sessions for this commit
 	strat := GetStrategy(ctx)
@@ -185,7 +173,7 @@ func previewCurrentHead(ctx context.Context, w io.Writer) error {
 		sessions = nil
 	}
 
-	if !hasShadowBranch && len(sessions) == 0 {
+	if len(legacyBranches) == 0 && len(sessions) == 0 {
 		fmt.Fprintln(w, "Nothing to clean for current HEAD.")
 		return nil
 	}
@@ -200,8 +188,12 @@ func previewCurrentHead(ctx context.Context, w io.Writer) error {
 		fmt.Fprintln(w)
 	}
 
-	if hasShadowBranch {
-		fmt.Fprintf(w, "Shadow branch:\n  %s\n\n", shadowBranchName)
+	if len(legacyBranches) > 0 {
+		fmt.Fprintf(w, "Legacy shadow branches (%d):\n", len(legacyBranches))
+		for _, branch := range legacyBranches {
+			fmt.Fprintf(w, "  %s\n", branch)
+		}
+		fmt.Fprintln(w)
 	}
 
 	fmt.Fprintln(w, "Run without --dry-run to clean these items.")
@@ -364,7 +356,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		totalItems := len(items) + len(tempFiles) + len(orphanTemps)
 		fmt.Fprintf(w, "Found %d %s to clean:\n\n", totalItems, itemWord(totalItems))
 
-		printSection(w, "Shadow branches", cleanupItemIDs(branches))
+		printSection(w, "Legacy shadow branches", cleanupItemIDs(branches))
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
 		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
@@ -415,7 +407,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	if totalDeleted > 0 {
 		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
 
-		printResultSection(w, "Shadow branches", result.ShadowBranches)
+		printResultSection(w, "Legacy shadow branches", result.ShadowBranches)
 		printResultSection(w, "Session states", result.SessionStates)
 		printResultSection(w, "Checkpoints", result.Checkpoints)
 
@@ -427,7 +419,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	if totalFailed > 0 {
 		fmt.Fprintf(errW, "\nFailed to delete %d %s:\n", totalFailed, itemWord(totalFailed))
 
-		printResultSection(errW, "Shadow branches", result.FailedBranches)
+		printResultSection(errW, "Legacy shadow branches", result.FailedBranches)
 		printResultSection(errW, "Session states", result.FailedStates)
 		printResultSection(errW, "Checkpoints", result.FailedCheckpoints)
 

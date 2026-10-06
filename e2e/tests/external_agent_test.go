@@ -37,7 +37,6 @@ func TestExternalAgentSingleSessionManualCommit(t *testing.T) {
 		testutil.AssertCheckpointMetadataComplete(t, s.Dir, cpID)
 		testutil.AssertCheckpointHasSingleSession(t, s.Dir, cpID)
 		testutil.AssertCheckpointFilesTouchedContains(t, s.Dir, cpID, "docs/hello.md")
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }
 
@@ -75,7 +74,6 @@ func TestExternalAgentMultipleTurnsManualCommit(t *testing.T) {
 		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
 		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 		testutil.AssertCheckpointMetadataComplete(t, s.Dir, cpID)
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 
 		// Both files should appear in files_touched
 		testutil.AssertCheckpointFilesTouchedContains(t, s.Dir, cpID, "src/alpha.txt")

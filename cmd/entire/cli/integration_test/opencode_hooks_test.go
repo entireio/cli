@@ -44,14 +44,8 @@ func TestOpenCodeHookFlow(t *testing.T) {
 		t.Fatalf("turn-end error: %v", err)
 	}
 
-	// 6. Verify checkpoint was created on the shadow branch
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after turn-end", shadowBranch)
-	}
-	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
-		t.Fatal("feature.go should exist on shadow branch after turn-end")
-	}
+	// 6. Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "feature.go")
 
 	// 7. For manual-commit, user commits manually (triggers condensation).
 	env.GitCommitWithHooks("Add feature", "feature.go")
@@ -76,7 +70,7 @@ func TestOpenCodeHookFlow(t *testing.T) {
 }
 
 // TestOpenCodeAgentStrategyComposition verifies that the OpenCode agent and strategy
-// work together correctly — agent parses session, strategy saves checkpoint on the shadow branch.
+// work together correctly — agent parses session, strategy records the turn end in session state.
 func TestOpenCodeAgentStrategyComposition(t *testing.T) {
 	t.Parallel()
 
@@ -125,14 +119,8 @@ func TestOpenCodeAgentStrategyComposition(t *testing.T) {
 		t.Fatalf("turn-end error = %v", err)
 	}
 
-	// Verify checkpoint was created on the shadow branch
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after turn-end", shadowBranch)
-	}
-	if !env.FileExistsInBranch(shadowBranch, "feature.go") {
-		t.Fatal("feature.go should exist on shadow branch after turn-end")
-	}
+	// Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "feature.go")
 }
 
 // TestOpenCodeMultiTurnCondensation verifies that multiple turns in a session
@@ -165,14 +153,8 @@ func TestOpenCodeMultiTurnCondensation(t *testing.T) {
 		t.Fatalf("turn-end error: %v", err)
 	}
 
-	// Verify checkpoint was created on the shadow branch
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after first turn", shadowBranch)
-	}
-	if !env.FileExistsInBranch(shadowBranch, "app.go") {
-		t.Fatal("app.go should exist on shadow branch after first turn")
-	}
+	// Verify the turn end was recorded in session state
+	env.AssertTurnEndRecorded(session.ID, "app.go")
 
 	// Commit with hooks (triggers condensation)
 	env.GitCommitWithHooks("Implement app", "app.go")
@@ -300,10 +282,7 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 		t.Fatalf("turn-end 1 error: %v", err)
 	}
 
-	shadowBranch1 := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch1) {
-		t.Fatalf("shadow branch %s should exist after turn 1", shadowBranch1)
-	}
+	env.AssertTurnEndRecorded(session.ID, "app.go")
 
 	// === User commits (triggers condensation) ===
 	env.GitCommitWithHooks("Create app", "app.go")
@@ -328,18 +307,8 @@ func TestOpenCodeResumedSessionAfterCommit(t *testing.T) {
 		t.Fatalf("turn-end 2 error: %v", err)
 	}
 
-	// === Verify: a new checkpoint was created for turn 2 on the new shadow branch ===
-	shadowBranch2 := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch2) {
-		t.Fatalf("shadow branch %s should exist after turn 2 (resumed session)", shadowBranch2)
-	}
-	content, found := env.ReadFileFromBranch(shadowBranch2, "app.go")
-	if !found {
-		t.Fatal("app.go should exist on shadow branch after turn 2 (resumed session)")
-	}
-	if content != "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"hello\") }" {
-		t.Errorf("app.go on shadow branch = %q, want turn 2 content", content)
-	}
+	// === Verify: turn 2 (resumed session) recorded a new turn-end step ===
+	env.AssertTurnEndRecorded(session.ID, "app.go")
 
 	// For manual-commit: commit turn 2 and verify second condensation
 	env.GitCommitWithHooks("Add color output", "app.go")

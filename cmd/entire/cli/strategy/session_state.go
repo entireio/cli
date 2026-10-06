@@ -278,7 +278,7 @@ func TransitionAndLog(goCtx context.Context, state *SessionState, event session.
 //
 // Why a separate file instead of SessionState?
 //
-// SessionState requires BaseCommit (used for shadow branch naming, checkpoint
+// SessionState requires BaseCommit (used for commit linking, checkpoint
 // writing, doctor classification, etc.) and is only created during TurnStart
 // when the git repo is fully inspected. Some agents report the model on earlier
 // hooks that fire as separate CLI processes before TurnStart:
@@ -520,8 +520,8 @@ func goroutineID() int64 {
 // inner load/save, so all mutations are flushed by the outermost call.
 //
 // fn may hold the lock for slow operations — PostCommit's callback, for
-// example, runs CondenseSession (shadow-branch tree builds, transcript
-// compaction) inside the gate. That's deliberate: PostToolUse must not slip
+// example, runs CondenseSession (transcript redaction and compaction,
+// checkpoint tree builds) inside the gate. That's deliberate: PostToolUse must not slip
 // in mid-condense and revert CheckpointTranscriptStart or files_touched.
 // A concurrent PostToolUse on the same session waits for the commit to
 // finish.
@@ -813,11 +813,12 @@ func RecordFilesTouched(ctx context.Context, sessionID string, modified, added, 
 		return nil
 	}
 	err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		merged := mergeFilesTouched(state.FilesTouched, modified, added, deleted)
-		if slices.Equal(merged, state.FilesTouched) {
+		before := slices.Clone(state.FilesTouched)
+		hashesBefore := len(state.TouchedFileHashes)
+		MergeUnhashedFilesTouched(state, modified, added, deleted)
+		if slices.Equal(before, state.FilesTouched) && hashesBefore == len(state.TouchedFileHashes) {
 			return ErrMutationSkip
 		}
-		state.FilesTouched = merged
 		return nil
 	})
 	if errors.Is(err, ErrStateNotFound) {

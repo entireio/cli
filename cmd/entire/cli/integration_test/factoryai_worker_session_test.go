@@ -4,8 +4,6 @@ package integration
 
 import (
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Factory AI Droid dispatches Workers as detached sessions: the parent's
@@ -15,8 +13,8 @@ import (
 // as a task record on the parent, not as an unrelated top-level session.
 
 // TestFactoryDroidWorkerSessionBecomesTaskCheckpoint covers the regression that
-// broke the E2E TestFactoryTaskRecordExistsBeforeCommit: a Worker's work reached
-// the shadow branch, but under its own session ID, so the parent had nothing
+// broke the E2E TestFactoryTaskRecordExistsBeforeCommit: a Worker's work was
+// recorded, but under its own session ID, so the parent had nothing
 // attributing it to the task.
 func TestFactoryDroidWorkerSessionBecomesTaskCheckpoint(t *testing.T) {
 	t.Parallel()
@@ -82,11 +80,14 @@ func TestFactoryDroidWorkerSessionBecomesTaskCheckpoint(t *testing.T) {
 		t.Errorf("the Worker's files must merge into the parent's FilesTouched, got %v", state.FilesTouched)
 	}
 
-	// A shadow write for the Worker session would misattribute the work to a
-	// session the user never drove — the exact shape of the regression.
-	if got := shadowBranches(env); len(got) != 0 {
-		t.Errorf("a Worker's turn must write a task record, not shadow data: %v", got)
+	// A turn-end step on the Worker's own session would misattribute the work
+	// to a session the user never drove — the exact shape of the regression.
+	if workerState, err := env.GetSessionState(worker.ID); err != nil {
+		t.Fatalf("GetSessionState(worker) failed: %v", err)
+	} else if workerState != nil && workerState.StepCount != 0 {
+		t.Errorf("a Worker's turn must write a task record, not a step on its own session (StepCount=%d)", workerState.StepCount)
 	}
+	env.AssertNoShadowBranches()
 
 	// Multi-turn Workers upsert into the SAME record: a second turn must MERGE
 	// its files with turn 1's (not overwrite them) and re-declare the
@@ -154,14 +155,10 @@ func TestFactoryDroidTopLevelSessionStillCheckpoints(t *testing.T) {
 		t.Fatalf("Stop failed: %v", err)
 	}
 
-	shadowBranch := env.GetShadowBranchName()
-	sessionCheckpoint := ".entire/metadata/" + session.ID + "/" + paths.TranscriptFileName
-	if !env.FileExistsInBranch(shadowBranch, sessionCheckpoint) {
-		t.Errorf("expected an ordinary session checkpoint at %s", sessionCheckpoint)
-	}
-
-	// It must not be diverted into a task checkpoint under some other session.
-	if env.FileExistsInBranch(shadowBranch, ".entire/metadata/"+session.ID+"/tasks") {
-		t.Errorf("a top-level session must not be recorded as a task")
+	// An ordinary turn-end step on its own session...
+	state := env.AssertTurnEndRecorded(session.ID, "feature.go")
+	// ...not diverted into a task record.
+	if len(state.TaskRecords) != 0 {
+		t.Errorf("a top-level session must not be recorded as a task, got %+v", state.TaskRecords)
 	}
 }

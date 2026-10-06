@@ -502,7 +502,7 @@ func TestMultipleReadOnlySessions_NoneCondensed(t *testing.T) {
 }
 
 // TestAllReadOnlySessions_NoCheckpointCreated verifies that when ALL sessions are
-// read-only (no session has shadow branch content), no checkpoint trailer is added
+// read-only (no session recorded a turn-end step), no checkpoint trailer is added
 // and no condensation occurs. PrepareCommitMsg's filterSessionsWithNewContent
 // filters out sessions that never called SaveStep, so no trailer is written.
 // This documents the full end-to-end behavior: read-only sessions produce no
@@ -679,12 +679,14 @@ func TestEmptySession_NoTranscriptPath_NotCondensed(t *testing.T) {
 	env.AssertCheckpointContainsSession(t, summary, codingSess.ID)
 	env.AssertCheckpointExcludesSession(t, summary, emptySess.ID)
 
-	// The empty session should NOT have been condensed
+	// The empty session should NOT have been condensed. Having nothing
+	// pending and never having been condensed, it may instead have been
+	// cleared as an orphan when the commit hooks listed sessions.
 	emptyStateAfter, err := env.GetSessionState(emptySess.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState for empty session after commit failed: %v", err)
 	}
-	if emptyStateAfter.LastCheckpointID != emptyState.LastCheckpointID {
+	if emptyStateAfter != nil && emptyStateAfter.LastCheckpointID != emptyState.LastCheckpointID {
 		t.Errorf("Empty session LastCheckpointID changed from %q to %q — it was incorrectly condensed",
 			emptyState.LastCheckpointID, emptyStateAfter.LastCheckpointID)
 	}

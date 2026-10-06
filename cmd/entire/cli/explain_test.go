@@ -480,7 +480,7 @@ func TestRunExplainAuto_CommitWithoutTrailer(t *testing.T) {
 
 // TestShouldFallBackToCommitResolution pins runExplainAuto's fallback
 // decision: commit resolution may run ONLY when the positional target matched
-// no committed or temporary checkpoint. A failure from a step AFTER a
+// no committed checkpoint. A failure from a step AFTER a
 // successful match that merely wraps checkpoint.ErrCheckpointNotFound (in the
 // field: "failed to save summary: checkpoint not found", from a summary
 // backfill against a backend missing the checkpoint) must NOT trigger the
@@ -584,8 +584,7 @@ func TestRunExplainAuto_TrailerReferencedCheckpointMissing(t *testing.T) {
 // TestRunExplainCheckpoint_NotFoundSentinels verifies the typed-error
 // contract runExplainAuto depends on: non-matching targets return an error
 // wrapping checkpoint.ErrCheckpointNotFound (for errors.Is detection),
-// regardless of --generate. The old code returned the temp-checkpoint
-// sentinel speculatively for --generate, breaking fallback routing.
+// regardless of --generate.
 func TestRunExplainCheckpoint_NotFoundSentinels(t *testing.T) {
 	runExplainAutoTestRepo(t)
 
@@ -596,95 +595,7 @@ func TestRunExplainCheckpoint_NotFoundSentinels(t *testing.T) {
 
 			require.Error(t, err)
 			require.ErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
-			require.NotErrorIs(t, err, errCannotGenerateTemporaryCheckpoint,
-				"sentinel must not fire unless a real temp checkpoint was matched")
 		})
-	}
-}
-
-func writeTemporaryCheckpointForExplainTest(t *testing.T) string {
-	t.Helper()
-
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	wt, err := repo.Worktree()
-	require.NoError(t, err)
-
-	testFile := filepath.Join(tmpDir, "temp.txt")
-	require.NoError(t, os.WriteFile(testFile, []byte("initial content"), 0o644))
-	_, err = wt.Add("temp.txt")
-	require.NoError(t, err)
-	initialCommit, err := wt.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
-	})
-	require.NoError(t, err)
-
-	sessionID := "2026-01-27-temp-session"
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", sessionID)
-	require.NoError(t, os.MkdirAll(metadataDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, paths.PromptFileName), []byte("temporary checkpoint prompt"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"type":"user","message":{"content":[{"type":"text","text":"temporary checkpoint"}]}}`+"\n"), 0o644))
-
-	require.NoError(t, os.WriteFile(testFile, []byte("updated content"), 0o644))
-
-	result, err := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs()).Write(context.Background(), checkpoint.Step{
-		SessionID:         sessionID,
-		BaseCommit:        initialCommit.String()[:7],
-		ModifiedFiles:     []string{"temp.txt"},
-		MetadataDir:       ".entire/metadata/" + sessionID,
-		CommitMessage:     "temporary checkpoint with code changes",
-		AuthorName:        "Test",
-		AuthorEmail:       "test@example.com",
-		IsFirstCheckpoint: false,
-	})
-	require.NoError(t, err)
-	require.False(t, result.Skipped)
-
-	return result.CommitHash.String()
-}
-
-func TestRunExplainAuto_GenerateTemporaryCheckpointDoesNotFallBackToCommit(t *testing.T) {
-	tempCheckpointSHA := writeTemporaryCheckpointForExplainTest(t)
-
-	var out, errOut bytes.Buffer
-	err := runExplainAuto(context.Background(), &out, &errOut, tempCheckpointSHA, true, false, false, false, true, false, false, 0)
-
-	require.Error(t, err)
-	require.ErrorIs(t, err, errCannotGenerateTemporaryCheckpoint)
-	require.NotErrorIs(t, err, checkpoint.ErrCheckpointNotFound)
-	require.NotContains(t, err.Error(), "no Entire-Checkpoint trailer")
-}
-
-// TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet verifies the
-// brand identity-bullet shape is used for temporary checkpoints, with the
-// "after commit" affordance text in the summary block.
-func TestRunExplainAuto_TemporaryCheckpointRendersIdentityBullet(t *testing.T) {
-	tempCheckpointSHA := writeTemporaryCheckpointForExplainTest(t)
-	shortID := tempCheckpointSHA[:7]
-
-	var out, errOut bytes.Buffer
-	// noPager=true to suppress the pager's terminal-only path so output lands
-	// in the buffer; generate=false so we read (and don't try to summarize).
-	err := runExplainAuto(context.Background(), &out, &errOut, tempCheckpointSHA, true, false, false, false, false, false, false, 0)
-	require.NoError(t, err)
-
-	output := out.String()
-	if !strings.Contains(output, fmt.Sprintf("● Checkpoint %s [temporary]", shortID)) {
-		t.Errorf("expected '● Checkpoint %s [temporary]' identity bullet, got:\n%s", shortID, output)
-	}
-	if !strings.Contains(output, "## Summary") {
-		t.Errorf("expected '## Summary' heading in temporary output, got:\n%s", output)
-	}
-	if !strings.Contains(output, "Temporary checkpoints can be summarized after commit") {
-		t.Errorf("expected 'after commit' affordance in temporary output, got:\n%s", output)
-	}
-	if !strings.Contains(output, "entire checkpoint explain --generate") {
-		t.Errorf("expected canonical `entire checkpoint explain --generate` hint in temporary output, got:\n%s", output)
 	}
 }
 
@@ -2156,7 +2067,7 @@ type externalTranscriptCompactorOptions struct {
 	fail              bool
 }
 
-func setupExternalTranscriptExplainRepo(t *testing.T) (*git.Repository, string) {
+func setupExternalTranscriptExplainRepo(t *testing.T) *git.Repository {
 	t.Helper()
 
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -2188,7 +2099,7 @@ func setupExternalTranscriptExplainRepo(t *testing.T) (*git.Repository, string) 
 		0o644,
 	))
 
-	return repo, tmpDir
+	return repo
 }
 
 func compactTranscriptForExternalDisplayTest(agentName, userText, assistantText string) []byte {
@@ -2243,52 +2154,10 @@ esac
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func writeExternalTemporaryCheckpointForExplainTest(
-	t *testing.T,
-	repo *git.Repository,
-	tmpDir string,
-	sessionID string,
-	agentType types.AgentType,
-	nativeTranscript []byte,
-	fileContent string,
-) string {
-	t.Helper()
-
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", sessionID)
-	require.NoError(t, os.MkdirAll(metadataDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, paths.PromptFileName), []byte("temporary external checkpoint prompt"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, paths.TranscriptFileName), nativeTranscript, 0o644))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(metadataDir, paths.MetadataFileName),
-		[]byte(fmt.Sprintf(`{"agent":%q}`+"\n", agentType)),
-		0o644,
-	))
-
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte(fileContent), 0o644))
-
-	head, err := repo.Head()
-	require.NoError(t, err)
-
-	result, err := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs()).Write(context.Background(), checkpoint.Step{
-		SessionID:         sessionID,
-		BaseCommit:        head.Hash().String()[:7],
-		ModifiedFiles:     []string{"test.txt"},
-		MetadataDir:       ".entire/metadata/" + sessionID,
-		CommitMessage:     "temporary external checkpoint",
-		AuthorName:        "Test",
-		AuthorEmail:       "test@example.com",
-		IsFirstCheckpoint: false,
-	})
-	require.NoError(t, err)
-	require.False(t, result.Skipped)
-
-	return result.CommitHash.String()
-}
-
 func TestRunExplainCheckpoint_FullCompactsExternalNativeTranscript(t *testing.T) {
 	// Cannot use t.Parallel() because external agent discovery mutates the
 	// package-level agent registry and this test changes cwd/PATH.
-	repo, _ := setupExternalTranscriptExplainRepo(t)
+	repo := setupExternalTranscriptExplainRepo(t)
 
 	const (
 		name      = "checkpoint-display-full"
@@ -2329,7 +2198,7 @@ func TestRunExplainCheckpoint_FullCompactsExternalNativeTranscript(t *testing.T)
 func TestRunExplainCheckpoint_VerboseCompactsScopedExternalNativeTranscript(t *testing.T) {
 	// Cannot use t.Parallel() because external agent discovery mutates the
 	// package-level agent registry and this test changes cwd/PATH.
-	repo, _ := setupExternalTranscriptExplainRepo(t)
+	repo := setupExternalTranscriptExplainRepo(t)
 
 	const (
 		name      = "checkpoint-display-verbose"
@@ -2367,91 +2236,6 @@ func TestRunExplainCheckpoint_VerboseCompactsScopedExternalNativeTranscript(t *t
 	require.Contains(t, output, "Transcript (checkpoint scope)")
 	require.Contains(t, output, "[User] scoped external prompt")
 	require.Contains(t, output, "[Assistant] scoped external reply")
-	require.NotContains(t, output, "(failed to parse transcript)")
-}
-
-func TestRunExplainAuto_TemporaryFullCompactsExternalNativeTranscript(t *testing.T) {
-	// Cannot use t.Parallel() because external agent discovery mutates the
-	// package-level agent registry and this test changes cwd/PATH.
-	repo, tmpDir := setupExternalTranscriptExplainRepo(t)
-
-	const (
-		name      = "temporary-display-full"
-		agentType = types.AgentType("Temporary Display Full Agent")
-	)
-	installExternalTranscriptCompactor(t, externalTranscriptCompactorOptions{
-		name:              name,
-		agentType:         agentType,
-		compactTranscript: compactTranscriptForExternalDisplayTest(name, "temporary external prompt", "temporary external reply"),
-		requiredMarker:    "TEMP_EXTERNAL_NATIVE_TRANSCRIPT",
-	})
-
-	tempCheckpointSHA := writeExternalTemporaryCheckpointForExplainTest(
-		t,
-		repo,
-		tmpDir,
-		"session-temp-external-full",
-		agentType,
-		[]byte("TEMP_EXTERNAL_NATIVE_TRANSCRIPT\nuser=temporary external prompt\nassistant=temporary external reply\n"),
-		"temporary full content",
-	)
-
-	var buf, errBuf bytes.Buffer
-	err := runExplainAuto(context.Background(), &buf, &errBuf, tempCheckpointSHA, true, false, true, false, false, false, false, 0)
-	require.NoError(t, err)
-
-	output := buf.String()
-	require.Contains(t, output, "Transcript (full session)")
-	require.Contains(t, output, "[User] temporary external prompt")
-	require.Contains(t, output, "[Assistant] temporary external reply")
-	require.NotContains(t, output, "(failed to parse transcript)")
-}
-
-func TestRunExplainAuto_TemporaryVerboseCompactsScopedExternalNativeTranscript(t *testing.T) {
-	// Cannot use t.Parallel() because external agent discovery mutates the
-	// package-level agent registry and this test changes cwd/PATH.
-	repo, tmpDir := setupExternalTranscriptExplainRepo(t)
-
-	const (
-		name      = "temporary-display-verbose"
-		agentType = types.AgentType("Temporary Display Verbose Agent")
-	)
-	installExternalTranscriptCompactor(t, externalTranscriptCompactorOptions{
-		name:              name,
-		agentType:         agentType,
-		compactTranscript: compactTranscriptForExternalDisplayTest(name, "temporary scoped prompt", "temporary scoped reply"),
-		requiredMarker:    "TEMP_EXTERNAL_NATIVE_SCOPE",
-		forbiddenMarker:   "TEMP_EXTERNAL_NATIVE_BEFORE",
-	})
-
-	sessionID := "session-temp-external-verbose"
-	_ = writeExternalTemporaryCheckpointForExplainTest(
-		t,
-		repo,
-		tmpDir,
-		sessionID,
-		agentType,
-		[]byte("TEMP_EXTERNAL_NATIVE_BEFORE\n"),
-		"temporary verbose parent content",
-	)
-	tempCheckpointSHA := writeExternalTemporaryCheckpointForExplainTest(
-		t,
-		repo,
-		tmpDir,
-		sessionID,
-		agentType,
-		[]byte("TEMP_EXTERNAL_NATIVE_BEFORE\nTEMP_EXTERNAL_NATIVE_SCOPE\nuser=temporary scoped prompt\nassistant=temporary scoped reply\n"),
-		"temporary verbose child content",
-	)
-
-	var buf, errBuf bytes.Buffer
-	err := runExplainAuto(context.Background(), &buf, &errBuf, tempCheckpointSHA, true, true, false, false, false, false, false, 0)
-	require.NoError(t, err)
-
-	output := buf.String()
-	require.Contains(t, output, "Transcript (checkpoint scope)")
-	require.Contains(t, output, "[User] temporary scoped prompt")
-	require.Contains(t, output, "[Assistant] temporary scoped reply")
 	require.NotContains(t, output, "(failed to parse transcript)")
 }
 
@@ -2508,7 +2292,7 @@ func TestRenderExplainBody_SanitizesTerminalSequencesOnNonColorPath(t *testing.T
 func TestRunExplainCheckpoint_FullFallsBackWhenExternalCompactionFails(t *testing.T) {
 	// Cannot use t.Parallel() because external agent discovery mutates the
 	// package-level agent registry and this test changes cwd/PATH.
-	repo, _ := setupExternalTranscriptExplainRepo(t)
+	repo := setupExternalTranscriptExplainRepo(t)
 
 	const (
 		name      = "checkpoint-display-fallback"
@@ -3518,44 +3302,6 @@ func TestFormatBranchCheckpoints_ShowsSessionInfo(t *testing.T) {
 	}
 }
 
-func TestFormatBranchCheckpoints_ShowsTemporaryIndicator(t *testing.T) {
-	now := time.Now()
-	points := []strategy.PendingCheckpoint{
-		{
-			ID:           "abc123def456",
-			Message:      "Committed checkpoint",
-			Date:         now,
-			CheckpointID: "chk123456789",
-			IsLogsOnly:   true, // Committed = logs only, no indicator shown
-			SessionID:    "2026-01-22-session-1",
-		},
-		{
-			ID:           "def456ghi789",
-			Message:      "Active checkpoint",
-			Date:         now.Add(-time.Hour),
-			CheckpointID: "chk987654321",
-			IsLogsOnly:   false, // Temporary = can be rewound, shows [temporary]
-			SessionID:    "2026-01-22-session-1",
-		},
-	}
-
-	output := formatBranchCheckpoints(io.Discard, "main", points, "")
-
-	// Should indicate temporary (non-committed) checkpoints with [temporary]
-	if !strings.Contains(output, "[temporary]") {
-		t.Errorf("expected [temporary] indicator for non-committed checkpoint, got:\n%s", output)
-	}
-
-	// Committed checkpoints should NOT have [temporary] indicator
-	// Find the line with the committed checkpoint and verify it doesn't have [temporary]
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "chk123456789") && strings.Contains(line, "[temporary]") {
-			t.Errorf("committed checkpoint should not have [temporary] indicator, got:\n%s", output)
-		}
-	}
-}
-
 func TestFormatBranchCheckpoints_ShowsTaskCheckpoints(t *testing.T) {
 	now := time.Now()
 	points := []strategy.PendingCheckpoint{
@@ -3586,9 +3332,8 @@ func TestFormatCheckpointGroup_NoPromptNoCommitShowsPlaceholder(t *testing.T) {
 	var sb strings.Builder
 	styles := newStatusStyles(io.Discard)
 	formatCheckpointGroup(&sb, checkpointGroup{
-		checkpointID: "temporary",
+		checkpointID: "2026-01-22-session-1",
 		prompt:       "",
-		isTemporary:  true,
 		commits:      []commitEntry{{date: time.Now(), gitSHA: "deadbee", message: ""}},
 	}, styles)
 	out := sb.String()
@@ -3644,228 +3389,6 @@ func TestFormatBranchCheckpoints_TruncatesLongMessages(t *testing.T) {
 	// Should contain truncation indicator (usually "...")
 	if !strings.Contains(output, "...") {
 		t.Errorf("expected truncation indicator '...' for long message, got:\n%s", output)
-	}
-}
-
-func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Initialize git repo with an initial commit
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create and commit initial file
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial content"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	initialCommit, err := w.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Create .entire directory
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o750); err != nil {
-		t.Fatalf("failed to create .entire dir: %v", err)
-	}
-
-	// Create metadata directory with prompt.txt
-	sessionID := "2026-01-27-test-session"
-	metadataDir := filepath.Join(tmpDir, ".entire", "metadata", sessionID)
-	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-
-	expectedPrompt := "This is my test prompt for the checkpoint"
-	if err := os.WriteFile(filepath.Join(metadataDir, paths.PromptFileName), []byte(expectedPrompt), 0o644); err != nil {
-		t.Fatalf("failed to write prompt file: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte(`{"test": true}`), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	// Create first checkpoint (baseline copy) - this one gets filtered out
-	store := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs())
-	baseCommit := initialCommit.String()[:7]
-	_, err = store.Write(context.Background(), checkpoint.Step{
-		SessionID:         sessionID,
-		BaseCommit:        baseCommit,
-		ModifiedFiles:     []string{"test.txt"},
-		MetadataDir:       ".entire/metadata/" + sessionID,
-		CommitMessage:     "First checkpoint (baseline)",
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-		IsFirstCheckpoint: true,
-	})
-	if err != nil {
-		t.Fatalf("WriteTemporary() first checkpoint error = %v", err)
-	}
-
-	// Modify test file again for a second checkpoint with actual code changes
-	if err := os.WriteFile(testFile, []byte("second modification"), 0o644); err != nil {
-		t.Fatalf("failed to modify test file: %v", err)
-	}
-
-	// Create second checkpoint (has code changes, won't be filtered)
-	_, err = store.Write(context.Background(), checkpoint.Step{
-		SessionID:         sessionID,
-		BaseCommit:        baseCommit,
-		ModifiedFiles:     []string{"test.txt"},
-		MetadataDir:       ".entire/metadata/" + sessionID,
-		CommitMessage:     "Second checkpoint with code changes",
-		AuthorName:        "Test",
-		AuthorEmail:       "test@test.com",
-		IsFirstCheckpoint: false, // Not first, has parent
-	})
-	if err != nil {
-		t.Fatalf("WriteTemporary() second checkpoint error = %v", err)
-	}
-
-	// Now call getBranchCheckpoints and verify the prompt is read
-	points, _, err := getBranchCheckpoints(context.Background(), repo, 10)
-	if err != nil {
-		t.Fatalf("getBranchCheckpoints() error = %v", err)
-	}
-
-	// Should have at least one temporary checkpoint (the second one with code changes)
-	var foundTempCheckpoint bool
-	for _, point := range points {
-		if !point.IsLogsOnly && point.SessionID == sessionID {
-			foundTempCheckpoint = true
-			// Verify the prompt was read correctly from the shadow branch tree
-			if point.SessionPrompt != expectedPrompt {
-				t.Errorf("expected prompt %q, got %q", expectedPrompt, point.SessionPrompt)
-			}
-			break
-		}
-	}
-
-	if !foundTempCheckpoint {
-		t.Errorf("expected to find temporary checkpoint with session ID %s, got points: %+v", sessionID, points)
-	}
-}
-
-func TestGetCurrentWorktreeHash_MainWorktree(t *testing.T) {
-	// In a temp dir with a real .git directory (main worktree), getCurrentWorktreeHash
-	// should return the hash of empty string (main worktree ID is "").
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-
-	hash := getCurrentWorktreeHash(context.Background())
-	expected := checkpoint.HashWorktreeID("") // Main worktree has empty ID
-	if hash != expected {
-		t.Errorf("getCurrentWorktreeHash(context.Background()) = %q, want %q (hash of empty worktree ID)", hash, expected)
-	}
-}
-
-func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
-	// Shadow branches are namespaced by worktree hash (entire/<commit>-<worktreeHash>).
-	// Only shadow branches matching the current worktree should be included.
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	testutil.InitRepo(t, tmpDir)
-	repo, err := git.PlainOpen(tmpDir)
-	require.NoError(t, err)
-
-	w, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create initial commit
-	testFile := filepath.Join(tmpDir, "test.txt")
-	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	if _, err := w.Add("test.txt"); err != nil {
-		t.Fatalf("failed to add test file: %v", err)
-	}
-	initialCommit, err := w.Commit("initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Setup metadata for both sessions
-	sessionIDLocal := "2026-02-10-local-session"
-	sessionIDOther := "2026-02-10-other-session"
-	for _, sid := range []string{sessionIDLocal, sessionIDOther} {
-		metaDir := filepath.Join(tmpDir, ".entire", "metadata", sid)
-		if err := os.MkdirAll(metaDir, 0o755); err != nil {
-			t.Fatalf("failed to create metadata dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(metaDir, paths.PromptFileName), []byte("test"), 0o644); err != nil {
-			t.Fatalf("failed to write prompt: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(metaDir, "full.jsonl"), []byte(`{"test":true}`), 0o644); err != nil {
-			t.Fatalf("failed to write transcript: %v", err)
-		}
-	}
-
-	store := checkpoint.NewEphemeralStore(repo, checkpoint.DefaultV1Refs())
-	baseCommit := initialCommit.String()[:7]
-
-	writeCheckpoints := func(sessionID, worktreeID string) {
-		t.Helper()
-		// Baseline
-		if _, err := store.Write(context.Background(), checkpoint.Step{
-			SessionID: sessionID, BaseCommit: baseCommit, WorktreeID: worktreeID,
-			ModifiedFiles: []string{"test.txt"}, MetadataDir: ".entire/metadata/" + sessionID,
-			AuthorEmail: "test@test.com", IsFirstCheckpoint: true,
-		}); err != nil {
-			t.Fatalf("WriteTemporary baseline error: %v", err)
-		}
-		// Code change checkpoint
-		if err := os.WriteFile(testFile, []byte(sessionID+" changes"), 0o644); err != nil {
-			t.Fatalf("failed to modify test file: %v", err)
-		}
-		if _, err := store.Write(context.Background(), checkpoint.Step{
-			SessionID: sessionID, BaseCommit: baseCommit, WorktreeID: worktreeID,
-			ModifiedFiles: []string{"test.txt"}, MetadataDir: ".entire/metadata/" + sessionID,
-			AuthorEmail: "test@test.com", IsFirstCheckpoint: false,
-		}); err != nil {
-			t.Fatalf("WriteTemporary code changes error: %v", err)
-		}
-	}
-
-	writeCheckpoints(sessionIDLocal, "")               // Main worktree (matches test env)
-	writeCheckpoints(sessionIDOther, "other-worktree") // Different worktree
-
-	// getBranchCheckpoints should only include local worktree's checkpoints
-	points, _, err := getBranchCheckpoints(context.Background(), repo, 20)
-	if err != nil {
-		t.Fatalf("getBranchCheckpoints error: %v", err)
-	}
-
-	for _, p := range points {
-		if p.SessionID == sessionIDOther {
-			t.Errorf("found checkpoint from other worktree (session %s) - should be filtered out", sessionIDOther)
-		}
-	}
-	var foundLocal bool
-	for _, p := range points {
-		if p.SessionID == sessionIDLocal {
-			foundLocal = true
-		}
-	}
-	if !foundLocal {
-		t.Errorf("expected local worktree checkpoint (session %s), got: %+v", sessionIDLocal, points)
 	}
 }
 

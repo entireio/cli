@@ -63,7 +63,7 @@ func externalize(t *testing.T, raw []byte) (rewritten []byte, assets []Transcrip
 // assets rather than orphaning them or re-inlining the images.
 func TestAssets_BackfillReExternalizesAndReplacesAssets(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a55e70000010")
 	sessionPath := cpID.Path() + "/0/"
@@ -132,7 +132,7 @@ func TestAssets_BackfillReExternalizesAndReplacesAssets(t *testing.T) {
 // called with empty Assets — the still-present placeholder must keep round-tripping.
 func TestAssets_BackfillIdenticalTranscriptKeepsAssets(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a55e70000012")
 	sessionPath := cpID.Path() + "/0/"
@@ -177,7 +177,7 @@ func TestAssets_BackfillIdenticalTranscriptKeepsAssets(t *testing.T) {
 // at condense time (no orphans) and clear the manifest pointer.
 func TestAssets_BackfillInlineClearsStaleAssets(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a55e70000011")
 	sessionPath := cpID.Path() + "/0/"
@@ -231,7 +231,7 @@ func TestAssets_BackfillInlineClearsStaleAssets(t *testing.T) {
 // plus an assets/ blob and manifest, and reinjected byte-exactly on read.
 func TestAssets_StoreRestoreRoundTrip(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a55e70000001")
 
@@ -325,7 +325,7 @@ func TestAssets_StoreRestoreRoundTrip(t *testing.T) {
 // path is unchanged: no assets/ folder and an empty AssetsManifest pointer.
 func TestAssets_NoExternalizationWritesNoManifest(t *testing.T) {
 	t.Parallel()
-	repo, _ := setupTestRepo(t)
+	repo := setupTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
 	cpID := id.MustCheckpointID("a55e70000002")
 

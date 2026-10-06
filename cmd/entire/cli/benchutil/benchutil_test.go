@@ -22,18 +22,6 @@ func BenchmarkNewBenchRepo_Large(b *testing.B) {
 	}
 }
 
-func BenchmarkSeedShadowBranch(b *testing.B) {
-	for _, count := range []int{1, 5, 10} {
-		b.Run(fmt.Sprintf("%dCheckpoints", count), func(b *testing.B) {
-			for b.Loop() {
-				repo := NewBenchRepo(b, RepoOpts{FileCount: 10})
-				sessionID := repo.CreateSessionState(b, SessionOpts{})
-				repo.SeedShadowBranch(b, sessionID, count, 3)
-			}
-		})
-	}
-}
-
 func BenchmarkSeedMetadataBranch(b *testing.B) {
 	for _, count := range []int{1, 5, 10} {
 		b.Run(fmt.Sprintf("%dCheckpoints", count), func(b *testing.B) {

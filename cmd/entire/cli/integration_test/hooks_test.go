@@ -184,11 +184,8 @@ func TestHookRunner_SimulateStop_SubagentOnlyChanges(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	// Verify checkpoint was created (manual-commit stores checkpoint data on the shadow branch)
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Errorf("shadow branch %s should exist after checkpoint", shadowBranch)
-	}
+	// No shadow branch: the turn end is recorded in session state only.
+	env.AssertNoShadowBranches()
 
 	// Verify session state was updated with checkpoint count
 	state, stateErr := env.GetSessionState(session.ID)

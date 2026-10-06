@@ -72,9 +72,9 @@ func TestSHA256Repository_EnableAndFirstCheckpoint(t *testing.T) {
 		t.Fatalf("session StepCount after first checkpoint = %#v, want 1", state)
 	}
 
-	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
-	shadowHead := gitOutput(t, env.RepoDir, "rev-parse", shadowBranch)
-	requireHexLen(t, "shadow checkpoint commit", shadowHead)
+	// The recorded turn-end content hash is in the repository's object format.
+	recorded := env.AssertTurnEndRecorded(sess.ID, "main.go")
+	requireHexLen(t, "recorded file hash", recorded.TouchedFileHashes["main.go"])
 
 	env.GitCommitWithHooks("Add SHA-256 main", "main.go")
 	userHead := gitOutput(t, env.RepoDir, "rev-parse", "HEAD")

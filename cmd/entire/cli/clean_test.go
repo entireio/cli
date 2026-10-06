@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -113,6 +112,12 @@ func createSessionStateFile(t *testing.T, repoRoot string, sessionID string, com
 	return sessionFile
 }
 
+// legacyShadowBranchName returns a branch name in the shape older CLIs gave
+// shadow branches (entire/<commit[:7]>-<worktreeHash[:6]>).
+func legacyShadowBranchName(commitHash plumbing.Hash) string {
+	return "entire/" + commitHash.String()[:7] + "-e3b0c4"
+}
+
 func writeCleanSettingsFile(t *testing.T, repoRoot, content string) {
 	t.Helper()
 
@@ -169,13 +174,9 @@ func TestCleanCmd_DefaultMode_WithForce(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
-	// Create shadow branch
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	// Create a legacy shadow branch an older CLI left behind
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -215,13 +216,9 @@ func TestCleanCmd_DefaultMode_DryRun(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
-	// Create shadow branch
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	// Create a legacy shadow branch an older CLI left behind
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -319,13 +316,9 @@ func TestCleanCmd_DefaultMode_MultipleSessions(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
-	// Create shadow branch
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	// Create a legacy shadow branch an older CLI left behind
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -659,13 +652,9 @@ func TestCleanCmd_All_FindsSessionWithShadowBranch(t *testing.T) {
 		t.Fatalf("failed to get worktree: %v", err)
 	}
 	worktreePath := wt.Filesystem().Root()
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
-	if err != nil {
-		t.Fatalf("failed to get worktree ID: %v", err)
-	}
 
 	// Create shadow branch for the session's base commit
-	shadowBranch := checkpoint.ShadowBranchNameForCommit(commitHash.String(), worktreeID)
+	shadowBranch := legacyShadowBranchName(commitHash)
 	shadowRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(shadowBranch), commitHash)
 	if err := repo.Storer.SetReference(shadowRef); err != nil {
 		t.Fatalf("failed to create shadow branch: %v", err)
@@ -804,8 +793,8 @@ func TestRunCleanAllWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "Shadow branches") {
-		t.Errorf("Expected 'Shadow branches' section, got: %s", output)
+	if !strings.Contains(output, "Legacy shadow branches") {
+		t.Errorf("Expected 'Legacy shadow branches' section, got: %s", output)
 	}
 	if !strings.Contains(output, "Session states") {
 		t.Errorf("Expected 'Session states' section, got: %s", output)

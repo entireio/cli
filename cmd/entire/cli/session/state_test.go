@@ -1292,3 +1292,28 @@ func TestState_RebaselineSubagentTokensPreservesLegacyNilUsage(t *testing.T) {
 		})
 	}
 }
+
+func TestState_HasPendingWork(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state State
+		want  bool
+	}{
+		{name: "empty", state: State{}, want: false},
+		{name: "turn-end step", state: State{StepCount: 1}, want: true},
+		{name: "files awaiting a commit", state: State{FilesTouched: []string{"a.go"}}, want: true},
+		{name: "task record", state: State{TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		// FullyCondensed is the caller's concern (see HasPendingWork's doc).
+		{name: "fully condensed with nothing left", state: State{FullyCondensed: true}, want: false},
+		{name: "fully condensed with an in-flight record", state: State{FullyCondensed: true, TaskRecords: []TaskRecord{{ToolUseID: "toolu_1"}}}, want: true},
+		{name: "condensed checkpoint id alone", state: State{LastCheckpointID: id.MustCheckpointID("abc123def456")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.state.HasPendingWork())
+		})
+	}
+}

@@ -303,7 +303,27 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// budget is untouched; see runSessionSweep for the safety contract.
 	maybeSpawnSessionSweep(ctx)
 
+	// One-time removal of the shadow branches older CLI versions left behind.
+	removeLegacyShadowBranches(ctx)
+
 	return nil
+}
+
+// removeLegacyShadowBranches runs strategy.CleanupLegacyShadowBranches, the
+// one-time, best-effort deletion of the local shadow branches older CLI
+// versions wrote. A marker in the git common dir makes every later call a
+// single stat, so session start pays for the ref scan once per repository.
+func removeLegacyShadowBranches(ctx context.Context) {
+	logCtx := logging.WithComponent(ctx, "cleanup")
+	deleted, err := strategy.CleanupLegacyShadowBranches(ctx)
+	if deleted > 0 {
+		logging.Info(logCtx, "removed legacy shadow branches",
+			slog.Int("count", deleted))
+	}
+	if err != nil {
+		logging.Warn(logCtx, "legacy shadow branch cleanup incomplete; it is retried at the next session start",
+			slog.String("error", err.Error()))
+	}
 }
 
 func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
@@ -387,9 +407,9 @@ func handleLifecycleModelUpdate(ctx context.Context, ag agent.Agent, event *agen
 }
 
 // handleLifecycleToolUse merges files reported by a per-tool-use hook into
-// the session's FilesTouched. Lightweight by design: no SaveStep, no shadow
-// branch commit — just enough so PostCommit's carry-forward decision sees
-// an accurate file list mid-turn.
+// the session's FilesTouched. Lightweight by design: no SaveStep — just
+// enough so PostCommit's carry-forward decision sees an accurate file list
+// mid-turn.
 func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 
@@ -628,7 +648,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	captureSpan.End()
 
 	// Append prompt to prompt.txt on filesystem so it's available for
-	// mid-turn commits (before SaveStep writes it to the shadow branch).
+	// mid-turn commits and condensation.
 	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
 	if event.Prompt != "" {
 		sessionName := sessionMetadataName(sessionID)
@@ -809,9 +829,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		copySpan.End()
 		return fmt.Errorf("failed to read transcript: %w", err)
 	}
-	// Sanitize before writing: this copy is what the shadow-branch walk blobs and
-	// redacts on every Stop. See agent.TranscriptSanitizer for why order matters.
-	// The agent's own rollout is untouched.
+	// Sanitize before writing: this copy is what condensation falls back to when
+	// the live transcript is unreadable, and its size is the growth baseline's
+	// coordinate (strategy.storedTranscriptSize). See agent.TranscriptSanitizer
+	// for why order matters. The agent's own rollout is untouched.
 	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
 	logFile := sessionName + "/" + paths.TranscriptFileName
 	if err := entiredir.WriteFile(entireRoot, logFile, storedTranscript, 0o600); err != nil {
@@ -991,8 +1012,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	normalizeSpan.End()
 
 	// Codex owns an authoritative child ledger. Refresh it before the
-	// no-files gate: a read-only child can finish without producing a shadow
-	// checkpoint, but its exact availability still must replace stale coverage.
+	// no-files gate: a read-only child can finish without producing a turn-end
+	// step, but its exact availability still must replace stale coverage.
 	var codexInventoryUsage *agent.TokenUsage
 	var codexLedgerVersion *uint64
 	if ag.Type() == agent.AgentTypeCodex {
@@ -1121,47 +1142,32 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		SubagentLedgerVersion:    codexLedgerVersion,
 	}
 
-	// finishTurn is the shared turn-end tail, run whether the save succeeded
-	// or was skipped on a status budget breach. The LastPrompt backfill must
-	// come after SaveStep because SaveStep may reinitialize session state,
-	// which would overwrite an earlier LastPrompt update — and SaveStep has
-	// initialized state even when it then failed on the budget.
-	finishTurn := func(degraded bool) {
-		if backfilledPrompt != "" {
-			mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-				if state.LastPrompt != "" {
-					return strategy.ErrMutationSkip
-				}
-				state.LastPrompt = backfilledPrompt
-				return nil
-			})
-			if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
-				logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
-					slog.String("error", mutErr.Error()))
-			}
-		}
-		recordCaptureDegraded(ctx, sessionID, degraded)
-		transitionSessionTurnEnd(ctx, sessionID, event)
-		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
-			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
-				slog.String("error", cleanupErr.Error()))
-		}
-	}
-
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
-		if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
-			// The first-checkpoint status read inside the save breached its
-			// budget. Hooks must never fail on status cost — skip this turn's
-			// checkpoint, run the normal turn-end bookkeeping, and exit 0.
-			logging.Warn(logCtx, "checkpoint skipped: status budget exceeded during save; capture degraded this turn",
-				slog.String("error", err.Error()))
-			finishTurn(true)
-			return nil
-		}
 		return fmt.Errorf("failed to save step: %w", err)
 	}
 
-	finishTurn(captureDegraded)
+	// The LastPrompt backfill must come after SaveStep because SaveStep may
+	// reinitialize session state, which would overwrite an earlier LastPrompt
+	// update.
+	if backfilledPrompt != "" {
+		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			if state.LastPrompt != "" {
+				return strategy.ErrMutationSkip
+			}
+			state.LastPrompt = backfilledPrompt
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to backfill LastPrompt in session state",
+				slog.String("error", mutErr.Error()))
+		}
+	}
+	recordCaptureDegraded(ctx, sessionID, captureDegraded)
+	transitionSessionTurnEnd(ctx, sessionID, event)
+	if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+			slog.String("error", cleanupErr.Error()))
+	}
 	return nil
 }
 
@@ -1416,7 +1422,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 					// nil is evidence too: a newer terminal snapshot without exact
 					// usage must clear, never preserve, an earlier total.
 					record.TokenUsage = child.TokenUsage
-					current.FilesTouched = mergeUnique(current.FilesTouched, childFiles)
+					strategy.MergeUnhashedFilesTouched(current, childFiles)
 					break
 				}
 			}
@@ -1601,8 +1607,7 @@ func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string 
 //     SubagentStop instead of completing the record from the stub.
 //   - event.Final == false, foreground: post-task fires at true completion, so
 //     the record is completed immediately via completeSubagentTaskRecord.
-//     ensureSessionState preserves SaveTaskStep's old create-if-missing parent
-//     state guarantee for this path (the Final path deliberately never
+//     ensureSessionState creates a missing parent session state for this path (the Final path deliberately never
 //     resurrects state — see handleSubagentStopFinal's zombie guard).
 func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
@@ -1877,7 +1882,7 @@ type subagentCaptureOptions struct {
 	eventFilesOnly bool
 
 	// ensureSessionState, when true, creates missing session state before
-	// completing the record — SaveTaskStep's old create-if-missing guarantee.
+	// completing the record.
 	// Set only for the foreground path; the Final path must never resurrect a
 	// swept session (handleSubagentStopFinal's zombie guard).
 	ensureSessionState bool
@@ -1961,7 +1966,7 @@ func subagentTokenUsage(ctx context.Context, ag agent.Agent, event *agent.Event,
 // completeSubagentTaskRecord detects a completed subagent invocation's changes
 // and completes its durable task record (#2058): files, labels, tokens, and the
 // declared transcript path land on the record; condensation later materializes
-// the transcript into the checkpoint. No shadow task step is written.
+// the transcript into the checkpoint.
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
 	subagentTranscriptPath, modifiedFiles, err := subagentTranscriptAndFiles(logCtx, ag, event, opts)
 	if err != nil {
@@ -2035,11 +2040,9 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	// The transcript records what the subagent wrote at some point in its run, not
 	// what is still uncommitted. When the subagent committed its own work mid-turn
 	// (the scenario TestSingleSessionSubagentCommitInTurn covers), that commit has
-	// already condensed the session and deleted the shadow branch, so there is
-	// nothing left to snapshot. Keeping those paths defeats the "no changes, skip"
-	// gate below and mints a *new* shadow branch after condensation — which nothing
-	// then condenses away, because turn-end skips when no files changed, so it
-	// outlives the session.
+	// already condensed the session, so there is nothing left pending. Keeping
+	// those paths defeats the "no changes, skip" gate below and leaves files
+	// pending after condensation that no commit will ever claim.
 	//
 	// filterToUncommittedFiles is the same guard the turn-end path already applies
 	// for this exact reason; it fails open, so a git error keeps the list as-is
@@ -2258,8 +2261,8 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		slog.Int("new_files", len(step.newFiles)),
 		slog.Int("deleted_files", len(step.deletedFiles)))
 
-	// SaveTaskStep's old parent-state guarantee: the parent may not have any
-	// session state yet when its Worker finishes first.
+	// The parent may not have any session state yet when its Worker finishes
+	// first.
 	if err := step.strat.EnsureSessionExists(ctx, step.link.ParentSessionID, step.agentType); err != nil {
 		return fmt.Errorf("failed to ensure parent session state: %w", err)
 	}

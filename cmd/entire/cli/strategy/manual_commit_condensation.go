@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,7 +33,6 @@ import (
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 var (
@@ -95,8 +96,7 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
-	shadowRef *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
-	repoDir   string              // Worktree root of the committing worktree (home-worktree check)
+	repoDir string // Worktree root of the committing worktree (home-worktree check)
 
 	// reconcileInterrupted allows this condensation to return a *different*
 	// checkpoint ID than the caller passed, when it recognises the transcript
@@ -172,8 +172,9 @@ var extractSessionImages = func(agentType types.AgentType, transcript []byte) ([
 //
 // It deliberately does NOT mutate the caller's transcript: the pre-externalization
 // bytes are what CondenseResult.TranscriptSizeBaseline is measured on, and that
-// baseline must stay in the shadow-branch blob's coordinate (sanitized but NOT
-// image-externalized, matching what the Stop path writes) — feeding it the shrunken
+// baseline must stay in the stored turn-end transcript's coordinate (sanitized but
+// NOT image-externalized, matching what the Stop path writes to
+// .entire/metadata/<session>/full.jsonl; see storedTranscriptSize) — feeding it the shrunken
 // externalized size would report spurious growth on every subsequent commit.
 func externalizeSessionImages(ctx, logCtx context.Context, state *SessionState, transcript []byte) ([]byte, []cpkg.TranscriptAsset) {
 	if !settings.IsImageExternalizationEnabled(ctx) {
@@ -556,13 +557,14 @@ func checkpointStepCount(s *SessionState) int {
 	return 1
 }
 
-// CondenseSession condenses a session's shadow branch to permanent storage.
+// CondenseSession condenses a session's pending work to permanent storage.
 // checkpointID is the 12-hex-char value from the Entire-Checkpoint trailer.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 // Uses checkpoint.PersistentStore.Write with a checkpoint.Session request for persistent storage.
 //
-// For mid-session commits (no Stop/SaveStep called yet), the shadow branch may not exist.
-// In this case, data is extracted from the live transcript instead.
+// The transcript comes from the agent's live transcript, falling back to the
+// sanitized copy the last Stop stored under .entire/metadata/<session>/ (see
+// condensationTranscript); files touched come from session state.
 func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Repository, checkpointID id.CheckpointID, state *SessionState, committedFiles map[string]struct{}, opts ...condenseOpts) (*CondenseResult, error) {
 	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	var o condenseOpts
@@ -571,9 +573,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	condenseStart := time.Now()
-
-	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	ref, hasShadowBranch := resolveShadowRef(repo, shadowBranchName, o.shadowRef)
 
 	// Re-resolve transcript path before any reads — handles agents that relocate
 	// transcripts mid-session (e.g., Cursor CLI flat → nested layout change).
@@ -586,11 +585,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	extractStart := time.Now()
 	_, extractSessionDataSpan := perf.Start(ctx, "extract_session_data")
-	var shadowHash plumbing.Hash
-	if hasShadowBranch {
-		shadowHash = ref.Hash()
-	}
-	sessionData, extractErr := s.extractOrCreateSessionData(ctx, repo, ag, shadowHash, hasShadowBranch, state)
+	sessionData, extractErr := s.extractSessionData(ctx, ag, state)
 	if extractErr != nil {
 		extractSessionDataSpan.RecordError(extractErr)
 		extractSessionDataSpan.End()
@@ -611,7 +606,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		}
 	}
 
-	if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID, hasShadowBranch); skipped != nil {
+	if skipped := skipIfNothingToCondense(logCtx, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
 	}
 
@@ -665,7 +660,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 
 	writeOpts, newSkillEvents := buildCondensationWriteOptions(
 		ctx, repo, state, sessionData, redactedTranscript, extractedAssets,
-		taskPayloads, checkpointID, shadowBranchName,
+		taskPayloads, checkpointID,
 	)
 
 	writeV1Start := time.Now()
@@ -748,7 +743,6 @@ func buildCondensationWriteOptions(
 	assets []cpkg.TranscriptAsset,
 	tasks []cpkg.TaskPayload,
 	checkpointID id.CheckpointID,
-	shadowBranchName string,
 ) (cpkg.WriteOptions, []agent.SkillEvent) {
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
 
@@ -772,7 +766,6 @@ func buildCondensationWriteOptions(
 		FilesTouched:                sessionData.FilesTouched,
 		CheckpointsCount:            checkpointStepCount(state),
 		SaveStepCount:               state.StepCount,
-		EphemeralBranch:             shadowBranchName,
 		AuthorName:                  authorName,
 		AuthorEmail:                 authorEmail,
 		Agent:                       state.AgentType,
@@ -824,9 +817,9 @@ func redactOrDrop(logCtx context.Context, repo *git.Repository, sessionID string
 // This check MUST run before filterFilesTouched. That function's fallback
 // assigns all committed files to sessions with empty FilesTouched (designed
 // for mid-turn commits where SaveStep hasn't run yet). Without this ordering,
-// genuinely empty sessions (no transcript, no shadow branch, no tracked files)
-// would acquire committed files from the fallback and bypass this gate.
-func skipIfNothingToCondense(logCtx context.Context, sessionData *ExtractedSessionData, state *SessionState, checkpointID id.CheckpointID, hasShadowBranch bool) *CondenseResult {
+// genuinely empty sessions (no transcript, no steps, no tracked files) would
+// acquire committed files from the fallback and bypass this gate.
+func skipIfNothingToCondense(logCtx context.Context, sessionData *ExtractedSessionData, state *SessionState, checkpointID id.CheckpointID) *CondenseResult {
 	if len(sessionData.Transcript) > 0 || len(sessionData.FilesTouched) > 0 || state.HasTaskContent() {
 		return nil
 	}
@@ -834,7 +827,7 @@ func skipIfNothingToCondense(logCtx context.Context, sessionData *ExtractedSessi
 		slog.String("session_id", state.SessionID),
 		slog.String("agent_type", string(state.AgentType)),
 		slog.String("checkpoint_id", checkpointID.String()),
-		slog.Bool("has_shadow_branch", hasShadowBranch),
+		slog.Int("step_count", state.StepCount),
 		slog.String("transcript_path", state.TranscriptPath),
 	)
 	return newSkippedResult(checkpointID, state.SessionID)
@@ -897,20 +890,6 @@ func redactSessionTranscript(
 	return redacted, time.Since(start), nil
 }
 
-// resolveShadowRef returns the shadow branch reference, preferring a pre-resolved
-// ref when available and falling back to a repo lookup.
-func resolveShadowRef(repo *git.Repository, branchName string, preResolved *plumbing.Reference) (ref *plumbing.Reference, exists bool) {
-	if preResolved != nil {
-		return preResolved, true
-	}
-	refName := plumbing.NewBranchReferenceName(branchName)
-	resolved, err := repo.Reference(refName, true)
-	if err != nil {
-		return nil, false
-	}
-	return resolved, true
-}
-
 // filterFilesTouched narrows sessionData.FilesTouched to files present in
 // committedFiles. When no prior files were recorded, it falls back to the
 // committed set (minus Entire metadata) — but only when sessionHasEvidenceOfWork
@@ -952,46 +931,6 @@ func sessionHasEvidenceOfWork(sessionData *ExtractedSessionData, state *SessionS
 		return true
 	}
 	return state != nil && state.StepCount > 0
-}
-
-// extractOrCreateSessionData tries to extract session data from the shadow branch,
-// live transcript, or creates empty session data as a fallback. The empty case is
-// handled by the skip gate in CondenseSession.
-func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, repo *git.Repository, ag agent.Agent, shadowHash plumbing.Hash, hasShadowBranch bool, state *SessionState) (*ExtractedSessionData, error) {
-	switch {
-	case hasShadowBranch:
-		// Shadow branch exists (from SaveStep commits) — extract transcript and
-		// metadata from the branch tree, preferring the live transcript if fresher.
-		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract session data: %w", err)
-		}
-		return data, nil
-	case state.TranscriptPath != "":
-		// No shadow branch but a live transcript path is known — read directly
-		// from disk. This handles mid-session commits before SaveStep runs.
-		if state.Phase.IsActive() {
-			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
-		}
-		data, err := s.extractSessionDataFromLiveTranscript(ctx, state)
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract session data from live transcript: %w", err)
-		}
-		return data, nil
-	default:
-		// No shadow branch and no transcript path — create empty session data.
-		// This happens for sessions where the agent never set TranscriptPath
-		// (e.g., Codex hooks may send null transcript_path). The skip gate in
-		// CondenseSession will skip condensation if nothing is found.
-		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
-			"no shadow branch and no transcript path, returning empty session data",
-			slog.String("session_id", state.SessionID),
-			slog.String("agent_type", string(state.AgentType)),
-		)
-		return &ExtractedSessionData{
-			FilesTouched: state.FilesTouched,
-		}, nil
-	}
 }
 
 // sliceByAgentMetric scopes a transcript through the agent's own offset metric
@@ -1305,158 +1244,81 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 	return result
 }
 
-// extractSessionData extracts session data from the shadow branch.
-// filesTouched is the list of files tracked during the session (from SessionState.FilesTouched).
-// agentType identifies the agent (e.g., "Claude Code", "OpenCode") to determine transcript format.
-// liveTranscriptPath, when non-empty and readable, is preferred over the shadow branch copy.
-// This handles the case where SaveStep was skipped (no code changes) but the transcript
-// continued growing — the shadow branch copy would be stale.
-// checkpointTranscriptStart is the line offset (JSONL agents) or message index (OpenCode) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
-	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
-	commit, err := repo.CommitObject(shadowRef)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit object: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit tree: %w", err)
-	}
-
-	data := &ExtractedSessionData{}
-	// sessionID is already an "entire session ID" (with date prefix)
-	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
-
-	// Extract transcript — prefer the live file when available, fall back to shadow branch.
-	// The shadow branch copy may be stale if the last turn ended without code changes
-	// (SaveStep is only called when there are file modifications).
-	var fullTranscript string
-	if liveTranscriptPath != "" {
-		// Ensure transcript file exists (OpenCode creates it lazily via `opencode export`).
-		// Only wait for flush when the session is active — for idle/ended sessions the
-		// transcript is already fully flushed (the Stop hook completed the flush).
-		if isActive {
-			prepareTranscriptIfNeeded(ctx, ag, liveTranscriptPath)
+// condensationTranscript returns the transcript a condensation stores and the
+// path it was read from: the agent's live transcript when it is readable and
+// non-empty, else the sanitized copy the last Stop stored under
+// .entire/metadata/<session>/ (storedTranscriptSize). The stored copy is how a
+// transcript the agent has since moved, rotated away, or deleted still reaches
+// the checkpoint; it is the only pre-commit copy Entire keeps. path is empty
+// when the bytes came from the stored copy, so path-based readers (subagent
+// transcripts, late-flush prompt extraction) do not misread it.
+//
+// For a session with a live transcript path that is still active, the
+// transcript is prepared first (OpenCode creates it lazily via `opencode
+// export`).
+func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionState) (data []byte, path string) {
+	if state.TranscriptPath != "" {
+		if state.Phase.IsActive() {
+			prepareTranscriptIfNeeded(ctx, ag, state.TranscriptPath)
 		}
-		if liveData, readErr := agent.ReadTranscriptFile(liveTranscriptPath); readErr == nil && len(liveData) > 0 {
-			fullTranscript = string(liveData)
-		}
-	}
-	if fullTranscript == "" {
-		// Fall back to shadow branch copy
-		if file, fileErr := tree.File(metadataDir + "/" + paths.TranscriptFileName); fileErr == nil {
-			if content, contentErr := file.Contents(); contentErr == nil {
-				fullTranscript = content
-			}
-		} else if file, fileErr := tree.File(metadataDir + "/" + paths.TranscriptFileNameLegacy); fileErr == nil {
-			if content, contentErr := file.Contents(); contentErr == nil {
-				fullTranscript = content
+		if transcriptPath, err := resolveTranscriptPath(state); err == nil {
+			if live, readErr := agent.ReadTranscriptFile(transcriptPath); readErr == nil && len(live) > 0 {
+				return live, transcriptPath
 			}
 		}
 	}
-
-	// Process transcript based on agent type
-	if fullTranscript != "" {
-		data.Transcript = []byte(fullTranscript)
-		data.FullTranscriptLines = countTranscriptItems(agentType, fullTranscript)
-	}
-
-	// Prompt resolution sits OUTSIDE the transcript gate: no rung below needs
-	// transcript content to answer. The shadow tree's prompt.txt and the
-	// filesystem copy are both written independently of it, and
-	// resolveCondensationPrompts falls back to reading the transcript path when
-	// the bytes are empty. Gating them recorded a checkpoint with NO prompt from
-	// any source whenever a LateTranscriptWriter (Antigravity) committed while
-	// its transcript was still the empty placeholder SaveStep checkpointed — a
-	// routine mid-turn state for it — and took logCondensationPrompts down with
-	// it, so the breadcrumb was absent exactly when it was needed. The
-	// live-transcript sibling already resolves prompts this way.
-	promptSource := "shadow prompt.txt"
-	if file, fileErr := tree.File(metadataDir + "/" + paths.PromptFileName); fileErr == nil {
-		if content, contentErr := file.Contents(); contentErr == nil && content != "" {
-			data.Prompts = splitPromptContent(content)
-		}
-	}
-	// Filesystem fallback (written at turn start, covers mid-turn commits)
-	if len(data.Prompts) == 0 {
-		promptSource = "filesystem prompt.txt"
-		data.Prompts = readPromptsFromFilesystem(ctx, sessionID)
-	}
-	// Late-flush fallback: re-extract from the transcript bytes being
-	// checkpointed when prompt.txt is still empty (e.g. Antigravity writes
-	// the transcript after the Stop hook, so the TurnEnd backfill saw an
-	// empty file).
-	if len(data.Prompts) == 0 {
-		promptSource = "transcript"
-		data.Prompts = resolveCondensationPrompts(ctx, ag, data.Transcript, liveTranscriptPath, checkpointTranscriptStart)
-	}
-	logCondensationPrompts(ctx, sessionID, promptSource, len(data.Prompts), checkpointTranscriptStart)
-
-	// Use tracked files from session state (not all files in tree)
-	data.FilesTouched = filesTouched
-
-	// Calculate token usage from the checkpoint-scoped transcript portion.
-	// Skill events annotate the stored raw transcript, which is full-session, so
-	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
-	// if they only render the checkpoint-scoped slice.
-	if len(data.Transcript) > 0 {
-		// subagentsDir="" on purpose. Re-reading the subagent transcripts here would
-		// re-parse the whole main transcript plus every subagent file from line 0 —
-		// measured at ~29x the cost of this call, enough to triple post-commit
-		// condensation for a subagent-heavy session — and would still yield a
-		// cumulative snapshot needing the same rescoping SaveStep already did.
-		// CondenseSession fills the already-rescoped window total in instead;
-		// see fillMissingSubagentTokensFrom.
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
-		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
-	}
-
-	return data, nil
+	return readStoredTranscript(ctx, state.SessionID), ""
 }
 
-// extractSessionDataFromLiveTranscript extracts session data directly from the live transcript file.
-// This is used for mid-session commits when no shadow branch resolves. That is
-// usually before SaveStep, but can also be a recovery path for stale state.
-func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.Context, state *SessionState) (*ExtractedSessionData, error) {
-	data := &ExtractedSessionData{}
+// extractSessionData extracts what a condensation stores for a session: its
+// transcript (condensationTranscript), prompts, files touched, token usage,
+// and skill events.
+//
+// When no transcript is available at all, the outcome depends on whether that
+// can be a transient race:
+//   - No transcript path and nothing stored: empty data. The session never had
+//     a transcript (e.g. Codex hooks with a null transcript_path), and the
+//     skip gate in CondenseSession decides whether anything is left.
+//   - A LateTranscriptWriter (e.g. agy) flushes its transcript only AFTER the
+//     Stop hook, so a mid-turn commit legitimately condenses while it is still
+//     an empty placeholder: degrade to a files/prompt-only checkpoint.
+//     Erroring here would happen after prepare-commit-msg already stamped the
+//     Entire-Checkpoint trailer, leaving the commit pointing at a checkpoint
+//     that never gets written.
+//   - A session with a recorded turn-end step (StepCount > 0) had a transcript
+//     at that Stop, so it is not coming back: degrade likewise rather than lose
+//     the step's files and prompts.
+//   - Anything else is a transient race (the file exists but the write has not
+//     landed): error, so the failed condensation leaves session state
+//     untouched and the next commit re-condenses with the populated transcript.
+func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, ag agent.Agent, state *SessionState) (*ExtractedSessionData, error) {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	transcript, transcriptPath := condensationTranscript(ctx, ag, state)
 
-	ag, _ := agent.GetByAgentType(state.AgentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
-
-	// Resolve the transcript path (handles agents that relocate mid-session).
-	transcriptPath, resolveErr := resolveTranscriptPath(state)
-	if resolveErr != nil {
-		return nil, resolveErr
-	}
-
-	liveData, err := agent.ReadTranscriptFile(transcriptPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read live transcript: %w", err)
-	}
-
-	// An empty live transcript degrades for late-transcript agents but errors
-	// for the rest. A LateTranscriptWriter (e.g. agy) flushes its transcript
-	// AFTER the Stop hook, so a first-turn mid-turn commit legitimately
-	// condenses while the transcript is still an empty placeholder — and
-	// erroring happens after prepare-commit-msg already stamped the
-	// Entire-Checkpoint trailer, leaving the commit pointing at a checkpoint
-	// that never gets written. For every other agent an empty live transcript
-	// is a transient race (the file exists but the write hasn't landed), and
-	// erroring preserves the retry invariant: the failed condensation leaves
-	// session state untouched so the next commit re-condenses with the
-	// populated transcript.
-	if len(liveData) == 0 {
-		if _, lateOK := agent.AsLateTranscriptWriter(ag); !lateOK {
-			return nil, errors.New("live transcript is empty")
+	if len(transcript) == 0 {
+		_, lateWriter := agent.AsLateTranscriptWriter(ag)
+		switch {
+		case state.TranscriptPath == "":
+			logging.Debug(logCtx, "no transcript path and no stored transcript, returning empty session data",
+				slog.String("session_id", state.SessionID),
+				slog.String("agent_type", string(state.AgentType)),
+			)
+			return &ExtractedSessionData{FilesTouched: state.FilesTouched}, nil
+		case lateWriter || state.StepCount > 0:
+			logging.Warn(logCtx, "transcript unavailable at condensation, degrading to files/prompt-only checkpoint",
+				slog.String("session_id", state.SessionID),
+				slog.Int("step_count", state.StepCount))
+		default:
+			return nil, errors.New("failed to extract session data from live transcript: live transcript is empty or unreadable")
 		}
-		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
-			"live transcript is empty at condensation, degrading to files/prompt-only checkpoint",
-			slog.String("session_id", state.SessionID))
 	}
 
-	fullTranscript := string(liveData)
-	data.Transcript = liveData
-	data.FullTranscriptLines = countTranscriptItems(state.AgentType, fullTranscript)
+	data := &ExtractedSessionData{}
+	if len(transcript) > 0 {
+		data.Transcript = transcript
+		data.FullTranscriptLines = countTranscriptItems(state.AgentType, string(transcript))
+	}
+
 	promptSource := "filesystem prompt.txt"
 	data.Prompts = readPromptsFromFilesystem(ctx, state.SessionID)
 	// Late-flush fallback: re-extract from the transcript bytes being
@@ -1476,9 +1338,9 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		// Unlike the shadow path, a live mid-turn condensation can still read the
-		// subagent transcripts. Their total is cumulative, so rescope it against the
-		// baseline captured after the previous checkpoint before storing it.
+		// The subagent transcripts are still readable here. Their total is
+		// cumulative, so it is rescoped against the baseline captured after the
+		// previous checkpoint before being stored.
 		data.TokenUsage = calculateLiveTranscriptTokenUsage(ctx, ag, data.Transcript, state, transcriptPath)
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
@@ -1567,7 +1429,7 @@ func resolvePendingTranscriptOffset(ctx context.Context, ag agent.Agent, state *
 // extracts from the transcript BYTES condensation is about to store, through
 // agent.TranscriptPromptExtractor, so the recorded prompts always describe the
 // stored transcript — including when that transcript came from the
-// shadow-branch copy because the live path could not be read, which is exactly
+// stored turn-end copy because the live path could not be read, which is exactly
 // when a re-read of the path would find nothing and record no prompt while the
 // checkpoint carried the full conversation. Agents without the bytes extractor
 // keep the path-based fallback.
@@ -1743,8 +1605,8 @@ func splitPromptContent(content string) []string {
 }
 
 // readPromptsFromFilesystem reads prompt.txt from the filesystem session metadata directory.
-// This file is written at turn start and updated at each SaveStep, providing prompt data
-// even for mid-turn commits where the shadow branch may not have been updated.
+// This file is written at turn start and backfilled at turn end, providing prompt data
+// even for mid-turn commits.
 func readPromptsFromFilesystem(ctx context.Context, sessionID string) []string {
 	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
@@ -1755,6 +1617,59 @@ func readPromptsFromFilesystem(ctx context.Context, sessionID string) []string {
 		return nil
 	}
 	return splitPromptContent(string(data))
+}
+
+// storedTranscriptFileNames are the names the turn-end transcript copy may
+// have under .entire/metadata/<session>/, current spelling first: every staged
+// file except the prompt.
+var storedTranscriptFileNames = stagedSessionFiles[1:]
+
+// resolveStoredTranscript finds the session's stored turn-end transcript: the
+// sanitized copy every Stop writes to .entire/metadata/<session>/full.jsonl
+// (see lifecycle.go), or the legacy full.log. ok is false when no regular file
+// exists under either name, which is normal before the first Stop and after
+// condensation released it.
+func resolveStoredTranscript(ctx context.Context, sessionID string) (root *os.Root, name string, info fs.FileInfo, ok bool) {
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		return nil, "", nil, false
+	}
+	for _, base := range storedTranscriptFileNames {
+		name = sessionMetadataFileName(sessionID, base)
+		info, statErr := osroot.LstatNoSymlinks(root, name)
+		if statErr == nil && info.Mode().IsRegular() {
+			return root, name, info, true
+		}
+	}
+	return nil, "", nil, false
+}
+
+// storedTranscriptSize returns the size of the session's stored turn-end
+// transcript (see resolveStoredTranscript).
+//
+// The size is in the coordinate CheckpointTranscriptSize is measured in —
+// sanitized, not image-externalized (CondenseResult.TranscriptSizeBaseline) —
+// which is what makes the growth comparison in sessionHasNewContent sound.
+func storedTranscriptSize(ctx context.Context, sessionID string) (size int64, ok bool) {
+	_, _, info, ok := resolveStoredTranscript(ctx, sessionID)
+	if !ok {
+		return 0, false
+	}
+	return info.Size(), true
+}
+
+// readStoredTranscript returns the session's stored turn-end transcript (see
+// resolveStoredTranscript), or nil when there is none or it is empty.
+func readStoredTranscript(ctx context.Context, sessionID string) []byte {
+	root, name, _, ok := resolveStoredTranscript(ctx, sessionID)
+	if !ok {
+		return nil
+	}
+	data, err := entiredir.ReadFile(root, name)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	return data
 }
 
 // sessionMetadataFileName returns one of a session's staged metadata files
@@ -1770,6 +1685,9 @@ func sessionMetadataFileName(sessionID, name string) string {
 // and releases together once that buffer has been consumed. full.log is the
 // legacy spelling of full.jsonl, written by older CLI versions and still read
 // as a fallback elsewhere.
+//
+// The prompt comes first; the rest are the transcript names, current spelling
+// first, which storedTranscriptFileNames reuses.
 var stagedSessionFiles = []string{
 	paths.PromptFileName,
 	paths.TranscriptFileName,
@@ -1789,11 +1707,11 @@ var stagedSessionFiles = []string{
 //
 // These files are a staging buffer, not a store. The transcript is rewritten
 // WHOLESALE from the agent's own transcript on every Stop (see the
-// copy_transcript span in lifecycle.go), and the only readers are the two
-// tree-building walks that run before this point — addDirectoryToChanges
-// (shadow) and copyEntireMetadataDir (v1). Every other reader of a session's
-// transcript goes through a git tree, not this file. So releasing them costs a
-// continuing session nothing: the next Stop recreates them.
+// copy_transcript span in lifecycle.go), and its readers are condensation's
+// fallback when the live transcript is unreadable (condensationTranscript),
+// the growth check in sessionHasNewContent (storedTranscriptSize), and
+// copyEntireMetadataDir (v1). So releasing them costs a continuing session
+// nothing: the next Stop recreates them.
 //
 // Without this, nothing ever removed the transcript. It stayed in the worktree
 // permanently after its content was already committed and pushed, growing to
@@ -1836,10 +1754,6 @@ func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.C
 	return checkpointID, true, nil
 }
 
-func hasEagerCondensationContent(state *SessionState) bool {
-	return state.StepCount > 0 || state.HasTaskContent()
-}
-
 // PrepareSessionEndCondensation reserves an ID for content-bearing ENDED
 // sessions or marks empty ENDED sessions fully condensed. File-bearing sessions
 // remain eligible for PostCommit.
@@ -1847,7 +1761,7 @@ func PrepareSessionEndCondensation(ctx context.Context, state *SessionState) err
 	if state.Phase != session.PhaseEnded || len(state.FilesTouched) > 0 {
 		return nil
 	}
-	if !hasEagerCondensationContent(state) {
+	if !state.HasPendingWork() {
 		state.FullyCondensed = true
 		state.ClearCondensationAttempt()
 		return nil
@@ -1891,7 +1805,6 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		return fmt.Errorf("failed to reserve checkpoint ID: %w", reserveErr)
 	}
 
-	var shadowBranchName string
 	var cleared bool
 	var newSkillEvents []agent.SkillEvent
 	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
@@ -1899,16 +1812,12 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 			return ErrMutationSkip
 		}
 
-		shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		refName := plumbing.NewBranchReferenceName(shadowBranchName)
-		_, refErr := repo.Reference(refName, true)
-		hasShadowBranch := refErr == nil
-
-		// Record-bearing sessions must materialize their records, not be cleared.
-		if !hasShadowBranch && !state.HasTaskContent() {
-			logging.Info(logCtx, "no shadow branch for session, clearing state only",
+		// A session with nothing pending (no turn-end step, no files, no task
+		// records) has nothing to condense; record-bearing sessions must
+		// materialize their records, not be cleared.
+		if !state.HasPendingWork() {
+			logging.Info(logCtx, "no pending work for session, clearing state only",
 				slog.String("session_id", sessionID),
-				slog.String("shadow_branch", shadowBranchName),
 			)
 			// Clear while still holding this session's gate (we're inside
 			// the locked mutation closure), not after releasing it: a
@@ -1980,47 +1889,26 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// Already cleared inside the locked mutation closure above -- see
 		// its comment for why this must not happen a second time (or
 		// outside the lock).
-		return nil
-	}
-
-	if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
-		logging.Warn(logCtx, "failed to clean up shadow branch",
-			slog.String("shadow_branch", shadowBranchName),
-			slog.String("error", err.Error()),
-		)
+		logging.Debug(logCtx, "condense by ID cleared a session with no pending work",
+			slog.String("session_id", sessionID))
 	}
 	return nil
 }
 
-func prepareEagerCondensation(
-	logCtx context.Context,
-	repo *git.Repository,
-	state *SessionState,
-) (shadowBranchName string, shouldCondense bool, err error) {
-	// Files waiting for a user commit belong to PostCommit's carry-forward path.
+// prepareEagerCondensation decides whether an ENDED session's leftover work
+// can be condensed now: files waiting for a user commit belong to PostCommit's
+// carry-forward path, and a session with no pending work is simply marked
+// fully condensed.
+func prepareEagerCondensation(state *SessionState) (shouldCondense bool, err error) {
 	if len(state.FilesTouched) > 0 {
-		return "", false, ErrMutationSkip
+		return false, ErrMutationSkip
 	}
-	if !hasEagerCondensationContent(state) {
+	if !state.HasPendingWork() {
 		state.FullyCondensed = true
 		state.ClearCondensationAttempt()
-		return "", false, nil
+		return false, nil
 	}
-
-	shadowBranchName = getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-	refName := plumbing.NewBranchReferenceName(shadowBranchName)
-	if _, refErr := repo.Reference(refName, true); refErr != nil && !state.HasTaskContent() {
-		logging.Info(logCtx, "eager condense: no shadow branch",
-			slog.String("session_id", state.SessionID),
-			slog.String("shadow_branch", shadowBranchName),
-		)
-		state.StepCount = 0
-		state.FullyCondensed = true
-		state.ClearCondensationAttempt()
-		return shadowBranchName, false, nil
-	}
-
-	return shadowBranchName, true, nil
+	return true, nil
 }
 
 // CondenseAndMarkFullyCondensed condenses an ENDED session and marks it
@@ -2028,7 +1916,7 @@ func prepareEagerCondensation(
 // clean up sessions so PostCommit doesn't have to process them.
 //
 // This does NOT call CondenseSessionByID because that method has two behaviors
-// we don't want: (1) it calls clearSessionState when no shadow branch exists
+// we don't want: (1) it calls clearSessionState when there is no pending work
 // (deletes the state file entirely), and (2) it sets Phase = IDLE. Instead,
 // we inline the condensation logic with ENDED-appropriate behavior.
 //
@@ -2047,7 +1935,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	defer repo.Close()
 
-	var shadowBranchName string
 	var checkpointID id.CheckpointID
 	reservedState, loadErr := s.loadSessionState(ctx, sessionID)
 	if loadErr != nil {
@@ -2060,8 +1947,9 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	if reservedState == nil {
 		return nil
 	}
-	if len(reservedState.FilesTouched) > 0 ||
-		(reservedState.FullyCondensed && !hasEagerCondensationContent(reservedState)) {
+	// Files waiting for a commit belong to PostCommit; a fully condensed
+	// session proceeds only for work that arrived after its condensation.
+	if len(reservedState.FilesTouched) > 0 || (reservedState.FullyCondensed && !reservedState.HasPendingWork()) {
 		return nil
 	}
 	checkpointID = reservedState.PendingCondensationID()
@@ -2069,7 +1957,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	if !shouldCondense {
 		reserveErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 			var preflightErr error
-			shadowBranchName, shouldCondense, preflightErr = prepareEagerCondensation(logCtx, repo, state)
+			shouldCondense, preflightErr = prepareEagerCondensation(state)
 			if preflightErr != nil || !shouldCondense {
 				return preflightErr
 			}
@@ -2091,11 +1979,10 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		return nil
 	}
 
-	var didCondense bool
 	var newSkillEvents []agent.SkillEvent
 	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		var preflightErr error
-		shadowBranchName, shouldCondense, preflightErr = prepareEagerCondensation(logCtx, repo, state)
+		shouldCondense, preflightErr = prepareEagerCondensation(state)
 		if preflightErr != nil || !shouldCondense {
 			return preflightErr
 		}
@@ -2135,7 +2022,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 			slog.String("session_id", sessionID),
 			slog.String("checkpoint_id", result.CheckpointID.String()),
 		)
-		didCondense = true
 		return nil
 	}, func() {
 		// Skill telemetry only — same reason as CondenseSessionByID: this
@@ -2148,47 +2034,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 	}
 	if mutErr != nil {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
-	}
-
-	if didCondense && shadowBranchName != "" {
-		if err := s.cleanupShadowBranchIfUnused(ctx, repo, shadowBranchName, sessionID); err != nil {
-			logging.Warn(logCtx, "eager condense: failed to clean up shadow branch",
-				slog.String("shadow_branch", shadowBranchName),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-	return nil
-}
-
-// cleanupShadowBranchIfUnused deletes a shadow branch if no other active sessions reference it.
-func (s *ManualCommitStrategy) cleanupShadowBranchIfUnused(ctx context.Context, _ *git.Repository, shadowBranchName, excludeSessionID string) error {
-	// List all session states to check if any other session uses this shadow branch
-	allStates, err := s.listAllSessionStates(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	for _, state := range allStates {
-		if state.SessionID == excludeSessionID {
-			continue
-		}
-		otherShadow := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		// Only SaveStep checkpoints live on the shadow branch; task records do
-		// not, so they no longer pin the branch alive.
-		if otherShadow == shadowBranchName && state.StepCount > 0 {
-			return nil
-		}
-	}
-
-	// No other sessions need it, delete the shadow branch via CLI
-	// (go-git v5's RemoveReference doesn't persist with packed refs/worktrees)
-	if err := DeleteBranchCLI(ctx, shadowBranchName); err != nil {
-		// Branch already gone is not an error
-		if errors.Is(err, ErrBranchNotFound) {
-			return nil
-		}
-		return fmt.Errorf("failed to remove shadow branch: %w", err)
 	}
 	return nil
 }

@@ -114,9 +114,9 @@ type State struct {
 	// CLIVersion is the version of the CLI that created this session
 	CLIVersion string `json:"cli_version,omitempty"`
 
-	// BaseCommit tracks the current shadow branch base. Initially set to HEAD when the
-	// session starts, but updated on migration (pull/rebase) and after condensation.
-	// Used for shadow branch naming and checkpoint storage.
+	// BaseCommit is the commit the session's pending work sits on top of.
+	// Initially set to HEAD when the session starts, then moved to HEAD when it
+	// moves (commit, pull, rebase, reset) and after condensation.
 	BaseCommit string `json:"base_commit"`
 
 	// WorktreePath is the absolute path to the worktree root
@@ -247,6 +247,21 @@ type State struct {
 
 	// FilesTouched tracks files modified/created/deleted during this session
 	FilesTouched []string `json:"files_touched,omitempty"`
+
+	// TouchedFileHashes records the content a turn-end step left for each file
+	// it changed: repo-relative path → git blob hash (hex) of the worktree file
+	// at that turn end, with clean filters applied as `git add` would. A path
+	// the step deleted maps to "" (a recorded deletion). A later step
+	// overwrites an earlier one's entry. Entries exist only for paths in
+	// FilesTouched; a FilesTouched path with no entry has no recorded content
+	// (hashing failed, a symlink, or it arrived via a task record or per-tool
+	// hook), and commit-time decisions fall back to its name.
+	//
+	// Commit hooks compare a committed or staged blob hash with this map to
+	// tell "the human committed what the agent wrote" from "the human replaced
+	// it". It replaced the shadow-branch snapshot those decisions used to
+	// read, and records no content.
+	TouchedFileHashes map[string]string `json:"touched_file_hashes,omitempty"`
 
 	// LastCheckpointID is the checkpoint ID from the most recent condensation.
 	// Used to restore the Entire-Checkpoint trailer on amend and to identify
@@ -439,8 +454,8 @@ type SubagentInventoryEntry struct {
 
 // TaskRecord is the durable pointer ledger entry for a subagent dispatched by
 // this session: a small session-state record (correlation ID, agent type,
-// description, declared transcript path, files touched, tokens) rather than a
-// shadow-tree write. Condensation is what materializes a record's transcript
+// description, declared transcript path, files touched, tokens). Condensation
+// is what materializes a record's transcript
 // (sanitize → externalize → redact) into the parent session's checkpoint —
 // see docs/superpowers/plans/2026-08-19-subagent-durable-records.md.
 //
@@ -726,11 +741,28 @@ func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool
 
 // HasTaskContent reports whether this session carries pending subagent task
 // content: any task record — live (transcript-so-far still needs capturing)
-// or completed-unmaterialized (awaiting condensation) — counts. Condensation
-// triggers and session-empty guards key on this, not on shadow-branch
-// existence: task records never touch the shadow branch.
+// or completed-unmaterialized (awaiting condensation) — counts.
 func (s *State) HasTaskContent() bool {
 	return len(s.TaskRecords) > 0
+}
+
+// HasPendingWork reports whether this session holds work no checkpoint has
+// captured yet: a turn-end step since the last condensation (StepCount), files
+// still awaiting a commit (FilesTouched, including carry-forward), or subagent
+// task records.
+//
+// It is the single answer to "is there anything here to condense or lose?" —
+// lifecycle cleanup, doctor, the session sweeper, and condensation all ask it,
+// and must not re-derive it from the parts. (Shadow-branch existence used to
+// stand in for it; nothing writes git objects at turn end anymore.)
+//
+// It deliberately ignores FullyCondensed: a fully condensed session can still
+// carry task records (a background subagent finishing after its session
+// ended). Callers that must leave fully condensed sessions alone — doctor's
+// ENDED classification, the zombie sweep, IsCondensableEndedSession — check
+// FullyCondensed themselves, as they always have.
+func (s *State) HasPendingWork() bool {
+	return s.StepCount > 0 || len(s.FilesTouched) > 0 || s.HasTaskContent()
 }
 
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —

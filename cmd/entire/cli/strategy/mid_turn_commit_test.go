@@ -65,7 +65,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	stale := time.Now().Add(-3 * time.Minute)
 	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
 
-	// Create session state: no shadow branch (it was deleted after last condensation),
+	// Create session state: no turn-end step since the last condensation,
 	// transcript path points to the file, agent type is Claude Code
 	now := time.Now()
 
@@ -87,7 +87,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call sessionHasNewContent — should fall through to live transcript check
-	// since there's no shadow branch. Pass staged files via contentCheckOpts.
+	// since there's no turn-end step. Pass staged files via contentCheckOpts.
 	stagedFiles, err := getStagedFiles(context.Background())
 	require.NoError(t, err)
 	hasNew, err := s.sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{stagedFiles: stagedFiles})
@@ -239,7 +239,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 		[]byte(subagentTranscript), 0o644,
 	))
 
-	// Create session state: no shadow branch, transcript has only Task calls,
+	// Create session state: no turn-end step, transcript has only Task calls,
 	// agent type is Claude Code so the subagent path resolution works
 	now := time.Now()
 	head, err := repo.Head()
@@ -260,7 +260,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call sessionHasNewContent — should fall through to live transcript check
-	// since there's no shadow branch, and should detect subagent file modifications.
+	// since there's no turn-end step, and should detect subagent file modifications.
 	// Pass staged files via contentCheckOpts.
 	stagedFiles, err := getStagedFiles(context.Background())
 	require.NoError(t, err)

@@ -274,7 +274,7 @@ const (
 // This deliberately avoids go-git's MergeBase (which walks full history and,
 // run once per branch, becomes O(branches × history) and hangs on large repos);
 // the precomputed default-commit set is a cheap stand-in for branch-only scoping.
-// Internal entire/ refs (checkpoint metadata + shadow branches) are never
+// Internal entire/ refs (checkpoint metadata, trails, legacy shadow branches) are never
 // indexed — they are not resumable and number in the hundreds.
 func buildCheckpointBranchIndex(repo *git.Repository) map[string]string {
 	index := map[string]string{}

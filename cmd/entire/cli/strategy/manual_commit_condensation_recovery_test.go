@@ -140,15 +140,14 @@ func TestPostCommitProcessSessionLocked_PreservesDifferentReservedAttempt(t *tes
 		BaseCommit: "base-commit",
 	}
 	state.BeginCondensationAttempt(reservedID)
-	preservedBranches := make(map[string]bool)
 
-	(&ManualCommitStrategy{}).postCommitProcessSessionLocked(
+	_, _, condensed := (&ManualCommitStrategy{}).postCommitProcessSessionLocked(
 		context.Background(), nil, state, nil, commitID, nil, nil, "", "",
-		nil, nil, nil, nil, preservedBranches, 0, nil,
+		nil, nil, nil, 0, nil,
 	)
 
+	require.False(t, condensed)
 	require.Equal(t, reservedID, state.PendingCondensationID())
-	require.True(t, preservedBranches[getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)])
 }
 
 func TestReserveDoctorCondensationAttempt_PreservesLegacyRecoveryAcrossRetries(t *testing.T) {

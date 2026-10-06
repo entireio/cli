@@ -153,8 +153,8 @@ func isNearerOwner(depth, bestDepth int, state, best *SessionState) bool {
 
 // isSessionHomeWorktree reports whether worktreePath — the commit's worktree,
 // already resolved by the hook entry point — is the one the session is
-// recorded in. Worktree-coupled state (BaseCommit, shadow-branch content and
-// deletion) may only be mutated from the session's home worktree; a
+// recorded in. Worktree-coupled state (BaseCommit, pending files and their
+// recorded hashes) may only be mutated from the session's home worktree; a
 // guest-linked commit elsewhere condenses and links without moving it. A
 // pure comparison by design: an earlier version re-resolved the worktree
 // here and read resolution failure as "home", which would have mutated a

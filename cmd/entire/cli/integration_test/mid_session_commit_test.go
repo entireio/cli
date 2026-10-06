@@ -20,7 +20,7 @@ import (
 // This is scenario 2 from ENT-112:
 // - User prompts Claude
 // - Claude creates files and commits them
-// - No Stop has happened yet (no shadow branch)
+// - No Stop has happened yet (no turn end recorded)
 // - The commit should still get a checkpoint trailer because the transcript shows file modifications
 func TestManualCommit_MidSessionCommit_FromTranscript(t *testing.T) {
 	t.Parallel()
@@ -70,23 +70,15 @@ func TestManualCommit_MidSessionCommit_FromTranscript(t *testing.T) {
 		{Path: "claude_file.txt", Content: "content from Claude"},
 	})
 
-	// Verify NO shadow branch exists (Stop hasn't been called)
-	shadowBranches := env.ListBranchesWithPrefix("entire/")
-	hasShadowBranch := false
-	for _, b := range shadowBranches {
-		if b != paths.MetadataBranchName && b != paths.TrailsBranchName {
-			hasShadowBranch = true
-			break
-		}
-	}
-	if hasShadowBranch {
-		t.Error("Shadow branch should not exist before Stop is called")
+	// Verify no turn-end step was recorded yet (Stop hasn't been called)
+	if state.StepCount != 0 {
+		t.Errorf("StepCount should be 0 before Stop is called, got %d", state.StepCount)
 	}
 
 	// Get HEAD before commit
 	headBefore := env.GetHeadHash()
 
-	// Commit with shadow hooks - should add trailer because transcript shows file modifications
+	// Commit with hooks - should add trailer because transcript shows file modifications
 	env.GitCommitWithHooks("Add file from Claude (mid-session)", "claude_file.txt")
 
 	// Get the commit
@@ -125,7 +117,7 @@ func TestManualCommit_MidSessionCommit_NoTrailerWithoutTranscriptPath(t *testing
 
 	// Don't create transcript - simulating a case where transcript path isn't available
 
-	// Commit with shadow hooks
+	// Commit with hooks
 	env.GitCommitWithHooks("Manual commit without transcript", "manual_file.txt")
 
 	// Commit should NOT have checkpoint trailer (no session activity detected)
@@ -173,7 +165,7 @@ func TestManualCommit_MidSessionCommit_NoTrailerForUnrelatedFile(t *testing.T) {
 	// Create and commit an UNRELATED file (not in transcript)
 	env.WriteFile("unrelated_file.txt", "unrelated content")
 
-	// Commit with shadow hooks - should NOT add trailer because files don't overlap
+	// Commit with hooks - should NOT add trailer because files don't overlap
 	env.GitCommitWithHooks("Unrelated file commit", "unrelated_file.txt")
 
 	commitHash := env.GetHeadHash()

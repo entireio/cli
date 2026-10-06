@@ -19,8 +19,8 @@ import (
 )
 
 // setupNoFileChangesSession records the session a snapshot is for: one that
-// changed no files, so turn end never ran SaveStep — no steps, no shadow
-// branch, no FilesTouched, only a live transcript (researchTranscript).
+// changed no files, so turn end never ran SaveStep — no steps, no
+// FilesTouched, only a live transcript (researchTranscript).
 func setupNoFileChangesSession(t *testing.T, sessionID string) *git.Repository {
 	t.Helper()
 	dir := setupGitRepo(t)
@@ -137,7 +137,7 @@ func TestCreateSnapshotCheckpoint_UnknownSession(t *testing.T) {
 	require.ErrorContains(t, err, "session not found")
 }
 
-// A session with a shadow branch but no transcript and no files is the
+// A session with a turn-end step but no transcript and no files is the
 // condensation skip gate; the snapshot reports it rather than returning an ID
 // for a checkpoint that was never written.
 func TestCreateSnapshotCheckpoint_NothingToCheckpoint(t *testing.T) {

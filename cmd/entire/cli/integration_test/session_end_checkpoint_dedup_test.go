@@ -12,7 +12,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // Session-end condensation writes a checkpoint to entire/checkpoints/v1 and only
@@ -22,7 +21,7 @@ import (
 // minted a second checkpoint ID over the same transcript range.
 //
 // These tests drive the real binary through that window. Everything up to the
-// crash is real: real hooks, real shadow branch, real condensation, real
+// crash is real: real hooks, real turn-end state, real condensation, real
 // checkpoint. The crash itself is forged with WriteSessionState, because the
 // only alternative is a fault-injection kill point in shipped code (see the PR
 // description). What is written back is exactly the state the reserving
@@ -66,21 +65,16 @@ func assertCheckpointCount(t *testing.T, env *TestEnv, want int, why string) []c
 	return infos
 }
 
-// preCondenseSnapshot is everything a hook killed between the durable
-// checkpoint write and the bookkeeping save leaves on disk. The shadow branch
-// matters as much as the state file: session-end condensation deletes the
-// branch only *after* the state save (see the didCondense block at the end of
-// CondenseAndMarkFullyCondensed), so a crash in the window leaves it standing.
-// A forge that drops it sends `entire doctor` down the discard path instead of
-// the retry path, and PrepareCommitMsg finds no content to link.
+// preCondenseSnapshot is what a hook killed between the durable checkpoint
+// write and the bookkeeping save leaves on disk: the pre-condense session
+// state, whose pending work (StepCount) keeps `entire doctor` on the retry
+// path rather than the discard path.
 type preCondenseSnapshot struct {
-	state        *strategy.SessionState
-	shadowBranch string
-	shadowTip    plumbing.Hash
+	state *strategy.SessionState
 }
 
 // startEagerCondensableSession drives a real session to the state the eager
-// session-end condense is built for: shadow-branch content (StepCount > 0) and
+// session-end condense is built for: an uncondensed turn-end step (StepCount > 0) and
 // no pending files. FilesTouched is cleared directly because
 // CondenseAndMarkFullyCondensed skips any session that still has files —
 // PostCommit owns those, for attribution. A review session and an
@@ -106,40 +100,18 @@ func startEagerCondensableSession(t *testing.T, env *TestEnv, file, content stri
 		t.Fatal("session state missing after stop")
 	}
 	if state.StepCount <= 0 {
-		t.Fatalf("expected shadow-branch content after stop, got StepCount=%d", state.StepCount)
+		t.Fatalf("expected an uncondensed turn-end step after stop, got StepCount=%d", state.StepCount)
 	}
 	state.FilesTouched = nil
 	if err := env.WriteSessionState(sess.ID, state); err != nil {
 		t.Fatalf("WriteSessionState failed: %v", err)
 	}
 
-	shadowBranch := env.GetShadowBranchNameForCommit(state.BaseCommit)
-	return sess, preCondenseSnapshot{
-		state:        state,
-		shadowBranch: shadowBranch,
-		shadowTip:    resolveBranchTip(t, env, shadowBranch),
-	}
-}
-
-func resolveBranchTip(t *testing.T, env *TestEnv, branch string) plumbing.Hash {
-	t.Helper()
-
-	repo, err := gitrepo.OpenPath(env.RepoDir)
-	if err != nil {
-		t.Fatalf("open repo: %v", err)
-	}
-	defer repo.Close()
-
-	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
-	if err != nil {
-		t.Fatalf("resolve shadow branch %s: %v", branch, err)
-	}
-	return ref.Hash()
+	return sess, preCondenseSnapshot{state: state}
 }
 
 // forgeInterruptedCondensation puts the repo back into the crashed state: the
-// pre-condense session state plus the reserved attempt ID, and the shadow branch
-// the real condense went on to delete. Pass an empty reservedID for the
+// pre-condense session state plus the reserved attempt ID. Pass an empty reservedID for the
 // pre-reservation (legacy) shape doctor has to reconcile from storage.
 func forgeInterruptedCondensation(t *testing.T, env *TestEnv, sessionID string, snap preCondenseSnapshot, reservedID id.CheckpointID) {
 	t.Helper()
@@ -155,17 +127,6 @@ func forgeInterruptedCondensation(t *testing.T, env *TestEnv, sessionID string, 
 	}
 	if err := env.WriteSessionState(sessionID, &crashed); err != nil {
 		t.Fatalf("WriteSessionState failed: %v", err)
-	}
-
-	repo, err := gitrepo.OpenPath(env.RepoDir)
-	if err != nil {
-		t.Fatalf("open repo: %v", err)
-	}
-	defer repo.Close()
-
-	ref := plumbing.NewHashReference(plumbing.NewBranchReferenceName(snap.shadowBranch), snap.shadowTip)
-	if err := repo.Storer.SetReference(ref); err != nil {
-		t.Fatalf("restore shadow branch %s: %v", snap.shadowBranch, err)
 	}
 }
 

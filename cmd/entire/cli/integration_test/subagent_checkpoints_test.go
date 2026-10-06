@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,19 +10,14 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-
-	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // TestSubagentCheckpoints_FullFlow tests the complete subagent checkpoint flow:
 // PreTask -> PostTodo (multiple times with file changes) -> PostTask
 //
 // This verifies:
-// 1. Incremental checkpoints are created as commits during subagent execution
-// 2. Only PostTodo calls with file changes create commits
-// 3. PostTask creates the final task checkpoint commit
+// 1. PostTodo records nothing (it used to write incremental shadow checkpoints)
+// 2. PostTask completes a durable task record carrying the task's files
 func TestSubagentCheckpoints_FullFlow(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -56,10 +50,10 @@ func TestSubagentCheckpoints_FullFlow(t *testing.T) {
 		t.Error("pre-task file should exist after SimulatePreTask")
 	}
 
-	// Step 2: PostTodo - simulate TodoWrite calls with file changes between them
-	// Note: Only PostTodo calls that detect file changes will create incremental commits
+	// Step 2: PostTodo - simulate TodoWrite calls with file changes between them.
+	// The hook is a no-op that only consumes its input.
 
-	// First TodoWrite - no file changes, should be skipped
+	// First TodoWrite
 	err = env.SimulatePostTodo(PostTodoInput{
 		SessionID:      session.ID,
 		TranscriptPath: session.TranscriptPath,
@@ -76,7 +70,7 @@ func TestSubagentCheckpoints_FullFlow(t *testing.T) {
 	// Create a file change
 	env.WriteFile("feature.go", "package main\n\nfunc Feature() {}\n")
 
-	// Second TodoWrite - should create incremental checkpoint (has file changes)
+	// Second TodoWrite
 	err = env.SimulatePostTodo(PostTodoInput{
 		SessionID:      session.ID,
 		TranscriptPath: session.TranscriptPath,
@@ -93,7 +87,7 @@ func TestSubagentCheckpoints_FullFlow(t *testing.T) {
 	// Create another file change
 	env.WriteFile("feature_test.go", "package main\n\nimport \"testing\"\n\nfunc TestFeature(t *testing.T) {}\n")
 
-	// Third TodoWrite - should create another incremental checkpoint
+	// Third TodoWrite
 	err = env.SimulatePostTodo(PostTodoInput{
 		SessionID:      session.ID,
 		TranscriptPath: session.TranscriptPath,
@@ -123,11 +117,10 @@ func TestSubagentCheckpoints_FullFlow(t *testing.T) {
 		t.Error("Pre-task file should be removed after PostTask")
 	}
 
-	// Incremental checkpoints (PostTodo) still live on the shadow branch.
-	verifyIncrementalCheckpointStorage(t, env, session.ID, taskToolUseID)
+	// PostTodo wrote nothing to git.
+	env.AssertNoShadowBranches()
 
-	// PostTask completes a durable task record on session state (#2058) —
-	// no final shadow task step is written anymore.
+	// PostTask completes a durable task record on session state (#2058).
 	state, err := env.GetSessionState(session.ID)
 	if err != nil {
 		t.Fatalf("GetSessionState failed: %v", err)
@@ -296,63 +289,6 @@ func TestSubagentCheckpoints_NoPreTaskFile(t *testing.T) {
 	}
 }
 
-// verifyIncrementalCheckpointStorage verifies PostTodo's incremental
-// checkpoints are stored in the shadow branch git tree (the surviving shadow
-// task write; final captures are task records on session state).
-func verifyIncrementalCheckpointStorage(t *testing.T, env *TestEnv, sessionID, taskToolUseID string) {
-	t.Helper()
-
-	repo, err := git.PlainOpen(env.RepoDir)
-	if err != nil {
-		t.Fatalf("failed to open repo: %v", err)
-	}
-
-	shadowBranchName := env.GetShadowBranchName()
-	shadowRef, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranchName), true)
-	if err != nil {
-		t.Fatalf("shadow branch %s not found: %v", shadowBranchName, err)
-	}
-	shadowCommit, err := repo.CommitObject(shadowRef.Hash())
-	if err != nil {
-		t.Fatalf("failed to get shadow commit: %v", err)
-	}
-	shadowTree, err := shadowCommit.Tree()
-	if err != nil {
-		t.Fatalf("failed to get shadow tree: %v", err)
-	}
-
-	checkpointsPrefix := ".entire/metadata/" + sessionID + "/tasks/" + taskToolUseID + "/checkpoints/"
-	foundCheckpointFiles := 0
-	err = shadowTree.Files().ForEach(func(f *object.File) error {
-		if strings.HasPrefix(f.Name, checkpointsPrefix) && strings.HasSuffix(f.Name, ".json") {
-			foundCheckpointFiles++
-			content, readErr := f.Contents()
-			if readErr != nil {
-				t.Errorf("failed to read checkpoint file %s: %v", f.Name, readErr)
-				return nil
-			}
-			var cp strategy.SubagentCheckpoint
-			if jsonErr := json.Unmarshal([]byte(content), &cp); jsonErr != nil {
-				t.Errorf("checkpoint file %s is invalid JSON: %v", f.Name, jsonErr)
-			}
-			if cp.Type == "" {
-				t.Errorf("checkpoint file %s missing type field", f.Name)
-			}
-			if cp.ToolUseID == "" {
-				t.Errorf("checkpoint file %s missing tool_use_id field", f.Name)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("failed to iterate shadow tree: %v", err)
-	}
-
-	if foundCheckpointFiles == 0 {
-		t.Errorf("expected incremental checkpoint files under %s", checkpointsPrefix)
-	}
-}
-
 // containsFile reports whether files contains path.
 func containsFile(files []string, path string) bool {
 	for _, f := range files {
@@ -510,8 +446,8 @@ func TestSubagentCheckpoints_BackgroundLaunch_DefersToSubagentStop(t *testing.T)
 
 // TestSubagentCheckpoints_TurnEnd_ThenSubagentStop covers turn-end (Stop)
 // landing between a background launch stub and the eventual subagent-stop:
-// the retired incremental backstop must NOT resurface (no shadow-tree task
-// write), the in-flight marker must survive the turn untouched, and
+// the retired incremental backstop must NOT resurface (no git write at turn
+// end), the in-flight marker must survive the turn untouched, and
 // subagent-stop remains the authoritative capture that completes the record —
 // in-flight coverage now comes from condensation materializing the record's
 // transcript-so-far, not from turn-end snapshots.
@@ -555,12 +491,8 @@ func TestSubagentCheckpoints_TurnEnd_ThenSubagentStop(t *testing.T) {
 	}
 
 	// No incremental task checkpoint: the turn-end backstop is retired.
-	shadowBranch := env.GetShadowBranchName()
-	incrementalPath := paths.EntireMetadataDir + "/" + session.ID + "/tasks/" + taskToolUseID +
-		"/checkpoints/001-" + taskToolUseID + ".json"
-	if env.FileExistsInBranch(shadowBranch, incrementalPath) {
-		t.Fatalf("turn-end must not write shadow-tree task checkpoints anymore, found %s", incrementalPath)
-	}
+	// Turn end writes no git objects at all.
+	env.AssertNoShadowBranches()
 
 	// The marker survives: the task is still running, and subagent-stop
 	// remains the authoritative final capture.

@@ -233,7 +233,8 @@ type PromptExtractor interface {
 
 // TranscriptPromptExtractor extracts user prompts from transcript CONTENT the
 // caller already holds. Condensation reads the transcript once — from the live
-// path, or from the shadow-branch copy when the live path cannot be read — and
+// path, or from the copy stored at the last Stop when the live path cannot be
+// read — and
 // stores those bytes in the checkpoint; the prompts it records must come from
 // the same bytes, not from a second read of the path that can see a different
 // (missing, shorter, or later) file. Optional: agents that only implement

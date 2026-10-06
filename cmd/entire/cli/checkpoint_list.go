@@ -21,7 +21,7 @@ import (
 // The field set, JSON names, omitempty markers, and the RFC3339 Date encoding
 // are load-bearing — this is a stable contract. CondensationID carries the
 // checkpoint ID (PendingCheckpoint.CheckpointID) for logs-only points; it is empty
-// for shadow-branch (uncommitted) points. Do not change these without
+// for uncommitted task-record points. Do not change these without
 // migrating every consumer.
 type pendingCheckpointJSON struct {
 	ID               string `json:"id"`
@@ -135,10 +135,10 @@ func pendingCheckpointLabel(p strategy.PendingCheckpoint, hasMultipleSessions bo
 		}
 		return fmt.Sprintf("%s (%s) %s%s", shortID, timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	case p.IsTaskCheckpoint:
-		// Task checkpoint (uncommitted) - no sha shown
+		// Task record (uncommitted) - no sha shown
 		return fmt.Sprintf("        (%s) [Task] %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	default:
-		// Shadow checkpoint (uncommitted) - no sha shown (internal commit)
+		// Uncommitted point - no sha to show
 		return fmt.Sprintf("        (%s) %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	}
 }
