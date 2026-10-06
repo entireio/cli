@@ -214,6 +214,40 @@ func (r *HookRunner) SimulatePostTask(input PostTaskInput) error {
 	return r.runHookWithInput("post-task", hookInput)
 }
 
+// SubagentStartInput contains the input for Claude Code's SubagentStart hook.
+// Like SubagentStop it carries no tool_use_id; AgentType is what the installed
+// matcher filters on ("workflow-subagent" for agents a Workflow launched).
+type SubagentStartInput struct {
+	SessionID      string // Parent session ID.
+	TranscriptPath string // Parent session's transcript path.
+	AgentID        string
+	AgentType      string
+}
+
+// SimulateSubagentStart simulates Claude Code's SubagentStart hook, which fires
+// as each subagent launches. For a Workflow's agents it is the only launch
+// signal: the Workflow call's PostToolUse names a run, not its agents.
+func (r *HookRunner) SimulateSubagentStart(input SubagentStartInput) error {
+	r.T.Helper()
+
+	hookInput := map[string]interface{}{
+		"session_id":      input.SessionID,
+		"transcript_path": input.TranscriptPath,
+		"hook_event_name": "SubagentStart",
+		"agent_id":        input.AgentID,
+		"agent_type":      input.AgentType,
+	}
+
+	return r.runHookWithInput("subagent-start", hookInput)
+}
+
+// SimulateSubagentStart is a convenience method on TestEnv.
+func (env *TestEnv) SimulateSubagentStart(input SubagentStartInput) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateSubagentStart(input)
+}
+
 // SubagentStopInput contains the input for the SubagentStop hook. There is no
 // ToolUseID: Claude Code's SubagentStop payload never carries one, so the
 // lifecycle must correlate on AgentID.
@@ -221,6 +255,7 @@ type SubagentStopInput struct {
 	SessionID           string // Parent session ID.
 	TranscriptPath      string // Parent session's transcript path.
 	AgentID             string
+	AgentType           string // Optional; Claude Code sends it, e.g. "workflow-subagent".
 	AgentTranscriptPath string // Path to the subagent's own transcript.
 }
 
@@ -237,6 +272,9 @@ func (r *HookRunner) SimulateSubagentStop(input SubagentStopInput) error {
 		"hook_event_name":       "SubagentStop",
 		"agent_id":              input.AgentID,
 		"agent_transcript_path": input.AgentTranscriptPath,
+	}
+	if input.AgentType != "" {
+		hookInput["agent_type"] = input.AgentType
 	}
 
 	return r.runHookWithInput("subagent-stop", hookInput)

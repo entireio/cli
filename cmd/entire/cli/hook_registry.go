@@ -70,11 +70,11 @@ const (
 
 // getHookType returns the hook type based on the hook name.
 // Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
-// subagent-stop) and "agent" for all other agent hooks.
+// subagent-start, subagent-stop) and "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
-		claudecode.HookNameSubagentStop:
+		claudecode.HookNameSubagentStart, claudecode.HookNameSubagentStop:
 		return hookTypeSubagent
 	default:
 		return hookTypeAgent

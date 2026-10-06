@@ -1654,6 +1654,12 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 // is the first point that sees the subagent's actual work. Tolerates
 // strategy.ErrStateNotFound the way the completion producers tolerate a launch
 // event arriving before session state exists.
+//
+// A launch replaces an existing record for its ToolUseID unless the event is
+// SubagentLaunchIdempotent: a launch keyed by the subagent itself (Claude
+// Code's SubagentStart for Workflow agents) can repeat, and must not reset a
+// record its SubagentStop already completed while that record is still in
+// session state.
 func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error {
 	logging.Debug(logCtx, "background subagent launch detected; deferring capture to subagent-stop",
 		slog.String("session_id", event.SessionID),
@@ -1662,13 +1668,18 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 	)
 
 	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
-		state.AddTaskRecord(session.TaskRecord{
+		record := session.TaskRecord{
 			ToolUseID:       event.ToolUseID,
 			AgentID:         event.SubagentID,
 			StartedAt:       time.Now(),
 			SubagentType:    event.SubagentType,
 			TaskDescription: event.TaskDescription,
-		})
+		}
+		if event.SubagentLaunchIdempotent {
+			state.EnsureTaskRecord(record)
+			return nil
+		}
+		state.AddTaskRecord(record)
 		return nil
 	})
 	switch {
@@ -1772,7 +1783,9 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		}
 		logging.Debug(logCtx, "no live in-flight marker for subagent-stop; skipping duplicate/foreground/racing capture",
 			slog.String("session_id", event.SessionID),
-			slog.String("tool_use_id", event.ToolUseID))
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("agent_id", event.SubagentID),
+			slog.String("agent_type", event.SubagentType))
 		return nil
 	}
 

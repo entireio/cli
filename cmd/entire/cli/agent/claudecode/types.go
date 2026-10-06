@@ -14,6 +14,7 @@ type ClaudeHooks struct {
 	UserPromptSubmit []ClaudeHookMatcher `json:"UserPromptSubmit,omitempty"`
 	Stop             []ClaudeHookMatcher `json:"Stop,omitempty"`
 	StopFailure      []ClaudeHookMatcher `json:"StopFailure,omitempty"`
+	SubagentStart    []ClaudeHookMatcher `json:"SubagentStart,omitempty"`
 	SubagentStop     []ClaudeHookMatcher `json:"SubagentStop,omitempty"`
 	PreToolUse       []ClaudeHookMatcher `json:"PreToolUse,omitempty"`
 	PostToolUse      []ClaudeHookMatcher `json:"PostToolUse,omitempty"`
@@ -90,9 +91,25 @@ type subagentStopHookInputRaw struct {
 	SessionID           string `json:"session_id"`
 	TranscriptPath      string `json:"transcript_path"`
 	AgentID             string `json:"agent_id"`
+	AgentType           string `json:"agent_type"`
 	AgentTranscriptPath string `json:"agent_transcript_path"`
 	ToolUseID           string `json:"tool_use_id"`
 }
+
+// subagentStartHookInputRaw is the JSON structure from the SubagentStart hook.
+// It names the subagent and its type but not the tool call that launched it:
+// for Workflow agents there is none of their own, only the Workflow call that
+// launched every agent in the run.
+type subagentStartHookInputRaw struct {
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	AgentID        string `json:"agent_id"`
+	AgentType      string `json:"agent_type"`
+}
+
+// workflowAgentType is the agent_type Claude Code reports for agents a
+// Workflow launches (observed in 2.1.291).
+const workflowAgentType = "workflow-subagent"
 
 // Tool names used in Claude Code transcripts
 const (

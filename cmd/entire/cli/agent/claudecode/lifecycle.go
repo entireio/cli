@@ -68,6 +68,7 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 		HookNamePreTask,
 		HookNamePostTask,
 		HookNamePostTodo,
+		HookNameSubagentStart,
 		HookNameSubagentStop,
 	}
 }
@@ -94,6 +95,8 @@ func (c *ClaudeCodeAgent) ParseHookEvent(ctx context.Context, hookName string, s
 		return c.parseSubagentStart(stdin)
 	case HookNamePostTask:
 		return c.parseSubagentEnd(stdin)
+	case HookNameSubagentStart:
+		return c.parseWorkflowAgentStart(stdin)
 	case HookNameSubagentStop:
 		return c.parseSubagentStop(ctx, stdin)
 	case HookNamePostTodo:
@@ -199,6 +202,41 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 	return event, nil
 }
 
+// parseWorkflowAgentStart parses Claude Code's SubagentStart hook into the
+// background-launch event a Workflow agent otherwise never gets (#2685): a
+// Workflow call returns at launch with a run ID and no agent IDs, so
+// PostToolUse has nothing per agent to record. The event records an in-flight
+// task record that the agent's SubagentStop later completes by agent ID.
+//
+// No per-agent tool_use_id exists — the Workflow's own is shared by every
+// agent in the run — so the agent ID keys the record. A record keyed this way
+// can see its launch signal again, so the launch is idempotent.
+//
+// Only Workflow agents produce an event. Direct Agent launches fire
+// SubagentStart too, but PreToolUse/PostToolUse[Agent] already record them
+// under their tool_use_id, and a second record here would duplicate the task.
+// The installed matcher filters them out; this check covers a widened one.
+func (c *ClaudeCodeAgent) parseWorkflowAgentStart(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStartHookInputRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	if raw.AgentType != workflowAgentType || raw.AgentID == "" {
+		return nil, nil //nolint:nilnil // nil event = no lifecycle action
+	}
+	return &agent.Event{
+		Type:                     agent.SubagentEnd,
+		SessionID:                raw.SessionID,
+		SessionRef:               raw.TranscriptPath,
+		ToolUseID:                raw.AgentID,
+		SubagentID:               raw.AgentID,
+		SubagentType:             raw.AgentType,
+		SubagentLaunch:           agent.SubagentLaunchBackground,
+		SubagentLaunchIdempotent: true,
+		Timestamp:                time.Now(),
+	}, nil
+}
+
 // subagentLaunchMode classifies an Agent call from its tool_response. Claude
 // Code decides whether a subagent runs in the background, often without the
 // model passing run_in_background at all, so the response is authoritative.
@@ -263,6 +301,7 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 		SessionRef:             raw.TranscriptPath,
 		ToolUseID:              raw.ToolUseID,
 		SubagentID:             raw.AgentID,
+		SubagentType:           raw.AgentType,
 		SubagentTranscriptPath: raw.AgentTranscriptPath,
 		Final:                  true,
 		Timestamp:              time.Now(),

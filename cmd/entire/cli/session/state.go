@@ -474,7 +474,10 @@ type SubagentInventoryEntry struct {
 // SessionEnd sweep to retry.
 type TaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
-	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
+	// to key TaskMetadataDir. Dedup key for AddTaskRecord. For a Claude Code
+	// Workflow agent it is the agent ID instead: those agents have no tool call
+	// of their own (the Workflow's tool_use_id is shared by every agent in the
+	// run), so the record is keyed by the subagent, and AgentID equals it.
 	ToolUseID string `json:"tool_use_id"`
 
 	// AgentID is the subagent identifier (tool_response.agentId at launch

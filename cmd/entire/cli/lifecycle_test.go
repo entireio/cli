@@ -4013,6 +4013,47 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_CompletesByAge
 	assert.Equal(t, "general-purpose", rec.SubagentType)
 }
 
+// TestHandleLifecycleSubagentEnd_WorkflowAgentLaunch_RepeatDoesNotResetRecord
+// covers Claude Code's SubagentStart for a Workflow agent (#2685): the launch
+// is keyed by the agent ID, so a SubagentStart seen again after the agent's
+// SubagentStop completed the record must leave that record as it is. Replacing
+// it (AddTaskRecord semantics) would drop the captured files and tokens and
+// leave a live record that nothing will complete again.
+func TestHandleLifecycleSubagentEnd_WorkflowAgentLaunch_RepeatDoesNotResetRecord(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "workflow-launch-session"
+	const agentID = "ae3d7b8f2930c8787"
+	completedAt := time.Now().Add(-time.Minute)
+
+	saveInFlightSession(ctx, t, sessionID, headHash, session.TaskRecord{
+		ToolUseID: agentID, AgentID: agentID, SubagentType: "workflow-subagent",
+		StartedAt: completedAt.Add(-time.Minute), CompletedAt: completedAt,
+		Files: []string{"a.txt"},
+	})
+
+	launch := &agent.Event{
+		Type:                     agent.SubagentEnd,
+		SessionID:                sessionID,
+		ToolUseID:                agentID,
+		SubagentID:               agentID,
+		SubagentType:             "workflow-subagent",
+		SubagentLaunch:           agent.SubagentLaunchBackground,
+		SubagentLaunchIdempotent: true,
+		Timestamp:                time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), launch))
+
+	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, state)
+	require.Len(t, state.TaskRecords, 1)
+	rec := state.TaskRecords[0]
+	assert.True(t, rec.CompletedAt.Equal(completedAt), "a repeated launch must not reopen a completed record")
+	assert.Equal(t, []string{"a.txt"}, rec.Files, "a repeated launch must not drop the captured files")
+}
+
 // TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_PrefersLiveRecord
 // covers two records sharing an agent ID before condensation, one completed
 // and one live. A stop matched by agent ID must complete the live record

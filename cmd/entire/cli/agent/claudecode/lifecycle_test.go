@@ -436,6 +436,52 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	})
 }
 
+// TestParseHookEvent_WorkflowSubagentStart covers Claude Code's SubagentStart
+// hook (#2685). A Workflow launches its agents without an Agent tool call, so
+// SubagentStart is the only launch signal; the payload shape is a real Claude
+// Code 2.1.291 capture. It becomes a background launch keyed by the agent ID,
+// which the later SubagentStop completes by the same ID.
+func TestParseHookEvent_WorkflowSubagentStart(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","cwd":"/repo","prompt_id":"p1","agent_id":"ae3d7b8f2930c8787","agent_type":"workflow-subagent","hook_event_name":"SubagentStart"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+
+	assert.Equal(t, agent.SubagentEnd, event.Type)
+	assert.False(t, event.Final, "a launch is not a completion")
+	assert.Equal(t, agent.SubagentLaunchBackground, event.SubagentLaunch)
+	assert.True(t, event.SubagentLaunchIdempotent, "a repeated SubagentStart must not reset the record")
+	assert.Equal(t, "parent-sess", event.SessionID)
+	assert.Equal(t, "/tmp/parent.jsonl", event.SessionRef)
+	assert.Equal(t, "ae3d7b8f2930c8787", event.ToolUseID)
+	assert.Equal(t, "ae3d7b8f2930c8787", event.SubagentID)
+	assert.Equal(t, "workflow-subagent", event.SubagentType)
+}
+
+// TestParseHookEvent_SubagentStart_IgnoresOtherAgentTypes: direct Agent
+// launches also fire SubagentStart, but PreToolUse/PostToolUse[Agent] already
+// record them under the call's tool_use_id. Recording them here as well would
+// create a second record for the same subagent. The installed matcher already
+// filters these out; this is the parse-side defence for a hand-widened one.
+func TestParseHookEvent_SubagentStart_IgnoresOtherAgentTypes(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{
+		`{"session_id":"s","transcript_path":"/t","agent_id":"a1","agent_type":"general-purpose"}`,
+		`{"session_id":"s","transcript_path":"/t","agent_id":"a1","agent_type":"Explore"}`,
+		`{"session_id":"s","transcript_path":"/t","agent_id":"a1"}`,
+		`{"session_id":"s","transcript_path":"/t","agent_type":"workflow-subagent"}`,
+	} {
+		event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+		require.NoError(t, err, input)
+		assert.Nil(t, event, input)
+	}
+}
+
 func TestParseHookEvent_PostTodo_ReturnsNil(t *testing.T) {
 	t.Parallel()
 

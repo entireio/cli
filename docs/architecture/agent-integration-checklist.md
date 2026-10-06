@@ -77,7 +77,10 @@ Map agent-native hooks to these `EventType` constants (see `agent/event.go`):
       (PostToolUse[Task]) fires at the launch stub (`Final: false`) and
       `subagent-stop` (the `SubagentStop` hook, wired to `entire hooks
       claude-code subagent-stop`) fires at true completion, per-agent, including
-      after the parent's own turn already ended (`Final: true`). Without the
+      after the parent's own turn already ended (`Final: true`). Agents a
+      Claude Code Workflow launches have no Agent call of their own, so their
+      launch comes from `subagent-start` (the `SubagentStart` hook, matcher
+      `workflow-subagent`), keyed by agent ID. Without the
       second hook, everything a background subagent does is invisible — see the
       "Task Records (Subagent Work)" section of [Sessions and
       Checkpoints](sessions-and-checkpoints.md) for the full launch-stub →

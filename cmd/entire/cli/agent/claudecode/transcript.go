@@ -3,7 +3,10 @@ package claudecode
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -139,17 +142,41 @@ func CalculateTokenUsageFromFile(path string, startLine int) (*agent.TokenUsage,
 // Returns a map of agentID -> toolUseID for all spawned agents.
 func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 	agentIDs := make(map[string]string)
+	forEachToolResultText(transcript, func(toolUseID, text string) {
+		// Look for agentId in the text. Drop any ID that isn't path-safe:
+		// callers build agent-<id>.jsonl from it and read that file, so this
+		// is the choke point that keeps the path inside subagentsDir,
+		// independent of extractAgentIDFromText's character handling.
+		if agentID := extractAgentIDFromText(text); agentID != "" && validation.ValidateAgentID(agentID) == nil {
+			agentIDs[agentID] = toolUseID
+		}
+	})
+	return agentIDs
+}
 
+// ExtractWorkflowRunIDs returns the IDs of the Workflow runs a transcript
+// launched. A Workflow call's tool_result names its run as "Run ID: <runId>"
+// (Claude Code 2.1.291) and none of the agents the run launches; those agents'
+// transcripts live under <subagentsDir>/workflows/<runId>/. Run IDs that are
+// not path-safe are dropped, as ExtractSpawnedAgentIDs drops agent IDs.
+func ExtractWorkflowRunIDs(transcript []TranscriptLine) []string {
+	var runIDs []string
+	forEachToolResultText(transcript, func(_, text string) {
+		if runID := extractIDAfter(text, "Run ID: ", true); runID != "" &&
+			validation.ValidateWorkflowRunID(runID) == nil && !slices.Contains(runIDs, runID) {
+			runIDs = append(runIDs, runID)
+		}
+	})
+	return runIDs
+}
+
+// forEachToolResultText calls fn with the text of every tool_result in the
+// transcript's user lines, whether the result content is a string or an array
+// of text blocks.
+func forEachToolResultText(transcript []TranscriptLine, fn func(toolUseID, text string)) {
 	for _, line := range transcript {
 		if line.Type != "user" {
 			continue
-		}
-
-		// Parse as array of content blocks (tool results)
-		var contentBlocks []struct {
-			Type      string          `json:"type"`
-			ToolUseID string          `json:"tool_use_id"`
-			Content   json.RawMessage `json:"content"`
 		}
 
 		var msg struct {
@@ -159,73 +186,70 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 			continue
 		}
 
+		// Parse as array of content blocks (tool results)
+		var contentBlocks []struct {
+			Type      string          `json:"type"`
+			ToolUseID string          `json:"tool_use_id"`
+			Content   json.RawMessage `json:"content"`
+		}
 		if err := json.Unmarshal(msg.Content, &contentBlocks); err != nil {
 			continue
 		}
 
 		for _, block := range contentBlocks {
-			if block.Type != "tool_result" {
-				continue
-			}
-
-			// Content can be a string or array of text blocks
-			var textContent string
-
-			// Try as array of text blocks first
-			var textBlocks []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			}
-			if err := json.Unmarshal(block.Content, &textBlocks); err == nil {
-				var textContentSb361 strings.Builder
-				for _, tb := range textBlocks {
-					if tb.Type == "text" {
-						textContentSb361.WriteString(tb.Text + "\n")
-					}
-				}
-				textContent += textContentSb361.String()
-			} else {
-				// Try as plain string
-				var str string
-				if err := json.Unmarshal(block.Content, &str); err == nil {
-					textContent = str
-				}
-			}
-
-			// Look for agentId in the text. Drop any ID that isn't path-safe:
-			// callers build agent-<id>.jsonl from it and read that file, so this
-			// is the choke point that keeps the path inside subagentsDir,
-			// independent of extractAgentIDFromText's character handling.
-			if agentID := extractAgentIDFromText(textContent); agentID != "" && validation.ValidateAgentID(agentID) == nil {
-				agentIDs[agentID] = block.ToolUseID
+			if block.Type == "tool_result" {
+				fn(block.ToolUseID, toolResultText(block.Content))
 			}
 		}
 	}
+}
 
-	return agentIDs
+// toolResultText returns a tool_result's content as text: an array of text
+// blocks joined line by line, or a plain string.
+func toolResultText(content json.RawMessage) string {
+	var textBlocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &textBlocks); err == nil {
+		var sb strings.Builder
+		for _, tb := range textBlocks {
+			if tb.Type == "text" {
+				sb.WriteString(tb.Text + "\n")
+			}
+		}
+		return sb.String()
+	}
+	var str string
+	if err := json.Unmarshal(content, &str); err == nil {
+		return str
+	}
+	return ""
 }
 
 // extractAgentIDFromText extracts an agent ID from text containing "agentId: <id>".
 func extractAgentIDFromText(text string) string {
-	const prefix = "agentId: "
+	return extractIDAfter(text, "agentId: ", false)
+}
+
+// extractIDAfter extracts the identifier following the first occurrence of
+// prefix in text: letters and digits, plus '_' and '-' when withSeparators is
+// set. Agent IDs are alphanumeric; run IDs ("wf_e5264e60-494") are not.
+func extractIDAfter(text, prefix string, withSeparators bool) string {
 	idx := strings.Index(text, prefix)
 	if idx == -1 {
 		return ""
 	}
 
-	// Extract the ID (alphanumeric characters after the prefix)
 	start := idx + len(prefix)
 	end := start
 	for end < len(text) && (text[end] >= 'a' && text[end] <= 'z' ||
 		text[end] >= 'A' && text[end] <= 'Z' ||
-		text[end] >= '0' && text[end] <= '9') {
+		text[end] >= '0' && text[end] <= '9' ||
+		withSeparators && (text[end] == '_' || text[end] == '-')) {
 		end++
 	}
-
-	if end > start {
-		return text[start:end]
-	}
-	return ""
+	return text[start:end]
 }
 
 // CalculateTotalTokenUsage calculates token usage for a turn, including subagents.
@@ -356,16 +380,15 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
-	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
+	agentPaths := subagentTranscriptPaths(ExtractSpawnedAgentIDs(fullParsed), ExtractWorkflowRunIDs(fullParsed), subagentsDir)
 
 	// Calculate subagent token usage. This re-reads each subagent transcript from
 	// line 0 on every call, so mainUsage.SubagentTokens is a cumulative-since-
 	// session-start snapshot — see the CalculateTotalTokenUsage interface contract
 	// in cmd/entire/cli/agent for how callers must accumulate it.
-	if len(agentIDs) > 0 {
+	if len(agentPaths) > 0 {
 		subagentUsage := &agent.TokenUsage{}
-		for agentID := range agentIDs {
-			agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
+		for _, agentPath := range agentPaths {
 			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
 			if err != nil {
 				// Agent transcript may not exist yet or may have been cleaned up
@@ -383,6 +406,36 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	}
 
 	return mainUsage, nil
+}
+
+// subagentTranscriptPaths maps every subagent the transcript launched to its
+// transcript: the agents named by "agentId:" tool results (spawnedAgentIDs),
+// at <subagentsDir>/agent-<id>.jsonl, plus the agents of every Workflow run
+// the transcript launched (runIDs), under <subagentsDir>/workflows/<runId>/
+// (#2685). A Workflow's tool result names its run, never its agents, so those
+// are found on disk — but only for runs the transcript names, so a transcript
+// prefix (import computes one per turn) counts only the runs launched so far.
+// An agent found both ways is read from its direct location when that file
+// exists, else from the run directory.
+func subagentTranscriptPaths(spawnedAgentIDs map[string]string, runIDs []string, subagentsDir string) map[string]string {
+	agentPaths := make(map[string]string)
+	for _, runID := range runIDs {
+		maps.Copy(agentPaths, paths.WorkflowRunAgentTranscripts(subagentsDir, runID))
+	}
+	for agentID := range spawnedAgentIDs {
+		direct := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
+		if _, inRun := agentPaths[agentID]; inRun && !fileExists(direct) {
+			continue
+		}
+		agentPaths[agentID] = direct
+	}
+	return agentPaths
+}
+
+// fileExists reports whether path names an existing file.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // ExtractAllModifiedFiles extracts files modified by both the main agent and

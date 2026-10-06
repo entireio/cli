@@ -587,6 +587,12 @@ comments at each site say which case applies:
   base the rule above refuses, and it would contain nothing while looking like
   it did.
 
+  The same gap covers listing Claude Code Workflow runs:
+  `paths.WorkflowAgentTranscripts` / `WorkflowRunAgentTranscripts` call bare
+  `os.ReadDir` under the session's `subagents/workflows/`, derived from the
+  transcript path. They take only path-safe run and agent IDs, skip symlinked
+  runs and files, and read nothing but regular `agent-<id>.jsonl` files.
+
   `TestTranscriptReadsOnlyShrink` (`agent/transcript_read_guard_test.go`) is a
   **ratchet** over that set: it pins the per-file count of
   `os.ReadFile(sessionRef)`-shaped reads and fails the build when one grows or a

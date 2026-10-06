@@ -306,6 +306,22 @@ func TestValidateAgentID(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowRunID(t *testing.T) {
+	t.Parallel()
+
+	for id, wantErr := range map[string]bool{
+		"wf_e5264e60-494": false,
+		"":                true,
+		"..":              true,
+		"wf_1/agent":      true,
+		"wf.1":            true,
+	} {
+		if err := ValidateWorkflowRunID(id); (err != nil) != wantErr {
+			t.Errorf("ValidateWorkflowRunID(%q) error = %v, wantErr %v", id, err, wantErr)
+		}
+	}
+}
+
 func TestValidateAgentSessionID(t *testing.T) {
 	t.Parallel()
 
