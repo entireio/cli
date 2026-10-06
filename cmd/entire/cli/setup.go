@@ -190,7 +190,7 @@ func updateStrategyOptions(ctx context.Context, w io.Writer, opts EnableOptions)
 		}
 	}
 
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -231,7 +231,7 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -305,7 +305,7 @@ func updateSummaryTimeoutSetting(ctx context.Context, w io.Writer, timeoutSecond
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -335,7 +335,7 @@ func updateSummaryTimeoutSetting(ctx context.Context, w io.Writer, timeoutSecond
 // Entire git hook when --force or --absolute-git-hook-path is set.
 func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, opts EnableOptions) error {
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
@@ -2256,7 +2256,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// why: writing the merged struct back into a single scope leaks the other
 	// scope's fields into it).
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	targetFileAbs, err := settings.FilePath(ctx, targetFile)
 	if err != nil {
 		targetFileAbs = targetFile
 	}
