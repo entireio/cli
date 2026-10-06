@@ -250,10 +250,10 @@ func geminiToolResultCompact(tc geminiToolCall) json.RawMessage {
 
 	r := toolResultJSON{
 		Output: output,
-		Status: toolResultStatusSuccess,
+		Status: ToolStatusSuccess,
 	}
-	if tc.Status != "" && tc.Status != toolResultStatusSuccess {
-		r.Status = toolResultStatusError
+	if tc.Status != "" && tc.Status != ToolStatusSuccess {
+		r.Status = ToolStatusError
 	}
 	b, err := json.Marshal(r)
 	if err != nil {

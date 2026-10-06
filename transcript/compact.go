@@ -43,11 +43,6 @@ func newTranscriptLine(opts Options) transcriptLine {
 	}
 }
 
-const (
-	toolResultStatusSuccess = "success"
-	toolResultStatusError   = "error"
-)
-
 // toolResultJSON is the compact result object inlined into tool_use blocks.
 type toolResultJSON struct {
 	Output     string              `json:"output"`
@@ -483,11 +478,11 @@ func inlineToolResults(assistant, user parsedEntry) parsedEntry {
 func buildToolResult(tr toolResultEntry) json.RawMessage {
 	r := toolResultJSON{
 		Output:     tr.output,
-		Status:     toolResultStatusSuccess,
+		Status:     ToolStatusSuccess,
 		MatchCount: tr.matchCount,
 	}
 	if tr.isError {
-		r.Status = toolResultStatusError
+		r.Status = ToolStatusError
 	}
 	if tr.file != nil {
 		r.File = &toolResultFileJSON{

@@ -68,7 +68,7 @@ A line is skipped when it:
 - A `content` value that is `null`, absent, or any other non-array, non-string
   JSON value becomes no blocks. The line is still returned.
 
-Every block carries `Raw`, the block exactly as stored. A block that is not a
+Every block carries `Raw`, the block exactly as stored (for string content, the synthesized text block). A block that is not a
 JSON object, or whose known fields have the wrong JSON type, is returned with
 only `Raw` set; it never causes its line to be skipped.
 

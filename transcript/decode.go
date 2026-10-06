@@ -19,6 +19,9 @@ type SkippedLinesError struct {
 }
 
 func (e *SkippedLinesError) Error() string {
+	if len(e.Skipped) == 0 {
+		return "transcript: skipped 0 lines"
+	}
 	first := e.Skipped[0]
 	return fmt.Sprintf("transcript: skipped %d line(s); first: line %d: %s", len(e.Skipped), first.Line, first.Reason)
 }
@@ -124,11 +127,16 @@ func decodeContent(content json.RawMessage) []Block {
 		if err := json.Unmarshal(content, &s); err != nil {
 			return nil
 		}
-		raw, err := json.Marshal(map[string]string{"type": BlockText, "text": s})
-		if err != nil {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{BlockText, s}); err != nil {
 			return nil
 		}
-		return []Block{{Type: BlockText, Text: s, Raw: raw}}
+		return []Block{{Type: BlockText, Text: s, Raw: bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})}}
 	case '[':
 		var items []json.RawMessage
 		if err := json.Unmarshal(content, &items); err != nil {
@@ -194,7 +202,13 @@ func Parse(raw []byte, o Options) ([]Line, error) {
 }
 
 func isEntireFormat(raw []byte) bool {
-	for _, l := range bytes.Split(raw, []byte{'\n'}) {
+	for len(raw) > 0 {
+		var l []byte
+		if i := bytes.IndexByte(raw, '\n'); i >= 0 {
+			l, raw = raw[:i], raw[i+1:]
+		} else {
+			l, raw = raw, nil
+		}
 		l = bytes.TrimSpace(l)
 		if len(l) == 0 {
 			continue

@@ -94,7 +94,15 @@ func TestDecode_Blocks(t *testing.T) {
 			input: `{"v":1,"type":"assistant","content":"hello"}`,
 			want: Line{
 				Version: 1, Type: TypeAssistant,
-				Blocks: []Block{{Type: BlockText, Text: "hello", Raw: json.RawMessage(`{"text":"hello","type":"text"}`)}},
+				Blocks: []Block{{Type: BlockText, Text: "hello", Raw: json.RawMessage(`{"type":"text","text":"hello"}`)}},
+			},
+		},
+		{
+			name:  "string content raw is not HTML-escaped",
+			input: `{"v":1,"type":"assistant","content":"a<b && c"}`,
+			want: Line{
+				Version: 1, Type: TypeAssistant,
+				Blocks: []Block{{Type: BlockText, Text: "a<b && c", Raw: json.RawMessage(`{"type":"text","text":"a<b && c"}`)}},
 			},
 		},
 		{
@@ -225,4 +233,10 @@ func TestDecode_VeryLongLine(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, lines, 1)
 	assert.Len(t, lines[0].Blocks[0].Text, len(text))
+}
+
+func TestSkippedLinesError_EmptyDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	assert.NotPanics(t, func() { _ = (&SkippedLinesError{}).Error() })
 }

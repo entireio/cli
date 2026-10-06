@@ -4,8 +4,8 @@ import "encoding/json"
 
 // Block types. Other values pass through verbatim; see Block.Raw.
 const (
-	BlockText    = "text"
-	BlockToolUse = "tool_use"
+	BlockText    = ContentTypeText
+	BlockToolUse = ContentTypeToolUse
 	BlockImage   = "image"
 )
 
