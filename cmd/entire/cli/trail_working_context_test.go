@@ -227,3 +227,11 @@ func TestWorkingTrailUnlinkPreservesBranch(t *testing.T) {
 	require.Contains(t, out, "trail #42")
 	require.Equal(t, []string{http.MethodGet, http.MethodGet, http.MethodDelete}, methods)
 }
+
+// A merged change's read has branch null; descriptions name its original branch.
+func TestTrailWorkingContextDescriptionNamesMergedBranch(t *testing.T) {
+	t.Parallel()
+	selected := trailWorkingContext{Target: &projectTrailTarget{}, Parent: api.ProjectTrail{Number: 42},
+		Host: "gh", Owner: "acme", Repo: "widget", Work: api.TrailResource{Number: 7, OriginalBranch: "feature/old"}}
+	require.Equal(t, "trail #42 (gh/acme/widget / feature/old)", selected.description())
+}

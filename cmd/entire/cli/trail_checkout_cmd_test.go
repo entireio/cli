@@ -94,6 +94,8 @@ func TestDescribeTrailRef(t *testing.T) {
 		{"title without number", api.TrailResource{Title: "Add foo"}, `trail "Add foo"`},
 		{"neither", api.TrailResource{}, "trail"},
 		{"title trimmed", api.TrailResource{Number: 1, Title: "  Add foo  "}, "trail #1 (Add foo)"},
+		{"project branch", api.TrailResource{Number: 7, Branch: "feature/x", Parent: &api.TrailParentReference{Number: 42}}, "trail #42 (branch feature/x)"},
+		{"project merged branch", api.TrailResource{Number: 7, OriginalBranch: "feature/old", Parent: &api.TrailParentReference{Number: 42}}, "trail #42 (branch feature/old)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

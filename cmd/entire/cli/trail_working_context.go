@@ -30,7 +30,7 @@ func (t *trailWorkingContext) description() string {
 	if t.Target == nil {
 		return fmt.Sprintf("trail #%d", t.Work.Number)
 	}
-	return fmt.Sprintf("trail #%d (%s/%s/%s / %s)", t.Parent.Number, t.Host, t.Owner, t.Repo, tuiutil.SanitizeTerminalLabel(t.Work.Branch))
+	return fmt.Sprintf("trail #%d (%s/%s/%s / %s)", t.Parent.Number, t.Host, t.Owner, t.Repo, tuiutil.SanitizeTerminalLabel(changeBranchName(t.Work)))
 }
 
 // resolveProjectTrailWorkingContext is projectTrailMode.workingContext.

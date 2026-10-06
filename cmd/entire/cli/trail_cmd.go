@@ -1874,7 +1874,7 @@ func checkoutTrailBranch(ctx context.Context, w, errW io.Writer, found *api.Trai
 // "trail \"Add foo\"".
 func describeTrailRef(t *api.TrailResource) string {
 	if t.Parent != nil {
-		return fmt.Sprintf("trail #%d (branch %s)", t.Parent.Number, t.Branch)
+		return fmt.Sprintf("trail #%d (branch %s)", t.Parent.Number, changeBranchName(*t))
 	}
 	title := strings.TrimSpace(t.Title)
 	if t.Number > 0 {
