@@ -311,6 +311,14 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if err != nil {
 		return err
 	}
+	// A pushed commit an earlier attach already linked has no trailer to find
+	// its checkpoint by; its checkpoint names it instead. Join that one, as the
+	// trailer paths do, rather than start a second checkpoint for the commit.
+	if plan.mode == attachRecordLink && !isExistingCheckpoint {
+		if linkedID, ok := checkpointLinkedTo(ctx, store, target); ok {
+			checkpointID, isExistingCheckpoint = linkedID, true
+		}
+	}
 
 	// Defense-in-depth guard: the earlier existingState.LastCheckpointID
 	// check only fires when the session's state file records its
@@ -395,19 +403,26 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 
 	fmt.Fprintf(w, "Attached session %s\n", sessionID)
 	printAttachFooter(w, meta, tokenUsage)
+	finishAttachLink(ctx, logCtx, w, errW, plan, headCommit, checkpointID, isExistingCheckpoint)
+	return nil
+}
+
+// finishAttachLink reports the checkpoint and completes its link to the target
+// commit: amending an unpushed HEAD, or reporting and pushing a recorded link.
+func finishAttachLink(ctx, logCtx context.Context, w, errW io.Writer, plan attachLinkPlan, headCommit *object.Commit, checkpointID id.CheckpointID, isExistingCheckpoint bool) {
 	if isExistingCheckpoint {
 		fmt.Fprintf(w, "  Added to existing checkpoint %s\n", checkpointID)
-		return nil
+		if plan.mode == attachRecordLink {
+			pushAttachedCheckpoint(ctx, w, errW, plan.remote)
+		}
+		return
 	}
-
 	fmt.Fprintf(w, "  Created checkpoint %s\n", checkpointID)
 	if plan.mode == attachRecordLink {
 		reportLinkedCommit(ctx, w, errW, plan)
-		return nil
+		return
 	}
 	amendOrPrintTrailer(logCtx, w, errW, headCommit, checkpointID.String())
-
-	return nil
 }
 
 // linkExistingCheckpoint handles a session that already has a checkpoint: it
@@ -498,6 +513,21 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 	default:
 		return attachLinkPlan{}, fmt.Errorf("commit %s is not pushed and is not HEAD, so it can't be linked: amending it would mean a rebase, and a recorded link wouldn't survive one. Push it first, or attach while it is HEAD", target.Hash.String()[:12])
 	}
+}
+
+// checkpointLinkedTo finds the most recent local checkpoint whose recorded
+// links name target. A listing failure finds none.
+func checkpointLinkedTo(ctx context.Context, store cpkg.PersistentStore, target *object.Commit) (id.CheckpointID, bool) {
+	infos, err := store.List(ctx)
+	if err != nil {
+		logging.Debug(ctx, "attach: listing checkpoints for a recorded link failed", slog.String("error", err.Error()))
+		return id.EmptyCheckpointID, false
+	}
+	linked := cpkg.CheckpointsLinkedTo(infos, target.Hash.String())
+	if len(linked) == 0 {
+		return id.EmptyCheckpointID, false
+	}
+	return linked[0], true
 }
 
 // remoteHoldingCommit returns a remote whose branches contain target, or "" when

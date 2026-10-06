@@ -350,3 +350,38 @@ func TestAttributionResolver_LinkedCheckpoints(t *testing.T) {
 		t.Fatalf("a failed listing links nothing, got %v", got)
 	}
 }
+
+// A pushed commit already linked by an earlier attach is linked: a second
+// session joins that checkpoint, like the trailer paths, rather than starting a
+// separate checkpoint for the same commit.
+func TestAttachCommit_SecondSessionJoinsTheRecordedLinkCheckpoint(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	pushToOrigin(t)
+
+	if out, err := attachHeadless(t, "attach-recorded-first", attachOptions{}); err != nil {
+		t.Fatalf("first attach: %v\n%s", err, out)
+	}
+	first, err := loadAttachState(t, "attach-recorded-first")
+	if err != nil || first == nil {
+		t.Fatalf("load first state: %v, %v", first, err)
+	}
+	out, err := attachHeadless(t, "attach-recorded-second", attachOptions{})
+	if err != nil {
+		t.Fatalf("second attach: %v\n%s", err, out)
+	}
+	second, err := loadAttachState(t, "attach-recorded-second")
+	if err != nil || second == nil {
+		t.Fatalf("load second state: %v, %v", second, err)
+	}
+	if second.LastCheckpointID != first.LastCheckpointID {
+		t.Fatalf("second session got checkpoint %s, want the commit's existing %s", second.LastCheckpointID, first.LastCheckpointID)
+	}
+	summary := readSummary(t, first.LastCheckpointID.String())
+	if len(summary.Sessions) != 2 {
+		t.Fatalf("checkpoint has %d sessions, want 2", len(summary.Sessions))
+	}
+	if len(summary.LinkedCommits) != 1 || summary.LinkedCommits[0].SHA != head.Hash.String() {
+		t.Errorf("LinkedCommits = %v, want just [%s]", summary.LinkedCommits, head.Hash)
+	}
+}
