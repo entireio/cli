@@ -24,29 +24,30 @@ func truncateStringSlice(s []string, n int) []string {
 	return s[:n]
 }
 
-// Content-aware overlap detection for checkpoint management.
+// Overlap detection for checkpoint linking and carry-forward.
 //
-// These functions determine whether a commit contains session-related work by comparing
-// committed (or staged) blob hashes against the hashes recorded at turn end in
-// SessionState.TouchedFileHashes (see touched_file_hashes.go). This enables
-// detection of the "reverted and replaced" scenario where a user:
-// 1. Reverts session changes (e.g., git checkout -- file.txt)
-// 2. Creates completely different content in the same file
-// 3. Commits the new content
+// Linking (filesOverlapWithContent in PostCommit, stagedFilesOverlapWithContent
+// in PrepareCommitMsg) decides whether a commit carries a session's work and so
+// gets its Entire-Checkpoint trailer. It is by NAME: any committed (or staged)
+// path in FilesTouched counts, whether the file is modified, deleted, or new,
+// and whatever its content. A user editing an agent-created file before
+// committing it is far more common than a user overwriting it wholesale, and
+// comparing the committed blob with the recorded hash turned the common case
+// into a missing trailer.
 //
-// In this scenario, the commit should NOT get a checkpoint trailer because the
-// session's work was discarded, not incorporated.
+// The one exception is a recorded deletion (SessionState.TouchedFileHashes
+// holds "" for the path): if the agent's last action on a path was to delete
+// it and the commit adds that path as a new file, someone else re-created it,
+// so it does not link. A later turn in which the agent re-creates the path
+// records a hash for it and removes the exception.
 //
-// The key distinction:
-// - Modified files (exist in parent commit): Always count as overlap, regardless of
-//   content changes. The user is editing session's work.
-// - New files (don't exist in parent): Require the committed blob to equal the
-//   recorded one. If it differs, the session's work was likely reverted & replaced.
-//
-// A path with no recorded hash is matched by name, so "reverted and replaced"
-// detection does not apply to it. That covers every path that reached
-// FilesTouched through a task record or a per-tool hook rather than a turn-end
-// step (MergeUnhashedFilesTouched), as well as symlinks and unhashable files.
+// Carry-forward (filesWithRemainingAgentChanges) is a different question: what
+// is LEFT of the agent's work after a commit. It does compare the committed blob
+// and the worktree with the recorded turn-end hash (see touched_file_hashes.go)
+// to tell fully committed from replaced from partially committed. A path with no
+// recorded hash — one that reached FilesTouched through a task record, a
+// per-tool hook, or a Codex child-file merge (MergeUnhashedFilesTouched), or a
+// symlink or unhashable file — falls back to name matching there too.
 
 // overlapOpts provides pre-resolved git objects to avoid redundant reads.
 // When fields are non-nil, they are used directly instead of reading from the repo.
@@ -56,9 +57,9 @@ type overlapOpts struct {
 	hasParentTree bool         // True if parentTree was explicitly resolved (distinguishes nil-not-resolved from nil-initial-commit)
 }
 
-// filesOverlapWithContent checks if any file in filesTouched overlaps with the committed
-// content, using the recorded turn-end hashes to detect the "reverted and
-// replaced" scenario.
+// filesOverlapWithContent reports whether the commit touches any path in
+// filesTouched: a modified, deleted, or new file, matched by name. A new file
+// the session recorded as deleted does not count (see the header above).
 //
 // This is used in PostCommit to determine if a session has work in the commit.
 func filesOverlapWithContent(ctx context.Context, hashes map[string]string, headCommit *object.Commit, filesTouched []string, opts ...overlapOpts) bool {
@@ -96,7 +97,7 @@ func filesOverlapWithContent(ctx context.Context, hashes map[string]string, head
 	// Check each file in filesTouched
 	for _, filePath := range filesTouched {
 		// Get file from HEAD tree (the committed content)
-		headFile, err := headTree.File(filePath)
+		_, err := headTree.File(filePath)
 		if err != nil {
 			// File not in HEAD commit. Check if this is a deletion (existed in parent).
 			// Deletions count as overlap because the agent's action (deleting the file)
@@ -130,8 +131,8 @@ func filesOverlapWithContent(ctx context.Context, hashes map[string]string, head
 			return true
 		}
 
-		// For new files, compare the committed blob with the recorded one.
-		if newFileMatchesRecorded(logCtx, "filesOverlapWithContent", hashes, filePath, headFile.Hash) {
+		// New files count by name, unless the agent's last action was deleting it.
+		if newFileIsSessionWork(logCtx, "filesOverlapWithContent", hashes, filePath) {
 			return true
 		}
 	}
@@ -142,49 +143,26 @@ func filesOverlapWithContent(ctx context.Context, hashes map[string]string, head
 	return false
 }
 
-// newFileMatchesRecorded reports whether a newly added file's committed or
-// staged blob is the session's work: equal to the hash recorded at turn end,
-// or — when no hash was recorded — present by name. A recorded deletion never
-// matches: the agent deleted the path and someone else re-created it.
-func newFileMatchesRecorded(logCtx context.Context, caller string, hashes map[string]string, filePath string, blobHash plumbing.Hash) bool {
-	recorded, ok, deleted := recordedFileHash(hashes, filePath)
-	switch {
-	case !ok:
-		logging.Debug(logCtx, caller+": new file without recorded hash, matching by name",
-			slog.String("file", filePath),
-		)
-		return true
-	case deleted:
+// newFileIsSessionWork reports whether a file the commit adds counts as the
+// session's work. It does, by name, unless the session recorded the path as
+// deleted: then someone else re-created it after the agent deleted it.
+func newFileIsSessionWork(logCtx context.Context, caller string, hashes map[string]string, filePath string) bool {
+	if _, _, deleted := recordedFileHash(hashes, filePath); deleted {
 		logging.Debug(logCtx, caller+": new file the session recorded as deleted",
 			slog.String("file", filePath),
 		)
 		return false
-	case blobHash.Equal(recorded):
-		// Equal, not ==: plumbing.Hash carries an object-format field
-		// alongside its bytes; see filesWithRemainingAgentChanges.
-		logging.Debug(logCtx, caller+": new file content match found",
-			slog.String("file", filePath),
-			slog.String("hash", blobHash.String()),
-		)
-		return true
-	default:
-		logging.Debug(logCtx, caller+": new file content mismatch (may be reverted & replaced)",
-			slog.String("file", filePath),
-			slog.String("committed_hash", blobHash.String()),
-			slog.String("recorded_hash", recorded.String()),
-		)
-		return false
 	}
+	logging.Debug(logCtx, caller+": new file counts as overlap",
+		slog.String("file", filePath),
+	)
+	return true
 }
 
-// stagedFilesOverlapWithContent checks if any staged file overlaps with filesTouched,
-// distinguishing between modified files (always overlap) and new files (check content).
-//
-// For modified files (already exist in HEAD), we count as overlap because the user
-// is editing the session's work. For new files (don't exist in HEAD), the
-// staged blob must equal the recorded turn-end hash, which detects the
-// "reverted and replaced" scenario. A new file staged with different content
-// than the agent left does not count, including a partially staged one.
+// stagedFilesOverlapWithContent reports whether any staged path is in
+// filesTouched, matched by name for modified, deleted, and new files alike. A
+// new file the session recorded as deleted does not count (see the header
+// above).
 //
 // This is used in PrepareCommitMsg.
 func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, hashes map[string]string, stagedFiles, filesTouched []string) bool {
@@ -219,21 +197,6 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, ha
 		return hasOverlappingFiles(stagedFiles, filesTouched)
 	}
 
-	// Get the git index to access staged file hashes
-	idx, err := repo.Storer.Index()
-	if err != nil {
-		logging.Debug(logCtx, "stagedFilesOverlapWithContent: failed to get index, falling back to filename check",
-			slog.String("error", err.Error()),
-		)
-		return hasOverlappingFiles(stagedFiles, filesTouched)
-	}
-
-	// Build a map of index entries for O(1) lookup (avoid O(n*m) nested loop)
-	indexEntries := make(map[string]plumbing.Hash, len(idx.Entries))
-	for _, entry := range idx.Entries {
-		indexEntries[entry.Name] = entry.Hash
-	}
-
 	// Check each staged file
 	for _, stagedPath := range stagedFiles {
 		if !touchedSet[stagedPath] {
@@ -257,12 +220,8 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, ha
 			return true
 		}
 
-		// For new files, compare the staged blob with the recorded one.
-		stagedHash, found := indexEntries[stagedPath]
-		if !found {
-			continue // Not in index (shouldn't happen but be safe)
-		}
-		if newFileMatchesRecorded(logCtx, "stagedFilesOverlapWithContent", hashes, stagedPath, stagedHash) {
+		// New files count by name, unless the agent's last action was deleting it.
+		if newFileIsSessionWork(logCtx, "stagedFilesOverlapWithContent", hashes, stagedPath) {
 			return true
 		}
 	}

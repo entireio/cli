@@ -99,9 +99,11 @@ func TestFilesOverlapWithContent_NewFile_ContentMatch(t *testing.T) {
 	assert.True(t, result, "New file with matching content should count as overlap")
 }
 
-// TestFilesOverlapWithContent_NewFile_ContentMismatch tests that a new file with
-// completely different content does NOT count as overlap (reverted & replaced scenario).
-func TestFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
+// TestFilesOverlapWithContent_NewFile_UserRewriteStillLinks tests that a new file
+// committed with different content than the agent left still links: linking is
+// by name, because editing an agent-created file before committing it is far
+// more common than replacing it.
+func TestFilesOverlapWithContent_NewFile_UserRewriteStillLinks(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
 
@@ -114,7 +116,8 @@ func TestFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
 		"replaced.txt": sessionContent,
 	})
 
-	// Commit a file with COMPLETELY DIFFERENT content (user reverted & replaced)
+	// Commit the file with different content than the agent left (the user
+	// edited, or even rewrote, the agent's new file before committing).
 	testFile := filepath.Join(dir, "replaced.txt")
 	require.NoError(t, os.WriteFile(testFile, []byte("user wrote something totally unrelated"), 0o644))
 
@@ -130,9 +133,36 @@ func TestFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
 	commit, err := repo.CommitObject(headCommit)
 	require.NoError(t, err)
 
-	// Test: New file with different content should NOT count as overlap
+	// Linking is by name: the commit carries a path the session created.
 	result := filesOverlapWithContent(context.Background(), hashes, commit, []string{"replaced.txt"})
-	assert.False(t, result, "New file with different content should NOT count as overlap (reverted & replaced)")
+	assert.True(t, result, "a new file in FilesTouched links by name, whatever its committed content")
+}
+
+// TestFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink pins the one
+// exception to name matching: the agent's last action on the path was deleting
+// it, so a commit that adds the path as a new file re-creates someone else's
+// file and does not link.
+func TestFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "recreated.txt"), []byte("re-created by the user"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("recreated.txt")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Re-create file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	hashes := map[string]string{"recreated.txt": touchedFileDeleted}
+	assert.False(t, filesOverlapWithContent(context.Background(), hashes, commit, []string{"recreated.txt"}))
 }
 
 // TestFilesOverlapWithContent_FileNotInCommit tests that a file in filesTouched
@@ -903,9 +933,9 @@ func TestStagedFilesOverlapWithContent_NewFile_ContentMatch(t *testing.T) {
 	assert.True(t, result, "New file with matching content should count as overlap")
 }
 
-// TestStagedFilesOverlapWithContent_NewFile_ContentMismatch tests that a new file
-// with different content does NOT count as overlap (reverted & replaced scenario).
-func TestStagedFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
+// TestStagedFilesOverlapWithContent_NewFile_UserRewriteStillLinks: the
+// prepare-commit-msg side of TestFilesOverlapWithContent_NewFile_UserRewriteStillLinks.
+func TestStagedFilesOverlapWithContent_NewFile_UserRewriteStillLinks(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
 
@@ -925,9 +955,28 @@ func TestStagedFilesOverlapWithContent_NewFile_ContentMismatch(t *testing.T) {
 		"newfile.txt": []byte("agent original content"),
 	})
 
-	// New file with different content should NOT count as overlap
+	// Linking is by name: the staged path is one the session created.
 	result := stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"newfile.txt"}, []string{"newfile.txt"})
-	assert.False(t, result, "New file with mismatched content should not count as overlap")
+	assert.True(t, result, "a staged new file in FilesTouched links by name, whatever its content")
+}
+
+// TestStagedFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink: see
+// TestFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink.
+func TestStagedFilesOverlapWithContent_NewFile_RecordedDeletionDoesNotLink(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "recreated.txt"), []byte("re-created by the user"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("recreated.txt")
+	require.NoError(t, err)
+
+	hashes := map[string]string{"recreated.txt": touchedFileDeleted}
+	assert.False(t, stagedFilesOverlapWithContent(context.Background(), repo, hashes, []string{"recreated.txt"}, []string{"recreated.txt"}))
 }
 
 // TestStagedFilesOverlapWithContent_NoOverlap tests that non-overlapping files

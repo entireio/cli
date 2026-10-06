@@ -86,12 +86,17 @@ func TestMixedNewAndModifiedFiles(t *testing.T) {
 	})
 }
 
-// TestInteractiveContentOverlapRevertNewFile: agent creates a file, user replaces its
-// content entirely with different text and commits while the session is still
-// idle (not ended). The content-aware overlap detection should prevent a
-// checkpoint trailer: the committed blob does not match the hash recorded for
-// the new file at turn end.
-func TestInteractiveContentOverlapRevertNewFile(t *testing.T) {
+// TestInteractiveNewFileLinksAfterUserRewrite: agent creates a file, the user
+// replaces its content with different text and commits while the session is
+// still idle (not ended). The commit still gets the session's checkpoint.
+//
+// Linking is by name for new files, as it already was for modified ones: a
+// path the session created links whatever content is committed. Editing an
+// agent-created file before committing it is far more common than overwriting
+// it wholesale, and the earlier rule (compare the committed blob with the hash
+// recorded at turn end) turned that common case into a missing trailer.
+// Carry-forward still compares hashes to decide what work is left.
+func TestInteractiveNewFileLinksAfterUserRewrite(t *testing.T) {
 	testutil.ForEachAgent(t, 2*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		prompt := s.Agent.PromptPattern()
 
@@ -120,18 +125,17 @@ func TestInteractiveContentOverlapRevertNewFile(t *testing.T) {
 		s.Git(t, "add", "docs/red.md")
 		s.Git(t, "commit", "-m", "Replace red.md content")
 
-		// Give post-commit hook time to fire.
-		time.Sleep(5 * time.Second)
+		testutil.WaitForCheckpoint(t, s, 30*time.Second)
+		testutil.AssertCheckpointAdvanced(t, s)
 
-		testutil.AssertNoCheckpointTrailer(t, s.Dir, "HEAD")
-		testutil.AssertCheckpointNotAdvanced(t, s)
+		cpID := testutil.AssertHasCheckpointTrailer(t, s.Dir, "HEAD")
+		testutil.AssertCheckpointExists(t, s.Dir, cpID)
 	})
 }
 
 // TestModifiedFileAlwaysGetsCheckpoint: agent modifies an existing tracked
 // file, user writes completely different content and commits. A checkpoint
-// should STILL be created because content-aware overlap detection only
-// applies to new files, not modifications to existing tracked files.
+// is still created: linking is by name for modified and new files alike.
 func TestModifiedFileAlwaysGetsCheckpoint(t *testing.T) {
 	testutil.ForEachAgent(t, 2*time.Minute, func(t *testing.T, s *testutil.RepoState, ctx context.Context) {
 		// Create a tracked file.

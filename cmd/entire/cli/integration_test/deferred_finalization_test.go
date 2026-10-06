@@ -846,21 +846,22 @@ func TestManualCommit_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	t.Log("SessionDepleted_ManualEditNoCheckpoint test completed successfully")
 }
 
-// TestManualCommit_RevertedFiles_ManualEditNoCheckpoint tests that after reverting
-// uncommitted session files, manual edits with completely different content
-// do NOT get checkpoint trailers.
+// TestManualCommit_RevertedFiles_ManualRewriteStillLinks tests that a new file
+// the session created still links the session when the user deletes it and
+// commits a rewrite at the same path.
 //
-// The overlap check is content-aware: it compares the committed blob hash with
-// the hash recorded at turn end (TouchedFileHashes). If they don't match,
-// the file is not considered session-related.
+// Linking is by name, not content: a user editing an agent-created file before
+// committing it is far more common than one replacing it wholesale, and the
+// two cannot be told apart from content alone. The recorded hash only decides
+// carry-forward (what work is left), not linking.
 //
 // Flow:
 // 1. Agent creates files A, B, C, then stops (IDLE)
 // 2. User commits files A and B → checkpoint #1
 // 3. User reverts file C (deletes it)
 // 4. User manually creates file C with different content
-// 5. User commits file C → NO checkpoint (content doesn't match the recorded hash)
-func TestManualCommit_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
+// 5. User commits file C → checkpoint #2 (fileC.go is in FilesTouched)
+func TestManualCommit_RevertedFiles_ManualRewriteStillLinks(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -911,21 +912,17 @@ func TestManualCommit_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 	// User manually creates file C with DIFFERENT content (not what agent wrote)
 	env.WriteFile("fileC.go", "package main\n\n// Completely different implementation\nfunc C() { panic(\"manual\") }\n")
 
-	// Commit the manual file C - should NOT get checkpoint because content-aware
-	// overlap check compares file hashes. The content is completely different
-	// from what the session wrote, so it's not linked.
+	// Commit the rewritten file C - it links by name, whatever its content.
 	env.GitCommitWithHooks("Add file C (manual implementation)", "fileC.go")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 
-	if secondCheckpointID != "" {
-		t.Errorf("Second commit should NOT have checkpoint trailer "+
-			"(content doesn't match the recorded hash), got %s", secondCheckpointID)
-	} else {
-		t.Log("Second commit correctly has no checkpoint trailer (content mismatch)")
+	switch secondCheckpointID {
+	case "":
+		t.Error("Second commit should have a checkpoint trailer: fileC.go is a path the session created")
+	case firstCheckpointID:
+		t.Errorf("Second commit reused the first checkpoint ID %s", firstCheckpointID)
 	}
-
-	t.Log("RevertedFiles_ManualEditNoCheckpoint test completed successfully")
 }
 
 // TestManualCommit_ResetSession_ClearsTurnCheckpointIDs tests that resetting a session
