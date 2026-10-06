@@ -44,6 +44,9 @@ func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
 						entries = append(entries, CondensedEntry{Type: transcript.TypeAssistant, Content: block.Text})
 					}
 				case transcript.BlockToolUse:
+					if block.Name == "" {
+						continue
+					}
 					var input map[string]any
 					if len(block.Input) > 0 {
 						if err := json.Unmarshal(block.Input, &input); err != nil {

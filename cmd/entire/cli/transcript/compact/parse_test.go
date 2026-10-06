@@ -68,3 +68,13 @@ func TestBuildCondensedEntries_ParsesCompactTranscript(t *testing.T) {
 	assert.Equal(t, "Read", entries[2].ToolName)
 	assert.Equal(t, "a.txt", entries[2].ToolDetail)
 }
+
+func TestBuildCondensedEntries_SkipsToolUseWithoutName(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{"v":1,"type":"assistant","content":[{"type":"tool_use","input":{"path":"a"}},{"type":"text","text":"hi"}]}` + "\n")
+	entries, err := BuildCondensedEntries(input)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "assistant", entries[0].Type)
+}
