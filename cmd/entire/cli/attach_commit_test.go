@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"slices"
 	"strings"
 	"testing"
 
@@ -87,53 +86,141 @@ func readSummary(t *testing.T, cpID string) *cpkg.CheckpointSummary {
 	return summary
 }
 
-// An older commit can't take a trailer without rewriting history, so the
-// checkpoint records the commit instead and nothing is amended.
-func TestAttachCommit_LinksOlderCommitWithoutRewriting(t *testing.T) {
+// pushToOrigin adds a bare "origin" and publishes HEAD to it, so remote
+// branches contain every commit made so far.
+func pushToOrigin(t *testing.T) string {
+	t.Helper()
+	dir := mustGetwd(t)
+	remote := t.TempDir()
+	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
+	testutil.RunGit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/main")
+	testutil.RunGit(t, dir, "fetch", "-q", "origin")
+	return remote
+}
+
+func attachHeadless(t *testing.T, sessionID string, opts attachOptions) (string, error) {
+	t.Helper()
+	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, opts)
+	return out.String(), err
+}
+
+// The common attach — hooks missed the commit just made — targets an unpushed
+// HEAD. A trailer is the right link there: nobody else has the commit, and the
+// trailer survives a later rebase. It is amended in without a prompt, so a
+// headless attach no longer leaves the checkpoint unlinked.
+func TestAttachCommit_UnpushedHeadIsAmended(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+
+	out, err := attachHeadless(t, "attach-unpushed-head", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	head := headCommitOf(t)
+	cpID, ok := trailers.ParseCheckpoint(head.Message)
+	if !ok {
+		t.Fatalf("unpushed HEAD was not amended with a trailer:\n%s", out)
+	}
+	if summary := readSummary(t, cpID.String()); len(summary.LinkedCommits) != 0 {
+		t.Errorf("LinkedCommits = %v: a trailer-linked checkpoint needs no anchor", summary.LinkedCommits)
+	}
+}
+
+// A pushed HEAD can't be amended without a force-push, so the link is recorded
+// in the checkpoint and the commit is left alone.
+func TestAttachCommit_PushedHeadIsLinkedInTheCheckpoint(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	remote := pushToOrigin(t)
+
+	out, err := attachHeadless(t, "attach-pushed-head", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("pushed HEAD was rewritten: %s %q", got.Hash, got.Message)
+	}
+	state, err := loadAttachState(t, "attach-pushed-head")
+	if err != nil || state == nil {
+		t.Fatalf("load state: %v, %v", state, err)
+	}
+	if summary := readSummary(t, state.LastCheckpointID.String()); len(summary.LinkedCommits) != 1 || summary.LinkedCommits[0].SHA != head.Hash.String() {
+		t.Fatalf("LinkedCommits = %v, want [%s]", summary.LinkedCommits, head.Hash)
+	}
+	if state.BaseCommit != head.Hash.String() {
+		t.Errorf("BaseCommit = %q, want HEAD so a still-running session keeps linking", state.BaseCommit)
+	}
+	if !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Errorf("expected the checkpoint to be pushed, got:\n%s", out)
+	}
+	if refs := testutil.RunGit(t, remote, "for-each-ref", "--format=%(refname)"); !strings.Contains(refs, "entire/checkpoints") {
+		t.Errorf("remote has no checkpoint refs:\n%s", refs)
+	}
+}
+
+// An older pushed commit is linked in the checkpoint, never rewritten.
+func TestAttachCommit_PushedOlderCommitIsLinkedInTheCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
 	target := commitAt(t, "work.txt")
 	head := commitAt(t, "later.txt")
+	pushToOrigin(t)
 
-	sessionID := "attach-commit-older"
-	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
-	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Commit: target.Hash.String()[:10], AllowUnpushed: true}); err != nil {
-		t.Fatalf("runAttach: %v\n%s", err, out.String())
+	out, err := attachHeadless(t, "attach-pushed-older", attachOptions{Commit: target.Hash.String()[:10]})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
-
 	if got := headCommitOf(t).Hash; got != head.Hash {
-		t.Fatalf("HEAD moved from %s to %s: --commit must never rewrite history", head.Hash, got)
+		t.Fatalf("HEAD moved from %s to %s", head.Hash, got)
 	}
 	if msg := commitByHash(t, target.Hash).Message; strings.Contains(msg, "Entire-Checkpoint") {
 		t.Fatalf("target commit gained a trailer: %q", msg)
 	}
-
-	state, err := loadAttachState(t, sessionID)
+	state, err := loadAttachState(t, "attach-pushed-older")
 	if err != nil || state == nil {
-		t.Fatalf("LoadState: %v, %v", state, err)
+		t.Fatalf("load state: %v, %v", state, err)
 	}
 	summary := readSummary(t, state.LastCheckpointID.String())
-	if !slices.Equal(summary.LinkedCommits, []cpkg.LinkedCommit{{SHA: target.Hash.String()}}) {
+	if len(summary.LinkedCommits) != 1 || summary.LinkedCommits[0].SHA != target.Hash.String() {
 		t.Fatalf("LinkedCommits = %v, want [%s]", summary.LinkedCommits, target.Hash)
 	}
 	if state.BaseCommit != "" {
-		t.Errorf("BaseCommit = %q: attaching to an older commit must not make the session link future HEAD commits", state.BaseCommit)
+		t.Errorf("BaseCommit = %q: an older commit must not make the session link future HEAD commits", state.BaseCommit)
 	}
-	if !strings.Contains(out.String(), target.Hash.String()[:7]) {
-		t.Errorf("output should name the linked commit, got:\n%s", out.String())
+	if !strings.Contains(out, target.Hash.String()[:7]) {
+		t.Errorf("output should name the linked commit, got:\n%s", out)
+	}
+}
+
+// An older commit no remote holds can be linked neither way: amending it means
+// a rebase, and a recorded link wouldn't survive the rebase still likely to
+// come. It is refused before anything is written.
+func TestAttachCommit_UnpushedOlderCommitIsRefused(t *testing.T) {
+	setupAttachTestRepo(t)
+	target := commitAt(t, "work.txt")
+	commitAt(t, "later.txt")
+
+	out, err := attachHeadless(t, "attach-unpushed-older", attachOptions{Commit: target.Hash.String()})
+	if err == nil || !strings.Contains(err.Error(), "not pushed") {
+		t.Fatalf("err = %v, want a refusal explaining the commit isn't pushed\n%s", err, out)
+	}
+	state, err := loadAttachState(t, "attach-unpushed-older")
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state != nil {
+		t.Errorf("a refused attach wrote session state: %+v", state)
 	}
 }
 
 // A commit that already carries a checkpoint is already linked: the session
-// joins that checkpoint and no anchor is written.
+// joins that checkpoint and nothing else is written.
 func TestAttachCommit_JoinsTheCommitsExistingCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
-
-	first := "attach-commit-first"
-	setupClaudeTranscript(t, first, attachCommitTranscript)
-	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, &out, first, agent.AgentNameClaudeCode, attachOptions{Force: true}); err != nil {
-		t.Fatalf("first attach: %v", err)
+	if out, err := attachHeadless(t, "attach-join-first", attachOptions{}); err != nil {
+		t.Fatalf("first attach: %v\n%s", err, out)
 	}
 	target := headCommitOf(t)
 	cpID, ok := trailers.ParseCheckpoint(target.Message)
@@ -142,13 +229,9 @@ func TestAttachCommit_JoinsTheCommitsExistingCheckpoint(t *testing.T) {
 	}
 	commitAt(t, "later.txt")
 
-	second := "attach-commit-second"
-	setupClaudeTranscript(t, second, attachCommitTranscript)
-	out.Reset()
-	if err := runAttach(context.Background(), &out, &out, second, agent.AgentNameClaudeCode, attachOptions{Commit: target.Hash.String(), AllowUnpushed: true}); err != nil {
-		t.Fatalf("second attach: %v\n%s", err, out.String())
+	if out, err := attachHeadless(t, "attach-join-second", attachOptions{Commit: target.Hash.String()}); err != nil {
+		t.Fatalf("second attach: %v\n%s", err, out)
 	}
-
 	summary := readSummary(t, cpID.String())
 	if len(summary.Sessions) != 2 {
 		t.Fatalf("checkpoint has %d sessions, want 2", len(summary.Sessions))
@@ -158,81 +241,30 @@ func TestAttachCommit_JoinsTheCommitsExistingCheckpoint(t *testing.T) {
 	}
 }
 
-func TestAttachCommit_RejectsWhatIsNotACommit(t *testing.T) {
-	setupAttachTestRepo(t)
-	sessionID := "attach-commit-bad-rev"
-	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Commit: "no-such-revision", AllowUnpushed: true})
-	if err == nil || !strings.Contains(err.Error(), "no-such-revision") {
-		t.Fatalf("err = %v, want an error naming the revision", err)
-	}
-}
-
-// --commit HEAD keeps today's link (trailer on HEAD) only when asked to amend;
-// otherwise it anchors like any other commit and leaves HEAD alone.
-func TestAttachCommit_HeadIsAnchoredNotAmended(t *testing.T) {
-	setupAttachTestRepo(t)
-	head := commitAt(t, "work.txt")
-	sessionID := "attach-commit-head"
-	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
-	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Commit: "HEAD", AllowUnpushed: true}); err != nil {
-		t.Fatalf("runAttach: %v\n%s", err, out.String())
-	}
-	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
-		t.Fatalf("HEAD was rewritten: %s %q", got.Hash, got.Message)
-	}
-	state, err := loadAttachState(t, sessionID)
-	if err != nil || state == nil {
-		t.Fatalf("LoadState: %v, %v", state, err)
-	}
-	if summary := readSummary(t, state.LastCheckpointID.String()); !slices.Equal(summary.LinkedCommits, []cpkg.LinkedCommit{{SHA: head.Hash.String()}}) {
-		t.Fatalf("LinkedCommits = %v, want [%s]", summary.LinkedCommits, head.Hash)
-	}
-	if state.BaseCommit != head.Hash.String() {
-		t.Errorf("BaseCommit = %q, want HEAD %s so the session keeps linking future commits", state.BaseCommit, head.Hash)
-	}
-}
-
-// A commit no remote holds is refused by default: the link wouldn't follow a
-// rebase or amend, and the server can't see the commit yet.
-func TestAttachCommit_RefusesUnpushedCommitByDefault(t *testing.T) {
-	setupAttachTestRepo(t)
-	target := commitAt(t, "work.txt")
-	sessionID := "attach-commit-unpushed"
-	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
-	var out bytes.Buffer
-	err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Commit: target.Hash.String()})
-	if err == nil || !strings.Contains(err.Error(), "--allow-unpushed") {
-		t.Fatalf("err = %v, want a refusal naming --allow-unpushed", err)
-	}
-}
-
-// A pushed commit is linked and the checkpoint is pushed right away, since no
-// later git push may come.
-func TestAttachCommit_PushesTheCheckpointForAPushedCommit(t *testing.T) {
+// A link recorded in the checkpoint only counts when the commit's author
+// attaches it; say so up front rather than let it fail quietly on the server.
+func TestAttachCommit_WarnsWhenNotTheCommitsAuthor(t *testing.T) {
 	setupAttachTestRepo(t)
 	dir := mustGetwd(t)
-	remote := t.TempDir()
-	testutil.RunGit(t, remote, "init", "--bare", "-q")
-	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
-	target := commitAt(t, "work.txt")
-	testutil.RunGit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/main")
-	testutil.RunGit(t, dir, "fetch", "-q", "origin")
+	testutil.WriteFile(t, dir, "theirs.txt", "theirs")
+	testutil.GitAdd(t, dir, "theirs.txt")
+	testutil.RunGit(t, dir, "-c", "user.name=Someone Else", "-c", "user.email=someone@example.com", "commit", "-q", "-m", "their commit")
+	pushToOrigin(t)
 
-	sessionID := "attach-commit-pushed"
-	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
-	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Commit: target.Hash.String()}); err != nil {
-		t.Fatalf("runAttach: %v\n%s", err, out.String())
+	out, err := attachHeadless(t, "attach-not-author", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
-	if !strings.Contains(out.String(), "Pushed checkpoint metadata to origin") {
-		t.Fatalf("expected the checkpoint to be pushed, got:\n%s", out.String())
+	if !strings.Contains(out, "someone@example.com") {
+		t.Errorf("expected a warning naming the commit's author, got:\n%s", out)
 	}
-	refs := testutil.RunGit(t, remote, "for-each-ref", "--format=%(refname)")
-	if !strings.Contains(refs, "entire/checkpoints") {
-		t.Fatalf("remote has no checkpoint refs after attach --commit:\n%s", refs)
+}
+
+func TestAttachCommit_RejectsWhatIsNotACommit(t *testing.T) {
+	setupAttachTestRepo(t)
+	_, err := attachHeadless(t, "attach-bad-rev", attachOptions{Commit: "no-such-revision"})
+	if err == nil || !strings.Contains(err.Error(), "no-such-revision") {
+		t.Fatalf("err = %v, want an error naming the revision", err)
 	}
 }
 
@@ -241,11 +273,10 @@ func TestAttachCommit_ExplainFindsTheLinkedCheckpoint(t *testing.T) {
 	setupAttachTestRepo(t)
 	target := commitAt(t, "work.txt")
 	commitAt(t, "later.txt")
+	pushToOrigin(t)
 	sessionID := "attach-commit-explain"
-	setupClaudeTranscript(t, sessionID, attachCommitTranscript)
-	var out bytes.Buffer
-	if err := runAttach(context.Background(), &out, &out, sessionID, agent.AgentNameClaudeCode, attachOptions{Commit: target.Hash.String(), AllowUnpushed: true}); err != nil {
-		t.Fatalf("runAttach: %v", err)
+	if out, err := attachHeadless(t, sessionID, attachOptions{Commit: target.Hash.String()}); err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
 	state, err := loadAttachState(t, sessionID)
 	if err != nil || state == nil {

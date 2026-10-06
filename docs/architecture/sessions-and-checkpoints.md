@@ -693,22 +693,31 @@ When condensing multiple concurrent sessions:
 - `sessions` array in `CheckpointSummary` maps each session to its file paths
 - `files_touched` is merged from all sessions
 
-A checkpoint written by `entire session attach --commit <rev>` carries
-`linked_commits` on the root `CheckpointSummary`: a list of `{sha, repo}`
-objects (`repo` is `<forge>/<owner>/<repo>` from the git remote that holds the
-commit, possibly empty). It links the checkpoint to a commit that has no
-`Entire-Checkpoint` trailer — an older or already-pushed commit, or a headless
-attach — without rewriting it. Unlike the import anchor below it is an
+`entire session attach <id> [--commit <rev>]` (default HEAD) picks how to
+link from the target commit, never from a flag (`planAttachLink`):
+- the commit already carries an `Entire-Checkpoint` trailer: the session joins
+  that checkpoint;
+- the commit is HEAD and no remote branch holds it: the trailer is amended in,
+  without a prompt (nobody else has the commit, and a trailer survives a later
+  rebase);
+- a remote branch already holds the commit: the link is recorded in the
+  checkpoint and the commit is left unchanged, so nothing needs a force-push;
+- an older commit no remote holds is refused (amending it means a rebase, and a
+  recorded link would not survive one).
+
+A recorded link is `linked_commits` on the root `CheckpointSummary`: a list of
+`{sha, repo}` objects (`repo` is `<forge>/<owner>/<repo>` from the remote that
+holds the commit, possibly empty). Unlike the import anchor below it is an
 **attributing** link: the server treats a verified entry like a trailer, and
 verifies it only when the authenticated checkpoint pusher is the commit's
-author (otherwise it is stored as an unverified attachment). Rewrites of the
-checkpoint keep existing entries (`unionLinkedCommits`). Readers consult
-trailers first and fall back to `checkpoint.CheckpointsLinkedTo` (`explain
-<commit>`, `blame`/`why`). Attach refuses a target no remote branch contains
-unless `--allow-unpushed` (the link does not follow a rebase or amend), and
-pushes the checkpoint itself through the pre-push path, since no later push
-may carry it. A CLI that predates the field drops it if it rewrites that
-checkpoint's root metadata.
+author (otherwise it is stored as an unverified attachment; attach warns when
+the local git author differs). Rewrites of the checkpoint keep existing entries
+(`unionLinkedCommits`). Readers consult trailers first and fall back to
+`checkpoint.CheckpointsLinkedTo` (`explain <commit>`, `blame`/`why`). Attach
+pushes the checkpoint itself through the pre-push path, since no later push may
+carry it. Git hooks keep writing trailers while a commit is made; nothing in
+Entire rewrites a commit that a remote already holds. A CLI that predates the
+field drops it if it rewrites that checkpoint's root metadata.
 
 Checkpoints written by the import path — `entire import <agent>` and `entire
 enable`'s optional history import — additionally carry a `commit_sha`

@@ -189,6 +189,13 @@ var agentHelpClassification = map[string]agentHelpFacts{
 // true for both audiences (e.g. "these endpoints are internal and can change")
 // belongs in Long instead, where both see it.
 var agentHelpGuidance = map[string]string{
+	"session attach": "Commits made during a session are linked to it automatically. Use this\n" +
+		"only when one was missed: `entire session attach <session-id> --commit <sha>`\n" +
+		"(default HEAD). It decides how to link from the commit, with no prompt: an\n" +
+		"unpushed HEAD is amended with the Entire-Checkpoint trailer; a pushed commit\n" +
+		"is linked in the checkpoint and never rewritten; an older unpushed commit\n" +
+		"is refused (push it first). A link to a pushed commit counts only when its\n" +
+		"author attaches it.",
 	"api": "LAST RESORT. Right in two cases: you are developing against Entire's own\n" +
 		"APIs and want a raw response, or no first-class command covers your need.\n" +
 		"Otherwise prefer the command built for the job (checkpoint, session, trail,\n" +
