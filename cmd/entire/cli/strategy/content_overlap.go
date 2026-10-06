@@ -264,10 +264,19 @@ func hasOverlappingFiles(stagedFiles, filesTouched []string) bool {
 // is clean (matches the commit), the user intentionally wrote different
 // content — there is nothing left to carry forward.
 //
-// Files recorded as agent deletions are never carried forward, and neither is
-// a file without a recorded hash that was committed or is missing from the
-// worktree (the phantom-path guard: transcript parsing can name files the
-// agent never created, and carrying those forward would never end).
+// A file without a recorded hash (a session from an older CLI, or a path added
+// by a task record, per-tool hook, or Codex child-file merge) is judged the
+// same way against the commit, minus the recorded-hash shortcut: once
+// committed, it stays while the working tree still differs from the committed
+// blob and drops when they match. An uncommitted one stays unless it is
+// missing from the worktree (the phantom-path guard: transcript parsing can
+// name files the agent never created, and carrying those forward would never
+// end).
+//
+// A recorded agent deletion stays while it is still pending: the commit tree
+// still has the path and the worktree still lacks it, so the later commit that
+// deletes it links the session. It drops once a commit removes the path, or
+// when the file is back in the worktree (someone re-created it).
 func filesWithRemainingAgentChanges(
 	ctx context.Context,
 	repo *git.Repository,
@@ -311,76 +320,17 @@ func filesWithRemainingAgentChanges(
 		}
 	}
 
-	type worktreeCandidate struct {
-		index        int
-		path         string
-		commitHash   plumbing.Hash
-		commitMode   filemode.FileMode
-		recordedHash plumbing.Hash
-	}
+	classify := remainingClassifier{logCtx: logCtx, commitTree: commitTree, root: root, worktreeRoot: worktreeRoot}
 	keep := make([]bool, len(filesTouched))
 	var candidates []worktreeCandidate
-
 	for i, filePath := range filesTouched {
 		_, wasCommitted := committedFiles[filePath]
-		recorded, hasHash, deleted := recordedFileHash(hashes, filePath)
-
-		switch {
-		case deleted:
-			// Agent deletion: there is no content on disk to carry forward.
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: recorded deletion, skipping",
-				slog.String("file", filePath),
-			)
-			continue
-		case !hasHash && wasCommitted:
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: committed file without recorded hash, dropping by name",
-				slog.String("file", filePath),
-			)
-			continue
-		case !hasHash:
-			// Phantom guard: a path the agent never actually produced.
-			if root != nil && !worktreeEntryExists(root, worktreeRoot, filePath) {
-				logging.Debug(logCtx, "filesWithRemainingAgentChanges: file without recorded hash missing from worktree, skipping",
-					slog.String("file", filePath),
-				)
-				continue
-			}
-			keep[i] = true
-			continue
-		case !wasCommitted:
-			// File wasn't committed at all — it has remaining changes
-			keep[i] = true
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
-				slog.String("file", filePath),
-			)
-			continue
+		kept, candidate := classify.file(filePath, wasCommitted, hashes)
+		keep[i] = kept
+		if candidate != nil {
+			candidate.index = i
+			candidates = append(candidates, *candidate)
 		}
-
-		commitFile, err := commitTree.File(filePath)
-		if err != nil {
-			// File not in commit tree (the commit deleted it) but the agent
-			// left content for it — keep it.
-			keep[i] = true
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not in commit tree but has recorded content, keeping",
-				slog.String("file", filePath),
-			)
-			continue
-		}
-
-		if commitFile.Hash.Equal(recorded) {
-			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content fully committed",
-				slog.String("file", filePath),
-			)
-			continue
-		}
-
-		candidates = append(candidates, worktreeCandidate{
-			index:        i,
-			path:         filePath,
-			commitHash:   commitFile.Hash,
-			commitMode:   commitFile.Mode,
-			recordedHash: recorded,
-		})
 	}
 
 	worktreeHashes := make(map[string]plumbing.Hash)
@@ -447,6 +397,98 @@ func filesWithRemainingAgentChanges(
 	)
 
 	return remaining
+}
+
+// worktreeCandidate is a committed path whose fate depends on whether the
+// working tree still differs from the committed blob.
+type worktreeCandidate struct {
+	index        int
+	path         string
+	commitHash   plumbing.Hash
+	commitMode   filemode.FileMode
+	recordedHash plumbing.Hash // zero when no hash was recorded
+}
+
+// remainingClassifier holds what filesWithRemainingAgentChanges resolves once
+// per commit for classifying each touched path.
+type remainingClassifier struct {
+	logCtx       context.Context
+	commitTree   *object.Tree
+	root         *os.Root
+	worktreeRoot string
+}
+
+// file decides one touched path without hashing the worktree: keep reports a
+// path that stays in FilesTouched outright; a non-nil candidate defers the
+// decision to the worktree-versus-commit comparison. See
+// filesWithRemainingAgentChanges for the rules.
+func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map[string]string) (keep bool, candidate *worktreeCandidate) {
+	recorded, hasHash, deleted := recordedFileHash(hashes, filePath)
+	switch {
+	case deleted:
+		if deletionStillPending(c.commitTree, c.root, c.worktreeRoot, filePath, wasCommitted) {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: recorded deletion not yet committed, keeping",
+				slog.String("file", filePath))
+			return true, nil
+		}
+		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: recorded deletion committed or path re-created, skipping",
+			slog.String("file", filePath))
+		return false, nil
+	case !wasCommitted && !hasHash:
+		// Phantom guard: a path the agent never actually produced.
+		if c.root != nil && !worktreeEntryExists(c.root, c.worktreeRoot, filePath) {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file without recorded hash missing from worktree, skipping",
+				slog.String("file", filePath))
+			return false, nil
+		}
+		return true, nil
+	case !wasCommitted:
+		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
+			slog.String("file", filePath))
+		return true, nil
+	}
+
+	commitFile, err := c.commitTree.File(filePath)
+	if err != nil {
+		// The commit removed the path. A recorded version is agent content
+		// left to commit; without one, only something back in the worktree is.
+		if hasHash || (c.root != nil && worktreeEntryExists(c.root, c.worktreeRoot, filePath)) {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not in commit tree but has content left, keeping",
+				slog.String("file", filePath))
+			return true, nil
+		}
+		return false, nil
+	}
+	if hasHash && commitFile.Hash.Equal(recorded) {
+		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: content fully committed",
+			slog.String("file", filePath))
+		return false, nil
+	}
+	// Without a recorded hash there is no shortcut: keep the path while the
+	// worktree still differs from what was committed (a partial commit).
+	return false, &worktreeCandidate{
+		path:         filePath,
+		commitHash:   commitFile.Hash,
+		commitMode:   commitFile.Mode,
+		recordedHash: recorded,
+	}
+}
+
+// deletionStillPending reports whether a recorded agent deletion of path has
+// not reached a commit yet: the commit did not touch the path, still has it,
+// and the worktree still lacks it. When the worktree root cannot be opened,
+// the deletion is treated as pending, so it is never dropped on a guess.
+func deletionStillPending(commitTree *object.Tree, root *os.Root, worktreeRoot, path string, wasCommitted bool) bool {
+	if wasCommitted {
+		return false
+	}
+	if _, err := commitTree.File(path); err != nil {
+		return false
+	}
+	if root == nil {
+		return true
+	}
+	return !worktreeEntryExists(root, worktreeRoot, path)
 }
 
 // workingTreeMatchesBlob checks whether the raw file representation hashes to

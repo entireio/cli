@@ -574,9 +574,39 @@ func TestFilesWithRemainingAgentChanges_NoRecordedHash(t *testing.T) {
 	committedFiles := map[string]struct{}{"test.txt": {}}
 	remaining := filesWithRemainingAgentChanges(context.Background(), repo, nil, commit, []string{"test.txt", "other.txt", "phantom.txt"}, committedFiles)
 
-	// With file-level subtraction: test.txt is committed, other.txt is not;
-	// phantom.txt is neither committed nor in the worktree.
-	assert.Equal(t, []string{"other.txt"}, remaining, "Fallback should use file-level subtraction with the phantom guard")
+	// test.txt is committed and the worktree matches the commit, other.txt is
+	// not committed; phantom.txt is neither committed nor in the worktree.
+	assert.Equal(t, []string{"other.txt"}, remaining, "unhashed paths: committed-and-clean drops, uncommitted stays, phantom drops")
+}
+
+// TestFilesWithRemainingAgentChanges_NoRecordedHash_PartialCommitKept: a
+// committed path with no recorded hash (an upgraded session, or one whose hash
+// MergeUnhashedFilesTouched cleared) stays while the worktree still holds more
+// than was committed, as a hashed path would.
+func TestFilesWithRemainingAgentChanges_NoRecordedHash_PartialCommitKept(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	// The user commits the first half of the file...
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\n"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("half.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit half", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+	// ...while the rest is still in the worktree.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\nsecond half\n"), 0o644))
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, nil, commit,
+		[]string{"half.txt"}, map[string]struct{}{"half.txt": {}})
+	assert.Equal(t, []string{"half.txt"}, remaining)
 }
 
 // resolveCommitTrees is a test helper that resolves the HEAD tree and parent
@@ -827,8 +857,9 @@ func TestFilesWithRemainingAgentChanges_PhantomFile(t *testing.T) {
 }
 
 // TestFilesWithRemainingAgentChanges_UncommittedDeletion verifies that an
-// agent-deleted file that the user didn't commit is skipped: the turn-end step
-// recorded it as a deletion, and there is nothing on disk to carry forward.
+// agent deletion the user did not commit is carried forward: the commit tree
+// still has the path and the worktree still lacks it, so the later commit that
+// deletes it must still link the session.
 func TestFilesWithRemainingAgentChanges_UncommittedDeletion(t *testing.T) {
 	t.Parallel()
 	dir := setupGitRepo(t)
@@ -871,10 +902,93 @@ func TestFilesWithRemainingAgentChanges_UncommittedDeletion(t *testing.T) {
 	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, userCommit,
 		[]string{"to_delete.txt", "other.txt"}, committedFiles)
 
-	// to_delete.txt is skipped: it is a recorded agent deletion, with no
-	// content on disk to carry forward. other.txt has no recorded hash and was
-	// committed, so it drops by name.
-	assert.Empty(t, remaining, "Recorded deletion should not be carried forward")
+	// to_delete.txt is kept: the deletion is still pending. other.txt has no
+	// recorded hash, was committed, and the worktree matches the commit, so it
+	// drops.
+	assert.Equal(t, []string{"to_delete.txt"}, remaining, "a pending recorded deletion is carried forward")
+}
+
+// recordedDeletionRepo commits to_delete.txt and removes it from the worktree,
+// as an agent's deletion would, returning the repo, its worktree, and the
+// recorded hashes for that deletion.
+func recordedDeletionRepo(t *testing.T) (string, *git.Repository, *git.Worktree, map[string]string) {
+	t.Helper()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "to_delete.txt"), []byte("will be deleted"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("to_delete.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Add file that agent will delete", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(dir, "to_delete.txt")))
+	return dir, repo, wt, map[string]string{"to_delete.txt": touchedFileDeleted}
+}
+
+// TestFilesWithRemainingAgentChanges_CommittedDeletion: once a commit carries
+// the agent's deletion, nothing of it is left to carry forward.
+func TestFilesWithRemainingAgentChanges_CommittedDeletion(t *testing.T) {
+	t.Parallel()
+	_, repo, wt, hashes := recordedDeletionRepo(t)
+
+	_, err := wt.Remove("to_delete.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit the deletion", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"to_delete.txt"}, map[string]struct{}{"to_delete.txt": {}})
+	assert.Empty(t, remaining)
+}
+
+// TestFilesWithRemainingAgentChanges_RecreatedDeletion: a recorded deletion
+// whose path is back in the worktree was re-created by someone else; it is no
+// longer the agent's pending work.
+func TestFilesWithRemainingAgentChanges_RecreatedDeletion(t *testing.T) {
+	t.Parallel()
+	dir, repo, wt, hashes := recordedDeletionRepo(t)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other"), 0o644))
+	_, err := wt.Add("other.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Unrelated commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "to_delete.txt"), []byte("re-created"), 0o644))
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"to_delete.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Empty(t, remaining)
+}
+
+// TestFilesOverlapWithContent_CarriedForwardDeletionLinks: the later commit
+// that finally deletes a carried-forward recorded deletion (the parent has the
+// path, HEAD does not) links the session.
+func TestFilesOverlapWithContent_CarriedForwardDeletionLinks(t *testing.T) {
+	t.Parallel()
+	_, repo, wt, hashes := recordedDeletionRepo(t)
+
+	_, err := wt.Remove("to_delete.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit the deletion", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	assert.True(t, filesOverlapWithContent(context.Background(), hashes, commit, []string{"to_delete.txt"}))
 }
 
 // TestStagedFilesOverlapWithContent_ModifiedFile tests that a modified file

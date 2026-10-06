@@ -1079,6 +1079,74 @@ func TestPostCommit_ActiveSession_CarryForward_PartialCommit(t *testing.T) {
 		"carry-forward should drop the recorded hashes of committed files")
 }
 
+// TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes covers a
+// session whose state was written by an older CLI: FilesTouched and StepCount
+// from the old format, no TouchedFileHashes at all. A partial commit must still
+// carry forward the file whose rest is in the worktree and the file that was
+// not committed, and drop only the fully committed one.
+func TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-upgraded-carry-forward"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName),
+		[]byte(testTranscriptPromptResponse), 0o644))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "full.txt"), []byte("all of it\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "later.txt"), []byte("not yet\n"), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		NewFiles:      []string{"full.txt", "half.txt", "later.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+
+	// Rewrite the state as the old format stored it: no recorded hashes.
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.TouchedFileHashes = nil
+	state.Phase = session.PhaseIdle
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+	raw, err := os.ReadFile(filepath.Join(dir, ".git", session.SessionStateDirName, sessionID+".json"))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "touched_file_hashes")
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("full.txt")
+	require.NoError(t, err)
+	_, err = wt.Add("half.txt")
+	require.NoError(t, err)
+	// The second half of half.txt stays in the worktree only.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\nsecond half\n"), 0o644))
+
+	commitMsg := "partial commit\n\n" + trailers.CheckpointTrailerKey + ": " + "ab12cd34ef56" + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, []string{"half.txt", "later.txt"}, state.FilesTouched,
+		"the partially committed and the uncommitted file carry forward; the fully committed one drops")
+	assert.Equal(t, 1, state.StepCount)
+}
+
 // TestPostCommit_ActiveSession_CarryForward_AllCommitted verifies that when an
 // ACTIVE session's files are ALL included in the commit, no carry-forward occurs.
 func TestPostCommit_ActiveSession_CarryForward_AllCommitted(t *testing.T) {
