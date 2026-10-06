@@ -1606,12 +1606,11 @@ func TestManualCommit_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T) 
 
 	s := &ManualCommitStrategy{}
 	state := &SessionState{
-		SessionID:             "session-1",
-		BaseCommit:            oldSHA,
-		AttributionBaseCommit: oldSHA,
-		WorktreePath:          worktreePath,
-		StartedAt:             time.Now(),
-		LastCheckpointID:      testTrailerCheckpointID,
+		SessionID:        "session-1",
+		BaseCommit:       oldSHA,
+		WorktreePath:     worktreePath,
+		StartedAt:        time.Now(),
+		LastCheckpointID: testTrailerCheckpointID,
 	}
 	if err := s.saveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
@@ -1627,9 +1626,6 @@ func TestManualCommit_PostRewrite_RemapsMatchingSessionInWorktree(t *testing.T) 
 	}
 	if loaded.BaseCommit != newSHA {
 		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, newSHA)
-	}
-	if loaded.AttributionBaseCommit != newSHA {
-		t.Fatalf("AttributionBaseCommit = %q, want %q", loaded.AttributionBaseCommit, newSHA)
 	}
 	if loaded.LastCheckpointID != testTrailerCheckpointID {
 		t.Fatalf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, testTrailerCheckpointID)
@@ -1681,13 +1677,12 @@ func TestManualCommit_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 	state := &SessionState{
-		SessionID:             "session-1",
-		BaseCommit:            oldBaseCommit,
-		AttributionBaseCommit: oldBaseCommit,
-		WorktreePath:          worktreePath,
-		WorktreeID:            worktreeID,
-		StartedAt:             time.Now(),
-		LastCheckpointID:      testTrailerCheckpointID,
+		SessionID:        "session-1",
+		BaseCommit:       oldBaseCommit,
+		WorktreePath:     worktreePath,
+		WorktreeID:       worktreeID,
+		StartedAt:        time.Now(),
+		LastCheckpointID: testTrailerCheckpointID,
 	}
 	if err := s.saveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
@@ -1703,9 +1698,6 @@ func TestManualCommit_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
 	}
 	if loaded.BaseCommit != newBaseCommit {
 		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, newBaseCommit)
-	}
-	if loaded.AttributionBaseCommit != oldBaseCommit {
-		t.Fatalf("AttributionBaseCommit = %q, want original %q when shadow branch migrates", loaded.AttributionBaseCommit, oldBaseCommit)
 	}
 	if !referenceExists(t, repo, plumbing.NewBranchReferenceName(newShadowBranch)) {
 		t.Fatalf("expected migrated shadow branch %q to exist", newShadowBranch)
@@ -1749,12 +1741,11 @@ func TestManualCommit_MigrateAndPersistIfNeeded_PersistsBaseCommitWithoutShadowB
 
 	s := &ManualCommitStrategy{}
 	state := &SessionState{
-		SessionID:             "session-1",
-		BaseCommit:            oldBaseCommit,
-		AttributionBaseCommit: oldBaseCommit,
-		WorktreePath:          worktreePath,
-		StartedAt:             time.Now(),
-		LastCheckpointID:      testTrailerCheckpointID,
+		SessionID:        "session-1",
+		BaseCommit:       oldBaseCommit,
+		WorktreePath:     worktreePath,
+		StartedAt:        time.Now(),
+		LastCheckpointID: testTrailerCheckpointID,
 	}
 	if err := s.saveSessionState(context.Background(), state); err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
@@ -1786,12 +1777,11 @@ func TestManualCommit_PostRewrite_DoesNotTouchOtherWorktrees(t *testing.T) {
 
 	s := &ManualCommitStrategy{}
 	other := &SessionState{
-		SessionID:             "other-worktree",
-		BaseCommit:            oldSHA,
-		AttributionBaseCommit: oldSHA,
-		WorktreePath:          filepath.Join(dir, "other"),
-		StartedAt:             time.Now(),
-		LastCheckpointID:      testTrailerCheckpointID,
+		SessionID:        "other-worktree",
+		BaseCommit:       oldSHA,
+		WorktreePath:     filepath.Join(dir, "other"),
+		StartedAt:        time.Now(),
+		LastCheckpointID: testTrailerCheckpointID,
 	}
 	if err := s.saveSessionState(context.Background(), other); err != nil {
 		t.Fatalf("saveSessionState() error = %v", err)
@@ -1807,9 +1797,6 @@ func TestManualCommit_PostRewrite_DoesNotTouchOtherWorktrees(t *testing.T) {
 	}
 	if loaded.BaseCommit != oldSHA {
 		t.Fatalf("BaseCommit = %q, want %q", loaded.BaseCommit, oldSHA)
-	}
-	if loaded.AttributionBaseCommit != oldSHA {
-		t.Fatalf("AttributionBaseCommit = %q, want %q", loaded.AttributionBaseCommit, oldSHA)
 	}
 	if loaded.LastCheckpointID != testTrailerCheckpointID {
 		t.Fatalf("LastCheckpointID = %q, want %q", loaded.LastCheckpointID, testTrailerCheckpointID)
@@ -2231,10 +2218,10 @@ func TestCountTranscriptItems(t *testing.T) {
 	}
 }
 
-// TestCondenseSession_IncludesAttribution verifies that when manual-commit
-// condenses a session, it calculates Attribution by comparing the shadow branch
-// (agent work) to HEAD (what was committed).
-func TestCondenseSession_IncludesAttribution(t *testing.T) {
+// TestCondenseSession_OmitsLineAttribution pins that condensation no longer
+// writes initial_attribution (line attribution was removed), even for a commit
+// mixing agent and human edits.
+func TestCondenseSession_OmitsLineAttribution(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
@@ -2290,7 +2277,7 @@ func TestCondenseSession_IncludesAttribution(t *testing.T) {
 		t.Fatalf("failed to write agent changes: %v", err)
 	}
 
-	// First checkpoint - captures agent's work on shadow branch
+	// First checkpoint - records the agent's work at turn end
 	err = s.SaveStep(context.Background(), StepContext{
 		SessionID:     sessionID,
 		ModifiedFiles: []string{"test.go"},
@@ -2383,614 +2370,8 @@ func TestCondenseSession_IncludesAttribution(t *testing.T) {
 		t.Fatalf("failed to parse metadata.json: %v", err)
 	}
 
-	if metadata.Attribution == nil {
-		t.Fatal("Attribution should be present in session metadata.json for manual-commit")
-	}
-
-	// Verify the attribution values are reasonable
-	// Agent added new function, human added a comment line
-	// The exact line counts depend on how the diff algorithm interprets the changes
-	// (insertion vs modification), but we should have non-zero totals and reasonable percentages.
-	if metadata.Attribution.TotalCommitted == 0 {
-		t.Error("TotalCommitted should be > 0")
-	}
-	if metadata.Attribution.AgentLines == 0 {
-		t.Error("AgentLines should be > 0 (agent wrote code)")
-	}
-
-	// Human contribution should be captured in either HumanAdded or HumanModified
-	// When inserting lines in the middle of existing code, the diff algorithm may
-	// interpret it as a modification rather than a pure addition.
-	humanContribution := metadata.Attribution.HumanAdded + metadata.Attribution.HumanModified
-	if humanContribution == 0 {
-		t.Error("Human contribution (HumanAdded + HumanModified) should be > 0")
-	}
-
-	if metadata.Attribution.AgentPercentage <= 0 || metadata.Attribution.AgentPercentage > 100 {
-		t.Errorf("AgentPercentage should be between 0-100, got %f", metadata.Attribution.AgentPercentage)
-	}
-
-	t.Logf("Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.Attribution.AgentLines,
-		metadata.Attribution.HumanAdded,
-		metadata.Attribution.HumanModified,
-		metadata.Attribution.HumanRemoved,
-		metadata.Attribution.TotalCommitted,
-		metadata.Attribution.AgentPercentage)
-}
-
-// TestCondenseSession_AttributionWithoutShadowBranch verifies that when an agent
-// commits mid-turn (before SaveStep), attribution is still calculated using HEAD
-// as the shadow tree. This reproduces the bug where agent_lines=0 for mid-turn commits.
-func TestCondenseSession_AttributionWithoutShadowBranch(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create initial empty commit
-	initialHash, err := worktree.Commit("Initial commit", &git.CommitOptions{
-		Author:            &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-		AllowEmptyCommits: true,
-	})
-	if err != nil {
-		t.Fatalf("failed to create initial commit: %v", err)
-	}
-
-	// Agent creates files in nested directories and commits (mid-turn, no SaveStep)
-	srcDir := filepath.Join(dir, "src")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		t.Fatalf("failed to create src dir: %v", err)
-	}
-	agentFile := filepath.Join(srcDir, "main.go")
-	agentContent := "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n"
-	if err := os.WriteFile(agentFile, []byte(agentContent), 0o644); err != nil {
-		t.Fatalf("failed to write agent file: %v", err)
-	}
-	agentFile2 := filepath.Join(dir, "README.md")
-	agentContent2 := "# My Project\n\nA test project.\n"
-	if err := os.WriteFile(agentFile2, []byte(agentContent2), 0o644); err != nil {
-		t.Fatalf("failed to write agent file 2: %v", err)
-	}
-	if _, err := worktree.Add("src/main.go"); err != nil {
-		t.Fatalf("failed to stage file: %v", err)
-	}
-	if _, err := worktree.Add("README.md"); err != nil {
-		t.Fatalf("failed to stage file 2: %v", err)
-	}
-	_, err = worktree.Commit("Add project files", &git.CommitOptions{
-		Author: &object.Signature{Name: "Agent", Email: "agent@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	// Create a live transcript file (required when no shadow branch)
-	transcriptDir := filepath.Join(dir, ".claude", "projects", "test")
-	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
-		t.Fatalf("failed to create transcript dir: %v", err)
-	}
-	transcriptFile := filepath.Join(transcriptDir, "session.jsonl")
-	transcriptContent := `{"type":"human","message":{"content":"create project files"}}
-{"type":"assistant","message":{"content":"I'll create src/main.go and README.md"}}
-`
-	if err := os.WriteFile(transcriptFile, []byte(transcriptContent), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	// Construct session state manually (no SaveStep was called, so no shadow branch)
-	state := &SessionState{
-		SessionID:             "test-no-shadow",
-		BaseCommit:            initialHash.String(),
-		AttributionBaseCommit: initialHash.String(),
-		FilesTouched:          []string{"src/main.go", "README.md"},
-		TranscriptPath:        transcriptFile,
-		AgentType:             "Claude Code",
-	}
-
-	s := &ManualCommitStrategy{}
-	checkpointID := id.MustCheckpointID("c3d4e5f6a7b8")
-
-	// Condense — no shadow branch exists, but attribution should still work
-	committedFiles := map[string]struct{}{"src/main.go": {}, "README.md": {}}
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, committedFiles)
-	if err != nil {
-		t.Fatalf("CondenseSession() error = %v", err)
-	}
-	if result.CheckpointID != checkpointID {
-		t.Errorf("CheckpointID = %q, want %q", result.CheckpointID, checkpointID)
-	}
-
-	// Read metadata from entire/checkpoints/v1 branch
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	if err != nil {
-		t.Fatalf("failed to get sessions branch: %v", err)
-	}
-	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
-	if err != nil {
-		t.Fatalf("failed to get sessions commit: %v", err)
-	}
-	tree, err := sessionsCommit.Tree()
-	if err != nil {
-		t.Fatalf("failed to get tree: %v", err)
-	}
-
-	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
-	metadataFile, err := tree.File(sessionMetadataPath)
-	if err != nil {
-		t.Fatalf("failed to find session metadata at %s: %v", sessionMetadataPath, err)
-	}
-	content, err := metadataFile.Contents()
-	if err != nil {
-		t.Fatalf("failed to read metadata: %v", err)
-	}
-
-	var metadata struct {
-		Attribution *struct {
-			AgentLines      int     `json:"agent_lines"`
-			HumanAdded      int     `json:"human_added"`
-			TotalCommitted  int     `json:"total_committed"`
-			AgentPercentage float64 `json:"agent_percentage"`
-		} `json:"initial_attribution"`
-	}
-	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
-		t.Fatalf("failed to parse metadata: %v", err)
-	}
-
-	if metadata.Attribution == nil {
-		t.Fatal("Attribution should be present even without shadow branch")
-	}
-
-	// Agent created all content (10 lines across 2 files), no human edits
-	if metadata.Attribution.AgentLines == 0 {
-		t.Error("AgentLines should be > 0 (agent created the file)")
-	}
-	if metadata.Attribution.TotalCommitted == 0 {
-		t.Error("TotalCommitted should be > 0")
-	}
-	if metadata.Attribution.AgentPercentage <= 50 {
-		t.Errorf("AgentPercentage should be > 50%% (agent wrote all content), got %.1f%%",
-			metadata.Attribution.AgentPercentage)
-	}
-
-	t.Logf("Attribution (no shadow branch): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
-		metadata.Attribution.AgentLines,
-		metadata.Attribution.HumanAdded,
-		metadata.Attribution.TotalCommitted,
-		metadata.Attribution.AgentPercentage)
-}
-
-// TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent verifies attribution
-// when an agent commits mid-turn (no shadow branch) and the commit includes both human
-// pre-session changes and agent-created files. Human changes are captured in PromptAttributions
-// and should be subtracted from the total to isolate agent contribution.
-func TestCondenseSession_AttributionWithoutShadowBranch_MixedHumanAgent(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	wt, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create initial commit with one file
-	existingFile := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(existingFile, []byte("key: value\n"), 0o644); err != nil {
-		t.Fatalf("failed to write initial file: %v", err)
-	}
-	if _, err := wt.Add("config.yaml"); err != nil {
-		t.Fatalf("failed to stage: %v", err)
-	}
-	initialHash, err := wt.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	// Human adds a new file (before the agent session starts).
-	// This is captured by calculatePromptAttributionAtStart.
-	humanFile := filepath.Join(dir, "docs", "notes.md")
-	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
-		t.Fatalf("failed to mkdir: %v", err)
-	}
-	humanContent := "# Notes\n\nSome human notes.\nAnother line.\n"
-	if err := os.WriteFile(humanFile, []byte(humanContent), 0o644); err != nil {
-		t.Fatalf("failed to write human file: %v", err)
-	}
-
-	// Agent creates its own file in a nested directory
-	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
-		t.Fatalf("failed to mkdir: %v", err)
-	}
-	agentFile := filepath.Join(dir, "src", "app.go")
-	agentContent := "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"app\")\n}\n"
-	if err := os.WriteFile(agentFile, []byte(agentContent), 0o644); err != nil {
-		t.Fatalf("failed to write agent file: %v", err)
-	}
-
-	// Agent stages everything and commits (mid-turn, no SaveStep)
-	if _, err := wt.Add("docs/notes.md"); err != nil {
-		t.Fatalf("failed to stage: %v", err)
-	}
-	if _, err := wt.Add("src/app.go"); err != nil {
-		t.Fatalf("failed to stage: %v", err)
-	}
-	_, err = wt.Commit("Add app and notes", &git.CommitOptions{
-		Author: &object.Signature{Name: "Agent", Email: "agent@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	// Create live transcript
-	transcriptDir := filepath.Join(dir, ".claude", "projects", "test")
-	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
-		t.Fatalf("failed to create transcript dir: %v", err)
-	}
-	transcriptFile := filepath.Join(transcriptDir, "session.jsonl")
-	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human","message":{"content":"create src/app.go"}}
-{"type":"assistant","message":{"content":"Done"}}
-`), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	// Session state with PromptAttributions capturing human's pre-session file (4 lines)
-	state := &SessionState{
-		SessionID:             "test-mixed-no-shadow",
-		BaseCommit:            initialHash.String(),
-		AttributionBaseCommit: initialHash.String(),
-		FilesTouched:          []string{"src/app.go"},
-		TranscriptPath:        transcriptFile,
-		AgentType:             "Claude Code",
-		PromptAttributions: []PromptAttribution{{
-			CheckpointNumber: 1,
-			UserLinesAdded:   4,
-			UserAddedPerFile: map[string]int{"docs/notes.md": 4},
-		}},
-	}
-
-	s := &ManualCommitStrategy{}
-	checkpointID := id.MustCheckpointID("d4e5f6a7b8c9")
-
-	committedFiles := map[string]struct{}{"src/app.go": {}, "docs/notes.md": {}}
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state, committedFiles)
-	if err != nil {
-		t.Fatalf("CondenseSession() error = %v", err)
-	}
-	if result.CheckpointID != checkpointID {
-		t.Errorf("CheckpointID = %q, want %q", result.CheckpointID, checkpointID)
-	}
-
-	// Read metadata
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	if err != nil {
-		t.Fatalf("failed to get sessions branch: %v", err)
-	}
-	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
-	if err != nil {
-		t.Fatalf("failed to get sessions commit: %v", err)
-	}
-	tree, err := sessionsCommit.Tree()
-	if err != nil {
-		t.Fatalf("failed to get tree: %v", err)
-	}
-
-	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
-	metadataFile, err := tree.File(sessionMetadataPath)
-	if err != nil {
-		t.Fatalf("failed to find session metadata at %s: %v", sessionMetadataPath, err)
-	}
-	content, err := metadataFile.Contents()
-	if err != nil {
-		t.Fatalf("failed to read metadata: %v", err)
-	}
-
-	var metadata struct {
-		Attribution *struct {
-			AgentLines      int     `json:"agent_lines"`
-			HumanAdded      int     `json:"human_added"`
-			TotalCommitted  int     `json:"total_committed"`
-			AgentPercentage float64 `json:"agent_percentage"`
-		} `json:"initial_attribution"`
-	}
-	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
-		t.Fatalf("failed to parse metadata: %v", err)
-	}
-
-	if metadata.Attribution == nil {
-		t.Fatal("Attribution should be present")
-	}
-
-	attr := metadata.Attribution
-	t.Logf("Attribution (mixed, no shadow): agent=%d, human_added=%d, total=%d, percentage=%.1f%%",
-		attr.AgentLines, attr.HumanAdded, attr.TotalCommitted, attr.AgentPercentage)
-
-	// src/app.go has 7 lines (agent). docs/notes.md was added before the session
-	// (captured by PA1) so it's pre-session baseline — excluded from human count.
-	if attr.AgentLines != 7 {
-		t.Errorf("AgentLines = %d, want 7 (src/app.go has 7 lines)", attr.AgentLines)
-	}
-	if attr.HumanAdded != 0 {
-		t.Errorf("HumanAdded = %d, want 0 (docs/notes.md is pre-session baseline, excluded)", attr.HumanAdded)
-	}
-	if attr.TotalCommitted != 7 {
-		t.Errorf("TotalCommitted = %d, want 7 (agent-only, pre-session excluded)", attr.TotalCommitted)
-	}
-	// Agent wrote 7/7 = 100%
-	if attr.AgentPercentage < 99.0 {
-		t.Errorf("AgentPercentage = %.1f%%, want ~100%% (pre-session human file excluded)", attr.AgentPercentage)
-	}
-}
-
-// TestMultiCheckpoint_UserEditsBetweenCheckpoints tests that user edits made between
-// agent checkpoints are correctly attributed to the user, not the agent.
-//
-// This tests two scenarios:
-// 1. User edits a DIFFERENT file than agent - detected at checkpoint save time
-// 2. User edits the SAME file as agent - detected at commit time (shadow → head diff)
-//
-//nolint:maintidx // Integration test with multiple steps is inherently complex
-func TestMultiCheckpoint_UserEditsBetweenCheckpoints(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("failed to open git repo: %v", err)
-	}
-
-	worktree, err := repo.Worktree()
-	if err != nil {
-		t.Fatalf("failed to get worktree: %v", err)
-	}
-
-	// Create initial commit with two files
-	agentFile := filepath.Join(dir, "agent.go")
-	userFile := filepath.Join(dir, "user.go")
-	if err := os.WriteFile(agentFile, []byte("package main\n"), 0o644); err != nil {
-		t.Fatalf("failed to write agent file: %v", err)
-	}
-	if err := os.WriteFile(userFile, []byte("package main\n"), 0o644); err != nil {
-		t.Fatalf("failed to write user file: %v", err)
-	}
-	if _, err := worktree.Add("agent.go"); err != nil {
-		t.Fatalf("failed to stage file: %v", err)
-	}
-	if _, err := worktree.Add("user.go"); err != nil {
-		t.Fatalf("failed to stage file: %v", err)
-	}
-	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
-		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	t.Chdir(dir)
-
-	s := &ManualCommitStrategy{}
-	sessionID := "2025-01-15-multi-checkpoint-test"
-
-	// Create metadata directory
-	metadataDir := ".entire/metadata/" + sessionID
-	metadataDirAbs := filepath.Join(dir, metadataDir)
-	if err := os.MkdirAll(metadataDirAbs, 0o755); err != nil {
-		t.Fatalf("failed to create metadata dir: %v", err)
-	}
-
-	transcript := `{"type":"human","message":{"content":"add function"}}
-{"type":"assistant","message":{"content":"adding function"}}
-`
-	if err := os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(transcript), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	// === PROMPT 1 START: Initialize session (simulates UserPromptSubmit) ===
-	// This must happen BEFORE agent makes any changes
-	if err := s.InitializeSession(context.Background(), sessionID, "Claude Code", "", "", ""); err != nil {
-		t.Fatalf("InitializeSession() prompt 1 error = %v", err)
-	}
-
-	// === CHECKPOINT 1: Agent modifies agent.go (adds 4 lines) ===
-	checkpoint1Content := "package main\n\nfunc agentFunc1() {\n\tprintln(\"agent1\")\n}\n"
-	if err := os.WriteFile(agentFile, []byte(checkpoint1Content), 0o644); err != nil {
-		t.Fatalf("failed to write agent changes 1: %v", err)
-	}
-
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:     sessionID,
-		ModifiedFiles: []string{"agent.go"},
-		NewFiles:      []string{},
-		DeletedFiles:  []string{},
-		MetadataDir:   metadataDir,
-		CommitMessage: "Checkpoint 1",
-		AuthorName:    "Test",
-		AuthorEmail:   "test@test.com",
-	})
-	if err != nil {
-		t.Fatalf("SaveStep() checkpoint 1 error = %v", err)
-	}
-
-	// Verify PromptAttribution was recorded for checkpoint 1
-	state1, err := s.loadSessionState(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("loadSessionState() after checkpoint 1 error = %v", err)
-	}
-	if len(state1.PromptAttributions) != 1 {
-		t.Fatalf("expected 1 PromptAttribution after checkpoint 1, got %d", len(state1.PromptAttributions))
-	}
-	// First checkpoint: no user edits yet (user.go hasn't changed)
-	if state1.PromptAttributions[0].UserLinesAdded != 0 {
-		t.Errorf("checkpoint 1: expected 0 user lines added, got %d", state1.PromptAttributions[0].UserLinesAdded)
-	}
-
-	// === USER EDITS A DIFFERENT FILE (user.go) BETWEEN CHECKPOINTS ===
-	userEditContent := "package main\n\n// User added this function\nfunc userFunc() {\n\tprintln(\"user\")\n}\n"
-	if err := os.WriteFile(userFile, []byte(userEditContent), 0o644); err != nil {
-		t.Fatalf("failed to write user edits: %v", err)
-	}
-
-	// === PROMPT 2 START: Initialize session again (simulates UserPromptSubmit) ===
-	// This captures the user's edits to user.go BEFORE the agent runs
-	if err := s.InitializeSession(context.Background(), sessionID, "Claude Code", "", "", ""); err != nil {
-		t.Fatalf("InitializeSession() prompt 2 error = %v", err)
-	}
-
-	// === CHECKPOINT 2: Agent modifies agent.go again (adds 4 more lines) ===
-	checkpoint2Content := "package main\n\nfunc agentFunc1() {\n\tprintln(\"agent1\")\n}\n\nfunc agentFunc2() {\n\tprintln(\"agent2\")\n}\n"
-	if err := os.WriteFile(agentFile, []byte(checkpoint2Content), 0o644); err != nil {
-		t.Fatalf("failed to write agent changes 2: %v", err)
-	}
-
-	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:     sessionID,
-		ModifiedFiles: []string{"agent.go"},
-		NewFiles:      []string{},
-		DeletedFiles:  []string{},
-		MetadataDir:   metadataDir,
-		CommitMessage: "Checkpoint 2",
-		AuthorName:    "Test",
-		AuthorEmail:   "test@test.com",
-	})
-	if err != nil {
-		t.Fatalf("SaveStep() checkpoint 2 error = %v", err)
-	}
-
-	// Verify PromptAttribution was recorded for checkpoint 2
-	state2, err := s.loadSessionState(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("loadSessionState() after checkpoint 2 error = %v", err)
-	}
-	if len(state2.PromptAttributions) != 2 {
-		t.Fatalf("expected 2 PromptAttributions after checkpoint 2, got %d", len(state2.PromptAttributions))
-	}
-
-	t.Logf("Checkpoint 2 PromptAttribution: user_added=%d, user_removed=%d, agent_added=%d, agent_removed=%d",
-		state2.PromptAttributions[1].UserLinesAdded,
-		state2.PromptAttributions[1].UserLinesRemoved,
-		state2.PromptAttributions[1].AgentLinesAdded,
-		state2.PromptAttributions[1].AgentLinesRemoved)
-
-	// Second checkpoint should detect user's edits to user.go (different file than agent)
-	// User added 5 lines to user.go
-	if state2.PromptAttributions[1].UserLinesAdded == 0 {
-		t.Error("checkpoint 2: expected user lines added > 0 because user edited user.go")
-	}
-
-	// === USER COMMITS ===
-	if _, err := worktree.Add("agent.go"); err != nil {
-		t.Fatalf("failed to stage agent.go: %v", err)
-	}
-	if _, err := worktree.Add("user.go"); err != nil {
-		t.Fatalf("failed to stage user.go: %v", err)
-	}
-	_, err = worktree.Commit("Final commit with agent and user changes", &git.CommitOptions{
-		Author: &object.Signature{Name: "Human", Email: "human@test.com", When: time.Now()},
-	})
-	if err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	// === CONDENSE AND VERIFY ATTRIBUTION ===
-	checkpointID := id.MustCheckpointID("b2c3d4e5f6a7")
-	result, err := s.CondenseSession(context.Background(), repo, checkpointID, state2, nil)
-	if err != nil {
-		t.Fatalf("CondenseSession() error = %v", err)
-	}
-
-	if result.CheckpointID != checkpointID {
-		t.Errorf("CheckpointID = %q, want %q", result.CheckpointID, checkpointID)
-	}
-
-	// Read metadata and verify attribution
-	sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
-	if err != nil {
-		t.Fatalf("failed to get sessions branch: %v", err)
-	}
-
-	sessionsCommit, err := repo.CommitObject(sessionsRef.Hash())
-	if err != nil {
-		t.Fatalf("failed to get sessions commit: %v", err)
-	}
-
-	tree, err := sessionsCommit.Tree()
-	if err != nil {
-		t.Fatalf("failed to get tree: %v", err)
-	}
-
-	// Attribution is stored in session-level metadata (0/metadata.json), not root (0-based indexing)
-	sessionMetadataPath := checkpointID.Path() + "/0/" + paths.MetadataFileName
-	metadataFile, err := tree.File(sessionMetadataPath)
-	if err != nil {
-		t.Fatalf("failed to find session metadata.json at %s: %v", sessionMetadataPath, err)
-	}
-
-	content, err := metadataFile.Contents()
-	if err != nil {
-		t.Fatalf("failed to read metadata.json: %v", err)
-	}
-
-	var metadata struct {
-		Attribution *struct {
-			AgentLines      int     `json:"agent_lines"`
-			HumanAdded      int     `json:"human_added"`
-			HumanModified   int     `json:"human_modified"`
-			HumanRemoved    int     `json:"human_removed"`
-			TotalCommitted  int     `json:"total_committed"`
-			AgentPercentage float64 `json:"agent_percentage"`
-		} `json:"initial_attribution"`
-	}
-	if err := json.Unmarshal([]byte(content), &metadata); err != nil {
-		t.Fatalf("failed to parse metadata.json: %v", err)
-	}
-
-	if metadata.Attribution == nil {
-		t.Fatal("Attribution should be present in session metadata")
-	}
-
-	t.Logf("Final Attribution: agent=%d, human_added=%d, human_modified=%d, human_removed=%d, total=%d, percentage=%.1f%%",
-		metadata.Attribution.AgentLines,
-		metadata.Attribution.HumanAdded,
-		metadata.Attribution.HumanModified,
-		metadata.Attribution.HumanRemoved,
-		metadata.Attribution.TotalCommitted,
-		metadata.Attribution.AgentPercentage)
-
-	// Verify the attribution makes sense:
-	// - Agent modified agent.go: added ~8 lines total
-	// - User modified user.go: added ~5 lines
-	// - So agent percentage should be around 50-70%
-	if metadata.Attribution.AgentLines == 0 {
-		t.Error("AgentLines should be > 0")
-	}
-	if metadata.Attribution.TotalCommitted == 0 {
-		t.Error("TotalCommitted should be > 0")
-	}
-
-	// The key test: user's lines should be captured in HumanAdded
-	if metadata.Attribution.HumanAdded == 0 {
-		t.Error("HumanAdded should be > 0 because user added lines to user.go")
-	}
-
-	// Agent percentage should not be 100% since user contributed
-	if metadata.Attribution.AgentPercentage >= 100 {
-		t.Errorf("AgentPercentage should be < 100%% since user contributed, got %.1f%%",
-			metadata.Attribution.AgentPercentage)
+	if metadata.Attribution != nil {
+		t.Fatalf("line attribution was removed; new checkpoints must not carry initial_attribution, got %+v", metadata.Attribution)
 	}
 }
 
@@ -3779,70 +3160,4 @@ func TestCommittedFilesExcludingMetadata(t *testing.T) {
 		".entire/.gitignore":    {},
 	})
 	require.Empty(t, allMetadata, "all metadata files should be excluded")
-}
-
-func TestMarshalPromptAttributionsIncludingPending(t *testing.T) {
-	t.Parallel()
-
-	committed := []PromptAttribution{{CheckpointNumber: 1, UserLinesAdded: 3}}
-	pending := &PromptAttribution{CheckpointNumber: 2, UserLinesAdded: 5}
-
-	tests := []struct {
-		name      string
-		state     *SessionState
-		wantNil   bool
-		wantCount int
-		// verify is an optional extra check on the unmarshalled attributions.
-		verify func(t *testing.T, result []PromptAttribution)
-	}{
-		{
-			name:      "includes both committed and pending",
-			state:     &SessionState{PromptAttributions: committed, PendingPromptAttribution: pending},
-			wantCount: 2,
-			verify: func(t *testing.T, result []PromptAttribution) {
-				require.Equal(t, 1, result[0].CheckpointNumber)
-				require.Equal(t, 3, result[0].UserLinesAdded)
-				require.Equal(t, 2, result[1].CheckpointNumber)
-				require.Equal(t, 5, result[1].UserLinesAdded)
-			},
-		},
-		{
-			name:      "committed only, no pending",
-			state:     &SessionState{PromptAttributions: committed},
-			wantCount: 1,
-		},
-		{
-			name:    "empty state returns nil",
-			state:   &SessionState{},
-			wantNil: true,
-		},
-		{
-			name:      "pending only still produces output",
-			state:     &SessionState{PendingPromptAttribution: &PromptAttribution{CheckpointNumber: 1, UserLinesAdded: 7}},
-			wantCount: 1,
-			verify: func(t *testing.T, result []PromptAttribution) {
-				require.Equal(t, 7, result[0].UserLinesAdded)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			raw := marshalPromptAttributionsIncludingPending(tt.state)
-			if tt.wantNil {
-				require.Nil(t, raw)
-				return
-			}
-			require.NotNil(t, raw)
-
-			var result []PromptAttribution
-			require.NoError(t, json.Unmarshal(raw, &result))
-			require.Len(t, result, tt.wantCount)
-			if tt.verify != nil {
-				tt.verify(t, result)
-			}
-		})
-	}
 }

@@ -63,23 +63,6 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
 
-		var promptAttr PromptAttribution
-		if state.PendingPromptAttribution != nil {
-			promptAttr = *state.PendingPromptAttribution
-			state.PendingPromptAttribution = nil
-		} else {
-			promptAttr = PromptAttribution{CheckpointNumber: state.StepCount + 1}
-		}
-
-		attrLogCtx := logging.WithComponent(ctx, "attribution")
-		logging.Debug(attrLogCtx, "prompt attribution at checkpoint save",
-			slog.Int("checkpoint_number", promptAttr.CheckpointNumber),
-			slog.Int("user_added", promptAttr.UserLinesAdded),
-			slog.Int("user_removed", promptAttr.UserLinesRemoved),
-			slog.Int("agent_added", promptAttr.AgentLinesAdded),
-			slog.Int("agent_removed", promptAttr.AgentLinesRemoved),
-			slog.String("session_id", sessionID))
-
 		_, writeCheckpointSpan := perf.Start(ctx, "write_temporary_checkpoint")
 		isFirstCheckpointOfSession := state.StepCount == 0
 		result, err := store.Write(ctx, checkpoint.Step{
@@ -116,7 +99,6 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		// condensation and used by handleAmendCommitMsg to restore checkpoint
 		// trailers on amend operations.
 		state.StepCount++
-		state.PromptAttributions = append(state.PromptAttributions, promptAttr)
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)
 		if state.StepCount == 1 {
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier

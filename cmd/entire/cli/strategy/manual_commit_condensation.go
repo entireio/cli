@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,7 +32,6 @@ import (
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 var (
@@ -97,13 +95,8 @@ func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointI
 
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
-	shadowRef        *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
-	headTree         *object.Tree        // Pre-resolved HEAD tree (passed through to calculateSessionAttributions)
-	parentTree       *object.Tree        // Pre-resolved parent tree (nil for initial commits, for consistent non-agent line counting)
-	repoDir          string              // Repository worktree path for git CLI commands
-	parentCommitHash string              // HEAD's first parent hash for per-commit non-agent file detection
-	headCommitHash   string              // HEAD commit hash (passed through for attribution)
-	allAgentFiles    map[string]struct{} // Union of all sessions' FilesTouched for cross-session exclusion (nil = single-session)
+	shadowRef *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
+	repoDir   string              // Worktree root of the committing worktree (home-worktree check)
 
 	// reconcileInterrupted allows this condensation to return a *different*
 	// checkpoint ID than the caller passed, when it recognises the transcript
@@ -112,9 +105,7 @@ type condenseOpts struct {
 	//
 	// PostCommit must NOT: its ID comes from the commit's Entire-Checkpoint
 	// trailer, which is already written and cannot be revised. Redirecting the
-	// write there leaves the commit naming a checkpoint that was never stored,
-	// and updateCombinedAttributionForCheckpoint writing attribution under the
-	// same non-existent ID.
+	// write there leaves the commit naming a checkpoint that was never stored.
 	reconcileInterrupted bool
 
 	// searchProbeAllowed gates the telemetry-only search-usage transcript scan
@@ -126,13 +117,6 @@ type condenseOpts struct {
 	// result. The gate is memoized per commit by commitCondensedEmitter, so the
 	// settings load behind it runs at most once per PostCommit.
 	searchProbeAllowed func() bool
-
-	// noCommitAttribution omits code attribution for a write that no commit
-	// backs (snapshot checkpoints). Attribution compares the shadow tree with
-	// HEAD on the premise that HEAD holds the work just committed; without a
-	// commit, HEAD predates the agent's uncommitted changes and every one of
-	// them would be counted as a human removal.
-	noCommitAttribution bool
 
 	// failOnRedactionError makes a runtime redaction failure abort the write
 	// instead of dropping the transcript and continuing. The hook paths drop
@@ -679,9 +663,9 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return recovery.result, recovery.err
 	}
 
-	writeOpts, attributionDuration, newSkillEvents := buildCondensationWriteOptions(
-		ctx, repo, ref, state, sessionData, redactedTranscript, extractedAssets,
-		taskPayloads, checkpointID, shadowBranchName, o,
+	writeOpts, newSkillEvents := buildCondensationWriteOptions(
+		ctx, repo, state, sessionData, redactedTranscript, extractedAssets,
+		taskPayloads, checkpointID, shadowBranchName,
 	)
 
 	writeV1Start := time.Now()
@@ -705,7 +689,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		slog.String("session_id", state.SessionID),
 		slog.String("checkpoint_id", checkpointID.String()),
 		slog.Int64("extract_session_data_ms", extractDuration.Milliseconds()),
-		slog.Int64("calculate_session_attribution_ms", attributionDuration.Milliseconds()),
 		slog.Int64("redact_transcript_ms", redactDuration.Milliseconds()),
 		slog.Int64("write_committed_v1_ms", writeV1Duration.Milliseconds()),
 		slog.Int64("total_ms", time.Since(condenseStart).Milliseconds()),
@@ -759,7 +742,6 @@ func condensationSessionWriteRequest(opts cpkg.WriteOptions) cpkg.WriteRequest {
 func buildCondensationWriteOptions(
 	ctx context.Context,
 	repo *git.Repository,
-	shadowRef *plumbing.Reference,
 	state *SessionState,
 	sessionData *ExtractedSessionData,
 	transcript redact.RedactedBytes,
@@ -767,30 +749,8 @@ func buildCondensationWriteOptions(
 	tasks []cpkg.TaskPayload,
 	checkpointID id.CheckpointID,
 	shadowBranchName string,
-	o condenseOpts,
-) (cpkg.WriteOptions, time.Duration, []agent.SkillEvent) {
+) (cpkg.WriteOptions, []agent.SkillEvent) {
 	authorName, authorEmail := GetGitAuthorFromRepo(repo)
-	attrBase := state.AttributionBaseCommit
-	if attrBase == "" {
-		attrBase = state.BaseCommit
-	}
-
-	attributionStart := time.Now()
-	var attribution *cpkg.Attribution
-	if !o.noCommitAttribution {
-		attrCtx, attributionSpan := perf.Start(ctx, "calculate_session_attribution")
-		attribution = calculateSessionAttributions(attrCtx, repo, shadowRef, sessionData, state, attributionOpts{
-			headTree:              o.headTree,
-			parentTree:            o.parentTree,
-			repoDir:               o.repoDir,
-			attributionBaseCommit: attrBase,
-			parentCommitHash:      o.parentCommitHash,
-			headCommitHash:        o.headCommitHash,
-			allAgentFiles:         o.allAgentFiles,
-		})
-		attributionSpan.End()
-	}
-	attributionDuration := time.Since(attributionStart)
 
 	var summary *cpkg.Summary
 	if settings.IsSummarizeEnabled(ctx) && transcript.Len() > 0 {
@@ -823,8 +783,6 @@ func buildCondensationWriteOptions(
 		TokenUsage:                  sessionData.TokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
-		Attribution:                 attribution,
-		PromptAttributionsJSON:      marshalPromptAttributionsIncludingPending(state),
 		Summary:                     summary,
 		Kind:                        string(state.Kind),
 		ReviewSkills:                state.ReviewSkills,
@@ -833,7 +791,7 @@ func buildCondensationWriteOptions(
 		HasInvestigation:            state.Kind.IsInvestigate(),
 		InvestigateRunID:            state.InvestigateRunID,
 		InvestigateTopic:            state.InvestigateTopic,
-	}, attributionDuration, newSkillEvents
+	}, newSkillEvents
 }
 
 // redactOrDrop runs redactSessionTranscript and, on failure, logs a warning
@@ -1169,26 +1127,6 @@ func buildSummaryGenerator(ctx context.Context) summarize.Generator {
 	}
 }
 
-// marshalPromptAttributionsIncludingPending builds the complete prompt attribution slice
-// (including PendingPromptAttribution for mid-turn commits) and encodes it to JSON.
-// This must stay consistent with the slice used by calculateSessionAttributions so the
-// persisted diagnostics match the computed Attribution.
-func marshalPromptAttributionsIncludingPending(state *SessionState) json.RawMessage {
-	pas := make([]PromptAttribution, len(state.PromptAttributions), len(state.PromptAttributions)+1)
-	copy(pas, state.PromptAttributions)
-	if state.PendingPromptAttribution != nil {
-		pas = append(pas, *state.PendingPromptAttribution)
-	}
-	if len(pas) == 0 {
-		return nil
-	}
-	data, err := json.Marshal(pas)
-	if err != nil {
-		return nil
-	}
-	return data
-}
-
 // buildSessionMetrics creates a SessionMetrics from session state if any metrics are available.
 // Returns nil if no hook-provided metrics exist (e.g., for agents that don't report them).
 func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
@@ -1343,157 +1281,6 @@ func sessionStateBackfillModel(ctx context.Context, ag agent.Agent, transcript [
 		return ""
 	}
 	return model
-}
-
-// attributionOpts provides pre-resolved git objects to avoid redundant reads.
-type attributionOpts struct {
-	headTree              *object.Tree        // HEAD commit tree (already resolved by PostCommit)
-	shadowTree            *object.Tree        // Shadow branch tree (already resolved by PostCommit)
-	parentTree            *object.Tree        // Parent commit tree (nil for initial commits, for consistent non-agent line counting)
-	repoDir               string              // Repository worktree path for git CLI commands
-	parentCommitHash      string              // HEAD's first parent hash (preferred diff base for non-agent files)
-	attributionBaseCommit string              // Base commit hash for non-agent file detection (empty = fall back to go-git tree walk)
-	headCommitHash        string              // HEAD commit hash for non-agent file detection (empty = fall back to go-git tree walk)
-	allAgentFiles         map[string]struct{} // Union of all sessions' FilesTouched (nil = single-session)
-}
-
-func calculateSessionAttributions(ctx context.Context, repo *git.Repository, shadowRef *plumbing.Reference, sessionData *ExtractedSessionData, state *SessionState, opts ...attributionOpts) *cpkg.Attribution {
-	// Calculate initial attribution using accumulated prompt attribution data.
-	// This uses user edits captured at each prompt start (before agent works),
-	// plus any user edits after the final checkpoint (shadow → head).
-	//
-	// When shadowRef is nil (agent committed mid-turn before SaveStep),
-	// HEAD is used as the shadow tree. This is correct because the agent's
-	// commit IS HEAD — there are no user edits between agent work and commit.
-	logCtx := logging.WithComponent(ctx, "attribution")
-
-	var o attributionOpts
-	if len(opts) > 0 {
-		o = opts[0]
-	}
-
-	headTree := o.headTree
-	if headTree == nil {
-		headRef, headErr := repo.Head()
-		if headErr != nil {
-			logging.Debug(logCtx, "attribution skipped: failed to get HEAD",
-				slog.String("error", headErr.Error()))
-			return nil
-		}
-
-		headCommit, commitErr := repo.CommitObject(headRef.Hash())
-		if commitErr != nil {
-			logging.Debug(logCtx, "attribution skipped: failed to get HEAD commit",
-				slog.String("error", commitErr.Error()))
-			return nil
-		}
-
-		var treeErr error
-		headTree, treeErr = headCommit.Tree()
-		if treeErr != nil {
-			logging.Debug(logCtx, "attribution skipped: failed to get HEAD tree",
-				slog.String("error", treeErr.Error()))
-			return nil
-		}
-	}
-
-	// Get shadow tree: from pre-resolved cache, shadow branch, or HEAD (agent committed directly).
-	shadowTree := o.shadowTree
-	if shadowTree == nil {
-		if shadowRef != nil {
-			shadowCommit, shadowErr := repo.CommitObject(shadowRef.Hash())
-			if shadowErr != nil {
-				logging.Debug(logCtx, "attribution skipped: failed to get shadow commit",
-					slog.String("error", shadowErr.Error()),
-					slog.String("shadow_ref", shadowRef.Hash().String()))
-				return nil
-			}
-			var shadowTreeErr error
-			shadowTree, shadowTreeErr = shadowCommit.Tree()
-			if shadowTreeErr != nil {
-				logging.Debug(logCtx, "attribution skipped: failed to get shadow tree",
-					slog.String("error", shadowTreeErr.Error()))
-				return nil
-			}
-		} else {
-			// No shadow branch: agent committed mid-turn. Use HEAD as shadow
-			// because the agent's work is the commit itself.
-			logging.Debug(logCtx, "attribution: using HEAD as shadow (no shadow branch)")
-			shadowTree = headTree
-		}
-	}
-
-	// Get base tree (state before session started)
-	var baseTree *object.Tree
-	attrBase := state.AttributionBaseCommit
-	if attrBase == "" {
-		attrBase = state.BaseCommit // backward compat
-	}
-	if baseCommit, baseErr := repo.CommitObject(plumbing.NewHash(attrBase)); baseErr == nil {
-		if tree, baseTErr := baseCommit.Tree(); baseTErr == nil {
-			baseTree = tree
-		} else {
-			logging.Debug(logCtx, "attribution: base tree unavailable",
-				slog.String("error", baseTErr.Error()))
-		}
-	} else {
-		logging.Debug(logCtx, "attribution: base commit unavailable",
-			slog.String("error", baseErr.Error()),
-			slog.String("attribution_base", attrBase))
-	}
-
-	// Include PendingPromptAttribution if it was never moved to PromptAttributions.
-	// This happens when an agent commits mid-turn without calling SaveStep (e.g., Codex).
-	// PendingPromptAttribution is set during UserPromptSubmit but only moved to
-	// PromptAttributions during SaveStep. Without this, mid-turn commits have no PA
-	// data and pre-session worktree dirt cannot be identified for baseline exclusion.
-	promptAttrs := state.PromptAttributions
-	if state.PendingPromptAttribution != nil {
-		promptAttrs = append(promptAttrs, *state.PendingPromptAttribution)
-	}
-
-	// Log accumulated prompt attributions for debugging
-	var totalUserAdded, totalUserRemoved int
-	for i, pa := range promptAttrs {
-		totalUserAdded += pa.UserLinesAdded
-		totalUserRemoved += pa.UserLinesRemoved
-		logging.Debug(logCtx, "prompt attribution data",
-			slog.Int("checkpoint", pa.CheckpointNumber),
-			slog.Int("user_added", pa.UserLinesAdded),
-			slog.Int("user_removed", pa.UserLinesRemoved),
-			slog.Int("agent_added", pa.AgentLinesAdded),
-			slog.Int("agent_removed", pa.AgentLinesRemoved),
-			slog.Int("index", i))
-	}
-
-	attribution := CalculateAttributionWithAccumulated(ctx, AttributionParams{
-		BaseTree:              baseTree,
-		ShadowTree:            shadowTree,
-		HeadTree:              headTree,
-		ParentTree:            o.parentTree,
-		FilesTouched:          sessionData.FilesTouched,
-		PromptAttributions:    promptAttrs,
-		RepoDir:               o.repoDir,
-		ParentCommitHash:      o.parentCommitHash,
-		AttributionBaseCommit: attrBase,
-		HeadCommitHash:        o.headCommitHash,
-		AllAgentFiles:         o.allAgentFiles,
-	})
-
-	if attribution != nil {
-		logging.Info(logCtx, "attribution calculated",
-			slog.Int("agent_lines", attribution.AgentLines),
-			slog.Int("human_added", attribution.HumanAdded),
-			slog.Int("human_modified", attribution.HumanModified),
-			slog.Int("human_removed", attribution.HumanRemoved),
-			slog.Int("total_committed", attribution.TotalCommitted),
-			slog.Float64("agent_percentage", attribution.AgentPercentage),
-			slog.Int("accumulated_user_added", totalUserAdded),
-			slog.Int("accumulated_user_removed", totalUserRemoved),
-			slog.Int("files_touched", len(sessionData.FilesTouched)))
-	}
-
-	return attribution
 }
 
 // committedFilesExcludingMetadata returns committed files with CLI- and
@@ -2171,9 +1958,6 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = result.CheckpointID
 		state.LastCheckpointCommitHash = state.BaseCommit
-		state.RealignAttributionBase(state.BaseCommit)
-		state.PromptAttributions = nil
-		state.PendingPromptAttribution = nil
 		return nil
 	}, func() {
 		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
@@ -2344,9 +2128,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = result.CheckpointID
 		state.LastCheckpointCommitHash = state.BaseCommit
-		state.RealignAttributionBase(state.BaseCommit)
-		state.PromptAttributions = nil
-		state.PendingPromptAttribution = nil
 		state.FullyCondensed = true
 		// Phase stays ENDED — do NOT set to IDLE
 

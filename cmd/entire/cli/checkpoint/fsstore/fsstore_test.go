@@ -81,7 +81,7 @@ func TestStore_BackfillTranscriptReplacesWithoutClobbering(t *testing.T) {
 	assert.Equal(t, []string{"a.go"}, summary.FilesTouched)
 }
 
-func TestStore_SessionSummaryAndAttribution(t *testing.T) {
+func TestStore_SessionSummary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := New(t.TempDir())
@@ -94,19 +94,10 @@ func TestStore_SessionSummaryAndAttribution(t *testing.T) {
 	require.NoError(t, store.Write(ctx, cp.SessionSummary{
 		CheckpointID: cid, Summary: &cp.Summary{Intent: "do a thing", Outcome: "did it"},
 	}))
-	require.NoError(t, store.Write(ctx, cp.CheckpointAttribution{
-		CheckpointID: cid, Attribution: &cp.Attribution{AgentLines: 10, AgentPercentage: 80},
-	}))
-
 	meta, err := store.ReadSessionMetadata(ctx, cid, 0)
 	require.NoError(t, err)
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "do a thing", meta.Summary.Intent)
-
-	summary, err := store.Read(ctx, cid)
-	require.NoError(t, err)
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 10, summary.CombinedAttribution.AgentLines)
 }
 
 func TestStore_ListReturnsCheckpoints(t *testing.T) {

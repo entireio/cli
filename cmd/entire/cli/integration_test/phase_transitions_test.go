@@ -376,9 +376,6 @@ func TestManualCommit_PostRewriteAmendRemapsSessionState(t *testing.T) {
 	if stateAfterRewrite.BaseCommit != amendedCommitHash {
 		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, amendedCommitHash)
 	}
-	if stateAfterRewrite.AttributionBaseCommit != amendedCommitHash {
-		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.AttributionBaseCommit, amendedCommitHash)
-	}
 	if stateAfterRewrite.LastCheckpointID.String() != originalCheckpointID {
 		t.Fatalf("LastCheckpointID after post-rewrite = %q, want %q", stateAfterRewrite.LastCheckpointID.String(), originalCheckpointID)
 	}
@@ -434,9 +431,6 @@ func TestManualCommit_PostRewriteAmendMigratesExistingShadowBranch(t *testing.T)
 	}
 	if stateAfterRewrite.BaseCommit != amendedCommitHash {
 		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, amendedCommitHash)
-	}
-	if stateAfterRewrite.AttributionBaseCommit != originalCommitHash {
-		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want original %q when shadow branch migrates", stateAfterRewrite.AttributionBaseCommit, originalCommitHash)
 	}
 }
 
@@ -525,8 +519,5 @@ func TestManualCommit_PostRewriteRebaseRemapsSessionState(t *testing.T) {
 	}
 	if stateAfterRewrite.BaseCommit != rebasedFeatureCommit {
 		t.Fatalf("BaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.BaseCommit, rebasedFeatureCommit)
-	}
-	if stateAfterRewrite.AttributionBaseCommit != rebasedFeatureCommit {
-		t.Fatalf("AttributionBaseCommit after post-rewrite = %q, want %q", stateAfterRewrite.AttributionBaseCommit, rebasedFeatureCommit)
 	}
 }

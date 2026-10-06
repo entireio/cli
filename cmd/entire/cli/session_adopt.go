@@ -567,7 +567,6 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, source
 	}
 	cleared := dropInvalidAdoptTaskTranscripts(ctx, &adopted, sourceWorktree)
 	adopted.BaseCommit = head.Hash().String()
-	adopted.RealignAttributionBase(head.Hash().String())
 	adopted.WorktreePath = worktreeRoot
 	adopted.WorktreeID = worktreeID
 	adopted.AdoptedIntoWorktreePath = ""
@@ -604,8 +603,6 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State, source
 
 	adopted.FullyCondensed = false
 	adopted.UntrackedFilesAtStart = untrackedFiles
-	adopted.PromptAttributions = nil
-	adopted.PendingPromptAttribution = nil
 	// Preserve cumulative turn/context metrics for the continuing agent session,
 	// but start the target checkpoint prompt window at the current turn count so
 	// the first adopted checkpoint only counts target-side turns.
@@ -631,11 +628,6 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.SubagentInventory = cloneSubagentInventory(source.SubagentInventory)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)
 	adopted.SkillEvents = cloneSkillEvents(source.SkillEvents)
-	adopted.PromptAttributions = clonePromptAttributions(source.PromptAttributions)
-	if source.PendingPromptAttribution != nil {
-		pending := clonePromptAttribution(*source.PendingPromptAttribution)
-		adopted.PendingPromptAttribution = &pending
-	}
 	return adopted
 }
 
@@ -685,20 +677,6 @@ func cloneSkillEvents(events []agent.SkillEvent) []agent.SkillEvent {
 		cloned[i].Native = maps.Clone(events[i].Native)
 	}
 	return cloned
-}
-
-func clonePromptAttributions(attrs []session.PromptAttribution) []session.PromptAttribution {
-	cloned := slices.Clone(attrs)
-	for i := range cloned {
-		cloned[i] = clonePromptAttribution(attrs[i])
-	}
-	return cloned
-}
-
-func clonePromptAttribution(attr session.PromptAttribution) session.PromptAttribution {
-	attr.UserAddedPerFile = maps.Clone(attr.UserAddedPerFile)
-	attr.UserRemovedPerFile = maps.Clone(attr.UserRemovedPerFile)
-	return attr
 }
 
 func sameAdoptPath(a, b string) bool {

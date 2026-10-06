@@ -128,8 +128,6 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 		return s.backfillTranscript(cp.UpdateOptions(r))
 	case cp.SessionSummary:
 		return s.writeSessionSummary(r)
-	case cp.CheckpointAttribution:
-		return s.writeAttribution(r)
 	default:
 		return fmt.Errorf("fsstore: unsupported write request %T", req)
 	}
@@ -157,8 +155,8 @@ func (s *Store) writeSession(opts cp.WriteOptions) error {
 	sc.Summary.HasReview = sc.Summary.HasReview || opts.HasReview
 	sc.Summary.HasInvestigation = sc.Summary.HasInvestigation || opts.HasInvestigation
 	if opts.CombinedAttribution != nil {
-		// Migration path: an initial write may carry holistic attribution. Normal
-		// condensation sets this later via a CheckpointAttribution write instead.
+		// Migration path: an initial write may carry an existing checkpoint's
+		// holistic attribution. Normal condensation never sets it.
 		sc.Summary.CombinedAttribution = opts.CombinedAttribution
 	}
 
@@ -197,18 +195,6 @@ func (s *Store) writeSessionSummary(r cp.SessionSummary) error {
 		return fmt.Errorf("fsstore: cannot set summary for unknown checkpoint %s", r.CheckpointID)
 	}
 	sc.Sessions[len(sc.Sessions)-1].Metadata.Summary = checkpoint.RedactSummary(r.Summary)
-	return s.save(sc)
-}
-
-func (s *Store) writeAttribution(r cp.CheckpointAttribution) error {
-	sc, err := s.load(r.CheckpointID)
-	if err != nil {
-		return err
-	}
-	if sc == nil {
-		return fmt.Errorf("fsstore: cannot set attribution for unknown checkpoint %s", r.CheckpointID)
-	}
-	sc.Summary.CombinedAttribution = r.Attribution
 	return s.save(sc)
 }
 
@@ -428,10 +414,8 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: git writes both so older CLIs can still read the metadata
 		TokenUsage:                  opts.TokenUsage,
 		SkillEvents:                 opts.SkillEvents,
-		PromptAttributions:          opts.PromptAttributionsJSON,
 		SessionMetrics:              opts.SessionMetrics,
 		Summary:                     checkpoint.RedactSummary(opts.Summary),
-		Attribution:                 opts.Attribution,
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
 		ReviewPrompt:                redact.String(opts.ReviewPrompt),

@@ -24,16 +24,15 @@ var ErrPendingFileChanges = errors.New("session has uncommitted file changes")
 // research, planning, review — which otherwise never get a checkpoint: turn end
 // skips SaveStep when nothing changed, so session end finds no steps and writes
 // nothing. A session with pending file changes is refused with
-// ErrPendingFileChanges; the next commit checkpoints that work, with
-// attribution, and a snapshot would only duplicate it. "Pending" is what the
+// ErrPendingFileChanges; the next commit checkpoints that work, and a
+// snapshot would only duplicate it. "Pending" is what the
 // transcript and file-touch hooks can see: an edit made through a shell
 // command rather than an edit tool is only detected at turn end, so a snapshot
 // in that same turn is not refused and overlaps the next commit's checkpoint.
 //
 // The checkpoint is written exactly as a condensation writes one — same
 // extraction, redaction, and store write, so it is enqueued for push like any
-// other — but it is not linked to a commit, and so carries no code attribution
-// (see condenseOpts.noCommitAttribution). A redaction failure is an error here
+// other — but it is not linked to a commit. A redaction failure is an error here
 // rather than a dropped transcript (see condenseOpts.failOnRedactionError).
 //
 // It runs under the session's state lock, like every other condensation: the
@@ -72,7 +71,7 @@ func (s *ManualCommitStrategy) CreateSnapshotCheckpoint(ctx context.Context, ses
 			return ErrPendingFileChanges
 		}
 		var condErr error
-		result, condErr = s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{noCommitAttribution: true, failOnRedactionError: true})
+		result, condErr = s.CondenseSession(ctx, repo, checkpointID, state, nil, condenseOpts{failOnRedactionError: true})
 		if condErr != nil {
 			return fmt.Errorf("failed to create checkpoint: %w", condErr)
 		}

@@ -47,14 +47,12 @@ type (
 	PersistentStore  = apicheckpoint.PersistentStore
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
-	// Write request union: session-level (Session, ReservedSession, SessionTranscript,
-	// SessionSummary) and checkpoint-level (CheckpointAttribution).
+	// Write request union: all session-level (Session, ReservedSession,
+	// SessionTranscript, SessionSummary).
 	Session           = apicheckpoint.Session
 	ReservedSession   = apicheckpoint.ReservedSession
 	SessionTranscript = apicheckpoint.SessionTranscript
 	SessionSummary    = apicheckpoint.SessionSummary
-	//nolint:revive // CheckpointAttribution stutter is accepted — makes the checkpoint (vs session) tier explicit.
-	CheckpointAttribution = apicheckpoint.CheckpointAttribution
 )
 
 // Sentinel errors (re-exported so errors.Is keeps working across packages).

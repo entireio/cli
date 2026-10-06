@@ -18,18 +18,15 @@ import (
 //
 // Reconcile path: if HEAD carries this session's LastCheckpointID as an
 // Entire-Checkpoint trailer (e.g. after git reset --hard to a condensed commit),
-// both BaseCommit and AttributionBaseCommit are updated to HEAD. The old shadow
+// BaseCommit is updated to HEAD. The old shadow
 // branch is intentionally left untouched to preserve its checkpoint data.
 //
 // Migrate path: for all other HEAD changes (pull, rebase, tool-call commits),
-// the shadow branch is renamed to the new base and only BaseCommit is updated.
-// AttributionBaseCommit stays pinned for correct attribution.
+// the shadow branch is renamed to the new base and BaseCommit is updated.
 //
 // Returns (changed, reconciled, err):
 //   - changed: true if either path fired, false for no-op
-//   - reconciled: true only for the reconcile path; callers use this to know
-//     that attribution must be recomputed against the new base since the old
-//     base has been discarded (reconcile = reset-to-known-checkpoint)
+//   - reconciled: true only for the reconcile path (reset-to-known-checkpoint)
 func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, repo *git.Repository, state *SessionState) (bool, bool, error) {
 	if state == nil || state.BaseCommit == "" {
 		return false, false, nil
@@ -47,15 +44,15 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 
 	// Reconcile path: if HEAD sits on the exact commit carrying this session's
 	// LastCheckpointID, the user has reset back to the last condensed
-	// checkpoint. Update both BaseCommit and AttributionBaseCommit to HEAD.
+	// checkpoint. Update BaseCommit to HEAD.
 	// Deliberately do NOT rename or touch the old shadow branch — it
 	// preserves checkpoint data from the discarded segment of history.
 	//
 	// The SHA guard (currentHead == LastCheckpointCommitHash) distinguishes a
 	// true reset from a cherry-pick/rebase that merely preserved the trailer.
 	// Cherry-picking a checkpoint commit creates a new SHA with the same
-	// message; firing reconcile in that case would drop the pinned
-	// AttributionBaseCommit and corrupt attribution for uncondensed work.
+	// message; firing reconcile in that case would abandon the shadow branch
+	// holding uncondensed work.
 	// Legacy state files without LastCheckpointCommitHash fall back to
 	// trailer-only matching for backward compatibility.
 	if !state.LastCheckpointID.IsEmpty() {
@@ -72,7 +69,6 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 				for _, cpID := range trailers.ParseAllCheckpoints(headCommit.Message) {
 					if cpID.String() == state.LastCheckpointID.String() {
 						state.BaseCommit = currentHead
-						state.RealignAttributionBase(currentHead)
 						logging.Info(logging.WithComponent(ctx, "migration"), "reconciled session to known checkpoint on HEAD",
 							slog.String("checkpoint_id", state.LastCheckpointID.String()),
 							slog.String("new_base", currentHead[:7]))
@@ -149,10 +145,6 @@ func (s *ManualCommitStrategy) migrateShadowBranchToBaseCommit(ctx context.Conte
 		slog.String("to", newShadowBranch))
 
 	// Update state with new base commit.
-	// NOTE: AttributionBaseCommit is intentionally NOT updated here. Migration
-	// renames the shadow branch but its checkpoint trees are still relative to
-	// the original base. Attribution must diff from that original base to
-	// correctly measure agent work captured in those checkpoints.
 	state.BaseCommit = newBaseCommit
 	return true, nil
 }

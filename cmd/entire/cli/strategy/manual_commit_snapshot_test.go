@@ -10,7 +10,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
@@ -165,36 +164,6 @@ func TestCreateSnapshotCheckpoint_NothingToCheckpoint(t *testing.T) {
 
 	_, err = s.CreateSnapshotCheckpoint(context.Background(), sessionID)
 	require.ErrorIs(t, err, ErrNothingToCheckpoint)
-}
-
-// A snapshot has no commit, so HEAD still predates any work in the shadow tree.
-// Commit attribution compares the shadow tree with HEAD and would count that
-// work as human edits, so the snapshot passes noCommitAttribution. With pending
-// files refused, a snapshot rarely has anything to attribute, so the option is
-// tested directly on a session that does: the control write records
-// attribution, the opted-out one must not.
-func TestCondenseSession_NoCommitAttributionOmitsAttribution(t *testing.T) {
-	sessionID := "2026-09-25-snapshot-attribution"
-	// The fixture's shadow tree holds an agent edit to test.txt that HEAD lacks.
-	repo, _ := setupCondensableSessionWithTranscript(t, sessionID)
-	s := &ManualCommitStrategy{}
-	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
-
-	attribution := func(cpID id.CheckpointID, opts condenseOpts) *checkpoint.Attribution {
-		t.Helper()
-		state, err := s.loadSessionState(context.Background(), sessionID)
-		require.NoError(t, err)
-		_, err = s.CondenseSession(context.Background(), repo, cpID, state, nil, opts)
-		require.NoError(t, err)
-		content, err := store.ReadSessionContent(context.Background(), cpID, 0)
-		require.NoError(t, err)
-		return content.Metadata.Attribution
-	}
-
-	require.NotNil(t, attribution(id.MustCheckpointID("a1a1a1a1a1a1"), condenseOpts{}),
-		"control: without the option this fixture records attribution, or the assertion below proves nothing")
-	assert.Nil(t, attribution(id.MustCheckpointID("b2b2b2b2b2b2"), condenseOpts{noCommitAttribution: true}),
-		"a commitless write must not carry commit attribution")
 }
 
 // Hook-path condensation drops the transcript when runtime redaction fails, so

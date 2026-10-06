@@ -342,12 +342,6 @@ func TestKindRoutingStore_TranscriptAndAttributionBackfillsFallBackToBranch(t *t
 		Transcript:   redact.AlreadyRedacted([]byte("finalized transcript")),
 	})
 	require.NoError(t, err, "transcript backfill for a hex checkpoint on the branch must fall back to the branch store")
-
-	err = router.Write(ctx, CheckpointAttribution{
-		CheckpointID: hexID,
-		Attribution:  &Attribution{AgentLines: 7},
-	})
-	require.NoError(t, err, "attribution backfill for a hex checkpoint on the branch must fall back to the branch store")
 }
 
 func TestKindRoutingStore_BackfillULIDRoutesToRefs(t *testing.T) {

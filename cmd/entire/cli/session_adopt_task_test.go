@@ -191,14 +191,13 @@ func TestSessionAdopt_DropsTaskTranscriptsOutsideTheSessionLayout(t *testing.T) 
 	// No AgentType: adoption takes it from the agent that owns the transcript
 	// and applies that agent's task layout.
 	if err := sourceStore.Save(context.Background(), &session.State{
-		SessionID:             sessionID,
-		StartedAt:             time.Now().Add(-5 * time.Minute),
-		LastInteractionTime:   &lastInteraction,
-		Phase:                 session.PhaseActive,
-		BaseCommit:            testutil.GetHeadHash(t, sourceRepo),
-		AttributionBaseCommit: testutil.GetHeadHash(t, sourceRepo),
-		WorktreePath:          sourceRepo,
-		TranscriptPath:        transcriptPath,
+		SessionID:           sessionID,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		TranscriptPath:      transcriptPath,
 		TaskRecords: []session.TaskRecord{
 			{ToolUseID: "toolu_kept", AgentID: "kept", DeclaredTranscriptPath: kept},
 			{ToolUseID: "toolu_sibling", AgentID: "sibling-session", DeclaredTranscriptPath: sibling},

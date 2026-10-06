@@ -26,8 +26,8 @@ func setupMigrationRepo(t *testing.T) (string, string) {
 }
 
 // TestMigrateShadowBranch_ReconcilePath verifies that when HEAD carries the
-// session's LastCheckpointID trailer, the reconcile path fires: both BaseCommit
-// and AttributionBaseCommit are updated to HEAD, and the old shadow branch is
+// session's LastCheckpointID trailer, the reconcile path fires: BaseCommit
+// is updated to HEAD, and the old shadow branch is
 // left untouched.
 func TestMigrateShadowBranch_ReconcilePath(t *testing.T) {
 	dir, initHash := setupMigrationRepo(t)
@@ -49,10 +49,9 @@ func TestMigrateShadowBranch_ReconcilePath(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &SessionState{
-		SessionID:             "test-session",
-		BaseCommit:            initHash,
-		AttributionBaseCommit: initHash,
-		LastCheckpointID:      cpID,
+		SessionID:        "test-session",
+		BaseCommit:       initHash,
+		LastCheckpointID: cpID,
 	}
 
 	s := &ManualCommitStrategy{}
@@ -61,7 +60,6 @@ func TestMigrateShadowBranch_ReconcilePath(t *testing.T) {
 
 	assert.True(t, migrated, "reconcile path should report migrated=true")
 	assert.Equal(t, headHash, state.BaseCommit, "BaseCommit should advance to HEAD")
-	assert.Equal(t, headHash, state.AttributionBaseCommit, "AttributionBaseCommit should advance to HEAD")
 
 	// Old shadow branch must still exist (not renamed or deleted).
 	assert.True(t, testutil.BranchExists(t, dir, oldShadowName), "old shadow branch should be preserved")
@@ -72,7 +70,7 @@ func TestMigrateShadowBranch_ReconcilePath(t *testing.T) {
 // session's LastCheckpointID trailer (same message, different SHA) does NOT
 // fire the reconcile path. Only a reset back to the exact condensed commit
 // should reconcile; cherry-pick creates a new SHA and must go through the
-// migrate path so AttributionBaseCommit stays pinned.
+// migrate path.
 func TestMigrateShadowBranch_CherryPickedCheckpointDoesNotTriggerReconcile(t *testing.T) {
 	dir, initHash := setupMigrationRepo(t)
 	t.Chdir(dir)
@@ -92,7 +90,6 @@ func TestMigrateShadowBranch_CherryPickedCheckpointDoesNotTriggerReconcile(t *te
 	state := &SessionState{
 		SessionID:                "test-session-cherry-pick",
 		BaseCommit:               initHash,
-		AttributionBaseCommit:    "original-pinned-attribution",
 		LastCheckpointID:         cpID,
 		LastCheckpointCommitHash: "0000000000000000000000000000000000000042", // distinct from HEAD
 	}
@@ -102,49 +99,13 @@ func TestMigrateShadowBranch_CherryPickedCheckpointDoesNotTriggerReconcile(t *te
 	require.NoError(t, err)
 
 	assert.False(t, reconciled,
-		"cherry-pick preserving the trailer must NOT fire reconcile (HEAD SHA != LastCheckpointCommitHash); reconcile would drop the pinned AttributionBaseCommit and corrupt attribution math for uncondensed shadow-branch work")
-	assert.Equal(t, "original-pinned-attribution", state.AttributionBaseCommit,
-		"AttributionBaseCommit pin must survive a cherry-picked checkpoint trailer (migrate path preserves it; reconcile would not)")
+		"cherry-pick preserving the trailer must NOT fire reconcile (HEAD SHA != LastCheckpointCommitHash); reconcile would abandon the shadow branch holding uncondensed work")
 }
 
-// TestMigrateShadowBranch_ReconcileClearsDivergenceFlag verifies that the reconcile
-// path also clears DivergenceNoticeShown. Without this, a session that warned about
-// divergence, got reset back to a known checkpoint, and later diverged again would
-// stay silent — defeating the show-once-per-divergence semantics.
-func TestMigrateShadowBranch_ReconcileClearsDivergenceFlag(t *testing.T) {
-	dir, initHash := setupMigrationRepo(t)
-	t.Chdir(dir)
-
-	cpID := checkpointID.MustCheckpointID("abc123def456")
-
-	testutil.WriteFile(t, dir, "file.txt", "content")
-	testutil.GitAdd(t, dir, "file.txt")
-	testutil.GitCommit(t, dir, "add feature\n\nEntire-Checkpoint: abc123def456")
-
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
-
-	state := &SessionState{
-		SessionID:             "test-session-reconcile-flag",
-		BaseCommit:            initHash,
-		AttributionBaseCommit: "some-older-commit",
-		LastCheckpointID:      cpID,
-		DivergenceNoticeShown: true, // was warned about divergence previously
-	}
-
-	s := &ManualCommitStrategy{}
-	migrated, _, err := s.migrateShadowBranchIfNeeded(context.Background(), repo, state)
-	require.NoError(t, err)
-	require.True(t, migrated)
-
-	assert.False(t, state.DivergenceNoticeShown,
-		"reconcile must clear DivergenceNoticeShown so future divergence can warn again")
-}
-
-// TestMigrateShadowBranch_MigratePathPinsAttribution verifies the existing
+// TestMigrateShadowBranch_MigratePath verifies the existing
 // migrate path: when HEAD changes but has no matching trailer, BaseCommit
-// advances but AttributionBaseCommit stays pinned.
-func TestMigrateShadowBranch_MigratePathPinsAttribution(t *testing.T) {
+// advances.
+func TestMigrateShadowBranch_MigratePath(t *testing.T) {
 	dir, initHash := setupMigrationRepo(t)
 	t.Chdir(dir)
 
@@ -160,10 +121,9 @@ func TestMigrateShadowBranch_MigratePathPinsAttribution(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &SessionState{
-		SessionID:             "test-session",
-		BaseCommit:            initHash,
-		AttributionBaseCommit: initHash,
-		LastCheckpointID:      cpID,
+		SessionID:        "test-session",
+		BaseCommit:       initHash,
+		LastCheckpointID: cpID,
 	}
 
 	s := &ManualCommitStrategy{}
@@ -172,12 +132,11 @@ func TestMigrateShadowBranch_MigratePathPinsAttribution(t *testing.T) {
 
 	assert.True(t, migrated, "migrate path should report migrated=true")
 	assert.Equal(t, headHash, state.BaseCommit, "BaseCommit should advance to HEAD")
-	assert.Equal(t, initHash, state.AttributionBaseCommit, "AttributionBaseCommit should stay pinned")
 }
 
 // TestMigrateShadowBranch_DifferentTrailerFromSameSession verifies that when
 // HEAD has a DIFFERENT Entire-Checkpoint trailer (not matching LastCheckpointID),
-// the migrate path fires instead of reconcile, and AttributionBaseCommit stays pinned.
+// the migrate path fires instead of reconcile.
 func TestMigrateShadowBranch_DifferentTrailerFromSameSession(t *testing.T) {
 	dir, initHash := setupMigrationRepo(t)
 	t.Chdir(dir)
@@ -194,10 +153,9 @@ func TestMigrateShadowBranch_DifferentTrailerFromSameSession(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &SessionState{
-		SessionID:             "test-session",
-		BaseCommit:            initHash,
-		AttributionBaseCommit: initHash,
-		LastCheckpointID:      sessionCpID,
+		SessionID:        "test-session",
+		BaseCommit:       initHash,
+		LastCheckpointID: sessionCpID,
 	}
 
 	s := &ManualCommitStrategy{}
@@ -206,7 +164,6 @@ func TestMigrateShadowBranch_DifferentTrailerFromSameSession(t *testing.T) {
 
 	assert.True(t, migrated, "migrate path should fire")
 	assert.Equal(t, headHash, state.BaseCommit, "BaseCommit should advance")
-	assert.Equal(t, initHash, state.AttributionBaseCommit, "AttributionBaseCommit should stay pinned (migrate, not reconcile)")
 }
 
 // TestMigrateShadowBranch_EmptyLastCheckpointID verifies that when the session
@@ -226,9 +183,8 @@ func TestMigrateShadowBranch_EmptyLastCheckpointID(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &SessionState{
-		SessionID:             "test-session",
-		BaseCommit:            initHash,
-		AttributionBaseCommit: initHash,
+		SessionID:  "test-session",
+		BaseCommit: initHash,
 		// LastCheckpointID is zero value (empty) - never condensed.
 	}
 
@@ -238,7 +194,6 @@ func TestMigrateShadowBranch_EmptyLastCheckpointID(t *testing.T) {
 
 	assert.True(t, migrated, "migrate path should fire")
 	assert.Equal(t, headHash, state.BaseCommit, "BaseCommit should advance")
-	assert.Equal(t, initHash, state.AttributionBaseCommit, "AttributionBaseCommit should stay pinned (migrate path)")
 }
 
 // TestMigrateShadowBranch_MultiTrailerHEAD verifies that the reconcile path
@@ -260,10 +215,9 @@ func TestMigrateShadowBranch_MultiTrailerHEAD(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &SessionState{
-		SessionID:             "test-session",
-		BaseCommit:            initHash,
-		AttributionBaseCommit: initHash,
-		LastCheckpointID:      cpID,
+		SessionID:        "test-session",
+		BaseCommit:       initHash,
+		LastCheckpointID: cpID,
 	}
 
 	s := &ManualCommitStrategy{}
@@ -272,5 +226,4 @@ func TestMigrateShadowBranch_MultiTrailerHEAD(t *testing.T) {
 
 	assert.True(t, migrated, "reconcile should fire on multi-trailer match")
 	assert.Equal(t, headHash, state.BaseCommit, "BaseCommit should advance to HEAD")
-	assert.Equal(t, headHash, state.AttributionBaseCommit, "AttributionBaseCommit should advance (reconcile path)")
 }

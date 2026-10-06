@@ -321,10 +321,6 @@ func TestAttach_PopulatesBaseCommitFromHEAD(t *testing.T) {
 		t.Errorf("BaseCommit = %q, want %q (HEAD); attach did not populate empty BaseCommit",
 			state.BaseCommit, headHash)
 	}
-	if state.AttributionBaseCommit != headHash {
-		t.Errorf("AttributionBaseCommit = %q, want %q (HEAD); attach did not populate empty AttributionBaseCommit",
-			state.AttributionBaseCommit, headHash)
-	}
 }
 
 // TestAttach_PreservesActivePhase is a regression for PR #1102.

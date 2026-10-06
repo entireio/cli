@@ -834,11 +834,10 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "stale-base-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            baseCommit,
-		AttributionBaseCommit: baseCommit,
+		SessionID:    "stale-base-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   baseCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -860,9 +859,6 @@ func TestWriteActiveSessions_ShowsDivergenceWarningWhenBaseCommitStale(t *testin
 	}
 	if reloaded.BaseCommit != baseCommit {
 		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, baseCommit)
-	}
-	if reloaded.AttributionBaseCommit != baseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, baseCommit)
 	}
 }
 
@@ -886,11 +882,10 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 
 	now := time.Now()
 	state := &session.State{
-		SessionID:             "reconciled-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: headCommit,
+		SessionID:    "reconciled-session",
+		WorktreePath: repoDir,
+		StartedAt:    now.Add(-10 * time.Minute),
+		BaseCommit:   headCommit,
 	}
 	if err := store.Save(context.Background(), state); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -901,64 +896,8 @@ func TestWriteActiveSessions_NoWarningWhenReconciled(t *testing.T) {
 	writeActiveSessions(context.Background(), &buf, sty)
 
 	output := buf.String()
-	if strings.Contains(output, "diverged") || strings.Contains(output, "attribution") {
-		t.Fatalf("expected no divergence or attribution warning when BaseCommit == HEAD and AttributionBaseCommit == BaseCommit, got: %s", output)
-	}
-}
-
-func TestWriteActiveSessions_ShowsSoftWarningWhenAttributionDiverged(t *testing.T) {
-	setupTestRepo(t)
-
-	repoDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
-
-	testutil.WriteFile(t, repoDir, "tracked.txt", "content")
-	testutil.GitAdd(t, repoDir, "tracked.txt")
-	testutil.GitCommit(t, repoDir, "initial commit")
-	headCommit := testutil.GetHeadHash(t, repoDir)
-
-	// Simulate: hooks already reconciled BaseCommit to HEAD, but
-	// AttributionBaseCommit is still pointing at the old commit (stale).
-	oldBaseCommit := strings.Repeat("a", 40)
-
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore() error = %v", err)
-	}
-
-	now := time.Now()
-	state := &session.State{
-		SessionID:             "attribution-diverged-session",
-		WorktreePath:          repoDir,
-		StartedAt:             now.Add(-10 * time.Minute),
-		BaseCommit:            headCommit,
-		AttributionBaseCommit: oldBaseCommit,
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	var buf bytes.Buffer
-	sty := newStatusStyles(&buf)
-	writeActiveSessions(context.Background(), &buf, sty)
-
-	output := buf.String()
-	if !strings.Contains(output, "attribution") {
-		t.Fatalf("expected attribution warning when AttributionBaseCommit != BaseCommit, got: %s", output)
-	}
-
-	// Verify session state was NOT mutated (read-only)
-	reloaded, err := store.Load(context.Background(), state.SessionID)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if reloaded.BaseCommit != headCommit {
-		t.Fatalf("BaseCommit was mutated: got %q, want %q", reloaded.BaseCommit, headCommit)
-	}
-	if reloaded.AttributionBaseCommit != oldBaseCommit {
-		t.Fatalf("AttributionBaseCommit was mutated: got %q, want %q", reloaded.AttributionBaseCommit, oldBaseCommit)
+	if strings.Contains(output, "diverged") {
+		t.Fatalf("expected no divergence warning when BaseCommit == HEAD, got: %s", output)
 	}
 }
 
@@ -976,10 +915,9 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 
 	active := []*session.State{
 		{
-			SessionID:             "partially-initialized",
-			WorktreePath:          repoRoot,
-			BaseCommit:            "",
-			AttributionBaseCommit: strings.Repeat("a", 40),
+			SessionID:    "partially-initialized",
+			WorktreePath: repoRoot,
+			BaseCommit:   "",
 		},
 	}
 
@@ -991,11 +929,6 @@ func TestComputeSessionDivergenceWarnings_EmptyBaseCommit_EmitsLinkageWarning(t 
 	}
 	if !strings.Contains(msg, "linkage incomplete") {
 		t.Fatalf("expected warning to mention linkage incomplete, got %q", msg)
-	}
-	// Must NOT be the attribution-divergence message — that would be misleading
-	// since the session isn't diverged; it's un-initialized.
-	if strings.Contains(msg, "attribution base diverged") {
-		t.Fatalf("empty-BaseCommit session should not produce attribution-divergence wording, got %q", msg)
 	}
 }
 

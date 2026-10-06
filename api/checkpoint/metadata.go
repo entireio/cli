@@ -233,19 +233,9 @@ type WriteOptions struct {
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
 	SessionMetrics *SessionMetrics
 
-	// Attribution is line-level attribution calculated at commit time
-	// comparing checkpoint tree (agent work) to committed tree (may include human edits)
-	Attribution *Attribution
-
-	// PromptAttributionsJSON is the raw PromptAttributions data, JSON-encoded.
-	// Persisted for diagnostic purposes — shows exactly which prompt recorded
-	// which "user" lines, enabling root cause analysis of attribution bugs.
-	// Uses json.RawMessage to avoid importing session package.
-	PromptAttributionsJSON json.RawMessage
-
-	// CombinedAttribution is holistic attribution across all sessions.
-	// Used during migration to preserve v1 root summary attribution.
-	// During normal condensation this is nil (computed post-commit via a CheckpointAttribution write).
+	// CombinedAttribution carries an existing checkpoint's holistic attribution
+	// through migration so v1 root summaries keep it. The CLI no longer computes
+	// line attribution; normal condensation leaves this nil.
 	CombinedAttribution *Attribution
 
 	// Summary is an optional AI-generated summary for this checkpoint.
@@ -505,11 +495,13 @@ type Metadata struct {
 	// AI-generated summary of the checkpoint
 	Summary *Summary `json:"summary,omitempty"`
 
-	// Attribution is line-level attribution calculated at commit time
+	// Attribution is the line-level attribution older CLIs calculated at commit
+	// time. The CLI no longer writes it; it is read from existing checkpoints
+	// only, and absent on new ones.
 	Attribution *Attribution `json:"initial_attribution,omitempty"`
 
-	// PromptAttributions is the raw per-prompt attribution data used to compute Attribution.
-	// Diagnostic field — shows which prompt recorded which "user" lines.
+	// PromptAttributions is the raw per-prompt attribution diagnostics older
+	// CLIs wrote alongside Attribution. Read-only, like Attribution.
 	PromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
 
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
@@ -663,9 +655,9 @@ type CodeLearning struct {
 	Finding string `json:"finding"`            // What was learned
 }
 
-// Attribution captures line-level attribution metrics at commit time.
-// This is a point-in-time snapshot comparing the checkpoint tree (agent work)
-// against the committed tree (may include human edits).
+// Attribution captures line-level attribution metrics at commit time, as
+// written by CLI versions that computed it. Current versions do not compute
+// line attribution; the type remains so existing checkpoints stay readable.
 //
 // Attribution Metrics:
 //   - TotalCommitted keeps the historical "net additions" view for compatibility

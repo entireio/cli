@@ -1060,9 +1060,6 @@ func computeSessionDivergenceWarnings(
 		}
 
 		if st.BaseCommit == head.commitHash {
-			if st.AttributionBaseCommit != "" && st.AttributionBaseCommit != st.BaseCommit {
-				warnings[st.SessionID] = "attribution base diverged after history movement; figures may be off until next checkpoint"
-			}
 			continue
 		}
 

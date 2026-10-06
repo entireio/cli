@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,8 @@ import (
 	"github.com/entireio/cli/redact"
 
 	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
 )
 
@@ -99,13 +102,6 @@ func TestAttributionBlameShowsHumanAndAICheckpointLines(t *testing.T) {
 		Agent:            agent.AgentTypeClaudeCode,
 		Model:            "claude-sonnet-test",
 		CheckpointsCount: 1,
-		Attribution: &checkpoint.Attribution{
-			AgentLines:        1,
-			TotalCommitted:    1,
-			TotalLinesChanged: 1,
-			AgentPercentage:   100,
-			MetricVersion:     2,
-		},
 	})
 	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nai_line = 2\n")
 	testutil.GitAdd(t, repoRoot, "auth.py")
@@ -169,13 +165,6 @@ func TestAttributionBlameLongShowsDetailedColumns(t *testing.T) {
 		Agent:            agent.AgentTypeClaudeCode,
 		Model:            "claude-sonnet-test",
 		CheckpointsCount: 1,
-		Attribution: &checkpoint.Attribution{
-			AgentLines:        1,
-			TotalCommitted:    1,
-			TotalLinesChanged: 1,
-			AgentPercentage:   100,
-			MetricVersion:     2,
-		},
 	})
 	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nai_line = 2\n")
 	testutil.GitAdd(t, repoRoot, "auth.py")
@@ -201,14 +190,14 @@ func TestAttributionBlameMarksMixedCheckpoint(t *testing.T) {
 		Agent:            agent.AgentTypeClaudeCode,
 		Model:            "claude-sonnet-test",
 		CheckpointsCount: 1,
-		Attribution: &checkpoint.Attribution{
-			AgentLines:        1,
-			HumanModified:     1,
-			TotalCommitted:    1,
-			TotalLinesChanged: 2,
-			AgentPercentage:   50,
-			MetricVersion:     2,
-		},
+	})
+	injectLegacySessionAttribution(t, repoRoot, "b1b2c3d4e5f6", &checkpoint.Attribution{
+		AgentLines:        1,
+		HumanModified:     1,
+		TotalCommitted:    1,
+		TotalLinesChanged: 2,
+		AgentPercentage:   50,
+		MetricVersion:     2,
 	})
 	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmixed_line = 2\n")
 	testutil.GitAdd(t, repoRoot, "auth.py")
@@ -316,13 +305,6 @@ func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
 		FilesTouched:     []string{"auth.py"},
 		Agent:            agent.AgentTypeClaudeCode,
 		CheckpointsCount: 1,
-		Attribution: &checkpoint.Attribution{
-			AgentLines:        1,
-			TotalCommitted:    1,
-			TotalLinesChanged: 1,
-			AgentPercentage:   100,
-			MetricVersion:     2,
-		},
 	})
 	writeAttributionCheckpoint(t, repoRoot, "f2b2c3d4e5f6", checkpoint.WriteOptions{
 		SessionID:        "session-other-12345678",
@@ -330,14 +312,14 @@ func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
 		FilesTouched:     []string{"other.py"},
 		Agent:            agent.AgentTypeClaudeCode,
 		CheckpointsCount: 1,
-		Attribution: &checkpoint.Attribution{
-			AgentLines:        1,
-			HumanModified:     1,
-			TotalCommitted:    1,
-			TotalLinesChanged: 2,
-			AgentPercentage:   50,
-			MetricVersion:     2,
-		},
+	})
+	injectLegacySessionAttribution(t, repoRoot, "f2b2c3d4e5f6", &checkpoint.Attribution{
+		AgentLines:        1,
+		HumanModified:     1,
+		TotalCommitted:    1,
+		TotalLinesChanged: 2,
+		AgentPercentage:   50,
+		MetricVersion:     2,
 	})
 	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nai_line = 2\n")
 	testutil.GitAdd(t, repoRoot, "auth.py")
@@ -451,16 +433,10 @@ func TestAttributionBlameScopesMixedToSessionNotCheckpoint(t *testing.T) {
 		FilesTouched:     []string{"auth.py"},
 		Agent:            agent.AgentTypeClaudeCode,
 		CheckpointsCount: 1,
-		// The session that touched auth.py is purely agent work...
-		Attribution: &checkpoint.Attribution{
-			AgentLines:        1,
-			TotalCommitted:    1,
-			TotalLinesChanged: 1,
-			AgentPercentage:   100,
-			MetricVersion:     2,
-		},
-		// ...even though the checkpoint as a whole mixed agent and human work
-		// (e.g. a human-edited file elsewhere in the same checkpoint).
+		// The checkpoint as a whole mixed agent and human work (e.g. a
+		// human-edited file elsewhere in the same checkpoint), as recorded by
+		// CLIs that computed line attribution; the session that touched
+		// auth.py recorded none.
 		CombinedAttribution: &checkpoint.Attribution{
 			AgentLines:        1,
 			HumanModified:     1,
@@ -759,6 +735,55 @@ func writeAttributionCheckpoint(t *testing.T, repoRoot, checkpointID string, opt
 	require.DirExists(t, filepath.Join(repoRoot, ".git"))
 	_, err = os.Stat(filepath.Join(repoRoot, "auth.py"))
 	require.NoError(t, err)
+}
+
+// injectLegacySessionAttribution rewrites the first session's metadata.json of
+// a committed checkpoint to carry initial_attribution, the way CLIs that
+// computed line attribution wrote it. The CLI no longer writes attribution, but
+// blame still reads it from existing checkpoints.
+func injectLegacySessionAttribution(t *testing.T, repoRoot, checkpointID string, attr *checkpoint.Attribution) {
+	t.Helper()
+	ctx := context.Background()
+	repo, err := git.PlainOpen(repoRoot)
+	require.NoError(t, err)
+	defer repo.Close()
+
+	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
+	ref, err := repo.Reference(refName, true)
+	require.NoError(t, err)
+	parent, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	tree, err := parent.Tree()
+	require.NoError(t, err)
+	entries := make(map[string]object.TreeEntry)
+	require.NoError(t, checkpoint.FlattenTree(repo, tree, "", entries))
+
+	metadataPath := checkpointid.MustCheckpointID(checkpointID).Path() + "/0/" + paths.MetadataFileName
+	entry, ok := entries[metadataPath]
+	require.True(t, ok, "session metadata %s not found", metadataPath)
+	blob, err := repo.BlobObject(entry.Hash)
+	require.NoError(t, err)
+	reader, err := blob.Reader()
+	require.NoError(t, err)
+	raw, err := io.ReadAll(reader)
+	require.NoError(t, reader.Close())
+	require.NoError(t, err)
+
+	var meta checkpoint.Metadata
+	require.NoError(t, json.Unmarshal(raw, &meta))
+	meta.Attribution = attr
+	updated, err := json.Marshal(meta)
+	require.NoError(t, err)
+	blobHash, err := checkpoint.CreateBlobFromContent(repo, updated)
+	require.NoError(t, err)
+	entry.Hash = blobHash
+	entries[metadataPath] = entry
+
+	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
+	require.NoError(t, err)
+	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, ref.Hash(), "legacy attribution fixture", "Test User", attributionTestEmail)
+	require.NoError(t, err)
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
 }
 
 func formatCheckpointTrailers(message string, checkpointIDs ...string) string {

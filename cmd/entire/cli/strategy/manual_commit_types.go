@@ -25,9 +25,6 @@ func truncatePromptForStorage(prompt string) string {
 // Previously this was a separate struct with manual conversion functions.
 type SessionState = session.State
 
-// PromptAttribution is an alias for session.PromptAttribution.
-type PromptAttribution = session.PromptAttribution
-
 // CheckpointInfo represents checkpoint metadata stored on the sessions branch.
 // Metadata is stored at sharded path: <checkpoint_id[:2]>/<checkpoint_id[2:]>/
 type CheckpointInfo struct {

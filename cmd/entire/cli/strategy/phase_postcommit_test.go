@@ -1490,7 +1490,7 @@ func setupSessionWithCheckpointAndFile(t *testing.T, s *ManualCommitStrategy, di
 
 	require.NoError(t, os.WriteFile(
 		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
-		[]byte(testTranscript), 0o644))
+		[]byte(testTranscriptPromptResponse), 0o644))
 
 	err := s.SaveStep(context.Background(), StepContext{
 		SessionID:     sessionID,

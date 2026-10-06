@@ -532,45 +532,21 @@ func remapRewriteSHA(sha string, rewrites []rewritePair) (string, bool) {
 	return sha, false
 }
 
-func shadowBranchExistsForBaseCommit(repo *git.Repository, baseCommit, worktreeID string) bool {
-	if repo == nil || baseCommit == "" {
-		return false
-	}
-
-	refName := plumbing.NewBranchReferenceName(checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID))
-	_, err := repo.Reference(refName, true)
-	return err == nil
-}
-
 func (s *ManualCommitStrategy) remapSessionForRewrite(ctx context.Context, repo *git.Repository, state *SessionState, rewrites []rewritePair) (bool, error) {
 	if state == nil {
 		return false, nil
 	}
 
 	newBaseCommit, baseChanged := remapRewriteSHA(state.BaseCommit, rewrites)
-	newAttrBaseCommit, attrChanged := remapRewriteSHA(state.AttributionBaseCommit, rewrites)
-	if !baseChanged && !attrChanged {
+	if !baseChanged {
 		return false, nil
 	}
 
-	hadShadowBranch := shadowBranchExistsForBaseCommit(repo, state.BaseCommit, state.WorktreeID)
-	if baseChanged {
-		changed, err := s.migrateShadowBranchToBaseCommit(ctx, repo, state, newBaseCommit)
-		if err != nil {
-			return false, fmt.Errorf("failed to migrate rewritten shadow branch: %w", err)
-		}
-		baseChanged = changed
+	changed, err := s.migrateShadowBranchToBaseCommit(ctx, repo, state, newBaseCommit)
+	if err != nil {
+		return false, fmt.Errorf("failed to migrate rewritten shadow branch: %w", err)
 	}
-
-	// If a shadow branch existed, preserve AttributionBaseCommit so future
-	// attribution still diffs against the original checkpoint base captured on
-	// that branch. Without a shadow branch, keep attribution in sync with the
-	// rewritten commit lineage.
-	if attrChanged && !hadShadowBranch {
-		state.AttributionBaseCommit = newAttrBaseCommit
-	}
-
-	return baseChanged || attrChanged, nil
+	return changed, nil
 }
 
 // findSessionsForCommit finds all sessions where base_commit matches the given SHA.
@@ -681,7 +657,6 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		SessionID:             sessionID,
 		CLIVersion:            versioninfo.Version,
 		BaseCommit:            headHash,
-		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
 		WorktreeID:            worktreeID,
 		StartedAt:             now,
@@ -724,7 +699,6 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		state = existing
 		state.CLIVersion = versioninfo.Version
 		state.BaseCommit = headHash
-		state.AttributionBaseCommit = headHash
 		state.WorktreePath = worktreePath
 		state.WorktreeID = worktreeID
 		if state.StartedAt.IsZero() {

@@ -189,8 +189,7 @@ func runAttachSurfaceReviewErrors(cmd *cobra.Command, sessionID string, agentNam
 // attachStepCount returns the displayed "steps" count for an attached session:
 // the number of user prompts (turns) in the attached transcript, as counted by
 // extractTranscriptMetadata. Floored at 1 so it never renders as "0 steps" for an
-// empty/unparseable transcript. SaveStepCount stays 0 (no SaveStep ran), keeping
-// the combined-attribution gate conservative for this fallback session.
+// empty/unparseable transcript. SaveStepCount stays 0 (no SaveStep ran).
 func attachStepCount(turnCount int) int {
 	return max(turnCount, 1)
 }
@@ -717,9 +716,7 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 	// active and future commits in the same session receive Entire-Checkpoint trailers.
 	if state.BaseCommit == "" {
 		if head, headErr := repo.Head(); headErr == nil {
-			headHash := head.Hash().String()
-			state.BaseCommit = headHash
-			state.AttributionBaseCommit = headHash
+			state.BaseCommit = head.Hash().String()
 		}
 	}
 

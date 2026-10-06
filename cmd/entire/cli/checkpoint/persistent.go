@@ -226,44 +226,6 @@ func (s *treeWriter) applySessionWrite(ctx context.Context, opts WriteOptions, e
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
 }
 
-// applyAttributionBackfill rewrites the checkpoint root summary's combined
-// attribution on the checkpoint's current subtree, returning the new subtree
-// hash. Returns ErrCheckpointNotFound when the checkpoint has no root summary.
-func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *object.Tree, basePath string, combinedAttribution *Attribution) (plumbing.Hash, error) {
-	entries, err := s.flattenExisting(existing, basePath)
-	if err != nil {
-		return plumbing.ZeroHash, err
-	}
-
-	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
-	entry, exists := entries[rootMetadataPath]
-	if !exists {
-		return plumbing.ZeroHash, ErrCheckpointNotFound
-	}
-
-	summary, err := s.readSummaryFromBlob(entry.Hash)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to read checkpoint summary: %w", err)
-	}
-	summary.CombinedAttribution = combinedAttribution
-
-	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to marshal checkpoint summary: %w", err)
-	}
-	metadataHash, err := CreateBlobFromContent(s.repo, metadataJSON)
-	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to create checkpoint summary blob: %w", err)
-	}
-	entries[rootMetadataPath] = object.TreeEntry{
-		Name: rootMetadataPath,
-		Mode: filemode.Regular,
-		Hash: metadataHash,
-	}
-
-	return s.buildCheckpointSubtree(ctx, entries, basePath)
-}
-
 // applySummaryBackfill rewrites the latest session's summary on the checkpoint's
 // current subtree, returning the new subtree hash and that session's ID (for the
 // commit message). Returns ErrCheckpointNotFound when the checkpoint has no root
@@ -745,8 +707,6 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		SkillEventsVersion:          skillEventsVersion(opts.SkillEvents),
 		SkillEvents:                 opts.SkillEvents,
 		SessionMetrics:              opts.SessionMetrics,
-		Attribution:                 opts.Attribution,
-		PromptAttributions:          opts.PromptAttributionsJSON,
 		Summary:                     RedactSummary(opts.Summary),
 		CLIVersion:                  versioninfo.Version,
 		Kind:                        opts.Kind,
@@ -846,39 +806,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		Hash: metadataHash,
 	}
 	return nil
-}
-
-// backfillAttribution updates root-level checkpoint metadata fields that depend
-// on the full set of sessions already written to the checkpoint.
-func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
-	if err := ctx.Err(); err != nil {
-		return err //nolint:wrapcheck // Propagating context cancellation
-	}
-
-	// Backfills require the branch to exist; a miss must not create it.
-	if err := s.requireSessionsBranch(); err != nil {
-		return err
-	}
-
-	return s.updatePrimaryRef(ctx, func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
-		existing, err := s.subtreeObjAt(rootTreeHash, checkpointID.Path())
-		if err != nil {
-			return plumbing.ZeroHash, err
-		}
-		checkpointSubtree, err := s.applyAttributionBackfill(ctx, existing, checkpointID.Path()+"/", combinedAttribution)
-		if err != nil {
-			return plumbing.ZeroHash, err
-		}
-
-		newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, checkpointID, checkpointSubtree)
-		if err != nil {
-			return plumbing.ZeroHash, err
-		}
-
-		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-		commitMsg := fmt.Sprintf("Update checkpoint summary for %s", checkpointID)
-		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
-	})
 }
 
 // findSessionIndex returns the index of an existing session with the given ID,
