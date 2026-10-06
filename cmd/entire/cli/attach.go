@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -257,7 +258,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 	// Decide how to link before writing anything, so a commit that can't be
 	// linked is refused with nothing left behind.
-	plan, err := planAttachLink(ctx, repo, headCommit, opts)
+	plan, err := planAttachLink(ctx, errW, repo, headCommit, opts)
 	if err != nil {
 		return err
 	}
@@ -294,6 +295,20 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// before writing — otherwise we'd create a fresh session 0 under the same
 	// ID and overwrite the original on push.
 	refs := opts.committedRefs(ctx)
+	// A pushed commit an earlier attach already linked has no trailer to find
+	// its checkpoint by; its checkpoint names it instead. Join that one, as the
+	// trailer paths do, rather than start a second checkpoint for the commit.
+	// Only a locally present checkpoint is joined: one on the remote-tracking
+	// copy alone would be rebuilt from scratch under its ID and overwrite the
+	// original on push. The availability guard below then runs on it as on any
+	// existing checkpoint.
+	if plan.mode == attachRecordLink && !isExistingCheckpoint {
+		if localStore, openErr := openAttachStore(ctx, repo, refs.PrimaryAsLocalRead()); openErr == nil {
+			if linkedID, ok := checkpointLinkedTo(ctx, localStore, target); ok {
+				checkpointID, isExistingCheckpoint = linkedID, true
+			}
+		}
+	}
 	refreshedRepo, err := ensureCheckpointAvailable(ctx, logCtx, repo, refs, checkpointID, isExistingCheckpoint)
 	if refreshedRepo != nil && refreshedRepo != repo {
 		oldRepo := repo
@@ -311,15 +326,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if err != nil {
 		return err
 	}
-	// A pushed commit an earlier attach already linked has no trailer to find
-	// its checkpoint by; its checkpoint names it instead. Join that one, as the
-	// trailer paths do, rather than start a second checkpoint for the commit.
-	if plan.mode == attachRecordLink && !isExistingCheckpoint {
-		if linkedID, ok := checkpointLinkedTo(ctx, store, target); ok {
-			checkpointID, isExistingCheckpoint = linkedID, true
-		}
-	}
-
 	// Defense-in-depth guard: the earlier existingState.LastCheckpointID
 	// check only fires when the session's state file records its
 	// checkpoint. A session already stored in the target commit's checkpoint but
@@ -490,7 +496,7 @@ type attachLinkPlan struct {
 // decides how to link it. An older commit no remote holds is refused: amending
 // it means a rebase, and a recorded link wouldn't survive the rebase still
 // likely to come.
-func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *object.Commit, opts attachOptions) (attachLinkPlan, error) {
+func planAttachLink(ctx context.Context, errW io.Writer, repo *git.Repository, headCommit *object.Commit, opts attachOptions) (attachLinkPlan, error) {
 	target := headCommit
 	if opts.Commit != "" {
 		var err error
@@ -501,6 +507,10 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 	if len(trailers.ParseAllCheckpoints(target.Message)) > 0 {
 		return attachLinkPlan{target: target, mode: attachJoinExisting}, nil
 	}
+	// Remote-tracking refs can be stale — someone may have pushed this commit
+	// from another clone — and amending a shared commit is what this rule
+	// exists to avoid, so refresh them first.
+	fetchRemotesForAttach(ctx, errW)
 	remote, err := remoteHoldingCommit(ctx, target)
 	if err != nil {
 		return attachLinkPlan{}, err
@@ -528,6 +538,31 @@ func checkpointLinkedTo(ctx context.Context, store cpkg.PersistentStore, target 
 		return id.EmptyCheckpointID, false
 	}
 	return linked[0], true
+}
+
+// attachFetchTimeout bounds the remote refresh attach does before deciding
+// whether a commit is pushed.
+const attachFetchTimeout = 30 * time.Second
+
+// fetchRemotesForAttach refreshes every remote's tracking refs without
+// credential prompts. A failure is reported and attach decides from the last
+// fetch.
+func fetchRemotesForAttach(ctx context.Context, errW io.Writer) {
+	out, err := exec.CommandContext(ctx, "git", "remote").Output()
+	if err != nil {
+		return
+	}
+	for _, remote := range strings.Fields(string(out)) {
+		fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+		cmd := exec.CommandContext(fetchCtx, "git", "fetch", "--quiet", "--no-tags", "--", remote)
+		// No credential prompts; SSH keeps the user's own configuration (attach
+		// is a foreground command, and without a terminal ssh can't prompt anyway).
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		if output, fetchErr := cmd.CombinedOutput(); fetchErr != nil {
+			fmt.Fprintf(errW, "Could not fetch %s (%s); deciding from its last fetch.\n", remote, firstLine(strings.TrimSpace(string(output))+" "+fetchErr.Error()))
+		}
+		cancel()
+	}
 }
 
 // remoteHoldingCommit returns a remote whose branches contain target, or "" when

@@ -385,3 +385,60 @@ func TestAttachCommit_SecondSessionJoinsTheRecordedLinkCheckpoint(t *testing.T) 
 		t.Errorf("LinkedCommits = %v, want just [%s]", summary.LinkedCommits, head.Hash)
 	}
 }
+
+// A checkpoint that exists only on the remote-tracking copy must not be joined
+// blind: writing under its ID without the local copy would rebuild it from
+// scratch and overwrite the original on push. The lookup only joins a local one.
+func TestAttachCommit_DoesNotJoinARemoteOnlyLinkedCheckpoint(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+	pushToOrigin(t)
+	if out, err := attachHeadless(t, "attach-remote-only-first", attachOptions{}); err != nil {
+		t.Fatalf("first attach: %v\n%s", err, out)
+	}
+	first, err := loadAttachState(t, "attach-remote-only-first")
+	if err != nil || first == nil {
+		t.Fatalf("load first state: %v, %v", first, err)
+	}
+	dir := mustGetwd(t)
+	if refs := testutil.RunGit(t, dir, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/entire/"); !strings.Contains(refs, "checkpoints") {
+		t.Fatalf("expected a remote-tracking checkpoint ref after the push, got:\n%s", refs)
+	}
+	testutil.RunGit(t, dir, "update-ref", "-d", "refs/heads/entire/checkpoints/v1")
+
+	if out, err := attachHeadless(t, "attach-remote-only-second", attachOptions{}); err != nil {
+		t.Fatalf("second attach: %v\n%s", err, out)
+	}
+	second, err := loadAttachState(t, "attach-remote-only-second")
+	if err != nil || second == nil {
+		t.Fatalf("load second state: %v, %v", second, err)
+	}
+	if second.LastCheckpointID == first.LastCheckpointID {
+		t.Fatalf("second attach wrote into checkpoint %s, which exists only on the remote-tracking ref", first.LastCheckpointID)
+	}
+}
+
+// Remote-tracking refs can be stale: a commit someone already pushed from
+// another clone reads as unpushed here. attach fetches before deciding, so it
+// records the link instead of amending a shared commit.
+func TestAttachCommit_FetchesBeforeDecidingAHeadIsUnpushed(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	dir := mustGetwd(t)
+	remote := t.TempDir()
+	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
+	// Pushed by URL, as another clone would: this repo's origin/* refs don't move.
+	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/main")
+	if refs := testutil.RunGit(t, dir, "branch", "-r"); strings.TrimSpace(refs) != "" {
+		t.Fatalf("expected no remote-tracking refs before attach, got %q", refs)
+	}
+
+	out, err := attachHeadless(t, "attach-stale-tracking", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("a commit the remote already holds was amended: %s %q\n%s", got.Hash, got.Message, out)
+	}
+}
