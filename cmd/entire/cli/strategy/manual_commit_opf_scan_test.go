@@ -2,9 +2,11 @@ package strategy
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/go-git/go-git/v6"
@@ -17,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 )
 
 // swapOPFScanSpawn replaces the detached-spawn seam with a recorder and returns
@@ -53,6 +56,50 @@ func TestRunOPFScan_ScansAndDeliversGitRefs(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, trailers.HasOPFApplied(commit.Message))
 		require.NotContains(t, treeContents(t, repo, commit.Hash), "PERSONABC")
+	}
+}
+
+// A long backlog is scanned in batches bounded by one ref's raw cap rather than
+// loaded whole, so the detached worker's memory does not grow with the queue.
+// Every ref still gets scanned and delivered.
+func TestRunOPFScan_BoundsEachScanBatchByTheRawCap(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1", "c3d4e5f6a1b2")
+	resetRedactionConfiguredForTest()
+	t.Cleanup(resetRedactionConfiguredForTest)
+	swapOPFScanSpawn(t)
+
+	maxRaw, maxLeaf, totalRaw := 0, 0, 0
+	for _, ref := range refs {
+		raw, leaf := refRewriteSizes(t, repo, ref)
+		maxRaw, maxLeaf, totalRaw = max(maxRaw, raw), max(maxLeaf, leaf), totalRaw+raw
+	}
+	limit := max(maxLeaf, (maxRaw+rawByteCapMultiplier-1)/rawByteCapMultiplier)
+	rawCap := rawByteCapForBatchLimit(limit)
+	require.Greater(t, totalRaw, rawCap, "fixture: the whole backlog must exceed one raw cap")
+	t.Setenv(batchEnvVar, strconv.Itoa(limit))
+
+	var batchRaw []int
+	old := opfScanBlobs
+	opfScanBlobs = func(ctx context.Context, blobs []redact.NamedBlob, cache redact.OPFSpanCache) error {
+		n := 0
+		for _, b := range blobs {
+			n += len(b.Content)
+		}
+		batchRaw = append(batchRaw, n)
+		return old(ctx, blobs, cache)
+	}
+	t.Cleanup(func() { opfScanBlobs = old })
+
+	require.NoError(t, RunOPFScan(t.Context(), "origin"))
+
+	require.Greater(t, len(batchRaw), 1, "the backlog must be split across scans")
+	for _, n := range batchRaw {
+		require.LessOrEqual(t, n, rawCap, "no scan batch may exceed the raw cap")
+	}
+	require.Empty(t, queuedRefs(t, repo), "every ref is still delivered")
+	for _, ref := range refs {
+		require.NotEmpty(t, remoteRefHash(t, bareDir, ref))
 	}
 }
 

@@ -173,16 +173,16 @@ func RunOPFScan(ctx context.Context, remote string) error {
 	ctx = withinOPFScanWorker(ctx)
 	var previous []string
 	for range opfScanMaxPasses {
-		blobs, collectErr := collectOPFScanWork(ctx, repo, remote)
+		units, collectErr := collectOPFScanUnits(ctx, repo, remote)
 		if collectErr != nil {
 			logging.Warn(logCtx, "opf scan: could not collect pending checkpoints",
 				slog.String("error", collectErr.Error()))
 			return nil
 		}
-		if len(blobs) == 0 {
+		if len(units) == 0 {
 			return nil
 		}
-		ids := opfScanBlobIDs(blobs)
+		ids := opfScanUnitIDs(units)
 		if slices.Equal(ids, previous) {
 			// The last pass scanned and delivered this exact set and it is
 			// still pending, so delivery failed for a reason a retry in this
@@ -191,8 +191,14 @@ func RunOPFScan(ctx context.Context, remote string) error {
 		}
 		previous = ids
 
-		if scanErr := redact.ScanBlobsWithPrivacyFilter(ctx, blobs, cache); scanErr != nil {
+		scanned, scanErr := scanOPFUnits(ctx, repo, units, cache)
+		if scanErr != nil {
 			logging.Warn(logCtx, "opf scan failed; checkpoints stay held", slog.String("error", scanErr.Error()))
+			return nil
+		}
+		if scanned == 0 {
+			// Every pending unit is over a cap; the rewrite would refuse them
+			// too, so there is nothing to deliver.
 			return nil
 		}
 		deliverCtx, cancel := context.WithTimeout(ctx, opfScanDeliveryTimeout)
@@ -209,15 +215,12 @@ func RunOPFScan(ctx context.Context, remote string) error {
 	return nil
 }
 
-// collectOPFScanWork returns the blobs of every checkpoint commit that still
-// lacks the OPF trailer on the primary backend, each unit capped the way the
-// rewrite caps it. A unit over a cap is left out and logged: the rewrite would
-// refuse it anyway, and scanning pathological content only burns model time.
-func collectOPFScanWork(ctx context.Context, repo *git.Repository, remote string) ([]redact.NamedBlob, error) {
-	logCtx := logging.WithComponent(ctx, opfScanComponent)
-	batchLimit := resolveBatchLimit()
-	rawCap := rawByteCapForBatchLimit(batchLimit)
-
+// collectOPFScanUnits returns the checkpoint commits that still lack the OPF
+// trailer on the primary backend, one unit per queued ref (git-refs) or the
+// unpushed v1 chain (git-branch). It loads commits only, no blob content, so a
+// long backlog costs little memory here; scanOPFUnits loads content in bounded
+// batches.
+func collectOPFScanUnits(ctx context.Context, repo *git.Repository, remote string) ([][]*object.Commit, error) {
 	var units [][]*object.Commit
 	if primaryIsGitRefs(ctx) {
 		queue, err := checkpoint.PushQueueForRepo(ctx, repo)
@@ -242,17 +245,42 @@ func collectOPFScanWork(ctx context.Context, repo *git.Repository, remote string
 				units = append(units, chain)
 			}
 		}
-	} else {
-		chain, err := v1CommitsAwaitingOPF(ctx, repo, remote)
-		if err != nil {
-			return nil, err
-		}
-		if len(chain) > 0 {
-			units = append(units, chain)
-		}
+		return units, nil
 	}
+	chain, err := v1CommitsAwaitingOPF(ctx, repo, remote)
+	if err != nil {
+		return nil, err
+	}
+	if len(chain) > 0 {
+		units = append(units, chain)
+	}
+	return units, nil
+}
 
-	var blobs []redact.NamedBlob
+// opfScanBlobs is the scan seam, swapped in tests to observe batch sizes.
+var opfScanBlobs = redact.ScanBlobsWithPrivacyFilter //nolint:gochecknoglobals // batch-size test seam
+
+// scanOPFUnits scans units into the cache in batches whose raw blob bytes stay
+// within one unit's raw cap, so the worker's resident input is bounded however
+// long the backlog is. Each unit is capped the way the rewrite caps it; a unit
+// over a cap is left out and logged, because the rewrite would refuse it anyway
+// and scanning pathological content only burns model time. It returns how many
+// units were scanned.
+func scanOPFUnits(ctx context.Context, repo *git.Repository, units [][]*object.Commit, cache redact.OPFSpanCache) (int, error) {
+	logCtx := logging.WithComponent(ctx, opfScanComponent)
+	batchLimit := resolveBatchLimit()
+	rawCap := rawByteCapForBatchLimit(batchLimit)
+
+	var batch []redact.NamedBlob
+	batchRaw, scanned := 0, 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		err := opfScanBlobs(ctx, batch, cache)
+		batch, batchRaw = nil, 0
+		return err
+	}
 	for _, unit := range units {
 		unitBlobs, err := collectCommitBlobsForOPF(repo, unit, rawCap)
 		if err != nil {
@@ -261,16 +289,27 @@ func collectOPFScanWork(ctx context.Context, repo *git.Repository, remote string
 				logging.Warn(logCtx, "opf scan: skipping checkpoint over the raw-byte cap", slog.String("error", err.Error()))
 				continue
 			}
-			return nil, err
+			return scanned, err
 		}
 		if leafBytes := redact.SumProseLeafBytes(unitBlobs); leafBytes > batchLimit {
 			logging.Warn(logCtx, "opf scan: skipping checkpoint over the prose-leaf cap",
 				slog.Int("leaf_bytes", leafBytes), slog.Int("limit", batchLimit))
 			continue
 		}
-		blobs = append(blobs, unitBlobs...)
+		unitRaw := 0
+		for _, b := range unitBlobs {
+			unitRaw += len(b.Content)
+		}
+		if batchRaw+unitRaw > rawCap {
+			if err := flush(); err != nil {
+				return scanned, err
+			}
+		}
+		batch = append(batch, unitBlobs...)
+		batchRaw += unitRaw
+		scanned++
 	}
-	return blobs, nil
+	return scanned, flush()
 }
 
 // v1CommitsAwaitingOPF returns the unpushed v1 commits that lack the OPF
@@ -318,10 +357,14 @@ func collectCommitBlobsForOPF(repo *git.Repository, commits []*object.Commit, ra
 	return blobs, nil
 }
 
-func opfScanBlobIDs(blobs []redact.NamedBlob) []string {
-	ids := make([]string, 0, len(blobs))
-	for _, b := range blobs {
-		ids = append(ids, b.ID)
+// opfScanUnitIDs identifies a pass's pending work by its commits, so a pass
+// that finds exactly the work the previous one delivered can stop.
+func opfScanUnitIDs(units [][]*object.Commit) []string {
+	var ids []string
+	for _, unit := range units {
+		for _, c := range unit {
+			ids = append(ids, c.Hash.String())
+		}
 	}
 	slices.Sort(ids)
 	return slices.Compact(ids)
