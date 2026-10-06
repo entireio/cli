@@ -129,6 +129,10 @@ func cursorTrustedWorkspace(projectDir string) (workspace string, ok bool) {
 // that no longer exist, dangling links and symlink loops are conclusive and
 // skipped.
 func pathsWithEncoding(target string, encode func(string) string, readLimit int) (matches []string, unscanned string) {
+	// Directory listings return canonical names, so the target must be in that
+	// spelling too (resolved symlinks; on Windows, long names instead of 8.3
+	// short names like RUNNER~1), or no listed entry can lead to it.
+	target = normalizePath(target)
 	want := encode(target)
 	queue := []string{filepath.VolumeName(target) + string(filepath.Separator)}
 	for reads := 0; len(queue) > 0; reads++ {

@@ -182,8 +182,8 @@ func codexLineTime(raw []byte) time.Time {
 // sessions belonging to this repo.
 func repoMatches(cwd, repoRoot string) bool {
 	// A relative cwd would resolve against Entire's own working directory, not
-	// where the agent ran. (IsAbs also rejects "" and drive-relative "C:foo".)
-	if !filepath.IsAbs(cwd) || !filepath.IsAbs(repoRoot) {
+	// where the agent ran.
+	if !isRooted(cwd) || !isRooted(repoRoot) {
 		return false
 	}
 	root, dir := normalizePath(repoRoot), normalizePath(cwd)
@@ -195,6 +195,17 @@ func repoMatches(cwd, repoRoot string) bool {
 	// On a case-insensitive filesystem the two may spell one directory
 	// differently; fall back to comparing directory identity.
 	return hasAncestorSameAs(dir, root)
+}
+
+// isRooted reports whether p starts at a filesystem root: absolute, or (on
+// Windows) rooted on the current drive like \work\repo. It rejects "", relative
+// paths, and drive-relative "C:foo". A drive-less rooted path never matches a
+// drive-qualified repo root, since filepath.Rel refuses to relate them.
+func isRooted(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	return filepath.VolumeName(p) == "" && p != "" && os.IsPathSeparator(p[0])
 }
 
 // hasAncestorSameAs reports whether dir, or one of its existing ancestors, is
