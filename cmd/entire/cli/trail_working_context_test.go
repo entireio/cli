@@ -235,3 +235,27 @@ func TestTrailWorkingContextDescriptionNamesMergedBranch(t *testing.T) {
 		Host: "gh", Owner: "acme", Repo: "widget", Work: api.TrailResource{Number: 7, OriginalBranch: "feature/old"}}
 	require.Equal(t, "trail #42 (gh/acme/widget / feature/old)", selected.description())
 }
+
+// watch labels a project change by its branch, naming a merged change's
+// original branch rather than ending in a bare " / ".
+func TestTrailWatchTargetDescription(t *testing.T) {
+	t.Parallel()
+	parent := &api.TrailParentReference{ID: projectTrailTestID, Number: 42}
+	for _, tt := range []struct {
+		name string
+		work api.TrailResource
+		want string
+	}{
+		{"project branch", api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/x", Parent: parent},
+			"trail #42 (gh/acme/widget, id " + projectTrailTestID + ") / feature/x"},
+		{"project merged", api.TrailResource{ID: projectTrailTestChange, Number: 7, OriginalBranch: "feature/old", Parent: parent},
+			"trail #42 (gh/acme/widget, id " + projectTrailTestID + ") / feature/old"},
+		{"legacy", api.TrailResource{ID: projectTrailTestChange, Number: 7, Branch: "feature/x"},
+			"trail #7 (gh/acme/widget, id " + projectTrailTestChange + ")"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, trailWatchTargetDescription(trailReviewTarget{Host: "gh", Owner: "acme", Repo: "widget", Trail: tt.work}))
+		})
+	}
+}

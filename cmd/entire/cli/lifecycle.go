@@ -455,8 +455,6 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 	return FilterAndNormalizePaths(resolved, repoRoot)
 }
 
-// handleLifecycleTurnStart handles turn start: captures pre-prompt state,
-// ensures strategy setup, initializes session.
 // entireTrailContextInjection is the one-time, model-facing pointer Entire
 // injects on the first turn of a session. It points at `entire agent-help` for
 // the full flag/subcommand surface — fetched on demand so that surface never goes

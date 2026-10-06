@@ -95,12 +95,18 @@ func runTrailReviewWatch(cmd *cobra.Command, mode *trailMode, selector string, j
 	if err != nil {
 		return err
 	}
+	return runTrailWatchResolved(cmd, client, target.Trail.ID, trailWatchTargetDescription(target), jsonOutput, showPings, once)
+}
+
+// trailWatchTargetDescription labels the stream: the trail, plus the branch
+// for a project change (a merged change keeps its name in original_branch).
+func trailWatchTargetDescription(target trailReviewTarget) string {
 	display := trailForDisplay(target.Trail)
 	description := trailWatchDescription(target.Host, target.Owner, target.Repo, display.Number, display.ID)
 	if target.Trail.Parent != nil {
-		description += " / " + target.Trail.Branch
+		description += " / " + changeBranchName(target.Trail)
 	}
-	return runTrailWatchResolved(cmd, client, target.Trail.ID, description, jsonOutput, showPings, once)
+	return description
 }
 
 func runTrailWatchResolved(cmd *cobra.Command, client *api.Client, trailID, description string, jsonOutput, showPings, once bool) error {

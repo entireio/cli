@@ -148,7 +148,10 @@ func finishTrailWorkingContext(ctx context.Context, target *projectTrailTarget, 
 	if err != nil {
 		return nil, fmt.Errorf("read trail branch: %w", err)
 	}
-	if out.ID != selected.ID || out.TrailID != parent.ID || out.RepositoryID != repoID || changeBranchName(out.TrailResource) != selected.Branch || out.Number <= 0 {
+	if out.ID != selected.ID || out.TrailID != parent.ID || out.RepositoryID != repoID || out.Number <= 0 ||
+		// An unlinked change may list no branch on its trail; the identity
+		// checks above prove containment then.
+		(selected.Branch != "" && changeBranchName(out.TrailResource) != selected.Branch) {
 		return nil, errors.New("trail branch response does not match the selected repository/branch")
 	}
 	out.Parent = &api.TrailParentReference{ID: parent.ID, Number: parent.Number, ProjectID: parent.ProjectID,

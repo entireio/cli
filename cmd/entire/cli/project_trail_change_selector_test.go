@@ -48,18 +48,24 @@ func TestParseProjectTrailChangeSelector(t *testing.T) {
 // change read returns branch null. Not parallel: replaces client constructors.
 func TestProjectChangeSelectorReachesBranchWork(t *testing.T) {
 	for _, tt := range []struct {
-		name   string
-		change map[string]any
+		name          string
+		summaryBranch string
+		change        map[string]any
 	}{
-		{"open", map[string]any{"branch": "feature/work"}},
-		{"merged", map[string]any{"branch": nil, "original_branch": "feature/work", "status": "merged"}},
+		{"open", "feature/work", map[string]any{"branch": "feature/work"}},
+		{"merged", "feature/work", map[string]any{"branch": nil, "original_branch": "feature/work", "status": "merged"}},
+		// An unlinked change may list no branch on its trail; identity alone
+		// (ID, trail, repository) proves containment then.
+		{"unlinked", "", map[string]any{"branch": nil, "original_branch": "feature/work"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
 				switch r.Method + " " + r.URL.Path {
 				case "GET " + projectTrailTestPath:
 					w.Header().Set("ETag", `W/"parent-version"`)
-					assert.NoError(t, json.NewEncoder(w).Encode(workingProjectTestResource()))
+					parent := workingProjectTestResource()
+					parent.Changes[0].Branch = tt.summaryBranch
+					assert.NoError(t, json.NewEncoder(w).Encode(parent))
 				case "GET " + projectTrailTestPath + "/changes/" + projectTrailTestChange:
 					change := map[string]any{"id": projectTrailTestChange, "number": 7, "trailId": projectTrailTestID, "repositoryId": "repo-id", "status": "open"}
 					for k, v := range tt.change {
