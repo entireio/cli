@@ -90,7 +90,7 @@ func (s activityStyles) renderAgent(agentID, text string) string {
 	if !s.colorEnabled {
 		return text
 	}
-	display := agentDisplayMap[agentID]
+	display := agentDisplayFor(agentID)
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(display.Color)).Render(text)
 }
 
@@ -119,6 +119,27 @@ var agentDisplayMap = map[string]agentDisplay{
 	activityAgentDroid:    {Label: "Droid", Color: "#f472b6", Char: '▓'},       // pink-400
 	activityAgentKiro:     {Label: "Kiro", Color: "#c084fc", Char: '▓'},        // purple-400
 	activityAgentUnknown:  {Label: "Unknown", Color: palette.Muted, Char: '░'},
+}
+
+// agentKey is the built-in agent ID for raw, or raw itself for an agent Entire
+// does not know (an external agent), so each keeps its own name.
+func agentKey(raw string) string {
+	if id := normalizeAgentString(raw); id != agentUnknown {
+		return id
+	}
+	if name := strings.TrimSpace(raw); name != "" {
+		return name
+	}
+	return agentUnknown
+}
+
+// agentDisplayFor is agentDisplayMap[key], or a plain entry labelled with the
+// key for an external agent.
+func agentDisplayFor(key string) agentDisplay {
+	if d, ok := agentDisplayMap[key]; ok {
+		return d
+	}
+	return agentDisplay{Label: key, Color: palette.Muted, Char: '░'}
 }
 
 var agentOrder = []string{
@@ -448,8 +469,7 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 
 			var badges []string
 			for _, a := range uniqueCommitAgents(c) {
-				display := agentDisplayMap[a]
-				badges = append(badges, sty.renderAgent(a, display.Label))
+				badges = append(badges, sty.renderAgent(a, agentDisplayFor(a).Label))
 			}
 
 			fileStats := fmt.Sprintf("%d files", c.FilesChanged)
@@ -494,7 +514,7 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 			left += leftSb359.String()
 			var leftPlainSb362 strings.Builder
 			for _, a := range uniqueCommitAgents(c) {
-				leftPlainSb362.WriteString("  " + agentDisplayMap[a].Label)
+				leftPlainSb362.WriteString("  " + agentDisplayFor(a).Label)
 			}
 			leftPlain += leftPlainSb362.String()
 
@@ -517,7 +537,7 @@ func renderCommitListN(w io.Writer, sty activityStyles, days []commitDay, maxDay
 				left += leftSb378.String()
 				var leftPlainSb381 strings.Builder
 				for _, a := range uniqueCommitAgents(c) {
-					leftPlainSb381.WriteString("  " + agentDisplayMap[a].Label)
+					leftPlainSb381.WriteString("  " + agentDisplayFor(a).Label)
 				}
 				leftPlain += leftPlainSb381.String()
 			}
@@ -578,10 +598,10 @@ func renderSessionListN(w io.Writer, sty activityStyles, days []sessionDay, maxD
 // checkpoint count. Fields mirror the entire.io Overview row.
 func renderSessionRow(w io.Writer, sty activityStyles, s userSession) {
 	agentID := agentUnknown
-	if s.Agent != nil && *s.Agent != "" {
-		agentID = normalizeAgentString(*s.Agent)
+	if s.Agent != nil {
+		agentID = agentKey(*s.Agent)
 	}
-	agentLabel := agentDisplayMap[agentID].Label
+	agentLabel := agentDisplayFor(agentID).Label
 
 	title := strings.TrimSpace(s.DisplayName)
 	if title == "" {
@@ -652,7 +672,7 @@ func uniqueCommitAgents(c userCommit) []string {
 			agents = []string{cp.Agent}
 		}
 		for _, a := range agents {
-			id := normalizeAgentString(a)
+			id := agentKey(a)
 			if _, ok := seen[id]; !ok {
 				seen[id] = struct{}{}
 				result = append(result, id)

@@ -75,6 +75,43 @@ func TestUniqueCommitAgents_Empty(t *testing.T) {
 	}
 }
 
+// External agents keep their own name instead of all folding into "Unknown".
+func TestUniqueCommitAgents_KeepsExternalAgentName(t *testing.T) {
+	t.Parallel()
+	c := userCommit{
+		Checkpoints: []userCommitCheckpoint{
+			{Agents: []string{"Claude Code", "Grok Bot"}},
+			{Agents: []string{"Qwen Coder (PC)"}},
+		},
+	}
+	got := uniqueCommitAgents(c)
+	want := []string{"Grok Bot", "Qwen Coder (PC)", activityTestAgentClaude}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestRenderSessionRow_AgentLabel(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		agent *string
+		want  string
+	}{
+		"built-in": {strPtr("Claude Code"), "Claude Code"},
+		"external": {strPtr("Grok Bot"), "Grok Bot"},
+		"missing":  {nil, "Unknown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			renderSessionRow(&buf, activityStyles{width: 120}, userSession{DisplayName: "s", Agent: tc.agent})
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("row = %q, want agent %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderStatCards_ContainsAllLabels(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
