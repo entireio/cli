@@ -708,8 +708,51 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 		}
 		assertHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
 		assertHookExists(t, matchers, "Agent", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Agent (subagent) hook")
-		assertHookExists(t, matchers, "TaskCreate|TaskUpdate", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire task-list hook")
+		assertNoEntireHookCommand(t, matchers, agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"))
 	})
+}
+
+// assertNoEntireHookCommand fails if any matcher still carries command.
+func assertNoEntireHookCommand(t *testing.T, matchers []ClaudeHookMatcher, command string) {
+	t.Helper()
+	for _, m := range matchers {
+		for _, h := range m.Hooks {
+			if h.Command == command {
+				t.Errorf("hook %q should not be installed (matcher %q)", command, m.Matcher)
+			}
+		}
+	}
+}
+
+// TestInstallHooks_PrunesPostTodoHook pins that a plain install (no --force)
+// removes the post-todo hook older CLIs installed: its handler records nothing,
+// and a user's own hook under the same matcher survives.
+func TestInstallHooks_PrunesPostTodoHook(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "PostToolUse": [
+      {"matcher": "TaskCreate|TaskUpdate", "hooks": [
+        {"type": "command", "command": %q},
+        {"type": "command", "command": "echo user task hook"}
+      ]}
+    ]
+  }
+}`, todo))
+
+	if _, err := (&ClaudeCodeAgent{}).InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	assertNoEntireHookCommand(t, settings.Hooks.PostToolUse, todo)
+	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate", "echo user task hook", "user hook under the old matcher")
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v, want HooksCurrent", got)
+	}
 }
 
 // assertHookExists checks that a hook with the given matcher and command exists
@@ -890,8 +933,9 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"), "pre-task subagent hook")
 	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
-	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
-		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
+	// post-todo records nothing anymore, so it is not installed.
+	assertNoEntireHookCommand(t, settings.Hooks.PostToolUse,
+		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"))
 
 	// SubagentStop fresh install is the regression for wiring up the real
 	// background-subagent-completion signal (SubagentStop fires at true
@@ -1151,8 +1195,7 @@ func TestInstallHooks_Force_ReinstallsStaleToolMatchers(t *testing.T) {
 	// Reinstalled under the current matchers.
 	assertHookExists(t, settings.Hooks.PostToolUse, "Agent",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task hook")
-	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
-		staleTodo, "post-todo hook")
+	assertNoEntireHookCommand(t, settings.Hooks.PostToolUse, staleTodo)
 	// The stale matchers no longer carry an Entire hook.
 	for _, m := range settings.Hooks.PostToolUse {
 		if m.Matcher == "Task" || m.Matcher == "TodoWrite" {

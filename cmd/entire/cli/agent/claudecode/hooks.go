@@ -39,20 +39,16 @@ const (
 // Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
 //
 // The subagent dispatch tool is "Agent" (Claude Code never exposed a tool named
-// "Task"), and the "TodoWrite" tool was disabled by default in v2.1.142 in favor
-// of the Task* tools. "TaskCreate|TaskUpdate" is a matcher list of exact tool
-// names (Claude Code treats a matcher containing only letters/digits/_/-/spaces/
-// ,/| as exact strings, not a regex). See:
+// "Task"). Older CLIs also installed a post-todo hook under "TodoWrite" and later
+// "TaskCreate|TaskUpdate"; it is no longer installed (the handler records
+// nothing) and installs prune it as a stale managed hook. See:
 //   - https://code.claude.com/docs/en/tools-reference.md (Agent, TodoWrite entries)
 //   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
 //
 // Configs written by older CLI versions used the outdated matchers "Task" and
 // "TodoWrite", where the hooks silently never fired. Those are not rewritten in
 // place on a normal `entire enable`; run with --force to strip and reinstall.
-const (
-	subagentToolMatcher = "Agent"
-	taskToolMatcher     = "TaskCreate|TaskUpdate"
-)
+const subagentToolMatcher = "Agent"
 
 // ClaudeSettingsFileName is the settings file used by Claude Code.
 // This is Claude-specific and not shared with other agents.
@@ -209,7 +205,6 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	// simpleHooks above).
 	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
 	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
-	postTodoCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher, which ran a
@@ -226,7 +221,10 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 		simpleMatchers[h.hookType] = drop(simpleMatchers[h.hookType], h.command)
 	}
 	preToolUse = drop(preToolUse, preTaskCmd)
-	postToolUse = drop(postToolUse, postTaskCmd, postTodoCmd)
+	// post-todo is no longer installed: the handler records nothing, so the
+	// stale-hook drop above prunes it from configs older CLIs wrote (its
+	// subcommand stays registered so those configs keep working until then).
+	postToolUse = drop(postToolUse, postTaskCmd)
 
 	// Add hooks if they don't exist
 	for _, h := range simpleHooks {
@@ -242,10 +240,6 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
 		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
-		count++
-	}
-	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
 		count++
 	}
 
@@ -512,10 +506,8 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 		return HooksAbsent
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)
-	taskTools := splitMatcherTools(taskToolMatcher)
 	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
-		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) ||
 		!hasEntireHook(settings.Hooks.SubagentStop) ||
 		!hasEntireHook(settings.Hooks.StopFailure) {
 		return HooksOutdated
@@ -647,8 +639,7 @@ func isEntireHook(command string) bool {
 
 // dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
 // want, per matcher, pruning matchers left with no hooks. want is a set because
-// one hook list can hold several Entire commands (PostToolUse carries both
-// post-task and post-todo). See agent.DropStaleManagedHooks for why this runs on
+// one hook list can hold several Entire commands. See agent.DropStaleManagedHooks for why this runs on
 // every install and why the dropped flag matters.
 func dropStaleEntireHooks(matchers []ClaudeHookMatcher, want ...string) ([]ClaudeHookMatcher, bool) {
 	result := make([]ClaudeHookMatcher, 0, len(matchers))
