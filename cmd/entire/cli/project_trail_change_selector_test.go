@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestParseProjectTrailChangeSelector(t *testing.T) {
@@ -122,4 +123,26 @@ func TestProjectChangeSelectorRejectsConflictingTargets(t *testing.T) {
 		_, _, err := executeProjectTrailTest(t, tt.args...)
 		require.ErrorContains(t, err, tt.failure, tt.args)
 	}
+}
+
+// finding apply patches the local clone, so a <repo>/<number> selector naming
+// another repository must be refused before any request, just as apply refuses
+// --repo. Not parallel: changes CWD and replaces client constructors.
+func TestProjectChangeSelectorFindingApplyStaysInThisClone(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.IsolateGitConfigEnv(t)
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/widget.git")
+	t.Chdir(repoDir)
+	setupProjectTrailTest(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected project request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+	setupWorkingRepoClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected repo request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	})
+
+	_, _, err := executeProjectTrailTest(t, "finding", "apply", "other/7", "finding-one", "--project", "gh/acme")
+	require.ErrorContains(t, err, "other/7 is not in this clone's repository")
 }

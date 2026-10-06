@@ -1848,7 +1848,10 @@ func checkoutTrailBranch(ctx context.Context, w, errW io.Writer, found *api.Trai
 	}
 	if opts.Worktree {
 		fmt.Fprintf(errW, "Checking out %s in a worktree\n", describeTrailRef(found))
-		return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, trailForDisplay(*found).Number)
+		// The branch work's own number, not a project parent's: every branch
+		// of a project trail shares the parent number, and sanitized branch
+		// names collide (feature/x, feature-x).
+		return checkoutTrailWorktree(ctx, w, errW, branch, opts.Force, found.Number)
 	}
 	currentBranch, _ := GetCurrentBranch(ctx) //nolint:errcheck // detached HEAD means not already on the branch
 	if currentBranch == branch {

@@ -34,8 +34,9 @@ type trailMode struct {
 	// workingContext resolves a selector and/or --branch to one repository
 	// branch. localOnly callers (checkout, resume) act on the local clone.
 	workingContext func(cmd *cobra.Command, selector, branch string, localOnly bool) (*trailWorkingContext, error)
-	// reviewTarget resolves the finding and watch target.
-	reviewTarget func(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error)
+	// reviewTarget resolves the finding and watch target. localOnly callers
+	// (finding apply) patch this clone, so the target must be its repository.
+	reviewTarget func(cmd *cobra.Command, selector string, localOnly bool) (*api.Client, trailReviewTarget, error)
 }
 
 var (

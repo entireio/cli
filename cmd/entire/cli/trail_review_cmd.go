@@ -310,7 +310,7 @@ func runTrailReviewDashboard(cmd *cobra.Command, mode *trailMode, selector strin
 	if err != nil {
 		return err
 	}
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		if strings.TrimSpace(selector) == "" && errors.Is(err, errTrailReviewDefaultTargetNotFound) {
 			fmt.Fprintln(cmd.OutOrStdout(), "No trail found for the current branch; showing trails in this repo.")
@@ -341,7 +341,7 @@ func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string
 	if err != nil {
 		return err
 	}
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -357,7 +357,7 @@ func runTrailReviewComments(cmd *cobra.Command, mode *trailMode, selector string
 }
 
 func runTrailReviewCommentAdd(cmd *cobra.Command, mode *trailMode, selector string, opts trailReviewCommentAddOptions) error {
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -393,7 +393,7 @@ func runTrailReviewCommentAdd(cmd *cobra.Command, mode *trailMode, selector stri
 }
 
 func runTrailReviewShow(cmd *cobra.Command, mode *trailMode, selector string, commentID string) error {
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -409,7 +409,7 @@ func runTrailReviewShow(cmd *cobra.Command, mode *trailMode, selector string, co
 }
 
 func runTrailReviewUpdate(cmd *cobra.Command, mode *trailMode, selector string, commentID string, opts trailReviewUpdateOptions) error {
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -438,7 +438,7 @@ func runTrailReviewUpdate(cmd *cobra.Command, mode *trailMode, selector string, 
 }
 
 func runTrailReviewApply(cmd *cobra.Command, mode *trailMode, selector string, commentID string, opts trailReviewApplyOptions) error {
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, true)
 	if err != nil {
 		return err
 	}
@@ -473,7 +473,7 @@ func runTrailReviewApply(cmd *cobra.Command, mode *trailMode, selector string, c
 }
 
 func runTrailReviewSetStatus(cmd *cobra.Command, mode *trailMode, selector string, commentID, status, message string) error {
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
@@ -495,8 +495,8 @@ func runTrailReviewSetStatus(cmd *cobra.Command, mode *trailMode, selector strin
 
 // projectTrailReviewTarget is projectTrailMode's finding/watch target: the
 // selected branch of a project trail.
-func projectTrailReviewTarget(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error) {
-	selected, err := resolveProjectTrailWorkingContext(cmd, selector, trailBranchFlag(cmd), false)
+func projectTrailReviewTarget(cmd *cobra.Command, selector string, localOnly bool) (*api.Client, trailReviewTarget, error) {
+	selected, err := resolveProjectTrailWorkingContext(cmd, selector, trailBranchFlag(cmd), localOnly)
 	if err != nil {
 		return nil, trailReviewTarget{}, err
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -766,5 +768,30 @@ func TestCheckoutTrailWorktree_UnknownBranch(t *testing.T) {
 	err := checkoutTrailWorktree(context.Background(), &out, &errOut, "feature/nope", false, 3)
 	if err == nil || !strings.Contains(err.Error(), "not found locally or on origin") {
 		t.Fatalf("error = %v, want branch-not-found", err)
+	}
+}
+
+// Branches of one project trail share its number, and sanitized branch names
+// are lossy, so the worktree directory takes the branch work's own number.
+// Not parallel: changes the working directory.
+func TestCheckoutTrailBranch_ProjectWorktreesUseBranchWorkNumber(t *testing.T) {
+	repoDir := newTrailWorktreeTestRepo(t)
+	runGit(t, repoDir, "branch", "feature/x")
+	runGit(t, repoDir, "branch", "feature-x")
+	t.Chdir(repoDir)
+
+	parent := &api.TrailParentReference{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Number: 42}
+	for _, work := range []api.TrailResource{
+		{Number: 7, Branch: "feature/x", Parent: parent},
+		{Number: 8, Branch: "feature-x", Parent: parent},
+	} {
+		var out, errOut bytes.Buffer
+		if err := checkoutTrailBranch(context.Background(), &out, &errOut, &work, trailCheckoutOptions{Worktree: true}); err != nil {
+			t.Fatalf("checkout %s: %v; stderr: %s", work.Branch, err, errOut.String())
+		}
+		wantPath := filepath.Join(repoDir, ".entire", "worktrees", fmt.Sprintf("trail-%d-feature-x", work.Number))
+		if got := currentBranchInDir(t, wantPath); got != work.Branch {
+			t.Fatalf("worktree %s branch = %q, want %q", wantPath, got, work.Branch)
+		}
 	}
 }

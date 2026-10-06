@@ -68,7 +68,9 @@ func resolveLegacyTrailContext(cmd *cobra.Command, selector, branch string, loca
 }
 
 // authenticatedLegacyTrailReviewTarget is legacyTrailMode.reviewTarget.
-func authenticatedLegacyTrailReviewTarget(cmd *cobra.Command, selector string) (*api.Client, trailReviewTarget, error) {
+// Legacy selectors cannot name another repository, and finding apply already
+// rejects --repo, so localOnly needs no extra check here.
+func authenticatedLegacyTrailReviewTarget(cmd *cobra.Command, selector string, _ bool) (*api.Client, trailReviewTarget, error) {
 	repo, branch := trailRepoFlag(cmd), trailBranchFlag(cmd)
 	if selector != "" && branch != "" {
 		return nil, trailReviewTarget{}, errors.New("pass a trail selector or --branch, not both")

@@ -91,7 +91,7 @@ Events emitted by the server:
 }
 
 func runTrailReviewWatch(cmd *cobra.Command, mode *trailMode, selector string, jsonOutput, showPings, once bool) error {
-	client, target, err := mode.reviewTarget(cmd, selector)
+	client, target, err := mode.reviewTarget(cmd, selector, false)
 	if err != nil {
 		return err
 	}
