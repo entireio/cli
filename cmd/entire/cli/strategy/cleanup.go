@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -181,6 +182,13 @@ const legacyShadowCleanupMarker = "entire-legacy-shadow-branches-removed"
 // session start. Nothing reads or writes these branches anymore — session
 // work in progress lives in session state — so there is no session to protect.
 //
+// A branch checked out in any worktree is left alone: `git update-ref -d`,
+// unlike `git branch -D`, does not refuse one, and deleting it would leave that
+// worktree's HEAD pointing at a missing ref. Someone checked it out on purpose,
+// so it is the user's branch now; skipping it is not a failure and does not
+// hold back the marker. If the worktree list cannot be read, nothing is
+// deleted and the pass is retried next time.
+//
 // A marker in the git common dir makes the pass one-time: the first call that
 // finishes without failures records it, and every later call returns
 // immediately. Old-format bare "entire/<hex>" branches are never touched here;
@@ -200,6 +208,19 @@ func CleanupLegacyShadowBranches(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if len(heads) > 0 {
+		checkedOut, listErr := checkedOutBranches(ctx)
+		if listErr != nil {
+			return 0, listErr
+		}
+		for branch := range heads {
+			if _, held := checkedOut[branch]; held {
+				logging.Info(logging.WithComponent(ctx, "cleanup"), "leaving checked-out legacy shadow branch in place",
+					slog.String("branch", branch))
+				delete(heads, branch)
+			}
+		}
+	}
 	deleted, failed := deleteLegacyShadowBranchesIfUnchanged(ctx, heads)
 	if len(failed) > 0 {
 		return len(deleted), fmt.Errorf("%d legacy shadow branch(es) could not be deleted", len(failed))
@@ -208,6 +229,21 @@ func CleanupLegacyShadowBranches(ctx context.Context) (int, error) {
 		return len(deleted), fmt.Errorf("record legacy shadow branch cleanup: %w", err)
 	}
 	return len(deleted), nil
+}
+
+// checkedOutBranches returns the short names of the branches checked out in
+// any worktree of the current repository, from `git worktree list
+// --porcelain`.
+func checkedOutBranches(ctx context.Context) (map[string]struct{}, error) {
+	out, err := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return nil, fmt.Errorf("list worktrees: %w", err)
+	}
+	branches := make(map[string]struct{})
+	for _, wt := range gitrepo.ParseWorktreeBranches(string(out)) {
+		branches[wt.Branch] = struct{}{}
+	}
+	return branches, nil
 }
 
 // deleteLegacyShadowBranchesIfUnchanged deletes each branch only if it still

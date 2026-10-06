@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -479,25 +480,11 @@ func branchCheckedOutElsewhere(ctx context.Context, branch string) (string, bool
 
 // parseWorktreeForBranch scans `git worktree list --porcelain` output and returns
 // the path of a worktree (other than currentRoot) that has branch checked out.
-//
-// Each worktree is a block beginning with a `worktree <path>` line and separated
-// by a blank line; a `branch <ref>` line only appears for non-detached worktrees.
-// curPath is reset at each block boundary and a branch line is only considered
-// when a worktree line was seen in the same block, so a detached worktree (no
-// branch line) can never pair a branch with a stale path or return an empty one.
+// See gitrepo.ParseWorktreeBranches for how blocks are paired.
 func parseWorktreeForBranch(porcelain, branch, currentRoot string) (string, bool) {
-	var curPath string
-	for _, line := range strings.Split(porcelain, "\n") {
-		switch {
-		case line == "":
-			curPath = "" // block boundary
-		case strings.HasPrefix(line, "worktree "):
-			curPath = strings.TrimPrefix(line, "worktree ")
-		case strings.HasPrefix(line, "branch ") && curPath != "":
-			name := strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
-			if name == branch && normalizeWorktreePath(curPath) != currentRoot {
-				return curPath, true
-			}
+	for _, wt := range gitrepo.ParseWorktreeBranches(porcelain) {
+		if wt.Branch == branch && normalizeWorktreePath(wt.Path) != currentRoot {
+			return wt.Path, true
 		}
 	}
 	return "", false
