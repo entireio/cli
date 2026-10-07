@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -155,19 +156,60 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 }
 
 // ExtractWorkflowRunIDs returns the IDs of the Workflow runs a transcript
-// launched. A Workflow call's tool_result names its run as "Run ID: <runId>"
-// (Claude Code 2.1.291) and none of the agents the run launches; those agents'
-// transcripts live under <subagentsDir>/workflows/<runId>/. Run IDs that are
-// not path-safe are dropped, as ExtractSpawnedAgentIDs drops agent IDs.
+// launched, from the tool_result text: a Workflow call's result names its run
+// as "Run ID: <runId>" (Claude Code 2.1.291) and none of the agents the run
+// launches; those agents' transcripts live under
+// <subagentsDir>/workflows/<runId>/. Every "Run ID:" in a result counts. Run
+// IDs that are not path-safe are dropped, as ExtractSpawnedAgentIDs drops
+// agent IDs. See also workflowRunIDsFromToolUseResults, which reads the same
+// run from the structured result.
 func ExtractWorkflowRunIDs(transcript []TranscriptLine) []string {
 	var runIDs []string
 	forEachToolResultText(transcript, func(_, text string) {
-		if runID := extractIDAfter(text, "Run ID: ", true); runID != "" &&
-			validation.ValidateWorkflowRunID(runID) == nil && !slices.Contains(runIDs, runID) {
-			runIDs = append(runIDs, runID)
+		const marker = "Run ID: "
+		for rest := text; ; {
+			idx := strings.Index(rest, marker)
+			if idx == -1 {
+				return
+			}
+			rest = rest[idx:]
+			runIDs = appendWorkflowRunID(runIDs, extractIDAfter(rest, marker, true))
+			rest = rest[len(marker):]
 		}
 	})
 	return runIDs
+}
+
+// workflowRunIDsFromToolUseResults returns the run IDs Claude Code records in
+// a Workflow launch's structured result ({"toolUseResult": {"taskType":
+// "local_workflow", "runId": ...}}) on the tool_result line. It does not depend
+// on the result's wording, which ExtractWorkflowRunIDs does.
+func workflowRunIDsFromToolUseResults(transcriptData []byte) []string {
+	var runIDs []string
+	for _, line := range bytes.Split(transcriptData, []byte("\n")) {
+		if !bytes.Contains(line, []byte(`"local_workflow"`)) {
+			continue
+		}
+		var entry struct {
+			Type          string `json:"type"`
+			ToolUseResult struct {
+				TaskType string `json:"taskType"`
+				RunID    string `json:"runId"`
+			} `json:"toolUseResult"`
+		}
+		if json.Unmarshal(line, &entry) != nil || entry.Type != transcript.TypeUser || entry.ToolUseResult.TaskType != "local_workflow" {
+			continue
+		}
+		runIDs = appendWorkflowRunID(runIDs, entry.ToolUseResult.RunID)
+	}
+	return runIDs
+}
+
+func appendWorkflowRunID(runIDs []string, runID string) []string {
+	if runID == "" || validation.ValidateWorkflowRunID(runID) != nil || slices.Contains(runIDs, runID) {
+		return runIDs
+	}
+	return append(runIDs, runID)
 }
 
 // forEachToolResultText calls fn with the text of every tool_result in the
@@ -380,7 +422,11 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
-	agentPaths := subagentTranscriptPaths(ExtractSpawnedAgentIDs(fullParsed), ExtractWorkflowRunIDs(fullParsed), subagentsDir)
+	runIDs := workflowRunIDsFromToolUseResults(transcriptData)
+	for _, runID := range ExtractWorkflowRunIDs(fullParsed) {
+		runIDs = appendWorkflowRunID(runIDs, runID)
+	}
+	agentPaths := subagentTranscriptPaths(ExtractSpawnedAgentIDs(fullParsed), runIDs, subagentsDir)
 
 	// Calculate subagent token usage. This re-reads each subagent transcript from
 	// line 0 on every call, so mainUsage.SubagentTokens is a cumulative-since-
@@ -481,6 +527,12 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
+	// Only agents the Agent tool launched. Workflow-launched agents are not
+	// looked up here: they run after the parent's turn has ended, so a turn-end
+	// extraction would not see their edits anyway; their files reach the
+	// session through their task records when each agent's SubagentStop
+	// completes it (unlike tokens, which CalculateTotalTokenUsage re-reads from
+	// every run the transcript launched).
 	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	for agentID := range agentIDs {
 		agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))

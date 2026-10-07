@@ -998,3 +998,48 @@ func TestCalculateTotalTokenUsage_AgentIDResultDoesNotHideWorkflowTranscript(t *
 	require.NotNil(t, usage.SubagentTokens, "the workflow transcript was dropped for the absent direct path")
 	assert.Equal(t, 3, usage.SubagentTokens.InputTokens)
 }
+
+// TestCalculateTotalTokenUsage_WorkflowRunFromStructuredResult pins that a
+// Workflow run is found from the launch's structured toolUseResult even when
+// the result text does not use the "Run ID:" wording, so a change in Claude
+// Code's prose cannot silently drop workflow agents' tokens.
+func TestCalculateTotalTokenUsage_WorkflowRunFromStructuredResult(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	runDir := filepath.Join(subagentsDir, "workflows", "wf_e5264e60-494")
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+	writeJSONLFile(t, filepath.Join(runDir, "agent-ae3d7b8f2930c8787.jsonl"),
+		`{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":5,"output_tokens":6}}}`)
+
+	result := mustMarshal(t, map[string]interface{}{
+		"type": "user", "uuid": "wf-result",
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": "toolu_wf", "content": "Workflow started."},
+		}},
+		"toolUseResult": map[string]interface{}{
+			"status": "async_launched", "taskType": "local_workflow", "runId": "wf_e5264e60-494",
+		},
+	})
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(string(result)), 0, subagentsDir)
+	require.NoError(t, err)
+	require.NotNil(t, usage.SubagentTokens)
+	assert.Equal(t, 5, usage.SubagentTokens.InputTokens)
+	assert.Equal(t, 6, usage.SubagentTokens.OutputTokens)
+}
+
+// TestExtractWorkflowRunIDs_EveryRunInAResult pins that a result naming more
+// than one run (e.g. a resumed run citing its source) yields each of them.
+func TestExtractWorkflowRunIDs_EveryRunInAResult(t *testing.T) {
+	t.Parallel()
+
+	result := mustMarshal(t, map[string]interface{}{
+		"type": "user", "uuid": "wf-result",
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": "toolu_wf", "content": "Run ID: wf_new-1\nResumed from Run ID: wf_old-2\nRun ID: wf_new-1"},
+		}},
+	})
+	parsed, err := transcript.ParseFromBytes(buildJSONL(string(result)))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"wf_new-1", "wf_old-2"}, ExtractWorkflowRunIDs(parsed))
+}
