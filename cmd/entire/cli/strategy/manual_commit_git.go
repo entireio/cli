@@ -404,6 +404,9 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) erro
 	if rec.TokenUsage != nil {
 		live.TokenUsage = rec.TokenUsage
 	}
+	if rec.TokenUsageFromTranscript {
+		live.TokenUsageFromTranscript = true
+	}
 	if live.AgentID == "" {
 		live.AgentID = rec.AgentID
 	}

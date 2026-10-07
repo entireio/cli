@@ -2075,19 +2075,21 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 
 	files := mergeUnique(mergeUnique(relModifiedFiles, relNewFiles), relDeletedFiles)
 	tokenUsage := event.TokenUsage
-	if tokenUsage == nil {
+	usageFromTranscript := tokenUsage == nil
+	if usageFromTranscript {
 		tokenUsage = subagentTokenUsage(logCtx, ag, event, subagentTranscriptPath)
 	}
 	rec := session.TaskRecord{
-		ToolUseID:              event.ToolUseID,
-		AgentID:                event.SubagentID,
-		StartedAt:              time.Now(),
-		SubagentType:           event.SubagentType,
-		TaskDescription:        event.TaskDescription,
-		DeclaredTranscriptPath: subagentTranscriptPath,
-		TranscriptUnavailable:  event.SubagentTranscriptUnavailable,
-		Files:                  files,
-		TokenUsage:             tokenUsage,
+		ToolUseID:                event.ToolUseID,
+		AgentID:                  event.SubagentID,
+		StartedAt:                time.Now(),
+		SubagentType:             event.SubagentType,
+		TaskDescription:          event.TaskDescription,
+		DeclaredTranscriptPath:   subagentTranscriptPath,
+		TranscriptUnavailable:    event.SubagentTranscriptUnavailable,
+		Files:                    files,
+		TokenUsage:               tokenUsage,
+		TokenUsageFromTranscript: usageFromTranscript,
 	}
 	// Exactly-once needs an identity to be "once" about. Copilot CLI's
 	// SubagentEnd carries no correlation ID at all, so every one of its

@@ -365,12 +365,28 @@ A subagent invocation (Claude Code's Task tool) is captured through a durable
 **task record** — `session.TaskRecord` (json `task_records`) on session state
 (`session/state.go`): `ToolUseID`, `AgentID`, `StartedAt`, `SubagentType`,
 `TaskDescription`, `DeclaredTranscriptPath`, `Files`, `TokenUsage`,
-`CompletedAt` (zero = still in flight). Mid-turn the record is a **pointer,
-not a payload**: the subagent's transcript stays wherever the agent wrote it,
-and the record remembers how to find it — the transcript path the agent's
-stop hook declared (Claude Code's `agent_transcript_path`), with the
-agent-layout convention as fallback. Nothing is written to the shadow branch
-for task work; the payload is materialized at condensation (below).
+`TokenUsageFromTranscript`, `CompletedAt` (zero = still in flight). Mid-turn
+the record is a **pointer, not a payload**: the subagent's transcript stays
+wherever the agent wrote it, and the record remembers how to find it — the
+transcript path the agent's stop hook declared (Claude Code's
+`agent_transcript_path`), with the agent-layout convention as fallback. Nothing
+is written to the shadow branch for task work; the payload is materialized at
+condensation (below).
+
+**Task token usage.** When the completing event carries no usage, completion
+computes it from the subagent's transcript and sets `TokenUsageFromTranscript`.
+That read can be short: Claude Code fires `SubagentStop` before the agent's last
+API call is in its transcript, and a background agent woken again by a child it
+launched stops more than once while only its first stop completes the record.
+Condensation therefore recounts a completed record's usage from the raw
+transcript it reads for storage (before redaction, which could rewrite the
+message IDs usage is deduplicated by), so `task.json`'s usage matches the
+stored transcript. It keeps the recorded usage for agent-reported usage (Codex's
+inventory usage, where nil is deliberate), live records (their usage would be
+partial and stored again once complete), external agents (their usage comes
+from what their binary's `read-transcript` returns), and a recount with fewer
+API calls than recorded (a different or unparseable file). A re-wake after a
+commit has already condensed and removed the record is not captured.
 
 **Producers.**
 

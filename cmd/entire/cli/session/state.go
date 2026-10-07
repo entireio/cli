@@ -513,8 +513,16 @@ type TaskRecord struct {
 	Files []string `json:"files,omitempty"`
 
 	// TokenUsage is this subagent's token usage, when the completing hook
-	// payload provided one. nil when unavailable.
+	// payload provided one or the agent computed it from the subagent's
+	// transcript. nil when unavailable.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// TokenUsageFromTranscript records that TokenUsage was computed from the
+	// subagent's transcript at completion (or would have been, had that read
+	// found usage) rather than reported by the agent. Condensation recomputes
+	// such usage from the transcript it stores, which by then holds API calls
+	// the agent had not yet written when it stopped.
+	TokenUsageFromTranscript bool `json:"token_usage_from_transcript,omitempty"`
 
 	// CompletedAt is when this record was completed (CompleteTaskRecord).
 	// Zero means the record is still in flight. See the type doc comment.

@@ -483,6 +483,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			payloads = append(payloads, payload)
 			continue
 		}
+		payload.TokenUsage = condensedTaskTokenUsage(ctx, ag, record, raw)
 
 		redacted, taskAssets, tooLarge, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, transcriptPath, raw)
 		if tooLarge {
@@ -507,6 +508,34 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	}
 
 	return payloads, assets
+}
+
+// condensedTaskTokenUsage returns the token usage to store for a task: its
+// recorded usage, or, when that usage was computed from the subagent's
+// transcript at completion, the usage of the transcript read now. An agent can
+// stop before it has written its last API calls (Claude Code), and a
+// background agent woken again by a child it launched stops more than once
+// while only its first stop completes the record, so the transcript at
+// condensation is the complete one.
+//
+// Only completed records are recomputed: a live record's usage would be
+// partial, and stored again in full once it completes. External agents are
+// left alone, since their usage is computed from what their binary's
+// read-transcript returns, not from the raw file. The recompute never lowers
+// the recorded call count: the transcript only grows, so a smaller result
+// means a different or unparseable file was read. Usage is computed from the
+// raw bytes, before redaction, like every other token count; redaction could
+// rewrite the message IDs that usage is deduplicated by.
+func condensedTaskTokenUsage(ctx context.Context, ag agent.Agent, record session.TaskRecord, raw []byte) *agent.TokenUsage {
+	recorded := record.TokenUsage
+	if !record.TokenUsageFromTranscript || record.CompletedAt.IsZero() || ag == nil || external.IsExternal(ag) {
+		return recorded
+	}
+	usage := agent.CalculateTokenUsage(ctx, ag, raw, 0, "")
+	if !hasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
+		return recorded
+	}
+	return usage
 }
 
 // readFirstTranscript tries each candidate path in order and returns the bytes
