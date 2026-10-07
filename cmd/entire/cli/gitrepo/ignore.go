@@ -19,8 +19,7 @@ func IgnoredPaths(ctx context.Context, worktreeRoot string, paths []string) (map
 	if len(paths) == 0 {
 		return ignored, nil
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreeRoot, "check-ignore", "-z", "--stdin")
-	cmd.Env = EnvWithoutRepoOverrides()
+	cmd := worktreeGitCommand(ctx, worktreeRoot, "check-ignore", "-z", "--stdin")
 	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
 	out, err := cmd.Output()
 	if err != nil {

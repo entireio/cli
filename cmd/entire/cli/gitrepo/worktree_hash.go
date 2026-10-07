@@ -74,10 +74,9 @@ func hashWorktreeFiles(
 }
 
 func hashWorktreeFileBatch(ctx context.Context, worktreeRoot string, paths []string) ([]plumbing.Hash, error) {
-	args := []string{"-C", worktreeRoot, "hash-object", "--"}
+	args := []string{"hash-object", "--"}
 	args = append(args, paths...)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = EnvWithoutRepoOverrides()
+	cmd := worktreeGitCommand(ctx, worktreeRoot, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
