@@ -560,11 +560,12 @@ A launch-time `SubagentEnd` needs `ToolUseID`, and should carry `SubagentID` whe
 ### `SubagentSessionResolver`
 
 **What it enables:** Attributing a detached subagent session's turn to the parent
-task invocation, as a task checkpoint under `.entire/metadata/<parent>/tasks/<tool-use-id>/`.
+task invocation, as a task record on the parent session that condensation
+materializes into the parent's checkpoint under `tasks/<tool-use-id>/`.
 
 **Without it:** Turn-end treats the subagent's session as an ordinary top-level
 session and records a turn end for it — the subagent's files are tracked under a
-session the user never drove, and no task checkpoint exists.
+session the user never drove, and no task record exists.
 
 **Implement when:** Your agent dispatches subagents as sessions of their own,
 firing a full SessionStart/UserPromptSubmit/Stop cycle for each. Factory AI

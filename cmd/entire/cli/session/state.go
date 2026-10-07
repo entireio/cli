@@ -272,14 +272,9 @@ type State struct {
 	// retry after process death keeps both the intended ID and recovery mode.
 	CondensationAttempt *CondensationAttempt `json:"condensation_attempt,omitempty"`
 
-	// LastCheckpointCommitHash is the exact commit SHA that carried
-	// LastCheckpointID at condensation time. Used by the reconcile path to
-	// distinguish "reset back to the condensed commit" (same SHA) from
-	// "cherry-picked / rebased a commit that happens to preserve the trailer"
-	// (different SHA).
-	// Empty for legacy state files — reconcile falls back to trailer-only
-	// matching for backward compatibility.
-	LastCheckpointCommitHash string `json:"last_checkpoint_commit_hash,omitempty"`
+	// last_checkpoint_commit_hash, written by older CLIs for a shadow-branch
+	// reconcile path that no longer exists, is an unknown key now: encoding/json
+	// ignores it on load and the next save drops it.
 
 	// FullyCondensed indicates this session has been condensed and has no remaining
 	// carry-forward files. PostCommit skips fully-condensed sessions entirely.

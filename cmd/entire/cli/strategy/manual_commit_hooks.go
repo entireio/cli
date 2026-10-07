@@ -1640,7 +1640,6 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	isHome := isSessionHomeWorktree(opts.repoDir, state)
 	if !isHome {
 		state.LastCheckpointID = result.CheckpointID
-		state.LastCheckpointCommitHash = head.Hash().String()
 		pendingStepCount := state.StepCount
 		resetCheckpointWindow(state)
 		// The checkpoint window was consumed, but the home worktree's pending
@@ -1672,10 +1671,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	// the prompt must persist so the next condensation can read it.
 
 	// Save checkpoint ID so subsequent commits can reuse it (e.g., amend restores trailer).
-	// LastCheckpointCommitHash records the exact commit SHA so the reconcile path can
-	// distinguish a true reset (same SHA) from cherry-pick/rebase (same trailer, new SHA).
 	state.LastCheckpointID = result.CheckpointID
-	state.LastCheckpointCommitHash = newHead
 
 	logging.Info(logCtx, "session condensed",
 		slog.String("strategy", "manual-commit"),

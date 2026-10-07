@@ -120,12 +120,6 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 		return nil, nil
 	}
 
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
 	var states []*SessionState
 	for _, sessionState := range sessionStates {
 		state := sessionState

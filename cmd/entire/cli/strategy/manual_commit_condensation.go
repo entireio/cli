@@ -1288,6 +1288,10 @@ func condensationTranscript(ctx context.Context, ag agent.Agent, state *SessionS
 //   - A session with a recorded turn-end step (StepCount > 0) had a transcript
 //     at that Stop, so it is not coming back: degrade likewise rather than lose
 //     the step's files and prompts.
+//   - An ended session (State.IsEnded) has no write still in flight, so a
+//     missing transcript will not appear: degrade likewise. Erroring here made
+//     the zombie sweep retry such a session at every session start until it
+//     aged out.
 //   - Anything else is a transient race (the file exists but the write has not
 //     landed): error, so the failed condensation leaves session state
 //     untouched and the next commit re-condenses with the populated transcript.
@@ -1304,7 +1308,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, ag agent.
 				slog.String("agent_type", string(state.AgentType)),
 			)
 			return &ExtractedSessionData{FilesTouched: state.FilesTouched}, nil
-		case lateWriter || state.StepCount > 0:
+		case lateWriter || state.StepCount > 0 || state.IsEnded():
 			logging.Warn(logCtx, "transcript unavailable at condensation, degrading to files/prompt-only checkpoint",
 				slog.String("session_id", state.SessionID),
 				slog.Int("step_count", state.StepCount))
@@ -1866,7 +1870,6 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = result.CheckpointID
-		state.LastCheckpointCommitHash = state.BaseCommit
 		return nil
 	}, func() {
 		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
@@ -2014,7 +2017,6 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		resetCheckpointWindow(state)
 		state.CheckpointTranscriptStart = result.TotalTranscriptLines
 		state.LastCheckpointID = result.CheckpointID
-		state.LastCheckpointCommitHash = state.BaseCommit
 		state.FullyCondensed = true
 		// Phase stays ENDED — do NOT set to IDLE
 

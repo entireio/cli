@@ -172,7 +172,7 @@ func TestState_LegacyAttributionKeysIgnored(t *testing.T) {
 	legacy := `{"session_id":"s1","base_commit":"aaaaaaa","checkpoint_count":2,` +
 		`"attribution_base_commit":"bbbbbbb","divergence_notice_shown":true,` +
 		`"prompt_attributions":[{"checkpoint_number":1,"user_lines_added":3}],` +
-		`"pending_prompt_attribution":{"checkpoint_number":2}}`
+		`"pending_prompt_attribution":{"checkpoint_number":2},"last_checkpoint_commit_hash":"ccccccc"}`
 	var state State
 	require.NoError(t, json.Unmarshal([]byte(legacy), &state))
 	assert.Equal(t, "aaaaaaa", state.BaseCommit)
@@ -180,7 +180,7 @@ func TestState_LegacyAttributionKeysIgnored(t *testing.T) {
 
 	out, err := json.Marshal(&state)
 	require.NoError(t, err)
-	for _, key := range []string{"attribution_base_commit", "divergence_notice_shown", "prompt_attributions", "pending_prompt_attribution"} {
+	for _, key := range []string{"attribution_base_commit", "divergence_notice_shown", "prompt_attributions", "pending_prompt_attribution", "last_checkpoint_commit_hash"} {
 		assert.NotContains(t, string(out), key)
 	}
 }

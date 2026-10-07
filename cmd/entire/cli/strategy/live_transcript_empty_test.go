@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,6 +81,29 @@ func TestExtractSessionData_EmptyTranscriptDegradesAfterATurnEndStep(t *testing.
 		TranscriptPath: filepath.Join(t.TempDir(), "gone.jsonl"),
 		FilesTouched:   []string{"a.txt"},
 		StepCount:      1,
+	}
+
+	data, err := s.extractSessionData(context.Background(), mustAgent(t, state.AgentType), state)
+	require.NoError(t, err)
+	require.Empty(t, data.Transcript)
+	require.Equal(t, []string{"a.txt"}, data.FilesTouched)
+}
+
+// TestExtractSessionData_EmptyTranscriptDegradesForEndedSession: an ended
+// session with files but no turn-end step (files from per-tool hooks, then the
+// session ended) has no write in flight, so an unreadable transcript is not a
+// race. Erroring made the zombie sweep retry it at every session start for the
+// whole stale window; it must degrade to a files/prompt-only checkpoint.
+func TestExtractSessionData_EmptyTranscriptDegradesForEndedSession(t *testing.T) {
+	t.Parallel()
+
+	s := &ManualCommitStrategy{}
+	state := &SessionState{
+		SessionID:      "claude-ended-no-transcript-test",
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: filepath.Join(t.TempDir(), "gone.jsonl"),
+		FilesTouched:   []string{"a.txt"},
+		Phase:          session.PhaseEnded,
 	}
 
 	data, err := s.extractSessionData(context.Background(), mustAgent(t, state.AgentType), state)

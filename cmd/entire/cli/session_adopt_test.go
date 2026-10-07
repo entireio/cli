@@ -956,7 +956,6 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 			CheckpointID:    id.MustCheckpointID("fedcba987654"),
 			RecoveryPending: true,
 		},
-		LastCheckpointCommitHash: "source-commit",
 		CheckpointTokenUsage:     &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
 		UntrackedFilesAtStart:    []string{"source-only.txt"},
 		PromptWindowBase:         3,
@@ -1034,9 +1033,6 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	}
 	if adopted.CondensationAttempt != nil {
 		t.Fatalf("CondensationAttempt = %#v, want nil", adopted.CondensationAttempt)
-	}
-	if adopted.LastCheckpointCommitHash != "" {
-		t.Fatalf("LastCheckpointCommitHash = %q, want empty", adopted.LastCheckpointCommitHash)
 	}
 	if adopted.CheckpointTokenUsage != nil {
 		t.Fatalf("CheckpointTokenUsage = %#v, want nil for first target checkpoint", adopted.CheckpointTokenUsage)
@@ -1662,7 +1658,6 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 		StepCount:                 4,
 		CheckpointTranscriptStart: 2,
 		LastCheckpointID:          id.MustCheckpointID("abc123def456"),
-		LastCheckpointCommitHash:  "source-commit",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1719,9 +1714,6 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 	}
 	if !loaded.LastCheckpointID.IsEmpty() {
 		t.Fatalf("LastCheckpointID = %s, want empty target-local checkpoint ID", loaded.LastCheckpointID.String())
-	}
-	if loaded.LastCheckpointCommitHash != "" {
-		t.Fatalf("LastCheckpointCommitHash = %q, want empty target-local commit hash", loaded.LastCheckpointCommitHash)
 	}
 
 	commitMsgFile := filepath.Join(targetWorktree, "COMMIT_EDITMSG")
