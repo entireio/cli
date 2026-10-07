@@ -197,3 +197,35 @@ func TestMergeUnhashedFilesTouched_ClearsEmptyMap(t *testing.T) {
 	assert.Equal(t, []string{"a.txt"}, state.FilesTouched)
 	assert.Nil(t, state.TouchedFileHashes)
 }
+
+// A step whose every changed path is a phantom (named by the transcript, absent
+// from the worktree) and that deletes nothing records no work: it must not
+// count a step, or the session stays pending with nothing a commit can match.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_PhantomOnlyStepIsSkipped(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-10-07-phantom-only"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"never/created.go"},
+		NewFiles:      []string{"also/missing.go"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "turn end",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Zero(t, state.StepCount)
+	assert.Empty(t, state.FilesTouched)
+	assert.False(t, state.HasPendingWork())
+}

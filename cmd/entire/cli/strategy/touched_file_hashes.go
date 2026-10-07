@@ -198,6 +198,26 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 	pruneTouchedFileHashes(state)
 }
 
+// stepHasWork reports whether a turn-end step records anything: a deletion,
+// or a changed path that is in the worktree (or cannot be ruled out). Only a
+// step that names changed paths, all of them phantoms, records nothing; a step
+// that names no paths at all is left to its caller (turn end never saves one).
+func stepHasWork(worktreeRoot string, changed, deleted []string) bool {
+	if len(deleted) > 0 || len(changed) == 0 {
+		return true
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return true
+	}
+	for _, path := range changed {
+		if worktreeEntryExists(root, worktreeRoot, filepath.ToSlash(path)) {
+			return true
+		}
+	}
+	return false
+}
+
 // worktreeEntryState is what a probe of one worktree path found.
 type worktreeEntryState int
 
