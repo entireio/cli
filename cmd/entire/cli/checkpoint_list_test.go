@@ -10,9 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -116,6 +120,9 @@ func TestRunCheckpointPendingListHuman_Empty(t *testing.T) {
 	var stdout bytes.Buffer
 	require.NoError(t, runCheckpointPendingListHuman(context.Background(), &stdout))
 	require.Contains(t, stdout.String(), "No pending checkpoints found.")
+	require.Contains(t, stdout.String(), "becomes a checkpoint when you commit it",
+		"turn ends create no checkpoint; the footer must say commits do")
+	require.NotContains(t, stdout.String(), "created automatically during active agent sessions")
 }
 
 // TestCheckpointListCmd_Routing drives the real `checkpoint list` command
@@ -147,6 +154,122 @@ func TestCheckpointListCmd_Routing(t *testing.T) {
 		"--pending --json must route to the pending JSON renderer")
 	require.Contains(t, pendingJSON, `"is_logs_only": true`)
 	require.NotContains(t, pendingJSON, `"checkpoint_id"`, "pending --json must never carry condensed-only fields")
+}
+
+// seedPendingPreviewSession records a session in the current worktree with
+// turn-end work (two turns, two files, one running task record on HEAD) and
+// two prompts in prompt.txt, the state `checkpoint list --pending` previews.
+func seedPendingPreviewSession(t *testing.T, repoDir string) {
+	t.Helper()
+	ctx := context.Background()
+	worktree, err := paths.WorktreeRoot(ctx)
+	require.NoError(t, err)
+	repo, err := git.PlainOpen(repoDir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	started := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+	last := started.Add(30 * time.Minute)
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:           "2026-10-07-preview",
+		AgentType:           agent.AgentTypeClaudeCode,
+		BaseCommit:          head.Hash().String(),
+		WorktreePath:        worktree,
+		Phase:               session.PhaseIdle,
+		StartedAt:           started,
+		LastInteractionTime: &last,
+		StepCount:           2,
+		FilesTouched:        []string{"src/b.go", "src/a.go"},
+		LastPrompt:          "add the tests",
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID: "toolu_01ABCDEFGHIJKLMN", SubagentType: "Explore", TaskDescription: "find callers", StartedAt: started,
+		}},
+	}))
+	promptDir := filepath.Join(repoDir, paths.SessionMetadataDirFromSessionID("2026-10-07-preview"))
+	require.NoError(t, os.MkdirAll(promptDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(promptDir, paths.PromptFileName),
+		[]byte("implement the parser\n\n---\n\nadd the tests"), 0o600))
+}
+
+// TestCheckpointListPending_PreviewText pins the human view of the
+// next-checkpoint preview, rendered without a TTY. Uses t.Chdir — do NOT add
+// t.Parallel().
+func TestCheckpointListPending_PreviewText(t *testing.T) {
+	_, dir := setupCheckpointListRepo(t)
+	seedPendingPreviewSession(t, dir)
+
+	out := runListCmd(t, "--pending")
+	require.Equal(t, `Next checkpoint (written when you commit):
+  Session 2026-10-07-preview (Claude Code): 2 turns, 2 files, 1 task
+    file    src/a.go
+    file    src/b.go
+    task    Running 'Explore' agent: find callers (toolu_01ABCD)
+    prompt  implement the parser
+    prompt  add the tests
+`, out, "the task record shows once, in the preview, not again as a [Task] row")
+}
+
+// TestCheckpointListPending_PreviewJSON pins the preview row of the JSON
+// view: an id-less element with is_next_checkpoint and a next_checkpoint
+// object, and no duplicate is_task_checkpoint row for the previewed session.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestCheckpointListPending_PreviewJSON(t *testing.T) {
+	_, dir := setupCheckpointListRepo(t)
+	seedPendingPreviewSession(t, dir)
+
+	out := runListCmd(t, "--pending", "--json")
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &rows), out)
+	require.Len(t, rows, 1, "the previewed session's task record must not also appear as its own row: %s", out)
+
+	row := rows[0]
+	require.ElementsMatch(t,
+		[]string{"id", "message", "metadata_dir", "date", "is_task_checkpoint", "is_logs_only", "session_id", "session_prompt", "is_next_checkpoint", "next_checkpoint"},
+		keysOf(row))
+	require.Empty(t, row["id"], "turn-end work has no checkpoint ID until a commit")
+	require.Equal(t, true, row["is_next_checkpoint"])
+	require.Equal(t, false, row["is_task_checkpoint"])
+	require.Equal(t, false, row["is_logs_only"])
+	require.Equal(t, "Next checkpoint: 2 turns, 2 files, 1 task", row["message"])
+	require.Equal(t, "2026-10-07T09:30:00Z", row["date"])
+	require.Equal(t, "2026-10-07-preview", row["session_id"])
+	require.Equal(t, "add the tests", row["session_prompt"])
+	require.Equal(t, paths.SessionMetadataDirFromSessionID("2026-10-07-preview"), row["metadata_dir"])
+
+	next, ok := row["next_checkpoint"].(map[string]any)
+	require.True(t, ok, "next_checkpoint must be an object: %s", out)
+	require.Equal(t, map[string]any{
+		"agent":         "Claude Code",
+		"turns":         float64(2),
+		"files_touched": []any{"src/a.go", "src/b.go"},
+		"task_records": []any{map[string]any{
+			"tool_use_id": "toolu_01ABCDEFGHIJKLMN", "subagent_type": "Explore", "description": "find callers", "status": "running",
+		}},
+		"prompts": []any{"implement the parser", "add the tests"},
+	}, next)
+}
+
+// TestCheckpointListPending_PreviewEmptyArraysPresent pins that the preview's
+// arrays render as [] rather than null when empty, so consumers can range over
+// them. Uses t.Chdir — do NOT add t.Parallel().
+func TestCheckpointListPending_PreviewEmptyArraysPresent(t *testing.T) {
+	setupCheckpointListRepo(t)
+	worktree, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID:    "2026-10-07-turn-only",
+		AgentType:    agent.AgentTypeClaudeCode,
+		WorktreePath: worktree,
+		Phase:        session.PhaseIdle,
+		StartedAt:    time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC),
+		StepCount:    1,
+	}))
+
+	out := runListCmd(t, "--pending", "--json")
+	require.Contains(t, out, `"files_touched": []`)
+	require.Contains(t, out, `"task_records": []`)
+	require.Contains(t, out, `"prompts": []`)
 }
 
 // TestCheckpointListCmd_SessionWithPendingErrors verifies --session is rejected

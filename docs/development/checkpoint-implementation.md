@@ -22,7 +22,8 @@ tests still called them. Nothing in the strategy writes checkpoint contents back
 over the worktree, and re-adding that is a product decision, not a refactor.
 
 What survives is everything that reads a checkpoint without touching working
-files. `ListPendingCheckpoints()` / `ListLogsOnlyPendingCheckpoints()` feed
+files. `PreviewNextCheckpoint()` (the next checkpoint's contents, from session
+state) and `ListPendingCheckpoints()` / `ListLogsOnlyPendingCheckpoints()` feed
 `checkpoint list --pending`. `RestoreLogsOnly()` writes a checkpoint's session
 logs into the agent's session directory — logs only, never worktree files — and
 feeds `entire resume` and `entire trail resume`. The type they return is
@@ -33,7 +34,9 @@ current branch whose logs *are* already condensed there, listed so the
 transcript can be restored. "Pending" names the listing, not a promise that the
 work is un-condensed. Either way you can list it and resume from it, but the
 CLI cannot restore working files from it. The `--pending` flag, the command
-paths, and the `--json` shape are unchanged by that rename.
+paths, and the `--json` shape are unchanged by that rename. Next-checkpoint
+preview elements are additional array elements marked `is_next_checkpoint`;
+every other row keeps its key set.
 
 #### How It Works
 

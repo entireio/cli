@@ -384,7 +384,7 @@ self-containment rule the compact transcript follows. Live records survive
 condensation for retry; completed records are removed only after a successful
 write (`removeCompletedTaskRecords`, run from `resetCheckpointWindow`).
 
-**Trigger currency.** "Does this session have task content?" is `State.HasTaskContent()` (`len(TaskRecords) > 0`), one of the inputs to `State.HasPendingWork()`, so a records-only session (no steps, empty parent transcript) still condenses. `checkpoint list --pending` renders `[Task]` rows from records, with `Running`/`Completed` verbs.
+**Trigger currency.** "Does this session have task content?" is `State.HasTaskContent()` (`len(TaskRecords) > 0`), one of the inputs to `State.HasPendingWork()`, so a records-only session (no steps, empty parent transcript) still condenses. `checkpoint list --pending` lists records with `Running`/`Completed` verbs: inside the next-checkpoint preview for sessions in this worktree, and as `[Task]` rows for other sessions on HEAD.
 
 The Claude Code post-todo hook records nothing and is no longer installed; installs prune it from configs older CLIs wrote, and its subcommand stays registered so those configs keep working. TodoWrite inside a subagent no longer produces an incremental checkpoint.
 
@@ -804,12 +804,14 @@ Strategies determine checkpoint timing and type:
 
 Each `PendingCheckpoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session when multiple sessions are interleaved.
 
-`checkpoint list --pending` is the resume view of the current branch, and a `PendingCheckpoint` row is one of two things:
+`checkpoint list --pending` lists work that is not a checkpoint yet, plus resume points. Turn-end work has no identity until a commit condenses it, so the listing leads with a **preview of the next checkpoint** (`ManualCommitStrategy.PreviewNextCheckpoint`): one entry per session in this worktree with pending work (`State.HasPendingWork`; fully condensed ended sessions are left out, as PostCommit skips them), showing the turns since the last checkpoint (`StepCount`), the files touched, its task records, and the prompts since the last checkpoint (prompt.txt, then the agent's transcript extractor from `CheckpointTranscriptStart`). The preview reads session state and local metadata only; it never prepares a transcript. In `--json` a preview is an id-less element with `"is_next_checkpoint": true` and a `next_checkpoint` object; the command help documents the shape.
 
-- a **task record** of a session based on HEAD, live or completed but not yet materialized by condensation; or
+After the preview, a `PendingCheckpoint` row is one of two things:
+
+- a **task record** of a session based on HEAD, live or completed but not yet materialized by condensation — omitted for a session that already has a preview, since the preview lists its task records; or
 - a **logs-only resume point** — a commit on the current branch whose `Entire-Checkpoint` trailer resolves to a checkpoint that *is* already condensed onto `entire/checkpoints/v1`, listed so its session transcript can be restored from there (file state would need a git checkout).
 
-Turn-end steps are tracked in session state only, so they have no row of their own. "Pending" describes the listing, not a guarantee that the work behind every row is un-condensed: `ListLogsOnlyPendingCheckpoints` builds the second kind by scanning branch history against committed checkpoint storage.
+"Pending" describes the listing, not a guarantee that the work behind every row is un-condensed: `ListLogsOnlyPendingCheckpoints` builds the second kind by scanning branch history against committed checkpoint storage.
 
 Either shape can be listed, but the CLI cannot restore working files to it: the file-restoring path (`Rewind`, `PreviewRewind`, `CanRewind`) was removed along with the `rewind` commands. `RestoreLogsOnly` still writes a checkpoint's session logs into the agent's session directory for `entire resume`, and leaves the worktree alone.
 

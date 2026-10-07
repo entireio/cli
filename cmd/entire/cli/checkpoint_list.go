@@ -4,36 +4,64 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // pendingCheckpointJSON is the machine-readable shape emitted by
 // `entire checkpoint list --pending --json` (and the deprecated `rewind --list`
-// bridge). It is byte-for-byte the JSON that `rewind --list` historically
-// produced, so downstream consumers (integration and e2e test harnesses,
-// external scripts) that parsed `rewind --list` keep working unchanged after
-// repointing to `checkpoint list --pending --json`.
+// bridge). Rows that existed before the next-checkpoint preview keep the JSON
+// `rewind --list` historically produced byte-for-byte, so downstream consumers
+// (integration and e2e test harnesses, external scripts) that parsed
+// `rewind --list` keep working after repointing to
+// `checkpoint list --pending --json`.
 //
 // The field set, JSON names, omitempty markers, and the RFC3339 Date encoding
 // are load-bearing — this is a stable contract. CondensationID carries the
-// checkpoint ID (PendingCheckpoint.CheckpointID) for logs-only points; it is empty
-// for uncommitted task-record points. Do not change these without
-// migrating every consumer.
+// checkpoint ID (PendingCheckpoint.CheckpointID) for logs-only points; it is
+// empty for uncommitted rows. IsNextCheckpoint and NextCheckpoint appear only
+// on next-checkpoint preview rows (omitempty), so the other rows' key sets are
+// unchanged. Do not change these without migrating every consumer.
 type pendingCheckpointJSON struct {
-	ID               string `json:"id"`
-	Message          string `json:"message"`
-	MetadataDir      string `json:"metadata_dir"`
-	Date             string `json:"date"`
-	IsTaskCheckpoint bool   `json:"is_task_checkpoint"`
-	ToolUseID        string `json:"tool_use_id,omitempty"`
-	IsLogsOnly       bool   `json:"is_logs_only"`
-	CondensationID   string `json:"condensation_id,omitempty"`
-	SessionID        string `json:"session_id,omitempty"`
-	SessionPrompt    string `json:"session_prompt,omitempty"`
+	ID               string              `json:"id"`
+	Message          string              `json:"message"`
+	MetadataDir      string              `json:"metadata_dir"`
+	Date             string              `json:"date"`
+	IsTaskCheckpoint bool                `json:"is_task_checkpoint"`
+	ToolUseID        string              `json:"tool_use_id,omitempty"`
+	IsLogsOnly       bool                `json:"is_logs_only"`
+	CondensationID   string              `json:"condensation_id,omitempty"`
+	SessionID        string              `json:"session_id,omitempty"`
+	SessionPrompt    string              `json:"session_prompt,omitempty"`
+	IsNextCheckpoint bool                `json:"is_next_checkpoint,omitempty"`
+	NextCheckpoint   *nextCheckpointJSON `json:"next_checkpoint,omitempty"`
+}
+
+// nextCheckpointJSON is the `next_checkpoint` object on a preview row: what
+// one session would contribute to the checkpoint the next commit writes. The
+// slices are always present (empty, not null) so consumers can range over them.
+type nextCheckpointJSON struct {
+	Agent        string                         `json:"agent"`
+	Turns        int                            `json:"turns"`
+	FilesTouched []string                       `json:"files_touched"`
+	TaskRecords  []nextCheckpointTaskRecordJSON `json:"task_records"`
+	Prompts      []string                       `json:"prompts"`
+}
+
+// nextCheckpointTaskRecordJSON is one subagent task record in a preview.
+// Status is "running" or "completed".
+type nextCheckpointTaskRecordJSON struct {
+	ToolUseID    string `json:"tool_use_id"`
+	SubagentType string `json:"subagent_type,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Status       string `json:"status"`
 }
 
 // pendingCheckpointsLimit caps how many pending checkpoints (both shapes) the
@@ -41,21 +69,58 @@ type pendingCheckpointJSON struct {
 // the migrated output is identical.
 const pendingCheckpointsLimit = 20
 
-// runCheckpointPendingListJSON emits the pending checkpoints as
-// JSON. This is the drop-in replacement for (and the implementation behind)
-// the deprecated `rewind --list` bridge: same dataset (strategy.ListPendingCheckpoints),
-// same cap, same JSON shape.
-func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
-	start := GetStrategy(ctx)
+// pendingListing is the pending dataset: the next-checkpoint preview for the
+// sessions in this worktree, then the existing rows (subagent task records of
+// sessions on HEAD, logs-only resume points).
+type pendingListing struct {
+	previews []strategy.NextCheckpointPreview
+	points   []strategy.PendingCheckpoint
+}
 
-	points, err := start.ListPendingCheckpoints(ctx, pendingCheckpointsLimit)
+// loadPendingListing gathers the pending dataset. A task-record row whose
+// session already has a preview is dropped: the preview lists that session's
+// task records, so the row would only repeat it.
+func loadPendingListing(ctx context.Context) (pendingListing, error) {
+	strat := GetStrategy(ctx)
+
+	previews, err := strat.PreviewNextCheckpoint(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list pending checkpoints: %w", err)
+		return pendingListing{}, fmt.Errorf("failed to preview the next checkpoint: %w", err)
+	}
+	points, err := strat.ListPendingCheckpoints(ctx, pendingCheckpointsLimit)
+	if err != nil {
+		return pendingListing{}, fmt.Errorf("failed to list pending checkpoints: %w", err)
 	}
 
-	output := make([]pendingCheckpointJSON, len(points))
-	for i, p := range points {
-		output[i] = pendingCheckpointJSON{
+	previewed := make(map[string]bool, len(previews))
+	for _, p := range previews {
+		previewed[p.SessionID] = true
+	}
+	kept := make([]strategy.PendingCheckpoint, 0, len(points))
+	for _, p := range points {
+		if p.IsTaskCheckpoint && previewed[p.SessionID] {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return pendingListing{previews: previews, points: kept}, nil
+}
+
+// runCheckpointPendingListJSON emits the pending dataset as a JSON array:
+// next-checkpoint preview rows first, then the task-record and logs-only rows.
+// This is also the implementation behind the deprecated `rewind --list` bridge.
+func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
+	listing, err := loadPendingListing(ctx)
+	if err != nil {
+		return err
+	}
+
+	output := make([]pendingCheckpointJSON, 0, len(listing.previews)+len(listing.points))
+	for _, p := range listing.previews {
+		output = append(output, nextCheckpointRowJSON(p))
+	}
+	for _, p := range listing.points {
+		output = append(output, pendingCheckpointJSON{
 			ID:               p.ID,
 			Message:          p.Message,
 			MetadataDir:      p.MetadataDir,
@@ -66,7 +131,7 @@ func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
 			CondensationID:   p.CheckpointID.String(),
 			SessionID:        p.SessionID,
 			SessionPrompt:    p.SessionPrompt,
-		}
+		})
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(output, "", "  ")
@@ -77,29 +142,129 @@ func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
-// runCheckpointPendingListHuman prints the pending checkpoints in
-// a human-readable list. `rewind --list` was JSON-only, so there is no legacy
-// human output to mirror; this renders each point with the same label format
-// the former interactive rewind picker used (see pendingCheckpointLabel).
-func runCheckpointPendingListHuman(ctx context.Context, w io.Writer) error {
-	start := GetStrategy(ctx)
+// nextCheckpointRowJSON renders a preview as a pending row. It has no ID: the
+// checkpoint does not exist until a commit condenses it.
+func nextCheckpointRowJSON(p strategy.NextCheckpointPreview) pendingCheckpointJSON {
+	records := make([]nextCheckpointTaskRecordJSON, 0, len(p.TaskRecords))
+	for _, rec := range p.TaskRecords {
+		status := "running"
+		if rec.Completed {
+			status = "completed"
+		}
+		records = append(records, nextCheckpointTaskRecordJSON{
+			ToolUseID:    rec.ToolUseID,
+			SubagentType: rec.SubagentType,
+			Description:  rec.Description,
+			Status:       status,
+		})
+	}
+	files := p.FilesTouched
+	if files == nil {
+		files = []string{}
+	}
+	prompts := p.Prompts
+	if prompts == nil {
+		prompts = []string{}
+	}
+	return pendingCheckpointJSON{
+		Message:          nextCheckpointSummary(p),
+		MetadataDir:      paths.SessionMetadataDirFromSessionID(p.SessionID),
+		Date:             p.LastActivity.Format(time.RFC3339),
+		SessionID:        p.SessionID,
+		SessionPrompt:    p.LastPrompt,
+		IsNextCheckpoint: true,
+		NextCheckpoint: &nextCheckpointJSON{
+			Agent:        string(p.Agent),
+			Turns:        p.Turns,
+			FilesTouched: files,
+			TaskRecords:  records,
+			Prompts:      prompts,
+		},
+	}
+}
 
-	points, err := start.ListPendingCheckpoints(ctx, pendingCheckpointsLimit)
+// nextCheckpointSummary is the one-line description of a preview, e.g.
+// "Next checkpoint: 2 turns, 3 files, 1 task".
+func nextCheckpointSummary(p strategy.NextCheckpointPreview) string {
+	parts := []string{
+		pluralCount(p.Turns, "turn", "turns"),
+		pluralCount(len(p.FilesTouched), "file", "files"),
+	}
+	if len(p.TaskRecords) > 0 {
+		parts = append(parts, pluralCount(len(p.TaskRecords), "task", "tasks"))
+	}
+	return "Next checkpoint: " + strings.Join(parts, ", ")
+}
+
+func pluralCount(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// runCheckpointPendingListHuman prints the pending dataset: a preview of the
+// next checkpoint per session in this worktree, then the task-record and
+// logs-only rows, each with the label format the former interactive rewind
+// picker used (see pendingCheckpointLabel).
+func runCheckpointPendingListHuman(ctx context.Context, w io.Writer) error {
+	listing, err := loadPendingListing(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list pending checkpoints: %w", err)
+		return err
 	}
 
-	if len(points) == 0 {
+	if len(listing.previews) == 0 && len(listing.points) == 0 {
 		fmt.Fprintln(w, "No pending checkpoints found.")
-		fmt.Fprintln(w, "Pending checkpoints are created automatically during active agent sessions.")
+		fmt.Fprintln(w, "Agent work is recorded in session state at the end of each turn and becomes a checkpoint when you commit it.")
 		return nil
 	}
 
-	multi := hasMultipleSessions(points)
-	for _, p := range points {
+	if len(listing.previews) > 0 {
+		fmt.Fprintln(w, "Next checkpoint (written when you commit):")
+		for _, p := range listing.previews {
+			renderNextCheckpointPreview(w, p)
+		}
+		if len(listing.points) > 0 {
+			fmt.Fprintln(w)
+		}
+	}
+
+	multi := hasMultipleSessions(listing.points)
+	for _, p := range listing.points {
 		fmt.Fprintln(w, pendingCheckpointLabel(p, multi))
 	}
 	return nil
+}
+
+// previewPromptWidth caps each prompt in the human preview; the JSON carries
+// them in full.
+const previewPromptWidth = 80
+
+// renderNextCheckpointPreview prints one session's preview block.
+func renderNextCheckpointPreview(w io.Writer, p strategy.NextCheckpointPreview) {
+	header := "  Session " + tuiutil.SanitizeTerminalLabel(p.SessionID)
+	if p.Agent != "" {
+		header += " (" + tuiutil.SanitizeTerminalLabel(string(p.Agent)) + ")"
+	}
+	fmt.Fprintf(w, "%s: %s\n", header, strings.TrimPrefix(nextCheckpointSummary(p), "Next checkpoint: "))
+	for _, f := range p.FilesTouched {
+		fmt.Fprintf(w, "    file    %s\n", tuiutil.SanitizeTerminalLabel(f))
+	}
+	for _, rec := range p.TaskRecords {
+		shortID := rec.ToolUseID
+		if len(shortID) > id.ShortIDLength {
+			shortID = shortID[:id.ShortIDLength]
+		}
+		message := strategy.FormatSubagentRunningMessage(rec.SubagentType, rec.Description, shortID)
+		if rec.Completed {
+			message = strategy.FormatSubagentEndMessage(rec.SubagentType, rec.Description, shortID)
+		}
+		fmt.Fprintf(w, "    task    %s\n", tuiutil.SanitizeTerminalLabel(message))
+	}
+	for _, prompt := range p.Prompts {
+		label := stringutil.TruncateRunes(stringutil.CollapseWhitespace(prompt), previewPromptWidth, "...")
+		fmt.Fprintf(w, "    prompt  %s\n", tuiutil.SanitizeTerminalLabel(label))
+	}
 }
 
 // hasMultipleSessions reports whether the points span more than one session,
@@ -135,10 +300,9 @@ func pendingCheckpointLabel(p strategy.PendingCheckpoint, hasMultipleSessions bo
 		}
 		return fmt.Sprintf("%s (%s) %s%s", shortID, timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	case p.IsTaskCheckpoint:
-		// Task record (uncommitted) - no sha shown
+		// Task record (uncommitted) - no ID until a commit condenses it
 		return fmt.Sprintf("        (%s) [Task] %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	default:
-		// Uncommitted point - no sha to show
 		return fmt.Sprintf("        (%s) %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	}
 }

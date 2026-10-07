@@ -60,13 +60,15 @@ func newCheckpointSearchCmd() *cobra.Command {
 //
 //	(default)            condensed checkpoints on the branch, human view (pager)
 //	--json               condensed checkpoints as JSON (branchCheckpointJSON shape)
-//	--pending            pending checkpoints (live + logs-only), human list
-//	--pending --json     pending checkpoints as JSON — the drop-in
-//	                     replacement for the deprecated `rewind --list` bridge
+//	--pending            next-checkpoint preview + task records + logs-only
+//	                     points, human list
+//	--pending --json     the same as a JSON array — the drop-in replacement
+//	                     for the deprecated `rewind --list` bridge
 //
 // The condensed dataset (entire/checkpoints/v1 for the branch) and the pending
-// dataset (strategy.ListPendingCheckpoints; task checkpoints, logs-only points,
-// condensation IDs) are deliberately distinct — see issue #1767.
+// dataset (strategy.PreviewNextCheckpoint plus strategy.ListPendingCheckpoints;
+// task records, logs-only points, condensation IDs) are deliberately distinct —
+// see issue #1767.
 func newCheckpointListCmd() *cobra.Command {
 	var sessionFlag string
 	var noPagerFlag bool
@@ -79,15 +81,35 @@ func newCheckpointListCmd() *cobra.Command {
 		Long: `List checkpoints on the current branch.
 
 By default shows condensed checkpoints from the checkpoints branch for the
-current branch. Use --pending for the resume view instead: subagent task
-records of sessions on HEAD (not yet condensed), plus logs-only resume points
-recovered from commits whose logs are already condensed.
+current branch. Use --pending for work that is not a checkpoint yet:
+
+  - A preview of the next checkpoint for each session in this worktree with
+    pending work. Agent turns are recorded in session state, not in git, so
+    this work has no checkpoint ID until you commit it. The preview shows the
+    turns since the last checkpoint, the files touched, subagent task records,
+    and the prompts since the last checkpoint.
+  - Subagent task records of other sessions on HEAD (not yet condensed).
+  - Logs-only resume points recovered from commits whose logs are already
+    condensed.
 
 Output modes:
   --json             Machine-readable JSON instead of the human view.
-  --pending          Select the pending dataset: uncondensed subagent task
-                     records plus logs-only resume points.
-  --pending --json   Pending checkpoints as JSON (replaces the deprecated rewind --list).
+  --pending          Select the pending dataset described above.
+  --pending --json   The pending dataset as a JSON array (replaces the
+                     deprecated rewind --list).
+
+Each --pending --json element has id, message, metadata_dir, date (RFC3339),
+is_task_checkpoint, is_logs_only, and when set tool_use_id, condensation_id,
+session_id and session_prompt. A next-checkpoint preview element has an empty
+id, "is_next_checkpoint": true, and a "next_checkpoint" object:
+
+  {"agent": "...", "turns": 2,
+   "files_touched": ["..."],
+   "task_records": [{"tool_use_id": "...", "subagent_type": "...",
+                     "description": "...", "status": "running|completed"}],
+   "prompts": ["..."]}
+
+The arrays are always present, possibly empty.
 
 Optionally filter condensed checkpoints by session ID with --session
 (not applicable with --pending).`,
@@ -121,6 +143,6 @@ Optionally filter condensed checkpoints by session ID with --session
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Filter checkpoints by session ID (or prefix)")
 	cmd.Flags().BoolVar(&noPagerFlag, "no-pager", false, "Disable pager output")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON instead of the human view")
-	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List pending checkpoints — uncondensed subagent task records plus logs-only resume points")
+	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List pending work — a preview of the next checkpoint, uncondensed subagent task records, and logs-only resume points")
 	return cmd
 }
