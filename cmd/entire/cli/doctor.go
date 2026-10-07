@@ -676,8 +676,8 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		// means this repo opted in at some point, and a stale one is actively
 		// broken rather than merely missing.
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
-		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
-		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+		fmt.Fprintln(w, "  A git hook is in an older shape this version no longer writes, and it")
+		fmt.Fprintln(w, "  can break `git push` or let a push through that Entire would have stopped.")
 	}
 	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
 

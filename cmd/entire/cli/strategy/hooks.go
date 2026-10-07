@@ -38,8 +38,11 @@ const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not inst
 // Entire branches on by name (see below).
 const postRewriteHook = "post-rewrite"
 
+// prePushHook is named on its own: its chained form adds prePushStatusGuard.
+const prePushHook = "pre-push"
+
 // gitHookNames are the git hooks managed by Entire CLI
-var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", postRewriteHook, "pre-push"}
+var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", postRewriteHook, prePushHook}
 
 // ManagedGitHookNames returns the list of git hooks managed by Entire CLI.
 // This is useful for tests that need to manipulate hooks.
@@ -419,8 +422,9 @@ const (
 	// version writes.
 	GitHooksCurrent
 	// GitHooksOutdated means the hooks are ours but at least one is a shape we no
-	// longer write. Today that means running Entire from the working tree, which
-	// is broken as well as stale — the path it names is gone.
+	// longer write and is broken, not merely stale: a hook that runs Entire from
+	// the working tree (the path it names is gone), or a chained pre-push without
+	// the status guard (an OPF refusal no longer aborts the push).
 	GitHooksOutdated
 )
 
@@ -495,9 +499,9 @@ var legacyGitHookLaunchers = []string{"scripts/entire-dev", "go run "}
 const bareEntireHookCmd = "entire"
 
 // gitHookStateInHooksDir classifies the hooks in the given directory. A hook that
-// is present but still invokes a removed local-dev launcher reads Outdated, not
-// Current, which is what makes EnsureSetup reinstall it rather than leaving a
-// broken hook in place forever.
+// is present but in a broken older shape (a removed local-dev launcher, or an
+// unguarded chained pre-push) reads Outdated, not Current, which is what makes
+// EnsureSetup reinstall it rather than leaving a broken hook in place forever.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
@@ -523,11 +527,51 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 		if entireHookLineRunsFromWorkingTree(content) {
 			outdated = true
 		}
+		if hook == prePushHook && isUnguardedChainedPrePush(content) {
+			outdated = true
+		}
 	}
 	if outdated {
 		return GitHooksOutdated
 	}
 	return GitHooksCurrent
+}
+
+// isUnguardedChainedPrePush reports whether content is a chained pre-push in the
+// shape written before prePushStatusGuard existed: Entire's pre-push line
+// followed directly by the chain block, ending the file. Such a hook lets the
+// chained hook's status replace Entire's, so an OPF refusal no longer aborts the
+// push; reading it Outdated makes EnsureSetup rewrite it.
+//
+// The match is exact on purpose, for the same reason as the legacy-launcher
+// check below: a hook carrying entireHookMarker is overwritten without a backup,
+// so anything the user added or changed in it must keep it Current. Only the
+// command prefix on Entire's line may differ (bare `entire` or any absolute path).
+func isUnguardedChainedPrePush(content string) bool {
+	head, ok := strings.CutSuffix(content, chainBlock(prePushHook))
+	if !ok {
+		return false
+	}
+	entireLine, ok := strings.CutPrefix(head, prePushHookHeader())
+	if !ok {
+		return false
+	}
+	entireLine, ok = strings.CutSuffix(entireLine, "\n")
+	return ok && !strings.Contains(entireLine, "\n") &&
+		strings.HasPrefix(entireLine, "if ") &&
+		strings.HasSuffix(entireLine, ` hooks git pre-push "$1"; else :; fi`)
+}
+
+// prePushHookHeader is the generated pre-push hook up to, but not including,
+// Entire's command line. It does not depend on the command prefix.
+func prePushHookHeader() string {
+	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
+		if spec.name == prePushHook {
+			body := strings.TrimSuffix(spec.content, "\n")
+			return body[:strings.LastIndex(body, "\n")+1]
+		}
+	}
+	return ""
 }
 
 // entireHookLineRunsFromWorkingTree reports whether the hook's OWN Entire
@@ -613,7 +657,7 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 `, entireHookMarker, postRewriteCmd),
 		},
 		{
-			name: "pre-push",
+			name: prePushHook,
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Pre-push hook: push session logs alongside user's push
@@ -872,7 +916,26 @@ func generateChainedContent(baseContent, hookName string) string {
 		return generatePostRewriteChainedContent(baseContent)
 	}
 
-	return baseContent + fmt.Sprintf(`%s
+	if hookName == prePushHook {
+		return baseContent + prePushStatusGuard + chainBlock(hookName)
+	}
+	return baseContent + chainBlock(hookName)
+}
+
+// prePushStatusGuard stops a chained pre-push when Entire's own pre-push failed.
+// pre-push is the one hook whose Entire invocation propagates failure (an OPF
+// refusal must abort `git push`); without the guard the script's status would be
+// the chained hook's, and the push would go through. It must sit directly after
+// Entire's line: the `_entire_hook_dir=` assignment in the chain block resets $?.
+// The chained hook is skipped on failure because the push is aborting anyway.
+const prePushStatusGuard = `_entire_status=$?
+if [ "$_entire_status" -ne 0 ]; then exit "$_entire_status"; fi
+`
+
+// chainBlock is the shell that runs the pre-existing hook backed up to
+// .pre-entire, passing the hook's arguments through.
+func chainBlock(hookName string) string {
+	return fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
 if [ -x "$_entire_hook_dir/%s%s" ]; then
     "$_entire_hook_dir/%s%s" "$@"

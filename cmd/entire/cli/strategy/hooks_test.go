@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1323,6 +1324,219 @@ func TestGitHookCommitMsg_MissingEntireStillRunsChainedHook(t *testing.T) {
 	}
 }
 
+// prePushRefs is the ref list git feeds a pre-push hook on stdin.
+const prePushRefs = "refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 2222222222222222222222222222222222222222\n"
+
+// runChainedPrePush writes Entire's pre-push hook chained to a backup hook that
+// records its stdin and exits with backupExit, then runs it the way git does.
+// entireStandIn names the binary linked in as `entire` ("true" or "false"), or
+// is empty to leave `entire` off PATH. It returns the hook's exit code and the
+// stdin the backup received; backupRan is false if the backup never ran.
+func runChainedPrePush(t *testing.T, entireStandIn string, backupExit int) (exitCode int, backupStdin string, backupRan bool) {
+	t.Helper()
+
+	shPath := requireShell(t)
+	hooksDir := t.TempDir()
+	binDir := t.TempDir()
+	markerFile := filepath.Join(hooksDir, "backup-stdin")
+
+	hook := findHookSpec(t, buildHookSpecs("entire"), "pre-push")
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(hookPath, []byte(generateChainedContent(hook.content, "pre-push")), 0o755); err != nil {
+		t.Fatalf("failed to write hook: %v", err)
+	}
+	backupContent := fmt.Sprintf("#!/bin/sh\ncat > %s\nexit %d\n", shellQuote(markerFile), backupExit)
+	if err := os.WriteFile(hookPath+backupSuffix, []byte(backupContent), 0o755); err != nil {
+		t.Fatalf("failed to write backup hook: %v", err)
+	}
+	// Linked after the scripts are written, narrowing the ETXTBSY window the
+	// backup's direct exec is exposed to (see linkExecutable).
+	linkExecutable(t, filepath.Join(binDir, "dirname"), "dirname")
+	linkExecutable(t, filepath.Join(binDir, "cat"), "cat")
+	if entireStandIn != "" {
+		linkExecutable(t, filepath.Join(binDir, "entire"), entireStandIn)
+	}
+
+	cmd := exec.CommandContext(context.Background(), shPath, hookPath, "origin", "https://example.invalid/repo.git")
+	cmd.Env = envWithPath(binDir)
+	cmd.Stdin = strings.NewReader(prePushRefs)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running chained pre-push: %v\n%s", err, output)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	data, readErr := os.ReadFile(markerFile)
+	return exitCode, string(data), readErr == nil
+}
+
+// A failing Entire pre-push (e.g. OPF declining to redact) must abort the push
+// even when the user's own pre-push hook is chained after it and succeeds. The
+// user's hook is skipped: the push is aborting anyway.
+func TestGitHookPrePush_ChainedEntireFailureAbortsPush(t *testing.T) {
+	t.Parallel()
+
+	exitCode, _, backupRan := runChainedPrePush(t, "false", 0)
+	if exitCode != 1 {
+		t.Fatalf("chained pre-push exit code = %d, want Entire's 1; the push would go through", exitCode)
+	}
+	if backupRan {
+		t.Error("backup pre-push ran after Entire's pre-push failed")
+	}
+}
+
+func TestGitHookPrePush_ChainedBackupFailureAbortsPush(t *testing.T) {
+	t.Parallel()
+
+	exitCode, _, backupRan := runChainedPrePush(t, "true", 3)
+	if exitCode != 3 {
+		t.Fatalf("chained pre-push exit code = %d, want the backup's 3", exitCode)
+	}
+	if !backupRan {
+		t.Error("backup pre-push did not run")
+	}
+}
+
+// The chained hook must still receive git's ref list on stdin; git-lfs's
+// pre-push reads it to decide what to upload.
+func TestGitHookPrePush_ChainedBothSucceedPassesRefsToBackup(t *testing.T) {
+	t.Parallel()
+
+	exitCode, stdin, backupRan := runChainedPrePush(t, "true", 0)
+	if exitCode != 0 {
+		t.Fatalf("chained pre-push exit code = %d, want 0", exitCode)
+	}
+	if !backupRan {
+		t.Fatal("backup pre-push did not run")
+	}
+	if stdin != prePushRefs {
+		t.Errorf("backup pre-push stdin = %q, want %q", stdin, prePushRefs)
+	}
+}
+
+func TestGitHookPrePush_ChainedMissingEntireRunsBackup(t *testing.T) {
+	t.Parallel()
+
+	exitCode, _, backupRan := runChainedPrePush(t, "", 3)
+	if !backupRan {
+		t.Fatal("backup pre-push did not run with entire missing from PATH")
+	}
+	if exitCode != 3 {
+		t.Errorf("chained pre-push exit code = %d, want the backup's 3", exitCode)
+	}
+}
+
+// legacyChainedPrePush is a chained pre-push in the shape versions before the
+// status guard wrote: Entire's hook followed directly by the chain block.
+func legacyChainedPrePush(t *testing.T, cmdPrefix string) string {
+	t.Helper()
+	return findHookSpec(t, buildHookSpecs(cmdPrefix), "pre-push").content + chainBlock("pre-push")
+}
+
+func TestCheckGitHookState_ChainedPrePush(t *testing.T) {
+	t.Parallel()
+
+	writePrePush := func(t *testing.T, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		if err := os.WriteFile(filepath.Join(dir, "pre-push"), []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	current := findHookSpec(t, buildHookSpecs("entire"), "pre-push").content
+
+	t.Run("chained without the status guard is Outdated", func(t *testing.T) {
+		t.Parallel()
+		dir := writePrePush(t, legacyChainedPrePush(t, "entire"))
+		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+			t.Errorf("legacy chained pre-push = %v, want GitHooksOutdated", got)
+		}
+	})
+
+	t.Run("chained with a quoted absolute path is Outdated", func(t *testing.T) {
+		t.Parallel()
+		dir := writePrePush(t, legacyChainedPrePush(t, shellQuote("/a b/it's/entire")))
+		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+			t.Errorf("legacy chained pre-push with quoted absolute path = %v, want GitHooksOutdated", got)
+		}
+	})
+
+	t.Run("chained with the status guard is Current", func(t *testing.T) {
+		t.Parallel()
+		dir := writePrePush(t, generateChainedContent(current, "pre-push"))
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("guarded chained pre-push = %v, want GitHooksCurrent", got)
+		}
+	})
+
+	// Entire overwrites a hook carrying its marker without a backup, so a
+	// hand-edited chained hook must not read Outdated or EnsureSetup would
+	// silently discard the edit.
+	t.Run("hand-edited legacy chain is left alone", func(t *testing.T) {
+		t.Parallel()
+		for name, content := range map[string]string{
+			"line appended":            legacyChainedPrePush(t, "entire") + "echo pushed\n",
+			"line between":             current + "echo before chain\n" + chainBlock("pre-push"),
+			"chain call edited":        strings.Replace(legacyChainedPrePush(t, "entire"), `"$@"`, `"$@" || true`, 1),
+			"line above Entire's line": strings.Replace(legacyChainedPrePush(t, "entire"), entireHookMarker+"\n", entireHookMarker+"\nexport FOO=1\n", 1),
+			"Entire's line edited":     strings.Replace(legacyChainedPrePush(t, "entire"), `pre-push "$1";`, `pre-push "$1" || true;`, 1),
+		} {
+			dir := writePrePush(t, content)
+			if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+				t.Errorf("%s: hand-edited chained pre-push = %v, want GitHooksCurrent", name, got)
+			}
+		}
+	})
+}
+
+// Reinstalling over a legacy chained pre-push must land on a shape that reads
+// Current; otherwise EnsureSetup would rewrite the hook on every agent turn.
+func TestInstallGitHook_UpgradesLegacyChainedPrePush(t *testing.T) {
+	for _, absolute := range []bool{false, true} {
+		t.Run(fmt.Sprintf("absolute=%v", absolute), func(t *testing.T) {
+			_, hooksDir := initHooksTestRepo(t)
+			prePush := filepath.Join(hooksDir, "pre-push")
+			if err := os.WriteFile(prePush, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := InstallGitHook(context.Background(), true, absolute); err != nil {
+				t.Fatalf("InstallGitHook() error = %v", err)
+			}
+			cmdPrefix, err := hookCmdPrefix(absolute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(prePush, []byte(legacyChainedPrePush(t, cmdPrefix)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitHookStateInHooksDir(hooksDir); got != GitHooksOutdated {
+				t.Fatalf("legacy chained install = %v, want GitHooksOutdated", got)
+			}
+
+			if _, err := InstallGitHook(context.Background(), true, absolute); err != nil {
+				t.Fatalf("InstallGitHook() error = %v", err)
+			}
+			if got := gitHookStateInHooksDir(hooksDir); got != GitHooksCurrent {
+				t.Fatalf("after reinstall = %v, want GitHooksCurrent", got)
+			}
+			data, err := os.ReadFile(prePush)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), prePushStatusGuard) {
+				t.Errorf("reinstalled pre-push lacks the status guard:\n%s", data)
+			}
+			if _, err := os.Stat(prePush + backupSuffix); err != nil {
+				t.Errorf("backup should survive the reinstall: %v", err)
+			}
+		})
+	}
+}
+
 // linkExecutable places an ETXTBSY-immune stand-in for the real `name` binary
 // at dst, for tests that hand a fabricated PATH to a shell subprocess.
 //
@@ -1652,6 +1866,11 @@ func TestGenerateChainedContent(t *testing.T) {
 	expectedExec := `"$_entire_hook_dir/pre-push` + backupSuffix + `" "$@"`
 	if !strings.Contains(result, expectedExec) {
 		t.Errorf("chained content should execute backup with $@, got:\n%s", result)
+	}
+
+	// pre-push stops on Entire's failure before the chain call
+	if !strings.Contains(result, prePushStatusGuard+chainComment) {
+		t.Errorf("chained pre-push should run the status guard right before the chain, got:\n%s", result)
 	}
 }
 
