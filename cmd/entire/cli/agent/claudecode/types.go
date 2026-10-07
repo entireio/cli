@@ -63,17 +63,29 @@ type taskHookInputRaw struct {
 type postToolHookInputRaw struct {
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`
+	ToolName       string          `json:"tool_name"`
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolInput      json.RawMessage `json:"tool_input"`
 	ToolResponse   struct {
 		AgentID string `json:"agentId"`
 		// Status and IsAsync report how Claude Code actually ran an Agent
 		// call: "completed" once a foreground subagent finished,
-		// "async_launched" (with isAsync) when it returned at launch.
+		// "async_launched" (with isAsync) when it returned at launch. A Skill
+		// call reports "forked" when the skill ran in an agent of its own.
 		Status  string `json:"status"`
 		IsAsync bool   `json:"isAsync"`
+		// Background reports whether a forked skill's agent is still running.
+		// A pointer, because only an explicit false means it finished.
+		Background *bool `json:"background"`
 	} `json:"tool_response"`
 }
+
+// skillToolName is the tool Claude Code runs skills with.
+const skillToolName = "Skill"
+
+// skillToolStatusForked is the Skill tool_response.status for a skill with
+// `context: fork`, which runs in an agent of its own (Claude Code 2.1.291).
+const skillToolStatusForked = "forked"
 
 // Agent tool_response.status values that identify the launch mode.
 const (

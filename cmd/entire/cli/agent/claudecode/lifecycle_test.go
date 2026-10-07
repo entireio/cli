@@ -1,9 +1,11 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1002,5 +1004,89 @@ func TestClaudeCodeAgent_ContextInjector(t *testing.T) {
 	}
 	if parsed.HookSpecificOutput.AdditionalContext != "use entire trail" {
 		t.Errorf("additionalContext = %q", parsed.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+// forkedSkillPostToolUse is a Skill call's PostToolUse payload as Claude Code
+// 2.1.291 sends it; background is omitted when nil.
+func forkedSkillPostToolUse(t *testing.T, status, agentID string, background *bool) io.Reader {
+	t.Helper()
+	response := map[string]any{"success": true, "commandName": "fanout-fork"}
+	if status != "" {
+		response["status"] = status
+	}
+	if agentID != "" {
+		response["agentId"] = agentID
+	}
+	if background != nil {
+		response["background"] = *background
+	}
+	data, err := json.Marshal(map[string]any{
+		"session_id":      "main-session",
+		"transcript_path": "/tmp/main.jsonl",
+		"hook_event_name": "PostToolUse",
+		"tool_name":       "Skill",
+		"tool_use_id":     "toolu_skill",
+		"tool_input":      map[string]any{"skill": "fanout-fork", "args": "user text"},
+		"tool_response":   response,
+	})
+	require.NoError(t, err)
+	return bytes.NewReader(data)
+}
+
+func TestParseHookEvent_ForkedSkill(t *testing.T) {
+	t.Parallel()
+	ag := &ClaudeCodeAgent{}
+	yes, no := true, false
+
+	for _, tc := range []struct {
+		name       string
+		background *bool
+		want       agent.SubagentLaunchMode
+	}{
+		{"background", &yes, agent.SubagentLaunchBackground},
+		// Only an explicit false means the agent finished; completing a
+		// still-running agent at launch would lose its work.
+		{"background omitted", nil, agent.SubagentLaunchBackground},
+		{"finished", &no, agent.SubagentLaunchForeground},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			event, err := ag.ParseHookEvent(context.Background(), HookNamePostTask,
+				forkedSkillPostToolUse(t, "forked", "a80ff32f89f7dadc4", tc.background))
+			require.NoError(t, err)
+			require.NotNil(t, event)
+			assert.Equal(t, agent.SubagentEnd, event.Type)
+			assert.False(t, event.Final)
+			assert.Equal(t, "toolu_skill", event.ToolUseID)
+			assert.Equal(t, "a80ff32f89f7dadc4", event.SubagentID)
+			assert.Equal(t, "/fanout-fork", event.TaskDescription, "only the skill name describes the task, never its args")
+			assert.Empty(t, event.SubagentType, "the agent's type comes from its SubagentStop")
+			assert.Equal(t, tc.want, event.SubagentLaunch)
+			assert.Equal(t, tc.want == agent.SubagentLaunchForeground, event.SubagentFilesFromTranscript,
+				"a finished fork has no worktree baseline, so only its transcript names its files")
+		})
+	}
+}
+
+func TestParseHookEvent_SkillWithoutAgent(t *testing.T) {
+	t.Parallel()
+	ag := &ClaudeCodeAgent{}
+	yes := true
+
+	for _, tc := range []struct {
+		name, status, agentID string
+	}{
+		{"inline skill", "", ""},
+		{"forked without agent ID", "forked", ""},
+		{"other status", "completed", "a80ff32f89f7dadc4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			event, err := ag.ParseHookEvent(context.Background(), HookNamePostTask,
+				forkedSkillPostToolUse(t, tc.status, tc.agentID, &yes))
+			require.NoError(t, err)
+			assert.Nil(t, event)
+		})
 	}
 }

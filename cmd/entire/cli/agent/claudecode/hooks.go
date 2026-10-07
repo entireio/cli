@@ -53,6 +53,11 @@ const (
 const (
 	subagentToolMatcher = "Agent"
 	taskToolMatcher     = "TaskCreate|TaskUpdate"
+	// skillToolMatcher routes Skill calls to post-task, which records the agent
+	// a `context: fork` skill runs in and ignores inline skills. PostToolUse
+	// only: a forked skill has no launch-time marker to write, and a
+	// PreToolUse hook would run a worktree scan for every inline skill.
+	skillToolMatcher = skillToolName
 )
 
 // workflowAgentMatcher is the agent-type matcher for Entire's SubagentStart
@@ -257,6 +262,10 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
 		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
+		count++
+	}
+	if !hookCommandExistsWithMatcher(postToolUse, skillToolMatcher, postTaskCmd) {
+		postToolUse = addHookToMatcher(postToolUse, skillToolMatcher, postTaskCmd)
 		count++
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
@@ -517,8 +526,8 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // current, or outdated. It is a read-only diagnostic used by `entire status`
 // and `entire doctor`; it never modifies settings. Outdated is detected on the
 // positive spec: Entire is installed (Stop hook present) yet one of the current
-// tool-use matchers, SubagentStart (for Workflow agents), SubagentStop, or
-// StopFailure does not carry its Entire hook.
+// tool-use matchers (Agent, Skill, the Task* tools), SubagentStart (for
+// Workflow agents), SubagentStop, or StopFailure does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, err := loadClaudeSettings(ctx)
 	// An unreadable or malformed settings file collapses to HooksAbsent
@@ -535,6 +544,7 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, []string{skillToolMatcher}) ||
 		!hasEntireHookCoveringTools(settings.Hooks.SubagentStart, []string{workflowAgentMatcher}) ||
 		!hasEntireHook(settings.Hooks.SubagentStop) ||
 		!hasEntireHook(settings.Hooks.StopFailure) {

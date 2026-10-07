@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1070,4 +1071,56 @@ func TestCalculateTotalTokenUsage_SameWorkflowAgentInTwoRunsCountsOnce(t *testin
 	assert.Equal(t, 7, usage.SubagentTokens.InputTokens)
 	assert.Equal(t, 8, usage.SubagentTokens.OutputTokens)
 	assert.Equal(t, 1, usage.SubagentTokens.APICallCount)
+}
+
+// forkedSkillResultLine is the parent transcript's tool_result line for a
+// Skill call that ran forked (Claude Code 2.1.291): the text does not name the
+// agent; the structured toolUseResult does.
+func forkedSkillResultLine(toolUseID, agentID string) string {
+	return fmt.Sprintf(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"Skill \"fanout-fork\" launched (forked execution, running in the background)."}]},`+
+		`"toolUseResult":{"success":true,"commandName":"fanout-fork","status":"forked","background":true,"agentId":%q}}`, toolUseID, agentID)
+}
+
+func TestForkedSkillAgentIDs(t *testing.T) {
+	t.Parallel()
+
+	data := buildJSONL(
+		forkedSkillResultLine("toolu_skill", "a80ff32f89f7dadc4"),
+		// An inline skill launched no agent.
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_inline","content":"Launching skill: fanout"}]},"toolUseResult":{"success":true,"commandName":"fanout"}}`,
+		// Not path-safe: dropped.
+		forkedSkillResultLine("toolu_bad", "../escape"),
+		// The same shape on an assistant line is not a tool result.
+		`{"type":"assistant","toolUseResult":{"status":"forked","agentId":"aother"}}`,
+	)
+
+	assert.Equal(t, map[string]string{"a80ff32f89f7dadc4": "toolu_skill"}, forkedSkillAgentIDs(data))
+}
+
+// A forked skill's agent writes its transcript beside an Agent call's, and
+// its tokens and files belong to the parent session just the same.
+func TestForkedSkillAgentCountsTowardSession(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+	data := buildJSONL(
+		forkedSkillResultLine("toolu_skill", "a80ff32f89f7dadc4"),
+		`{"type":"assistant","uuid":"a2","message":{"id":"m-main","usage":{"input_tokens":1000,"output_tokens":100}}}`,
+	)
+	writeJSONLFile(t, filepath.Join(subagentsDir, "agent-a80ff32f89f7dadc4.jsonl"),
+		makeWriteToolLine(t, "f1", "/repo/c.txt"),
+		`{"type":"assistant","uuid":"f2","message":{"id":"m-fork","usage":{"input_tokens":10,"output_tokens":20}}}`)
+
+	c := &ClaudeCodeAgent{}
+	usage, err := c.CalculateTotalTokenUsage(data, 0, subagentsDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1000, usage.InputTokens, "main usage must not absorb the forked agent's")
+	require.NotNil(t, usage.SubagentTokens, "forked skill agent was not counted")
+	assert.Equal(t, 10, usage.SubagentTokens.InputTokens)
+	assert.Equal(t, 20, usage.SubagentTokens.OutputTokens)
+
+	files, err := c.ExtractAllModifiedFiles(data, 0, subagentsDir)
+	require.NoError(t, err)
+	assert.Contains(t, files, "/repo/c.txt")
 }

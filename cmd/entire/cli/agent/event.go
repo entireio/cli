@@ -144,6 +144,13 @@ type Event struct {
 	// session state (one condensation has not yet materialized and removed).
 	SubagentLaunchIdempotent bool
 
+	// SubagentFilesFromTranscript, on a launch-time foreground SubagentEnd,
+	// takes the task's files from its transcript only. Set when no pre-task
+	// baseline was captured at launch (Claude Code's Skill call, which has no
+	// PreToolUse hook), so a worktree diff would credit the task with every
+	// uncommitted change in the worktree.
+	SubagentFilesFromTranscript bool
+
 	// SubagentRunID, on a Final SubagentEnd, names the run this execution of
 	// SubagentID belonged to, for agents that reuse a subagent ID across runs
 	// (Claude Code resumes a Workflow run with its agents' IDs). The adapter

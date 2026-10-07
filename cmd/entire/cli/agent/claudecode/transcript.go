@@ -154,6 +154,61 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 	return agentIDs
 }
 
+// spawnedAgentIDs returns every agent the transcript launched under its own
+// ID: Agent calls named in their result text (ExtractSpawnedAgentIDs) and
+// skills that ran forked (forkedSkillAgentIDs).
+func spawnedAgentIDs(transcriptData []byte, parsed []TranscriptLine) map[string]string {
+	agentIDs := ExtractSpawnedAgentIDs(parsed)
+	for agentID, toolUseID := range forkedSkillAgentIDs(transcriptData) {
+		if _, ok := agentIDs[agentID]; !ok {
+			agentIDs[agentID] = toolUseID
+		}
+	}
+	return agentIDs
+}
+
+// forkedSkillAgentIDs returns the agents that skills with `context: fork` ran
+// in, keyed to the Skill call's tool_use_id. A forked Skill call's result
+// text does not name its agent; only the structured result does
+// ({"toolUseResult": {"status": "forked", "agentId": ...}}, Claude Code
+// 2.1.291). The agent's transcript is <subagentsDir>/agent-<id>.jsonl, as for
+// an Agent call. IDs that are not path-safe are dropped.
+func forkedSkillAgentIDs(transcriptData []byte) map[string]string {
+	agentIDs := make(map[string]string)
+	for _, line := range bytes.Split(transcriptData, []byte("\n")) {
+		if !bytes.Contains(line, []byte(`"forked"`)) {
+			continue
+		}
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []struct {
+					Type      string `json:"type"`
+					ToolUseID string `json:"tool_use_id"`
+				} `json:"content"`
+			} `json:"message"`
+			ToolUseResult struct {
+				Status  string `json:"status"`
+				AgentID string `json:"agentId"`
+			} `json:"toolUseResult"`
+		}
+		if json.Unmarshal(line, &entry) != nil || entry.Type != transcript.TypeUser ||
+			entry.ToolUseResult.Status != skillToolStatusForked ||
+			validation.ValidateAgentID(entry.ToolUseResult.AgentID) != nil {
+			continue
+		}
+		toolUseID := ""
+		for _, block := range entry.Message.Content {
+			if block.Type == "tool_result" {
+				toolUseID = block.ToolUseID
+				break
+			}
+		}
+		agentIDs[entry.ToolUseResult.AgentID] = toolUseID
+	}
+	return agentIDs
+}
+
 // ExtractWorkflowRunIDs returns the IDs of the Workflow runs a transcript
 // launched, from the tool_result text: a Workflow call's result names its run
 // as "Run ID: <runId>" (Claude Code 2.1.291) and none of the agents the run
@@ -425,7 +480,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	for _, runID := range ExtractWorkflowRunIDs(fullParsed) {
 		runIDs = appendWorkflowRunID(runIDs, runID)
 	}
-	agentPaths := subagentTranscriptPaths(ExtractSpawnedAgentIDs(fullParsed), runIDs, subagentsDir)
+	agentPaths := subagentTranscriptPaths(spawnedAgentIDs(transcriptData, fullParsed), runIDs, subagentsDir)
 
 	// Calculate subagent token usage. This re-reads each subagent transcript from
 	// line 0 on every call, so mainUsage.SubagentTokens is a cumulative-since-
@@ -526,13 +581,16 @@ func (c *ClaudeCodeAgent) ExtractAllModifiedFiles(transcriptData []byte, startLi
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
 	}
-	// Only agents the Agent tool launched. Workflow-launched agents are not
+	// Agents the Agent tool launched and agents forked skills ran in; a forked
+	// skill's agent can keep editing after its record completes, when a
+	// background child it launched wakes it again, and this picks those edits
+	// up at the parent's next turn end. Workflow-launched agents are not
 	// looked up here: they run after the parent's turn has ended, so a turn-end
 	// extraction would not see their edits anyway; their files reach the
 	// session through their task records when each agent's SubagentStop
 	// completes it (unlike tokens, which CalculateTotalTokenUsage re-reads from
 	// every run the transcript launched).
-	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
+	agentIDs := spawnedAgentIDs(transcriptData, fullParsed)
 	for agentID := range agentIDs {
 		agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 		agentLines, agentErr := transcript.ParseFromFileAtLine(agentPath, 0)

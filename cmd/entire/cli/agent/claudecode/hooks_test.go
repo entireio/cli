@@ -12,6 +12,8 @@ import (
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestInstallHooks_DoesNotAddDenyRule pins the retirement: a fresh install must
@@ -720,6 +722,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 		}
 		assertHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
 		assertHookExists(t, matchers, "Agent", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Agent (subagent) hook")
+		assertHookExists(t, matchers, "Skill", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "Entire Skill (forked skill) hook")
 		assertHookExists(t, matchers, "TaskCreate|TaskUpdate", agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "Entire task-list hook")
 	})
 }
@@ -1197,6 +1200,44 @@ func TestCheckHookConfig_Outdated(t *testing.T) {
 // matcher beyond what we install (still covering the required tools) is not
 // flagged as drift — matchers are |-lists of exact tool names, so a superset
 // still fires for the required tools.
+// TestCheckHookConfig_Outdated_MissingSkillHook: a config from before Entire
+// recorded forked skills has every other hook, and still reports outdated so
+// `entire status` and `entire doctor` prompt a reinstall.
+func TestCheckHookConfig_Outdated_MissingSkillHook(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	settingsPath := filepath.Join(tempDir, ".claude", ClaudeSettingsFileName)
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	var settings, hooks map[string]json.RawMessage
+	var postToolUse []ClaudeHookMatcher
+	require.NoError(t, json.Unmarshal(data, &settings))
+	require.NoError(t, json.Unmarshal(settings["hooks"], &hooks))
+	require.NoError(t, json.Unmarshal(hooks["PostToolUse"], &postToolUse))
+	postToolUse = slices.DeleteFunc(postToolUse, func(m ClaudeHookMatcher) bool { return m.Matcher == "Skill" })
+	hooks["PostToolUse"], err = json.Marshal(postToolUse)
+	require.NoError(t, err)
+	settings["hooks"], err = json.Marshal(hooks)
+	require.NoError(t, err)
+	data, err = json.Marshal(settings)
+	require.NoError(t, err)
+	writeSettingsFile(t, tempDir, string(data))
+
+	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+		t.Errorf("CheckHookConfig() = %v, want HooksOutdated without the Skill hook", got)
+	}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
+		t.Errorf("CheckHookConfig() after reinstall = %v, want HooksCurrent", got)
+	}
+}
+
 func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -1208,9 +1249,9 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
 	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
 	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
-	// "Agent|Foo" still covers Agent; "TaskCreate|TaskUpdate|TaskGet" still
-	// covers TaskCreate and TaskUpdate; "workflow-subagent|Explore" still
-	// covers workflow-subagent.
+	// "Agent|Foo" still covers Agent; "Agent|Skill|Foo" still covers Agent and
+	// Skill; "TaskCreate|TaskUpdate|TaskGet" still covers TaskCreate and
+	// TaskUpdate; "workflow-subagent|Explore" still covers workflow-subagent.
 	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
   "hooks": {
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
@@ -1219,7 +1260,7 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
     "SubagentStop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
     "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
     "PostToolUse": [
-      {"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "Agent|Skill|Foo", "hooks": [{"type": "command", "command": %q}]},
       {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
     ]
   }

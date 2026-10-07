@@ -1645,7 +1645,10 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		return recordInFlightTaskLaunch(logCtx, event)
 	}
 
-	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{ensureSessionState: true})
+	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
+		ensureSessionState: true,
+		analyzerFilesOnly:  event.SubagentFilesFromTranscript,
+	})
 }
 
 // recordInFlightTaskLaunch handles a background Task launch. It records an

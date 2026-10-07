@@ -186,6 +186,9 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 	if err != nil {
 		return nil, err
 	}
+	if raw.ToolName == skillToolName {
+		return forkedSkillEnd(raw), nil
+	}
 	event := &agent.Event{
 		Type:       agent.SubagentEnd,
 		SessionID:  raw.SessionID,
@@ -203,6 +206,47 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 		event.SubagentID = raw.ToolResponse.AgentID
 	}
 	return event, nil
+}
+
+// forkedSkillEnd turns a Skill call's PostToolUse into the launch of the
+// agent a `context: fork` skill runs in; Claude Code reports that agent only
+// in the Skill result ({"status": "forked", "agentId": ...}), and its
+// SubagentStart carries the agent's ordinary type, not the skill. A skill
+// that ran inline launched no agent and produces no event.
+//
+// The agent is in the background unless the result says background:false: a
+// background launch waits for SubagentStop (or the SessionEnd sweep), while
+// completing a still-running agent at launch would lose its work. A finished
+// fork completes now, with files from its transcript alone, since no
+// PreToolUse ran for the Skill call to record a worktree baseline. The skill
+// name, never its args, describes the task; the agent's type comes from its
+// SubagentStop, as the Skill result does not report it.
+func forkedSkillEnd(raw *postToolHookInputRaw) *agent.Event {
+	if raw.ToolResponse.Status != skillToolStatusForked || raw.ToolResponse.AgentID == "" {
+		return nil
+	}
+	var input struct {
+		Skill string `json:"skill"`
+	}
+	_ = json.Unmarshal(raw.ToolInput, &input) //nolint:errcheck // a missing name only leaves the description empty
+	launch := agent.SubagentLaunchBackground
+	if bg := raw.ToolResponse.Background; bg != nil && !*bg {
+		launch = agent.SubagentLaunchForeground
+	}
+	event := &agent.Event{
+		Type:                        agent.SubagentEnd,
+		SessionID:                   raw.SessionID,
+		SessionRef:                  raw.TranscriptPath,
+		ToolUseID:                   raw.ToolUseID,
+		SubagentID:                  raw.ToolResponse.AgentID,
+		SubagentLaunch:              launch,
+		SubagentFilesFromTranscript: launch == agent.SubagentLaunchForeground,
+		Timestamp:                   time.Now(),
+	}
+	if input.Skill != "" {
+		event.TaskDescription = "/" + input.Skill
+	}
+	return event
 }
 
 // parseWorkflowAgentStart parses Claude Code's SubagentStart hook into the

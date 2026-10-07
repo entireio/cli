@@ -112,11 +112,12 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Fatalf("InstallHooks() error = %v", err)
 		}
 
-		// Should install 10 hooks: SessionStart, SessionEnd, Stop, StopFailure,
+		// Should install 11 hooks: SessionStart, SessionEnd, Stop, StopFailure,
 		// SubagentStart[workflow-subagent], SubagentStop, UserPromptSubmit,
-		// PreToolUse[Agent], PostToolUse[Agent], PostToolUse[TaskCreate|TaskUpdate]
-		if count != 10 {
-			t.Errorf("InstallHooks() count = %d, want 10", count)
+		// PreToolUse[Agent], PostToolUse[Agent], PostToolUse[Skill],
+		// PostToolUse[TaskCreate|TaskUpdate]
+		if count != 11 {
+			t.Errorf("InstallHooks() count = %d, want 11", count)
 		}
 
 		// Verify hooks are installed
