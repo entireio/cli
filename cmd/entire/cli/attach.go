@@ -515,7 +515,7 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 		lines = append(lines, rewriteWarning(ctx, plan.rewrite, plan.checkedRemotes)...)
 		lines = append(lines, fmt.Sprintf("Session %s goes into a new checkpoint linked by that trailer.", sessionID))
 	}
-	if plan.mode == attachRecordLink {
+	if plan.remote != "" {
 		lines = append(lines, "The checkpoint, including the session transcript, is pushed now.")
 	} else {
 		lines = append(lines, "The checkpoint, including the session transcript, is pushed with your next git push.")
@@ -528,12 +528,20 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 
 // finishAttachLink reports the checkpoint and completes its link to the target
 // commit: adding the trailer to an unpushed commit, or reporting and pushing a
-// recorded link.
+// recorded link. A checkpoint joined on a pushed commit is pushed too.
 func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool) error {
 	if isExistingCheckpoint {
 		fmt.Fprintf(w, "  Added to existing checkpoint %s\n", checkpointID)
-		if plan.mode == attachRecordLink {
+		switch {
+		case plan.remote == "":
+			return nil
+		case plan.mode == attachRecordLink:
 			return pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
+		}
+		// The commit's trailer already links it, so a failed push loses no
+		// link; the checkpoint still goes out with a later git push.
+		if err := pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID); err != nil {
+			fmt.Fprintf(errW, "warning: %v\n", err)
 		}
 		return nil
 	}
@@ -571,7 +579,8 @@ const (
 type attachLinkPlan struct {
 	target *object.Commit
 	mode   attachLinkMode
-	// remote is a remote whose branches hold target (attachRecordLink only).
+	// remote is a remote whose branches hold target, empty when none does (or,
+	// when joining, none could be reached). The checkpoint is pushed to it now.
 	remote string
 	// rewrite is target and the commits after it up to HEAD, oldest first
 	// (attachAddTrailer only).
@@ -590,10 +599,18 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 			return attachLinkPlan{}, err
 		}
 	}
-	if len(trailers.ParseAllCheckpoints(target.Message)) > 0 {
-		return attachLinkPlan{target: target, mode: attachJoinExisting}, nil
-	}
 	remotes := attachRemotesToCheck(ctx)
+	if len(trailers.ParseAllCheckpoints(target.Message)) > 0 {
+		// Joining changes no history, so whether the commit is pushed only
+		// decides when the checkpoint goes out: now if it is, since there may be
+		// no later push of it, else with the next git push. A remote that can't
+		// be reached leaves it for that push.
+		remote, _, err := remoteHoldingPushedCommit(ctx, target, remotes)
+		if err != nil {
+			return attachLinkPlan{}, err
+		}
+		return attachLinkPlan{target: target, mode: attachJoinExisting, remote: remote, checkedRemotes: remotes}, nil
+	}
 	remote, unreachable, err := remoteHoldingPushedCommit(ctx, target, remotes)
 	if err != nil {
 		return attachLinkPlan{}, err

@@ -697,7 +697,9 @@ When condensing multiple concurrent sessions:
 link from two facts about the target commit, the same for HEAD and `--commit`
 (`planAttachLink`):
 - the commit already carries an `Entire-Checkpoint` trailer: the session joins
-  that checkpoint, and history is unchanged;
+  that checkpoint, and history is unchanged. If a remote branch holds the
+  commit, the checkpoint is pushed now (there may be no later push of the
+  commit to carry it); otherwise it goes with the next git push;
 - a remote branch already holds the commit: the link is recorded in a new
   checkpoint (or joins one an earlier attach recorded for it) and the commit
   is left unchanged, so nothing needs a force-push;

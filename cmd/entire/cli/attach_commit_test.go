@@ -583,6 +583,28 @@ func TestAttachCommit_PushedHeadWithACheckpointIsJoined(t *testing.T) {
 	if summary := readSummary(t, cpID.String()); len(summary.Sessions) != 2 {
 		t.Fatalf("checkpoint has %d sessions, want 2", len(summary.Sessions))
 	}
+	// The commit is pushed, so no later push of it may carry the checkpoint.
+	if !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Fatalf("joined checkpoint of a pushed commit was not pushed:\n%s", out)
+	}
+}
+
+// Joining the checkpoint of an unpushed commit leaves it for the next git push.
+func TestAttachCommit_UnpushedHeadWithACheckpointWaitsForPush(t *testing.T) {
+	setupAttachTestRepo(t)
+	if out, err := attachHeadless(t, "attach-unpushed-join-a", attachOptions{}); err != nil {
+		t.Fatalf("first attach: %v\n%s", err, out)
+	}
+	out, err := attachHeadless(t, "attach-unpushed-join-b", attachOptions{})
+	if err != nil {
+		t.Fatalf("second attach: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Pushed checkpoint metadata") {
+		t.Fatalf("pushed the checkpoint of an unpushed commit:\n%s", out)
+	}
+	if !strings.Contains(out, "pushed with your next git push") {
+		t.Fatalf("warning doesn't say when the checkpoint is pushed:\n%s", out)
+	}
 }
 
 // Only the remotes the branch pushes to are checked, so an unrelated remote
