@@ -144,6 +144,14 @@ type Event struct {
 	// session state (one condensation has not yet materialized and removed).
 	SubagentLaunchIdempotent bool
 
+	// SubagentRunID, on a Final SubagentEnd, names the run this execution of
+	// SubagentID belonged to, for agents that reuse a subagent ID across runs
+	// (Claude Code resumes a Workflow run with its agents' IDs). The adapter
+	// sets it only together with a SubagentTranscriptPath it verified is that
+	// run's transcript for this agent. The lifecycle uses it to tell a later
+	// run's stop from a repeated stop of a run it already completed.
+	SubagentRunID string
+
 	// CompletionWithoutLaunch marks a true completion whose stable identity was
 	// learned at completion time rather than from a correlated start hook.
 	// Shared lifecycle may create the task record only when the parent session

@@ -462,6 +462,82 @@ func TestParseHookEvent_WorkflowSubagentStart(t *testing.T) {
 	assert.Equal(t, "workflow-subagent", event.SubagentType)
 }
 
+// TestParseHookEvent_WorkflowSubagentStop_TranscriptPath: a Workflow agent's
+// declared transcript is accepted only when it is this agent's transcript in a
+// Workflow run of this session, inside the parent's session directory, with no
+// link on the way. Anything else is dropped (the lifecycle then falls back to
+// the layout lookup) and carries no run ID.
+func TestParseHookEvent_WorkflowSubagentStop_TranscriptPath(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sessionID = "parent-sess"
+		agentID   = "ae3d7b8f2930c8787"
+		runID     = "wf_e5264e60-494"
+	)
+	store := t.TempDir()
+	runPath := func(session, run, agent string) string {
+		return filepath.Join(store, session, "subagents", "workflows", run, "agent-"+agent+".jsonl")
+	}
+	write := func(path string) string {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+		return path
+	}
+	valid := write(runPath(sessionID, runID, agentID))
+	otherSession := write(runPath("other-sess", runID, agentID))
+	otherAgent := write(runPath(sessionID, runID, "a0000000000000001"))
+	outside := write(filepath.Join(t.TempDir(), sessionID, "subagents", "workflows", runID, "agent-"+agentID+".jsonl"))
+	ordinaryLayout := write(filepath.Join(store, sessionID, "subagents", "agent-"+agentID+".jsonl"))
+
+	cases := map[string]string{
+		"another session":        otherSession,
+		"another agent":          otherAgent,
+		"outside the store":      outside,
+		"not a workflow run":     ordinaryLayout,
+		"missing":                runPath(sessionID, "wf_missing-000", agentID),
+		"traversal out":          filepath.Join(store, sessionID, "subagents", "workflows", runID, "..", "..", "..", "..", "other-sess", "subagents", "workflows", runID, "agent-"+agentID+".jsonl"),
+		"relative traversal":     filepath.Join("..", filepath.Base(filepath.Dir(outside))),
+		"unsafe run component":   filepath.Join(store, sessionID, "subagents", "workflows", "wf.x", "agent-"+agentID+".jsonl"),
+		"workflows dir itself":   filepath.Join(store, sessionID, "subagents", "workflows"),
+		"empty agent transcript": "",
+	}
+	linkedFile := runPath(sessionID, "wf_linkfile-001", agentID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(linkedFile), 0o700))
+	if err := os.Symlink(valid, linkedFile); err != nil {
+		t.Logf("symlink cases skipped: %v", err)
+	} else {
+		cases["symlinked transcript"] = linkedFile
+		require.NoError(t, os.Symlink(filepath.Dir(valid), filepath.Join(store, sessionID, "subagents", "workflows", "wf_linkdir-002")))
+		cases["symlinked run directory"] = runPath(sessionID, "wf_linkdir-002", agentID)
+	}
+
+	stop := func(declared string) *agent.Event {
+		t.Helper()
+		input, err := json.Marshal(map[string]string{
+			"session_id": sessionID, "transcript_path": filepath.Join(store, sessionID+".jsonl"),
+			"hook_event_name": "SubagentStop", "agent_id": agentID, "agent_type": "workflow-subagent",
+			"agent_transcript_path": declared,
+		})
+		require.NoError(t, err)
+		event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(string(input)))
+		require.NoError(t, err)
+		require.NotNil(t, event)
+		return event
+	}
+
+	event := stop(valid)
+	assert.Equal(t, valid, event.SubagentTranscriptPath)
+	assert.Equal(t, runID, event.SubagentRunID)
+
+	for name, declared := range cases {
+		event := stop(declared)
+		assert.Empty(t, event.SubagentTranscriptPath, name)
+		assert.Empty(t, event.SubagentRunID, name)
+		assert.Equal(t, agentID, event.SubagentID, name)
+	}
+}
+
 // TestParseHookEvent_SubagentStart_IgnoresOtherAgentTypes: direct Agent
 // launches also fire SubagentStart, but PreToolUse/PostToolUse[Agent] already
 // record them under the call's tool_use_id. Recording them here as well would

@@ -7,13 +7,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Compile-time interface assertions for new interfaces.
@@ -210,7 +213,10 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 //
 // No per-agent tool_use_id exists — the Workflow's own is shared by every
 // agent in the run — so the agent ID keys the record. A record keyed this way
-// can see its launch signal again, so the launch is idempotent.
+// can see its launch signal again, so the launch is idempotent. A resumed run
+// reuses its agents' IDs, so its launch can find the earlier run's completed
+// record and add none; the stop tells the runs apart by the run its
+// transcript lives in (SubagentRunID) and completes a record of its own.
 //
 // Only Workflow agents produce an event. Direct Agent launches fire
 // SubagentStart too, but PreToolUse/PostToolUse[Agent] already record them
@@ -295,6 +301,17 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 			"subagent-stop payload missing session_id")
 	}
 
+	transcriptPath, runID := raw.AgentTranscriptPath, ""
+	if raw.AgentType == workflowAgentType && transcriptPath != "" {
+		var ok bool
+		transcriptPath, runID, ok = c.workflowAgentTranscript(raw.TranscriptPath, raw.SessionID, raw.AgentID, transcriptPath)
+		if !ok {
+			logging.Warn(logging.WithComponent(ctx, "agent.claudecode"),
+				"ignoring workflow agent transcript path that is not this agent's run transcript in this session",
+				slog.String("agent_id", raw.AgentID))
+		}
+	}
+
 	return &agent.Event{
 		Type:                   agent.SubagentEnd,
 		SessionID:              raw.SessionID,
@@ -302,10 +319,45 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 		ToolUseID:              raw.ToolUseID,
 		SubagentID:             raw.AgentID,
 		SubagentType:           raw.AgentType,
-		SubagentTranscriptPath: raw.AgentTranscriptPath,
+		SubagentTranscriptPath: transcriptPath,
+		SubagentRunID:          runID,
 		Final:                  true,
 		Timestamp:              time.Now(),
 	}, nil
+}
+
+// workflowAgentTranscript checks a Workflow agent's declared transcript path,
+// which arrives in the hook payload and is read into the parent's checkpoint.
+// It is accepted only as the regular file
+// <sessionID>/subagents/workflows/<runID>/agent-<agentID>.jsonl inside the
+// parent's session directory (the directory of transcriptPath), with no link
+// at any component below it: another session's transcript, another agent's,
+// or a path that leaves the directory is not this agent's. It returns the
+// transcript's path and its run ID, which tells one run's execution of the
+// agent from a resumed run's; ok is false and both are empty otherwise.
+func (c *ClaudeCodeAgent) workflowAgentTranscript(transcriptPath, sessionID, agentID, declared string) (path, runID string, ok bool) {
+	if transcriptPath == "" || agentID == "" || validation.ValidateAgentID(agentID) != nil ||
+		validation.ValidateSessionID(sessionID) != nil {
+		return "", "", false
+	}
+	store, err := agent.OpenSessionStoreAt(c, filepath.Dir(transcriptPath))
+	if err != nil {
+		return "", "", false
+	}
+	name, err := store.Name(declared)
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.Split(name, "/")
+	if len(parts) != 5 || parts[0] != sessionID || parts[1] != "subagents" ||
+		parts[2] != paths.SubagentWorkflowsDirName || validation.ValidateWorkflowRunID(parts[3]) != nil ||
+		parts[4] != paths.AgentTranscriptFileName(agentID) {
+		return "", "", false
+	}
+	if info, err := store.Lstat(name); err != nil || !info.Mode().IsRegular() {
+		return "", "", false
+	}
+	return filepath.Join(store.Dir(), filepath.FromSlash(name)), parts[3], true
 }
 
 // --- Transcript flush sentinel ---

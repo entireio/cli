@@ -1746,10 +1746,9 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// that launched it. Find the launch record by agent ID and adopt its
 	// ToolUseID, which keys the exactly-once completion and the checkpoint's
 	// tasks/<tool_use_id>/ tree.
+	newExecution := false
 	if event.ToolUseID == "" && !event.CompletionWithoutLaunch {
-		if rec := state.FindTaskRecordByAgentID(event.SubagentID); rec != nil {
-			event.ToolUseID = rec.ToolUseID
-		}
+		event.ToolUseID, newExecution = taskRecordKeyForStop(state, event)
 	}
 
 	marker := state.FindTaskRecord(event.ToolUseID)
@@ -1759,7 +1758,7 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 			slog.String("tool_use_id", event.ToolUseID))
 		return nil
 	}
-	if (marker == nil && !event.CompletionWithoutLaunch) || (marker != nil && !marker.CompletedAt.IsZero()) {
+	if (marker == nil && !event.CompletionWithoutLaunch && !newExecution) || (marker != nil && !marker.CompletedAt.IsZero()) {
 		// No live marker: this ToolUseID was already completed at launch-time
 		// post-task (foreground task), or another Final event for the same
 		// ToolUseID (a duplicate SubagentStop, or a race against the
@@ -1864,6 +1863,41 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	}
 
 	return nil
+}
+
+// taskRecordKeyForStop picks the task record a stop that names its subagent
+// but not its tool call completes, by agent ID; a live record wins.
+//
+// When the adapter named the stop's run (SubagentRunID), an agent ID alone
+// does not identify the execution: Claude Code resumes a Workflow run with its
+// agents' IDs, so a completed record for the ID may hold an earlier run that
+// condensation has not removed yet, and a launch for the later run found that
+// record and added none. Such a stop completes the record already holding its
+// run's transcript (a repeated stop), else a new record: keyed by the agent ID
+// when that key is free, otherwise by agent and run. newExecution reports the
+// new record, which CompleteTaskRecord creates.
+func taskRecordKeyForStop(state *strategy.SessionState, event *agent.Event) (key string, newExecution bool) {
+	rec := state.FindTaskRecordByAgentID(event.SubagentID)
+	if rec != nil && rec.CompletedAt.IsZero() {
+		return rec.ToolUseID, false
+	}
+	if event.SubagentRunID == "" || event.SubagentTranscriptPath == "" || event.SubagentID == "" {
+		if rec == nil {
+			return "", false
+		}
+		return rec.ToolUseID, false
+	}
+	transcript := filepath.Clean(event.SubagentTranscriptPath)
+	for _, existing := range state.TaskRecords {
+		if existing.AgentID == event.SubagentID && existing.DeclaredTranscriptPath != "" &&
+			filepath.Clean(existing.DeclaredTranscriptPath) == transcript {
+			return existing.ToolUseID, false
+		}
+	}
+	if state.FindTaskRecord(event.SubagentID) == nil {
+		return event.SubagentID, true
+	}
+	return event.SubagentID + "-" + event.SubagentRunID, true
 }
 
 // subagentCaptureOptions controls completeSubagentTaskRecord's behavior across

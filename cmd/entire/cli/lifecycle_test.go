@@ -34,6 +34,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -4052,6 +4053,100 @@ func TestHandleLifecycleSubagentEnd_WorkflowAgentLaunch_RepeatDoesNotResetRecord
 	rec := state.TaskRecords[0]
 	assert.True(t, rec.CompletedAt.Equal(completedAt), "a repeated launch must not reopen a completed record")
 	assert.Equal(t, []string{"a.txt"}, rec.Files, "a repeated launch must not drop the captured files")
+}
+
+// TestHandleLifecycleSubagentEnd_WorkflowAgent_RunsSharingAgentID covers a
+// resumed Workflow run reusing an agent ID before condensation has removed the
+// earlier run's completed record. Each run's stop must complete a record of its
+// own, whichever order the stops arrive in, and a repeated stop for a run must
+// not add a third.
+func TestHandleLifecycleSubagentEnd_WorkflowAgent_RunsSharingAgentID(t *testing.T) {
+	const agentID = "ae3d7b8f2930c8787"
+	runs := []string{"wf_e5264e60-494", "wf_0b9c1d22-781"}
+
+	for _, tc := range []struct {
+		name  string
+		order []string // event sequence: "start<i>" / "stop<i>"
+	}{
+		{name: "sequential", order: []string{"start0", "stop0", "start1", "stop1"}},
+		{name: "overlapping, reversed stops", order: []string{"start0", "start1", "stop1", "stop0"}},
+		{name: "earlier run condensed between start and stop", order: []string{"start0", "stop0", "start1", "condense", "stop1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+			_, headHash := setupSubagentEndTestRepo(t)
+			ctx := context.Background()
+			sessionID := "workflow-resume-session"
+			saveInFlightSession(ctx, t, sessionID, headHash)
+
+			transcriptDir := t.TempDir()
+			runTranscript := make([]string, len(runs))
+			for i, run := range runs {
+				runDir := filepath.Join(paths.SubagentsDir(transcriptDir, sessionID), paths.SubagentWorkflowsDirName, run)
+				require.NoError(t, os.MkdirAll(runDir, 0o700))
+				runTranscript[i] = filepath.Join(runDir, paths.AgentTranscriptFileName(agentID))
+				require.NoError(t, os.WriteFile(runTranscript[i], []byte(`{"type":"user"}`+"\n"), 0o600))
+			}
+			stop := func(i int) *agent.Event {
+				event := finalSubagentEvent(sessionID, "", agentID)
+				event.SessionRef = filepath.Join(transcriptDir, sessionID+".jsonl")
+				event.SubagentType = "workflow-subagent"
+				event.SubagentTranscriptPath = runTranscript[i]
+				event.SubagentRunID = runs[i]
+				return event
+			}
+			launch := func() *agent.Event {
+				return &agent.Event{
+					Type: agent.SubagentEnd, SessionID: sessionID, ToolUseID: agentID, SubagentID: agentID,
+					SubagentType: "workflow-subagent", SubagentLaunch: agent.SubagentLaunchBackground,
+					SubagentLaunchIdempotent: true, Timestamp: time.Now(),
+				}
+			}
+
+			var condensed []session.TaskRecord
+			for _, step := range tc.order {
+				switch {
+				case step == "condense":
+					// What condensation leaves behind: completed records
+					// materialized and removed, live ones kept.
+					require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+						live := state.LiveTaskRecords()
+						for _, rec := range state.TaskRecords {
+							if !rec.CompletedAt.IsZero() {
+								condensed = append(condensed, rec)
+							}
+						}
+						state.TaskRecords = live
+						return nil
+					}))
+				case strings.HasPrefix(step, "stop"):
+					require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), stop(int(step[4]-'0'))), step)
+				default:
+					require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), launch()), step)
+				}
+			}
+			// A repeated stop for a run already completed adds nothing.
+			require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), stop(1)))
+
+			state, loadErr := strategy.LoadSessionState(ctx, sessionID)
+			require.NoError(t, loadErr)
+			require.NotNil(t, state)
+			records := append(append([]session.TaskRecord(nil), condensed...), state.TaskRecords...)
+			require.Len(t, records, 2, "each run's execution gets its own record")
+			assert.Empty(t, state.LiveTaskRecords())
+			assert.ElementsMatch(t, runTranscript,
+				[]string{records[0].DeclaredTranscriptPath, records[1].DeclaredTranscriptPath},
+				"each record holds its own run's transcript")
+			if len(condensed) == 0 {
+				assert.NotEqual(t, records[0].ToolUseID, records[1].ToolUseID, "records in one state need distinct keys")
+			}
+			for _, rec := range records {
+				assert.Equal(t, agentID, rec.AgentID)
+				assert.False(t, rec.CompletedAt.IsZero())
+				require.NoError(t, validation.ValidateToolUseID(rec.ToolUseID))
+			}
+		})
+	}
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_WithoutToolUseID_PrefersLiveRecord
