@@ -92,6 +92,21 @@ func TestUniqueCommitAgents_KeepsExternalAgentName(t *testing.T) {
 	}
 }
 
+// External agent names are self-reported; escape sequences must not reach the
+// terminal.
+func TestAgentKey_StripsControlCharacters(t *testing.T) {
+	t.Parallel()
+	if got := agentKey("Grok\x1b[2J Bot\u202e\n"); got != "Grok[2J Bot" {
+		t.Errorf("agentKey = %q, want %q", got, "Grok[2J Bot")
+	}
+	if got := agentKey("\x1b\x07"); got != agentUnknown {
+		t.Errorf("agentKey of only control characters = %q, want %q", got, agentUnknown)
+	}
+	if got := agentDisplayFor("Grok\x1b[2J Bot").Label; got != "Grok[2J Bot" {
+		t.Errorf("agentDisplayFor label = %q, want %q", got, "Grok[2J Bot")
+	}
+}
+
 func TestRenderSessionRow_AgentLabel(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {

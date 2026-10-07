@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
@@ -128,10 +129,22 @@ func agentKey(raw string) string {
 	if id := normalizeAgentString(raw); id != agentUnknown {
 		return id
 	}
-	if name := strings.TrimSpace(raw); name != "" {
+	if name := externalAgentName(raw); name != "" {
 		return name
 	}
 	return agentUnknown
+}
+
+// externalAgentName is raw trimmed and without control or bidi characters.
+// External agent names are self-reported, so escape sequences must not reach
+// the terminal.
+func externalAgentName(raw string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, raw))
 }
 
 // agentDisplayFor is agentDisplayMap[key], or a plain entry labelled with the
@@ -140,7 +153,10 @@ func agentDisplayFor(key string) agentDisplay {
 	if d, ok := agentDisplayMap[key]; ok {
 		return d
 	}
-	return agentDisplay{Label: key, Color: palette.Muted, Char: '░'}
+	if name := externalAgentName(key); name != "" {
+		return agentDisplay{Label: name, Color: palette.Muted, Char: '░'}
+	}
+	return agentDisplayMap[activityAgentUnknown]
 }
 
 var agentOrder = []string{
