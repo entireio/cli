@@ -350,6 +350,10 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 		return nil
 	}
 
+	// A trailer naming a checkpoint deleted from this clone goes first: kept,
+	// post-commit would condense into the dead ID and re-create it.
+	strippedDeleted := stripDeletedCheckpointTrailers(ctx, commitMsgFile)
+
 	// Inherited trailers link the squashed commits' checkpoints; matching still
 	// runs so work the session holds gets a checkpoint of its own.
 	inherited := s.inheritSquashedCheckpointTrailers(ctx, commitMsgFile, source)
@@ -366,7 +370,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	// Handle amend (source="commit") separately: preserve or restore trailer
 	if source == "commit" {
-		return s.prepareAmendCommitMsg(ctx, commitMsgFile)
+		return s.prepareAmendCommitMsg(ctx, commitMsgFile, strippedDeleted)
 	}
 
 	_, openRepoSpan := perf.Start(ctx, "open_repository")
@@ -573,7 +577,7 @@ func (s *ManualCommitStrategy) inheritSquashedCheckpointTrailers(ctx context.Con
 		return nil // no squash in progress (or unreadable: fall through to normal matching)
 	}
 
-	inherited := trailers.ParseAllCheckpoints(string(squashMsg))
+	inherited := withoutDeletedCheckpoints(ctx, trailers.ParseAllCheckpoints(string(squashMsg)))
 	if len(inherited) == 0 {
 		return nil
 	}
@@ -701,7 +705,7 @@ func stripInheritedCheckpointTrailers(commitMsgFile string, inherited []id.Check
 
 // handleAmendCommitMsg handles the prepare-commit-msg hook for amend operations
 // (source="commit"). It preserves existing trailers or restores from LastCheckpointID.
-func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitMsgFile string) error {
+func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitMsgFile string, strippedDeleted bool) error {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	// Read current commit message
 	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
@@ -773,11 +777,100 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		return nil
 	}
 
+	if strippedDeleted {
+		// The amended commit's checkpoint was deleted. Work a session still
+		// holds gets a fresh checkpoint, exactly as an ordinary commit would.
+		s.stampFreshCheckpointForAmend(ctx, repo, worktreePath, commitMsgFile)
+		return nil
+	}
+
 	// No checkpoint ID found - leave message unchanged
 	logging.Debug(logCtx, "prepare-commit-msg: amend with no checkpoint to restore",
 		slog.String("strategy", "manual-commit"),
 	)
 	return nil
+}
+
+// stampFreshCheckpointForAmend links an amend whose deleted checkpoint trailer
+// was removed to a new checkpoint when a session has new content for it. With
+// nothing new, the amend simply carries no trailer.
+func (s *ManualCommitStrategy) stampFreshCheckpointForAmend(ctx context.Context, repo *git.Repository, worktreePath, commitMsgFile string) {
+	logCtx := logging.WithComponent(ctx, "checkpoint")
+	sessions, err := s.findSessionsForCommitLinking(ctx, worktreePath)
+	if err != nil || len(sessions) == 0 {
+		return
+	}
+	withContent := s.filterSessionsWithNewContent(ctx, repo, sessions)
+	if len(withContent) == 0 {
+		return
+	}
+	cpID, err := checkpointIDForSessions(ctx, withContent)
+	if err != nil {
+		return
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(commitMsgFile, []byte(addCheckpointTrailer(string(content), cpID)), 0o600); err != nil { //nolint:gosec // path from git hook arg
+		return
+	}
+	logging.Info(logCtx, "prepare-commit-msg: amend of a deleted checkpoint linked to a new one",
+		slog.String("strategy", "manual-commit"),
+		slog.String("checkpoint_id", cpID.String()),
+	)
+}
+
+// withoutDeletedCheckpoints drops IDs deleted from this clone, so inheriting
+// trailers (squash, redo) cannot put back one stripDeletedCheckpointTrailers
+// removed. An unreadable list filters nothing: hooks fail open.
+func withoutDeletedCheckpoints(ctx context.Context, ids []id.CheckpointID) []id.CheckpointID {
+	if len(ids) == 0 {
+		return ids
+	}
+	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
+	if err != nil || len(deleted) == 0 {
+		return ids
+	}
+	kept := make([]id.CheckpointID, 0, len(ids))
+	for _, cpID := range ids {
+		if !deleted.Contains(cpID) {
+			kept = append(kept, cpID)
+		}
+	}
+	return kept
+}
+
+// stripDeletedCheckpointTrailers removes Entire-Checkpoint trailers naming
+// checkpoints deleted from this clone, reporting whether any was removed. A
+// list that cannot be read strips nothing: hooks fail open.
+func stripDeletedCheckpointTrailers(ctx context.Context, commitMsgFile string) bool {
+	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: deleted checkpoints list unavailable",
+			slog.String("error", err.Error()))
+		return false
+	}
+	if len(deleted) == 0 {
+		return false
+	}
+	content, err := os.ReadFile(commitMsgFile) //nolint:gosec // commitMsgFile is provided by git hook
+	if err != nil {
+		return false
+	}
+	var remove []id.CheckpointID
+	for _, cpID := range trailers.ParseAllCheckpoints(string(content)) {
+		if deleted.Contains(cpID) {
+			remove = append(remove, cpID)
+		}
+	}
+	if len(remove) == 0 {
+		return false
+	}
+	stripInheritedCheckpointTrailers(commitMsgFile, remove)
+	logging.Info(logging.WithComponent(ctx, "checkpoint"), "prepare-commit-msg: removed trailers of deleted checkpoints",
+		slog.Int("removed", len(remove)))
+	return true
 }
 
 // PostCommit is called by the git post-commit hook after a commit is created.
