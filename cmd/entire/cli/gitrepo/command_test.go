@@ -38,7 +38,8 @@ func TestHashWorktreeFiles_HungCleanFilterDiesOnCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := HashWorktreeFiles(ctx, dir, []string{"a.txt"})
+	hashes, err := HashWorktreeFiles(ctx, dir, []string{"a.txt"})
 	require.Error(t, err)
+	require.Empty(t, hashes, "a killed hash-object yields no hash")
 	require.Less(t, time.Since(start), 5*time.Second, "the filter's process group must be killed on cancellation")
 }
