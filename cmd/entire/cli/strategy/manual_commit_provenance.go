@@ -22,13 +22,15 @@ import (
 // stampedTrailer returns the first checkpoint trailer in message that
 // prepare-commit-msg stamped itself, skipping trailers inherited from
 // squashed commits: those link existing checkpoints and never stand in for a
-// fresh one.
-func stampedTrailer(message string, inherited []id.CheckpointID) (id.CheckpointID, bool) {
+// fresh one. A checkpoint deleted from this clone never counts either: an ID
+// left in the message (an indented squash message, prose) would otherwise
+// suppress the fresh trailer new work needs.
+func stampedTrailer(ctx context.Context, message string, inherited []id.CheckpointID) (id.CheckpointID, bool) {
 	skip := make(map[id.CheckpointID]bool, len(inherited))
 	for _, cpID := range inherited {
 		skip[cpID] = true
 	}
-	for _, cpID := range trailers.ParseAllCheckpoints(message) {
+	for _, cpID := range withoutDeletedCheckpoints(ctx, trailers.ParseAllCheckpoints(message)) {
 		if !skip[cpID] {
 			return cpID, true
 		}
@@ -180,13 +182,16 @@ func commitParentCandidates(ctx context.Context) []string {
 }
 
 // stampedTrailersOf returns the checkpoint trailers of commit that
-// prepare-commit-msg stamped, leaving out the ones it recorded as inherited.
+// prepare-commit-msg stamped, leaving out the ones it recorded as inherited
+// and any checkpoint deleted from this clone: post-commit must never condense
+// new work into a deleted ID, which would re-create it.
 func stampedTrailersOf(ctx context.Context, commit *object.Commit) []id.CheckpointID {
 	var parent string
 	if len(commit.ParentHashes) > 0 {
 		parent = commit.ParentHashes[0].String()
 	}
-	return withoutInherited(trailers.ParseAllCheckpoints(commit.Message), takeInheritedTrailers(ctx, parent))
+	stamped := withoutInherited(trailers.ParseAllCheckpoints(commit.Message), takeInheritedTrailers(ctx, parent))
+	return withoutDeletedCheckpoints(ctx, stamped)
 }
 
 // takeInheritedTrailers returns the trailers prepare-commit-msg recorded as

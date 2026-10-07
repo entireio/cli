@@ -148,22 +148,34 @@ func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
 // however the separator is spaced ("Entire-Checkpoint:<id>", a tab).
 var checkpointTrailerLineRegex = regexp.MustCompile(`^` + CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)\s*$`)
 
+// scissorsMarker is the core of git's scissors line ("# ---- >8 ----"); with
+// `commit -v` everything below it is the diff, which git discards.
+const scissorsMarker = "------------------------ >8 ------------------------"
+
 // RemoveCheckpointTrailers removes every whole Entire-Checkpoint trailer line
-// whose ID drop selects, anywhere after the subject paragraph, and returns the
-// new message with the IDs removed (nil when the message is unchanged). It
-// does not try to reproduce git's trailer-block rules (mixed blocks, a
-// "(cherry picked from ...)" note, custom comment characters): a line that is
-// exactly a checkpoint trailer is one in every form git accepts, and leaving
-// one behind would let an amend keep a deleted checkpoint alive. Prose that
-// merely mentions an ID is not a whole trailer line and stays. Blank lines
-// left behind by a removal are collapsed and trimmed from the end.
+// whose ID drop selects, anywhere between the subject paragraph and a scissors
+// line, and returns the new message with the IDs removed (nil when the
+// message is unchanged). It does not try to reproduce git's trailer-block
+// rules (mixed blocks, a "(cherry picked from ...)" note, custom comment
+// characters): a line that is exactly a checkpoint trailer is one in every
+// form git accepts, and leaving one behind would let an amend keep a deleted
+// checkpoint alive. Indentation is ignored, since a squash message indents
+// the squashed commits' messages. Prose that merely mentions an ID is not a
+// whole trailer line and stays. Blank lines a removal leaves doubled are
+// collapsed, and trailing blank lines are trimmed unless a scissors line
+// follows; nothing at or below the scissors line is touched.
 func RemoveCheckpointTrailers(message string, drop func(checkpointID.CheckpointID) bool) (string, []checkpointID.CheckpointID) {
 	lines := strings.Split(message, "\n")
 	bodyStart := subjectParagraphEnd(lines)
-	removeLine := make([]bool, len(lines))
+	end := slices.IndexFunc(lines, func(line string) bool { return strings.Contains(line, scissorsMarker) })
+	hasScissors := end >= 0
+	if !hasScissors {
+		end = len(lines)
+	}
+	removeLine := make([]bool, end)
 	var removed []checkpointID.CheckpointID
-	for i := bodyStart; i < len(lines); i++ {
-		match := checkpointTrailerLineRegex.FindStringSubmatch(lines[i])
+	for i := bodyStart; i < end; i++ {
+		match := checkpointTrailerLineRegex.FindStringSubmatch(strings.TrimSpace(lines[i]))
 		if match == nil {
 			continue
 		}
@@ -179,7 +191,11 @@ func RemoveCheckpointTrailers(message string, drop func(checkpointID.CheckpointI
 	if len(removed) == 0 {
 		return message, nil
 	}
-	return strings.Join(keepLines(lines, removeLine, strings.HasSuffix(message, "\n")), "\n"), removed
+	if hasScissors {
+		kept := keepLines(lines[:end], removeLine, false, false)
+		return strings.Join(append(kept, lines[end:]...), "\n"), removed
+	}
+	return strings.Join(keepLines(lines, removeLine, true, strings.HasSuffix(message, "\n")), "\n"), removed
 }
 
 // subjectParagraphEnd returns the index just past the subject paragraph: the
@@ -195,10 +211,10 @@ func subjectParagraphEnd(lines []string) int {
 	return i
 }
 
-// keepLines drops the removed lines, collapses a blank line that a removal
-// would leave doubled, and trims trailing blank lines, keeping the message's
-// final newline.
-func keepLines(lines []string, removeLine []bool, endsWithNewline bool) []string {
+// keepLines drops the removed lines and collapses a blank line that a
+// removal would leave doubled. With trimTrailing it also trims trailing blank
+// lines, keeping the message's final newline.
+func keepLines(lines []string, removeLine []bool, trimTrailing, endsWithNewline bool) []string {
 	kept := make([]string, 0, len(lines))
 	afterRemoval := false
 	for i, line := range lines {
@@ -214,6 +230,9 @@ func keepLines(lines []string, removeLine []bool, endsWithNewline bool) []string
 			afterRemoval = false
 		}
 		kept = append(kept, line)
+	}
+	if !trimTrailing {
+		return kept
 	}
 	for len(kept) > 0 && isBlankLine(kept[len(kept)-1]) {
 		kept = kept[:len(kept)-1]

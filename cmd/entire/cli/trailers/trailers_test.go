@@ -490,6 +490,18 @@ func TestRemoveCheckpointTrailers(t *testing.T) {
 			wantRemoved: []checkpointID.CheckpointID{dead},
 		},
 		{
+			name:        "indented line from a squash message",
+			msg:         "Squashed commit of the following:\n\ncommit 0123\n\n    part one\n\n    Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "Squashed commit of the following:\n\ncommit 0123\n\n    part one\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "nothing below a scissors line is touched or trimmed",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# ------------------------ >8 ------------------------\n Entire-Checkpoint: a1b2c3d4e5f6\n\n\n",
+			want:        "subject\n\n# ------------------------ >8 ------------------------\n Entire-Checkpoint: a1b2c3d4e5f6\n\n\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
 			name:        "blank paragraph gap collapsed",
 			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# comment\n",
 			want:        "subject\n\n# comment\n",

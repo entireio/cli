@@ -129,7 +129,7 @@ func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, op
 	// ID an earlier, partly successful delete recorded stays.
 	copyDeleted := false
 	defer func() {
-		if !addedHere || copyDeleted || result.anyRemoteDeleted() {
+		if !addedHere || copyDeleted || result.anyRemoteDeleted() || !failuresLeftEveryCopy(ctx, root, cid, result) {
 			return
 		}
 		if err := deletedList.Remove(cid); err != nil {
@@ -164,8 +164,10 @@ func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, op
 		return result, err
 	}
 
+	var localRemoval plumbing.Hash
 	if plan.LocalV1 {
-		removed, err := removeLocalV1Checkpoint(ctx, repo, cid)
+		removal, removed, err := removeLocalV1Checkpoint(ctx, repo, cid)
+		localRemoval = removal
 		if err != nil {
 			result.LocalV1 = DeleteOutcomeFailed
 			return result, fmt.Errorf("remove checkpoint from local %s: %w", paths.MetadataBranchName, err)
@@ -183,13 +185,40 @@ func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, op
 	for _, target := range opts.Targets {
 		res, pushedV1 := deleteFromTarget(ctx, root, cid, target)
 		result.Targets = append(result.Targets, res)
-		if !adopted && !pushedV1.IsZero() && result.LocalV1 == DeleteOutcomeDeleted && slices.Contains(plan.V1PushURLs, target.URL) {
+		if !adopted && !pushedV1.IsZero() && !localRemoval.IsZero() && slices.Contains(plan.V1PushURLs, target.URL) {
 			adopted = true
-			rebaseLocalV1OntoRemoteRemoval(ctx, repo, cid, pushedV1)
+			if err := adoptRemoteV1Removal(ctx, repo, cid, refTip(repo, v1BranchRef), localRemoval, pushedV1); err != nil {
+				logging.Warn(ctx, "checkpoint delete: local v1 left as is; the next push reconciles it",
+					slog.String("checkpoint_id", cid.String()), slog.String("reason", err.Error()))
+			}
 		}
 	}
 	recheckRemoteRefs(ctx, root, cid, result)
 	return result, nil
+}
+
+// failuresLeftEveryCopy re-probes each failed target and reports whether the
+// failure certainly removed nothing: the ref is still there and the v1 branch
+// still has the tip the plan saw. A push that errored can still have landed
+// (a dropped connection after the remote applied it), and an unreachable
+// target cannot be checked, so either keeps the ID recorded.
+func failuresLeftEveryCopy(ctx context.Context, root string, cid id.CheckpointID, result *CheckpointDeleteResult) bool {
+	for _, r := range result.Targets {
+		if !r.Failed() {
+			continue
+		}
+		listing, err := lsRemoteCheckpoint(ctx, root, r.Target.URL, cid)
+		if err != nil {
+			return false
+		}
+		if r.Ref == DeleteOutcomeFailed && listing.refOID.IsZero() {
+			return false
+		}
+		if r.V1 == DeleteOutcomeFailed && !listing.v1Tip.Equal(r.Target.V1Tip) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *CheckpointDeleteResult) anyRemoteDeleted() bool {
@@ -198,57 +227,93 @@ func (r *CheckpointDeleteResult) anyRemoteDeleted() bool {
 	})
 }
 
-// rebaseLocalV1OntoRemoteRemoval rebuilds the local v1 branch on pushed, the
-// removal commit just pushed to the v1 push destination. The local removal
-// and the remote one are separate commits, so without this the two branches
-// diverge, and with OPF enabled a diverged v1 aborts the next push
-// (V1DivergedError). Local-only commits are replayed onto pushed, except the
-// local removal commit, whose change pushed already carries. Failure only
-// logs: without OPF the next pre-push reconciles a diverged branch itself.
-func rebaseLocalV1OntoRemoteRemoval(ctx context.Context, repo *git.Repository, cid id.CheckpointID, pushed plumbing.Hash) {
-	err := checkpoint.UpdatePersistentRef(ctx, repo, v1BranchRef, func() (plumbing.Hash, plumbing.Hash, error) {
-		local := refTip(repo, v1BranchRef)
-		if local.IsZero() || local == pushed {
-			return plumbing.ZeroHash, plumbing.ZeroHash, errNothingToRemove
-		}
-		newTip, err := replayLocalV1Onto(ctx, repo, cid, local, pushed)
-		if err != nil {
-			return plumbing.ZeroHash, plumbing.ZeroHash, err
-		}
-		return newTip, local, nil
-	})
-	if err != nil && !errors.Is(err, errNothingToRemove) {
-		logging.Warn(ctx, "checkpoint delete: could not rebase local v1 onto the pushed removal",
-			slog.String("checkpoint_id", cid.String()), slog.String("error", err.Error()))
-	}
-}
+// errNotThisDeletesDivergence: local and remote v1 differ by more than this
+// delete's two removal commits, so rebuilding local v1 would hide a divergence
+// (a force-rewritten remote, say) that OPF's pre-push check exists to refuse.
+var errNotThisDeletesDivergence = errors.New("local and remote v1 diverged before this delete")
 
-func replayLocalV1Onto(ctx context.Context, repo *git.Repository, cid id.CheckpointID, local, pushed plumbing.Hash) (plumbing.Hash, error) {
+// adoptRemoteV1Removal rebuilds the local v1 branch on pushed, the removal
+// commit just pushed to a v1 push destination. The local removal
+// (localRemoval) and the remote one are separate commits, so without this the
+// branches diverge, and with OPF enabled a diverged v1 aborts the next push
+// (V1DivergedError). It acts only when that pair is the whole divergence: the
+// remote tip the removal was pushed on must already be in the local removal's
+// history. Local commits after that tip are replayed onto pushed, except the
+// local removal itself, whose change pushed already carries.
+//
+// Only the first v1 push destination the removal reached is adopted. With
+// several pushurls the others received their own removal commits, so local v1
+// can still diverge from them; the next pre-push reconciles those without
+// OPF, and with OPF its divergence check refuses them as before.
+//
+// local is the v1 tip the rebuild starts from; the ref moves only if it still
+// points there (one compare-and-swap, no retry). A lost race leaves local v1
+// alone and never deletes an object: pushed already exists (the remote-tracking
+// ref may point at it), and replayed commits left unreferenced are garbage git
+// collects. Without OPF the next pre-push reconciles a diverged branch itself.
+func adoptRemoteV1Removal(ctx context.Context, repo *git.Repository, cid id.CheckpointID, local, localRemoval, pushed plumbing.Hash) error {
+	if local.IsZero() || local.Equal(pushed) {
+		return nil
+	}
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
-		return plumbing.ZeroHash, err
+		return err
 	}
-	if _, err := getMergeBase(ctx, repoPath, local.String(), pushed.String()); err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("local and remote v1 share no history: %w", err)
+	if err := checkRemovalPairIsTheDivergence(ctx, repo, repoPath, local, localRemoval, pushed); err != nil {
+		return err
 	}
 	commits, err := collectCommitsSince(ctx, repo, repoPath, local, pushed)
 	if err != nil {
-		return plumbing.ZeroHash, err
+		return err
 	}
-	removal := checkpointRemovalMessage(cid)
-	replay := slices.DeleteFunc(commits, func(c *object.Commit) bool { return c.Message == removal })
-	if len(replay) == 0 {
-		return pushed, nil
+	replay := slices.DeleteFunc(commits, func(c *object.Commit) bool { return c.Hash.Equal(localRemoval) })
+	newTip := pushed
+	if len(replay) > 0 {
+		if newTip, err = replayOnto(ctx, repo, repoPath, cid, pushed, replay); err != nil {
+			return err
+		}
 	}
+	return checkpoint.CASPersistentRef(ctx, repo, v1BranchRef, newTip, local) //nolint:wrapcheck // the caller logs it as the reason
+}
+
+// checkRemovalPairIsTheDivergence requires the remote tip the removal was
+// pushed on (pushed's parent) to be the local removal's parent or one of its
+// ancestors, and the local removal to still be in local v1.
+func checkRemovalPairIsTheDivergence(ctx context.Context, repo *git.Repository, repoPath string, local, localRemoval, pushed plumbing.Hash) error {
+	pushedCommit, err := repo.CommitObject(pushed)
+	if err != nil || len(pushedCommit.ParentHashes) != 1 {
+		return errNotThisDeletesDivergence
+	}
+	removalCommit, err := repo.CommitObject(localRemoval)
+	if err != nil || len(removalCommit.ParentHashes) != 1 {
+		return errNotThisDeletesDivergence
+	}
+	if !isAncestorOrSelf(ctx, repoPath, pushedCommit.ParentHashes[0], removalCommit.ParentHashes[0]) ||
+		!isAncestorOrSelf(ctx, repoPath, localRemoval, local) {
+		return errNotThisDeletesDivergence
+	}
+	return nil
+}
+
+func isAncestorOrSelf(ctx context.Context, repoPath string, ancestor, descendant plumbing.Hash) bool {
+	if ancestor.Equal(descendant) {
+		return true
+	}
+	base, err := getMergeBase(ctx, repoPath, ancestor.String(), descendant.String())
+	return err == nil && base.Equal(ancestor)
+}
+
+// replayOnto cherry-picks replay onto base and drops the checkpoint's subtree
+// again should a replayed commit have written under its ID.
+func replayOnto(ctx context.Context, repo *git.Repository, repoPath string, cid id.CheckpointID, base plumbing.Hash, replay []*object.Commit) (plumbing.Hash, error) {
 	shallow, err := loadShallowHashes(ctx, repoPath)
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
-	newTip, err := cherryPickOnto(ctx, repo, pushed, replay, shallow)
+	newTip, err := cherryPickOnto(ctx, repo, base, replay, shallow)
 	if err != nil {
 		return plumbing.ZeroHash, err
 	}
-	// A replayed local commit could have written under the ID again.
 	if again, err := buildCheckpointRemovalCommit(ctx, repo, newTip, cid); err == nil {
 		return again, nil
 	} else if !errors.Is(err, errNothingToRemove) {
@@ -311,8 +376,10 @@ func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Reposi
 }
 
 // removeLocalV1Checkpoint commits the subtree's removal onto the local v1
-// branch under the checkpoint writers' lock, rebuilding on a CAS conflict.
-func removeLocalV1Checkpoint(ctx context.Context, repo *git.Repository, cid id.CheckpointID) (bool, error) {
+// branch under the checkpoint writers' lock, rebuilding on a CAS conflict. It
+// returns the removal commit, and whether there was anything to remove.
+func removeLocalV1Checkpoint(ctx context.Context, repo *git.Repository, cid id.CheckpointID) (plumbing.Hash, bool, error) {
+	var removal plumbing.Hash
 	err := checkpoint.UpdatePersistentRef(ctx, repo, v1BranchRef, func() (plumbing.Hash, plumbing.Hash, error) {
 		tip := refTip(repo, v1BranchRef)
 		if tip.IsZero() {
@@ -322,15 +389,16 @@ func removeLocalV1Checkpoint(ctx context.Context, repo *git.Repository, cid id.C
 		if err != nil {
 			return plumbing.ZeroHash, plumbing.ZeroHash, err
 		}
+		removal = commit
 		return commit, tip, nil
 	})
 	switch {
 	case errors.Is(err, errNothingToRemove):
-		return false, nil
+		return plumbing.ZeroHash, false, nil
 	case err != nil:
-		return false, err //nolint:wrapcheck // caller adds the branch context
+		return plumbing.ZeroHash, false, err //nolint:wrapcheck // caller adds the branch context
 	}
-	return true, nil
+	return removal, true, nil
 }
 
 // buildCheckpointRemovalCommit writes a commit on parent whose tree lacks cid's

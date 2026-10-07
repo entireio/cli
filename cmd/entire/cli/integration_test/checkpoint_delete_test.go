@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 // checkpointExistsLocally reports whether this clone holds the checkpoint: its
@@ -427,6 +428,66 @@ func TestCheckpointDelete_BranchBackendNextPushAfterRemoteDelete(t *testing.T) {
 			}
 			assert.False(t, env.CheckpointExistsOnRemote(bare, cpID), "and the deleted one stays gone")
 			assert.False(t, env.checkpointExistsLocally(cpID))
+		})
+	}
+}
+
+// A deleted ID can survive trailer stripping: git's SQUASH_MSG indents the
+// squashed commits' messages, and prose can mention an ID. Such a leftover
+// must never count as the commit's own trailer: new session work gets a
+// fresh checkpoint, and the deleted one is not re-created.
+func TestCheckpointDelete_LeftoverDeletedIDNeverReceivesNewWork(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		message func(env *TestEnv, deletedID string) string
+	}{
+		{name: "squash message", message: func(env *TestEnv, _ string) string {
+			testutil.RunGit(env.T, env.RepoDir, "merge", "--squash", "feature/test-branch")
+			data, err := os.ReadFile(filepath.Join(env.RepoDir, ".git", "SQUASH_MSG"))
+			require.NoError(env.T, err)
+			return string(data)
+		}},
+		{name: "prose mention", message: func(env *TestEnv, deletedID string) string {
+			testutil.RunGit(env.T, env.RepoDir, "merge", "--squash", "feature/test-branch")
+			testutil.RunGit(env.T, env.RepoDir, "commit", "--no-verify", "-m", "squash without trailers")
+			return "Follow-up\n\nEntire-Checkpoint: " + deletedID + " was deleted on purpose.\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ForEachBackend(t, func(t *testing.T, backend string) {
+				env := NewFeatureBranchEnv(t)
+				env.CheckpointStore = backend
+				sess := env.NewSession()
+				turn := func(prompt, file, content string) {
+					require.NoError(t, env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, prompt, sess.TranscriptPath))
+					env.WriteFile(file, content)
+					sess.CreateTranscript(prompt, []FileChange{{Path: file, Content: content}})
+					require.NoError(t, env.SimulateStop(sess.ID, sess.TranscriptPath))
+				}
+				turn("part one", "f1.txt", "one\n")
+				env.GitCommitWithShadowHooks("part one", "f1.txt")
+				deletedID := env.LatestCheckpointID()
+				env.RunCLI("checkpoint", "delete", deletedID, "--force")
+				require.False(t, env.checkpointExistsLocally(deletedID))
+
+				turn("part two", "f2.txt", "two\n") // pending when the next commit is made
+				env.GitCheckoutBranch(masterBranch)
+				message := tc.message(env, deletedID)
+				env.GitCommitWithShadowHooks(message, "f2.txt")
+
+				ids := trailers.ParseAllCheckpoints(testutil.RunGit(t, env.RepoDir, "log", "-1", "--format=%B"))
+				var fresh []string
+				for _, cpID := range ids {
+					if cpID.String() != deletedID {
+						fresh = append(fresh, cpID.String())
+					}
+				}
+				require.Len(t, fresh, 1, "the pending work gets a fresh checkpoint: %v", ids)
+				assert.True(t, env.checkpointExistsLocally(fresh[0]))
+				assert.False(t, env.checkpointExistsLocally(deletedID), "the deleted checkpoint must not be re-created")
+			})
 		})
 	}
 }

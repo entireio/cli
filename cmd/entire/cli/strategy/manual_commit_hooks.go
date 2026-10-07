@@ -445,7 +445,7 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 	message := string(content)
 
 	// A trailer prepare already stamped is kept (e.g. amend); inherited ones are links
-	if existingCpID, found := stampedTrailer(message, inherited); found {
+	if existingCpID, found := stampedTrailer(ctx, message, inherited); found {
 		readCommitMessageSpan.End()
 		// Trailer already exists (e.g., amend) - keep it
 		logging.Debug(logCtx, "prepare-commit-msg: trailer already exists",
@@ -857,9 +857,10 @@ func withoutDeletedCheckpoints(ctx context.Context, ids []id.CheckpointID) []id.
 
 // stripDeletedCheckpointTrailers removes Entire-Checkpoint trailers naming
 // checkpoints deleted from this clone, reporting whether the message file was
-// actually rewritten. Only trailer-block lines are considered, by the same
-// matcher that decides what to remove. A list that cannot be read strips
-// nothing: hooks fail open.
+// actually rewritten. Every whole (possibly indented) trailer line after the
+// subject and above any scissors line is considered, by the same matcher that
+// decides what to remove (see trailers.RemoveCheckpointTrailers). A list that
+// cannot be read strips nothing: hooks fail open.
 func stripDeletedCheckpointTrailers(ctx context.Context, commitMsgFile string) bool {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
@@ -2890,7 +2891,7 @@ func (s *ManualCommitStrategy) addTrailerForAgentCommit(logCtx context.Context, 
 	message := string(content)
 
 	// Don't add if prepare already stamped one (inherited trailers are links)
-	if _, found := stampedTrailer(message, inherited); found {
+	if _, found := stampedTrailer(logCtx, message, inherited); found {
 		return nil
 	}
 

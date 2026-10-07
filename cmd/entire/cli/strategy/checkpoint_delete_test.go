@@ -366,10 +366,11 @@ func TestCheckpointDelete_V1RemoteAheadAndUnpushedLocalCommits(t *testing.T) {
 	assert.NotContains(t, localTree, cid.Path()+"/")
 	assert.Contains(t, localTree, unpushed.Path()+"/")
 
-	// Local v1 is rebuilt on the tip the delete pushed, so the branches do not
-	// diverge (a diverged v1 aborts an OPF push with V1DivergedError).
+	// The remote was ahead before the delete, so local and remote v1 differ by
+	// more than the two removal commits: local v1 is left for the next push to
+	// reconcile rather than silently rebuilt.
 	remoteTip := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "rev-parse", "entire/checkpoints/v1"))
-	testutil.RunGit(t, f.workDir, "merge-base", "--is-ancestor", remoteTip, "entire/checkpoints/v1")
+	assert.NotEqual(t, remoteTip, strings.TrimSpace(testutil.RunGit(t, f.workDir, "rev-parse", "entire/checkpoints/v1")))
 }
 
 // addFileToBranchTree returns a tree hash: branch's tree plus one file.
@@ -686,4 +687,85 @@ func TestCheckpointDelete_OPFRewriteAfterRemoteV1Delete(t *testing.T) {
 	_, err = RewriteUnpushedV1WithOPF(t.Context(), repo, "origin")
 	var diverged *V1DivergedError
 	require.NotErrorAs(t, err, &diverged, "local v1 must not diverge from the remote after a delete")
+}
+
+// A remote whose v1 was force-rewritten has diverged from this clone before
+// the delete. Rebuilding local v1 on the pushed removal would hide that from
+// OPF's pre-push check, so the delete leaves local v1 alone and the check still
+// refuses.
+func TestCheckpointDelete_ForceRewrittenRemoteV1StaysDiverged(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	f.writeCheckpoint(t, cid, "sess-1")
+	testutil.RunGit(t, f.workDir, "push", "--no-verify", "origin", "entire/checkpoints/v1")
+	// Rewrite the tip: same content, different commit, on the same parent.
+	// The branches still share history, so only the pair check stops a rebuild.
+	tree := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "rev-parse", "entire/checkpoints/v1^{tree}"))
+	parent := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "rev-parse", "entire/checkpoints/v1^"))
+	rewritten := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "commit-tree", tree, "-p", parent, "-m", "rewritten history"))
+	testutil.RunGit(t, f.bareDir, "update-ref", "refs/heads/entire/checkpoints/v1", rewritten)
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{Targets: plan.HolderTargets()})
+	require.NoError(t, err)
+	require.False(t, result.Failed(), "%+v", result.Targets)
+	require.Equal(t, DeleteOutcomeDeleted, result.Targets[0].V1)
+
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	repo, err := gitrepo.OpenPath(f.workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	_, err = RewriteUnpushedV1WithOPF(t.Context(), repo, "origin")
+	var diverged *V1DivergedError
+	require.ErrorAs(t, err, &diverged, "a divergence the delete did not cause must still be refused")
+}
+
+// Losing the compare-and-swap leaves local v1 where a concurrent writer put it
+// and deletes nothing: the pushed commit is not this rebuild's to clean up.
+func TestAdoptRemoteV1Removal_LostRaceKeepsObjects(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	f.writeCheckpoint(t, cid, "sess-1")
+	repo, err := gitrepo.OpenPath(f.workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	base := refTip(repo, v1BranchRef)
+	localRemoval, err := buildCheckpointRemovalCommit(t.Context(), repo, base, cid)
+	require.NoError(t, err)
+	removalTree := strings.TrimSpace(testutil.RunGit(t, f.workDir, "rev-parse", localRemoval.String()+"^{tree}"))
+	pushed := plumbing.NewHash(strings.TrimSpace(testutil.RunGit(t, f.workDir, "commit-tree", removalTree, "-p", base.String(), "-m", "remote removal")))
+	// A concurrent writer moved local v1 past the removal.
+	concurrent := strings.TrimSpace(testutil.RunGit(t, f.workDir, "commit-tree", removalTree, "-p", localRemoval.String(), "-m", "concurrent"))
+	testutil.RunGit(t, f.workDir, "update-ref", "refs/heads/entire/checkpoints/v1", concurrent)
+
+	err = adoptRemoteV1Removal(t.Context(), repo, cid, localRemoval, localRemoval, pushed)
+	require.Error(t, err, "the ref moved since the snapshot")
+	assert.Equal(t, concurrent, strings.TrimSpace(testutil.RunGit(t, f.workDir, "rev-parse", "entire/checkpoints/v1")))
+	testutil.RunGit(t, f.workDir, "cat-file", "-e", pushed.String())
+}
+
+// A failure that is not a definitive rejection (here a transport error) may
+// have removed the copy anyway, so the ID stays recorded.
+func TestExecuteCheckpointDelete_KeepsRecordWhenAFailureIsAmbiguous(t *testing.T) {
+	f := newDeleteFixture(t, "git-refs")
+	cid := id.MustCheckpointID("01K6ZQ2M8E3V7R5T9Y4X6W2A1B")
+	f.writeCheckpoint(t, cid, "sess-1")
+	ref, err := checkpoint.RefName(cid)
+	require.NoError(t, err)
+	testutil.RunGit(t, f.workDir, "push", "--no-verify", "origin", ref.String()+":"+ref.String())
+	testutil.RunGit(t, f.workDir, "update-ref", "-d", ref.String())
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	targets := plan.HolderTargets()
+	require.Len(t, targets, 1)
+	targets[0].URL = filepath.Join(t.TempDir(), "gone") // the connection fails mid-delete
+	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{Targets: targets})
+	require.NoError(t, err)
+	require.True(t, result.Failed())
+
+	deleted, err := checkpoint.LoadDeletedCheckpoints(t.Context())
+	require.NoError(t, err)
+	assert.True(t, deleted.Contains(cid), "an ambiguous failure keeps the record")
 }

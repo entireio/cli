@@ -221,9 +221,13 @@ const (
 // probed and found without a v1 copy loses nothing; one that could not be
 // probed is refused, since its copy cannot be ruled out.
 //
-// Known limitation: a push to a remote that is not yet the sync remote can
+// Known limitations: a push to a remote that is not yet the sync remote can
 // elect it on the spot (capture) and send v1 there; such a remote is not a
-// destination here until it is elected.
+// destination here until it is elected. A dedicated checkpoint_remote URL
+// derived from a remote spelling this clone cannot authenticate to (another
+// remote's protocol, say) probes as unreachable, so the delete keeps refusing
+// with "retry when reachable" until that spelling works or the remote is
+// removed.
 func (p *CheckpointDeletePlan) CheckLocalV1Propagation(targets []CheckpointDeleteTarget, selection CheckpointDeleteSelection) error {
 	if !p.LocalV1 {
 		return nil

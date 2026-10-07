@@ -862,14 +862,21 @@ What it means for the domain model:
   delete whose selection leaves one out is refused before anything is written
   when that destination holds a `v1` copy (remedy: also delete there, or use
   the git-refs backend) or cannot be reached (remedy: retry once reachable).
-  Known limitation: a push to a not-yet-elected remote can elect it on the spot
-  (capture) and send `v1` there; such a remote is not checked. With
+  Known limitations: a push to a not-yet-elected remote can elect it on the
+  spot (capture) and send `v1` there; such a remote is not checked. A
+  dedicated `checkpoint_remote` URL derived from a remote spelling this clone
+  cannot authenticate to probes as unreachable, so the refusal ("retry when
+  reachable") persists until that spelling works. With
   `push_sessions` disabled nothing is pushed, but re-enabling it later carries
   the removal to the sync remote.
 - **Local and remote `v1` stay in one line.** After the removal is pushed to
   a `v1` push destination, local `v1` is rebuilt on that pushed commit (local
   unpushed checkpoints replayed on top), so the next push is a fast-forward and
-  the OPF pre-push rewrite does not see a diverged branch.
+  the OPF pre-push rewrite does not see a diverged branch. This happens only
+  when the two removal commits are the whole difference: a remote that was
+  ahead or rewritten before the delete is left for pre-push to reconcile (or
+  for OPF to refuse), and with several pushurls only the first destination is
+  adopted, so the others can still diverge.
 - **`--local-only` copies can come back into view.** On git-refs, a read
   (explain, backfill) that misses locally fetches the remote copy and recreates
   the local ref. On git-branch, reads do not refetch a deleted local copy.

@@ -168,7 +168,9 @@ history. The local `v1` removal is a commit the next pre-push sends to every
 `v1` push destination, so on the git-branch primary a delete that leaves one
 out is refused before any write if it holds a copy or cannot be reached. After
 pushing the removal to a destination, local `v1` is rebuilt on the pushed
-commit (unpushed local commits replayed) so the branches do not diverge.
+commit (unpushed local commits replayed) so the branches do not diverge, but
+only when the two removal commits are the whole divergence, and only for the
+first destination reached.
 
 ### On-demand fetch (reads and backfill writes)
 

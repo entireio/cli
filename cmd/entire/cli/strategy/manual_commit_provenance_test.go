@@ -18,14 +18,14 @@ func TestStampedTrailer_SkipsInheritedTrailers(t *testing.T) {
 	fresh := id.CheckpointID("01M2VBJBJQZ2BP1W2PBWDF3J31")
 	msg := "Squashed\n\nEntire-Checkpoint: " + inherited.String() + "\nEntire-Checkpoint: " + fresh.String() + "\n"
 
-	got, ok := stampedTrailer(msg, []id.CheckpointID{inherited})
+	got, ok := stampedTrailer(context.Background(), msg, []id.CheckpointID{inherited})
 	assert.True(t, ok)
 	assert.Equal(t, fresh, got)
 
-	_, ok = stampedTrailer("Squashed\n\nEntire-Checkpoint: "+inherited.String()+"\n", []id.CheckpointID{inherited})
+	_, ok = stampedTrailer(context.Background(), "Squashed\n\nEntire-Checkpoint: "+inherited.String()+"\n", []id.CheckpointID{inherited})
 	assert.False(t, ok, "an inherited trailer alone is not a stamp")
 
-	got, ok = stampedTrailer(msg, nil)
+	got, ok = stampedTrailer(context.Background(), msg, nil)
 	assert.True(t, ok)
 	assert.Equal(t, inherited, got, "with nothing inherited the first trailer is the stamp, as before")
 }
