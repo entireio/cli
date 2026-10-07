@@ -97,3 +97,34 @@ func TestWithoutDeletedCheckpoints(t *testing.T) {
 	recordDeleted(t, deleted)
 	assert.Equal(t, []id.CheckpointID{kept}, withoutDeletedCheckpoints(context.Background(), []id.CheckpointID{deleted, kept}))
 }
+
+// A deleted ID is stripped however its trailer is spaced, and the report
+// matches what was written: a mention outside the trailer block is neither
+// removed nor reported.
+func TestStripDeletedCheckpointTrailers_NonCanonicalSpelling(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	recordDeleted(t, id.MustCheckpointID("abc123def456"))
+
+	tests := []struct {
+		name         string
+		msg          string
+		wantStripped bool
+		wantContent  string
+	}{
+		{name: "no space", msg: "msg\n\nEntire-Checkpoint:abc123def456\n", wantStripped: true, wantContent: "msg\n\n"},
+		{name: "tab", msg: "msg\n\nEntire-Checkpoint:\tabc123def456\n", wantStripped: true, wantContent: "msg\n\n"},
+		{name: "body mention", msg: "msg\n\nEntire-Checkpoint: abc123def456 is gone, so\nthis prose stays.\n", wantContent: "msg\n\nEntire-Checkpoint: abc123def456 is gone, so\nthis prose stays.\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+			require.NoError(t, os.WriteFile(commitMsgFile, []byte(tt.msg), 0o644))
+
+			assert.Equal(t, tt.wantStripped, stripDeletedCheckpointTrailers(context.Background(), commitMsgFile))
+			content, err := os.ReadFile(commitMsgFile)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantContent, string(content))
+		})
+	}
+}

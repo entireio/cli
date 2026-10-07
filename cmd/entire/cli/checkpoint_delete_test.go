@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -264,12 +267,171 @@ func TestPrintCheckpointDeleteResult_UnreachableRemoteIsNotClaimedDeleted(t *tes
 	result := &strategy.CheckpointDeleteResult{LocalRef: strategy.DeleteOutcomeDeleted, LocalV1: strategy.DeleteOutcomeAbsent}
 
 	var buf bytes.Buffer
-	printCheckpointDeleteResult(&buf, plan, result, checkpointDeleteFlags{})
+	printCheckpointDeleteResult(&buf, plan, nil, result, checkpointDeleteFlags{})
 	assert.Contains(t, buf.String(), "Could not check backup")
 	assert.Contains(t, buf.String(), "entire checkpoint delete a1b2c3d4e5f6 --remote backup")
 	assert.NotContains(t, buf.String(), "Deleted checkpoint a1b2c3d4e5f6.\n")
+}
 
-	buf.Reset()
-	printCheckpointDeleteResult(&buf, plan, result, checkpointDeleteFlags{localOnly: true})
-	assert.Contains(t, buf.String(), "Deleted checkpoint a1b2c3d4e5f6.\n", "--local-only never consults remotes")
+// --local-only never consults remotes, so the summary must not claim the
+// checkpoint is gone everywhere: it names the remotes it left unchecked.
+func TestPrintCheckpointDeleteResult_LocalOnlyNamesUncheckedRemotes(t *testing.T) {
+	t.Parallel()
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	plan := &strategy.CheckpointDeletePlan{CheckpointID: cid, Targets: []strategy.CheckpointDeleteTarget{
+		{Remotes: []string{"origin"}, URL: "/a", NotChecked: true},
+	}}
+	result := &strategy.CheckpointDeleteResult{LocalRef: strategy.DeleteOutcomeDeleted, LocalV1: strategy.DeleteOutcomeAbsent}
+
+	var buf bytes.Buffer
+	printCheckpointDeleteResult(&buf, plan, nil, result, checkpointDeleteFlags{localOnly: true})
+	assert.NotContains(t, buf.String(), "Deleted checkpoint a1b2c3d4e5f6.\n")
+	assert.Contains(t, buf.String(), "Deleted the local copy of checkpoint a1b2c3d4e5f6.")
+	assert.Contains(t, buf.String(), "origin was not checked (--local-only)")
+}
+
+// A holder the user left out (--remote, or deselected) is named, not hidden
+// behind a "Deleted checkpoint" claim.
+func TestPrintCheckpointDeleteResult_NamesUnselectedHolders(t *testing.T) {
+	t.Parallel()
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	oid := plumbing.NewHash("1111111111111111111111111111111111111111")
+	origin := strategy.CheckpointDeleteTarget{Remotes: []string{"origin"}, URL: "/a", Reachable: true, RefOID: oid}
+	upstream := strategy.CheckpointDeleteTarget{Remotes: []string{"upstream"}, URL: "/b", Reachable: true, RefOID: oid}
+	plan := &strategy.CheckpointDeletePlan{CheckpointID: cid, Targets: []strategy.CheckpointDeleteTarget{origin, upstream}}
+	result := &strategy.CheckpointDeleteResult{LocalRef: strategy.DeleteOutcomeDeleted, LocalV1: strategy.DeleteOutcomeAbsent,
+		Targets: []strategy.CheckpointDeleteTargetResult{{Target: upstream, Ref: strategy.DeleteOutcomeDeleted, V1: strategy.DeleteOutcomeAbsent}}}
+
+	var buf bytes.Buffer
+	printCheckpointDeleteResult(&buf, plan, []strategy.CheckpointDeleteTarget{upstream}, result, checkpointDeleteFlags{remotes: []string{"upstream"}})
+	assert.NotContains(t, buf.String(), "Deleted checkpoint a1b2c3d4e5f6.\n")
+	assert.Contains(t, buf.String(), "Still on origin (not selected)")
+}
+
+// addUpstreamHolder adds a second bare remote, makes it the sync remote, and
+// pushes the checkpoint there too, so two remotes hold it.
+func (f deleteCmdFixture) addUpstreamHolder(t *testing.T) string {
+	t.Helper()
+	upstream := t.TempDir()
+	testutil.RunGit(t, upstream, "init", "--bare")
+	testutil.RunGit(t, f.dir, "remote", "add", "upstream", upstream)
+	testutil.RunGit(t, f.dir, "push", "--no-verify", "upstream", f.ref.String()+":"+f.ref.String())
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "upstream"}}`)
+	return upstream
+}
+
+func runCheckpointDeleteCmdWithSelector(t *testing.T, selectTargets checkpointDeleteTargetSelector, args ...string) (string, error) {
+	t.Helper()
+	cmd := newCheckpointDeleteCmdWithPrompts(checkpointDeletePrompts{canPrompt: func() bool { return true }, selectTargets: selectTargets})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return stdout.String(), err
+}
+
+// Deselecting every remote of a checkpoint with no local copy leaves nothing
+// to delete: the command cancels without recording anything.
+func TestCheckpointDelete_DeselectAllWithoutLocalCopyCancels(t *testing.T) {
+	f := newDeleteCmdFixture(t)
+	upstream := f.addUpstreamHolder(t)
+	testutil.RunGit(t, f.dir, "update-ref", "-d", f.ref.String())
+
+	deselectAll := func(context.Context, []strategy.CheckpointDeleteTarget) ([]strategy.CheckpointDeleteTarget, error) {
+		return nil, nil
+	}
+	stdout, err := runCheckpointDeleteCmdWithSelector(t, deselectAll, f.cid.String())
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "No remote selected")
+	assert.True(t, f.remoteHasRef(t))
+	assert.Contains(t, testutil.RunGit(t, upstream, "for-each-ref", "--format=%(refname)"), f.ref.String())
+	deleted, err := checkpoint.LoadDeletedCheckpoints(context.Background())
+	require.NoError(t, err)
+	assert.False(t, deleted.Contains(f.cid), "a cancelled delete records nothing")
+}
+
+// Esc in the remote multi-select is a clean cancel, like the confirmation.
+func TestCheckpointDelete_AbortedRemoteSelectionCancels(t *testing.T) {
+	f := newDeleteCmdFixture(t)
+	f.addUpstreamHolder(t)
+
+	abort := func(context.Context, []strategy.CheckpointDeleteTarget) ([]strategy.CheckpointDeleteTarget, error) {
+		return nil, fmt.Errorf("remote selection: %w", huh.ErrUserAborted)
+	}
+	stdout, err := runCheckpointDeleteCmdWithSelector(t, abort, f.cid.String())
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Deletion cancelled.")
+	assert.True(t, f.localHasRef(t))
+	assert.True(t, f.remoteHasRef(t))
+}
+
+// --remote leaves the other holders alone, and the summary says so.
+func TestCheckpointDelete_RemoteFlagReportsUnselectedHolder(t *testing.T) {
+	f := newDeleteCmdFixture(t)
+	upstream := f.addUpstreamHolder(t)
+
+	stdout, err := runCheckpointDeleteCmd(t, false, f.cid.String(), "--remote", "upstream", "--force")
+	require.NoError(t, err)
+	assert.NotContains(t, testutil.RunGit(t, upstream, "for-each-ref", "--format=%(refname)"), f.ref.String())
+	assert.True(t, f.remoteHasRef(t), "origin was not selected")
+	assert.Contains(t, stdout, "Still on origin (not selected)")
+	assert.NotContains(t, stdout, "Deleted checkpoint "+f.cid.String()+".\n")
+}
+
+// --local-only plans without contacting any remote: JSON marks them unchecked.
+func TestCheckpointDelete_LocalOnlyDryRunDoesNotProbe(t *testing.T) {
+	f := newDeleteCmdFixture(t)
+	testutil.RunGit(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
+
+	stdout, err := runCheckpointDeleteCmd(t, false, f.cid.String(), "--local-only", "--dry-run", "--json")
+	require.NoError(t, err)
+	var doc checkpointDeleteJSON
+	require.NoError(t, json.Unmarshal([]byte(stdout), &doc), stdout)
+	require.Len(t, doc.Remotes, 1)
+	assert.Equal(t, "not_checked", doc.Remotes[0].Status)
+	assert.Empty(t, doc.Warnings)
+
+	text, err := runCheckpointDeleteCmd(t, false, f.cid.String(), "--local-only", "--dry-run")
+	require.NoError(t, err)
+	assert.Contains(t, text, "not checked (--local-only)")
+}
+
+// A miss in --json mode is still JSON, naming the remotes that could not be
+// reached; the text error names them too.
+func TestCheckpointDelete_NotFoundNamesUnreachableRemotes(t *testing.T) {
+	f := newDeleteCmdFixture(t)
+	testutil.RunGit(t, f.dir, "update-ref", "-d", f.ref.String())
+	testutil.RunGit(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
+
+	stdout, err := runCheckpointDeleteCmd(t, false, f.cid.String(), "--dry-run", "--json")
+	require.Error(t, err)
+	var doc checkpointDeleteJSON
+	require.NoError(t, json.Unmarshal([]byte(stdout), &doc), stdout)
+	assert.True(t, doc.NotFound)
+	require.Len(t, doc.Remotes, 1)
+	assert.Equal(t, "unreachable", doc.Remotes[0].Status)
+
+	_, err = runCheckpointDeleteCmd(t, false, f.cid.String(), "--dry-run")
+	require.ErrorContains(t, err, "could not reach origin")
+}
+
+func TestBuildCheckpointDeleteJSON_TrackingV1AndHistoryFlag(t *testing.T) {
+	t.Parallel()
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	origin := strategy.CheckpointDeleteTarget{Remotes: []string{"origin"}, URL: "/a", Reachable: true, V1: strategy.V1CopyPresent}
+	plan := &strategy.CheckpointDeletePlan{CheckpointID: cid, TrackingV1: []string{"origin"}, Targets: []strategy.CheckpointDeleteTarget{origin}}
+
+	selected := buildCheckpointDeleteJSON(plan, []strategy.CheckpointDeleteTarget{origin}, nil, true, false)
+	assert.Equal(t, []string{"origin"}, selected.Local.TrackingV1)
+	assert.True(t, selected.V1HistoryRetained, "deleting the remote v1 copy leaves it in that branch's history")
+
+	notSelected := buildCheckpointDeleteJSON(plan, nil, nil, true, true)
+	assert.False(t, notSelected.V1HistoryRetained, "--local-only with only a remote v1 copy touches no v1 branch")
+
+	var buf bytes.Buffer
+	printCheckpointDeletePlan(&buf, plan, nil, true)
+	assert.Contains(t, buf.String(), "refs/remotes/origin/"+paths.MetadataBranchName)
+	assert.Contains(t, buf.String(), "until origin's copy is deleted")
 }

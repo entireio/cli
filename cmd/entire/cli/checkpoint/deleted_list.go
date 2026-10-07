@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 
 	"github.com/go-git/go-git/v6"
@@ -89,6 +90,28 @@ func (d *DeletedCheckpoints) Record(cid id.CheckpointID) error {
 	if cid.Kind() == id.KindUnknown {
 		return fmt.Errorf("record deleted checkpoint: invalid checkpoint ID %q", cid)
 	}
+	return d.update(func(ids []id.CheckpointID) ([]id.CheckpointID, bool) {
+		if slices.Contains(ids, cid) {
+			return ids, false
+		}
+		return append(ids, cid), true
+	})
+}
+
+// Remove takes cid off the list again, for a delete that failed before it
+// removed any copy. Removing an ID that is not listed is a no-op.
+func (d *DeletedCheckpoints) Remove(cid id.CheckpointID) error {
+	return d.update(func(ids []id.CheckpointID) ([]id.CheckpointID, bool) {
+		if !slices.Contains(ids, cid) {
+			return ids, false
+		}
+		return slices.DeleteFunc(ids, func(recorded id.CheckpointID) bool { return recorded == cid }), true
+	})
+}
+
+// update rewrites the list under its lock; change reports whether it altered
+// the IDs, and an unchanged list is not rewritten.
+func (d *DeletedCheckpoints) update(change func([]id.CheckpointID) ([]id.CheckpointID, bool)) error {
 	root, err := gitdir.OpenAt(d.dir)
 	if err != nil {
 		return fmt.Errorf("open git common dir: %w", err)
@@ -99,14 +122,14 @@ func (d *DeletedCheckpoints) Record(cid id.CheckpointID) error {
 	}
 	defer release()
 
-	ids, err := readDeletedCheckpoints(root)
+	ids, err := d.read(root)
 	if err != nil {
 		return err
 	}
-	if slices.Contains(ids, cid) {
+	ids, changed := change(ids)
+	if !changed {
 		return nil
 	}
-	ids = append(ids, cid)
 	raw := make([]string, len(ids))
 	for i, recorded := range ids {
 		raw[i] = recorded.String()
@@ -116,7 +139,7 @@ func (d *DeletedCheckpoints) Record(cid id.CheckpointID) error {
 		return fmt.Errorf("encode deleted checkpoints list: %w", err)
 	}
 	if err := jsonutil.WriteFileAtomicIn(root, deletedCheckpointsFileName, data, 0o600); err != nil {
-		return fmt.Errorf("write deleted checkpoints list: %w", err)
+		return fmt.Errorf("write deleted checkpoints list %s: %w", d.path(), err)
 	}
 	return nil
 }
@@ -129,7 +152,7 @@ func (d *DeletedCheckpoints) Load() (DeletedCheckpointSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open git common dir: %w", err)
 	}
-	ids, err := readDeletedCheckpoints(root)
+	ids, err := d.read(root)
 	if err != nil {
 		return nil, err
 	}
@@ -140,17 +163,22 @@ func (d *DeletedCheckpoints) Load() (DeletedCheckpointSet, error) {
 	return set, nil
 }
 
-func readDeletedCheckpoints(root *os.Root) ([]id.CheckpointID, error) {
+// path names the list file in errors, so a user can find the file to fix.
+func (d *DeletedCheckpoints) path() string {
+	return filepath.Join(d.dir, deletedCheckpointsFileName)
+}
+
+func (d *DeletedCheckpoints) read(root *os.Root) ([]id.CheckpointID, error) {
 	data, err := osroot.ReadFileNoFollow(root, deletedCheckpointsFileName)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read deleted checkpoints list: %w", err)
+		return nil, fmt.Errorf("read deleted checkpoints list %s: %w", d.path(), err)
 	}
 	var file deletedCheckpointsFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("parse deleted checkpoints list: %w", err)
+		return nil, fmt.Errorf("parse deleted checkpoints list %s: %w", d.path(), err)
 	}
 	valid := make([]id.CheckpointID, 0, len(file.CheckpointIDs))
 	for _, raw := range file.CheckpointIDs {

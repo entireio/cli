@@ -143,9 +143,12 @@ probe, the lease, and the push address the same repository.
 
 The local ref is deleted (compare-and-swap) and dropped from the push queue
 before any remote: pre-push drains the queue and pushes refs that exist locally,
-so remote-first ordering would let a concurrent push put it back. Each remote
-is then re-checked once with `ls-remote` and the delete retried if a push had
-already re-landed it. A remote that refuses is reported with an
+so remote-first ordering would let a concurrent push put it back. Each remote's
+per-checkpoint ref (not its `v1` branch) is then re-checked once with
+`ls-remote` and its delete retried if a push had already re-landed it. A lease
+that fails as stale is re-probed: when the ref is already gone (the same
+repository reached through a second URL spelling, say) the outcome is
+"absent", not a failure. A remote that refuses is reported with an
 `entire checkpoint delete <id> --remote <name>` retry command; the local copy is
 not restored, and a remote-only delete (no local copy) is allowed. The ID is
 also recorded in the git common dir's deleted-checkpoints list
@@ -153,13 +156,17 @@ also recorded in the git common dir's deleted-checkpoints list
 ID's trailer on an amend and which migration skips. Other clones still holding
 the ref can push it back; remote tombstones are deferred.
 
-A hex checkpoint on the `v1` branch is deleted per remote by fetching that
+A checkpoint on the `v1` branch is deleted per remote by fetching that
 remote's branch tip into a temporary ref, committing the subtree's removal on
 it, and pushing with a lease on the fetched tip (a fast-forward). Local `v1`
 commits are never pushed by a delete, so unpushed (for example not yet
 OPF-redacted) data stays local. The remote-tracking `v1` ref of each named
-remote is advanced to the pushed tip so read fallbacks and migration stop
-seeing the checkpoint. The content remains in the branch's history.
+remote whose fetch URL is the target is advanced to the pushed tip (or to the
+fetched tip when the checkpoint was already gone there) so read fallbacks and
+migration stop seeing the checkpoint. The content remains in the branch's
+history. The local `v1` removal is a commit the next pre-push sends to the
+sync remote, so on the git-branch primary a delete that leaves that remote out
+is refused before any write.
 
 ### On-demand fetch (reads and backfill writes)
 

@@ -405,3 +405,78 @@ func TestAppendOPFAppliedTrailer(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveCheckpointTrailers(t *testing.T) {
+	t.Parallel()
+	dead := checkpointID.MustCheckpointID("a1b2c3d4e5f6")
+	isDead := func(cpID checkpointID.CheckpointID) bool { return cpID == dead }
+
+	tests := []struct {
+		name        string
+		msg         string
+		want        string
+		wantRemoved []checkpointID.CheckpointID
+	}{
+		{
+			name:        "canonical trailer",
+			msg:         "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "Subject\n\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "no space after the colon",
+			msg:         "Subject\n\nSigned-off-by: A <a@b.c>\nEntire-Checkpoint:a1b2c3d4e5f6\n",
+			want:        "Subject\n\nSigned-off-by: A <a@b.c>\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "tab and trailing space",
+			msg:         "Subject\n\nEntire-Checkpoint:\ta1b2c3d4e5f6  \nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want:        "Subject\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "editor comments below the trailer block",
+			msg:         "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# Please enter the commit message\n",
+			want:        "Subject\n\n# Please enter the commit message\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name: "mention in the body is not a trailer",
+			msg:  "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6 was wrong, see below.\nMore prose here.\n",
+			want: "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6 was wrong, see below.\nMore prose here.\n",
+		},
+		{
+			name: "paragraph mixing prose and the trailer is not a trailer block",
+			msg:  "Subject\n\nSome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want: "Subject\n\nSome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+		},
+		{
+			name: "subject line is never a trailer",
+			msg:  "Entire-Checkpoint: a1b2c3d4e5f6\n",
+			want: "Entire-Checkpoint: a1b2c3d4e5f6\n",
+		},
+		{
+			name: "live checkpoint kept",
+			msg:  "Subject\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+			want: "Subject\n\nEntire-Checkpoint: b2c3d4e5f6a1\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, removed := RemoveCheckpointTrailers(tt.msg, isDead)
+			if got != tt.want {
+				t.Errorf("message = %q, want %q", got, tt.want)
+			}
+			if len(removed) != len(tt.wantRemoved) {
+				t.Fatalf("removed = %v, want %v", removed, tt.wantRemoved)
+			}
+			for i := range removed {
+				if removed[i] != tt.wantRemoved[i] {
+					t.Errorf("removed[%d] = %v, want %v", i, removed[i], tt.wantRemoved[i])
+				}
+			}
+		})
+	}
+}

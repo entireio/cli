@@ -6,6 +6,7 @@ package trailers
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -141,6 +142,82 @@ func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
 		}
 	}
 	return ids
+}
+
+// checkpointTrailerLineRegex matches one whole Entire-Checkpoint trailer line,
+// however the separator is spaced ("Entire-Checkpoint:<id>", a tab).
+var checkpointTrailerLineRegex = regexp.MustCompile(`^` + CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)\s*$`)
+
+// trailerKeyLineRegex is the loose "Key:" shape used to decide whether a
+// paragraph is a trailer block; unlike IsTrailerLine it does not require a
+// space after the colon.
+var trailerKeyLineRegex = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*:`)
+
+// RemoveCheckpointTrailers removes the Entire-Checkpoint trailers whose ID
+// drop selects, returning the new message and the IDs removed (nil when the
+// message is unchanged). Only lines in a trailer block count: a paragraph
+// after the subject made solely of "Key:" lines (and their indented
+// continuations). Blank lines and '#' comment lines separate paragraphs, so a
+// squash message's per-commit trailer blocks are each considered. The same
+// match decides what is removed and what is reported, so a caller never sees
+// an ID reported as removed while its line stays.
+func RemoveCheckpointTrailers(message string, drop func(checkpointID.CheckpointID) bool) (string, []checkpointID.CheckpointID) {
+	lines := strings.Split(message, "\n")
+	removeLine := make([]bool, len(lines))
+	var removed []checkpointID.CheckpointID
+	paragraph := 0
+	for i := 0; i < len(lines); {
+		if isParagraphBoundary(lines[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(lines) && !isParagraphBoundary(lines[i]) {
+			i++
+		}
+		paragraph++
+		if paragraph == 1 || !isTrailerParagraph(lines[start:i]) {
+			continue
+		}
+		for j := start; j < i; j++ {
+			match := checkpointTrailerLineRegex.FindStringSubmatch(lines[j])
+			if match == nil {
+				continue
+			}
+			cpID, err := checkpointID.NewCheckpointID(match[1])
+			if err != nil || !drop(cpID) {
+				continue
+			}
+			removeLine[j] = true
+			if !slices.Contains(removed, cpID) {
+				removed = append(removed, cpID)
+			}
+		}
+	}
+	if len(removed) == 0 {
+		return message, nil
+	}
+	kept := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if !removeLine[i] {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n"), removed
+}
+
+func isParagraphBoundary(line string) bool {
+	return strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#")
+}
+
+func isTrailerParagraph(lines []string) bool {
+	for i, line := range lines {
+		continuation := i > 0 && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t"))
+		if !continuation && !trailerKeyLineRegex.MatchString(line) {
+			return false
+		}
+	}
+	return true
 }
 
 // FormatSourceRef creates a formatted source ref string for the trailer.

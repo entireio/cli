@@ -114,7 +114,7 @@ func TestCheckpointDelete_DeletesEverywhereAndStaysDeleted(t *testing.T) {
 
 		explainOut, err := env.RunCLIWithError("checkpoint", "explain", "--commit", env.GetHeadHash())
 		require.Error(t, err)
-		assert.Contains(t, explainOut, "checkpoint not found (may have been deleted)")
+		assert.Contains(t, explainOut, "checkpoint not found (deleted with `entire checkpoint delete`)")
 
 		// The next push must not resurrect it.
 		env.GitPushWithHooks("origin", "HEAD")
@@ -250,6 +250,11 @@ func TestCheckpointDelete_PartialFailureAndRetry(t *testing.T) {
 	})
 }
 
+// --local-only leaves every remote copy alone, including across the next
+// push. On git-refs the local ref goes and pre-push has nothing to send; a
+// read then refetches the remote copy and recreates the local ref. On
+// git-branch the removal would be a local v1 commit that pre-push
+// fast-forwards onto the remote, so the delete is refused before any write.
 func TestCheckpointDelete_LocalOnlyLeavesRemotes(t *testing.T) {
 	t.Parallel()
 	ForEachBackend(t, func(t *testing.T, backend string) {
@@ -260,13 +265,56 @@ func TestCheckpointDelete_LocalOnlyLeavesRemotes(t *testing.T) {
 		cpID := createCheckpointedCommit(t, env, "Add zeta", "zeta.go", "package zeta", "Add zeta")
 		env.GitPushWithHooks("origin", "HEAD")
 
-		env.RunCLI("checkpoint", "delete", cpID, "--local-only", "--force")
-		assert.False(t, env.checkpointExistsLocally(cpID))
-		assert.True(t, env.CheckpointExistsOnRemote(bare, cpID), "--local-only never touches a remote")
+		out, err := env.RunCLIWithError("checkpoint", "delete", cpID, "--local-only", "--force")
+		if backend == StoreGitBranch {
+			require.Error(t, err, "a local v1 removal would reach origin on the next push")
+			assert.Contains(t, out, "the next git push sends that branch to origin")
+			assert.True(t, env.checkpointExistsLocally(cpID), "a refused delete writes nothing")
+		} else {
+			require.NoError(t, err, out)
+			assert.False(t, env.checkpointExistsLocally(cpID))
+		}
 
-		// Documented consequence: reads may still find the remote copy.
-		out, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", cpID)
-		t.Logf("explain after --local-only (err=%v):\n%s", err, out)
+		env.RunPrePush("origin")
+		assert.True(t, env.CheckpointExistsOnRemote(bare, cpID), "--local-only: the remote copy survives the next push")
+
+		// Documented consequence: reads can still find the remote copy.
+		explainOut, err := env.RunCLIWithError("checkpoint", "explain", "--checkpoint", cpID)
+		require.NoError(t, err, explainOut)
+		assert.Contains(t, explainOut, cpID)
+		if backend == StoreGitRefs {
+			assert.True(t, env.checkpointExistsLocally(cpID), "the read refetched the remote copy as a local ref")
+		}
+	})
+}
+
+// The same repository reached under two spellings (a push URL and a fetch URL
+// that differ, as pushInsteadOf produces) is two targets. The second sees the
+// checkpoint already gone: that is success, and the remote-tracking v1 ref
+// still stops showing it.
+func TestCheckpointDelete_SameRepositoryUnderTwoURLs(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		env := NewFeatureBranchEnv(t)
+		env.CheckpointStore = backend
+		bare := env.SetupBareRemote()
+		cpID := createCheckpointedCommit(t, env, "Add mu", "mu.go", "package mu", "Add mu")
+		env.GitPushWithHooks("origin", "HEAD")
+		testutil.RunGit(t, env.RepoDir, "remote", "set-url", "--push", "origin", "file://"+bare)
+		env.setGitConfigBaseline()
+		tracking := "refs/remotes/origin/" + paths.MetadataBranchName
+		if backend == StoreGitBranch {
+			testutil.RunGit(t, env.RepoDir, "fetch", "origin", "+refs/heads/"+paths.MetadataBranchName+":"+tracking)
+		}
+
+		out, err := env.RunCLIWithError("checkpoint", "delete", cpID, "--force")
+		require.NoError(t, err, "the same repository reached twice is not a failure:\n%s", out)
+		assert.Contains(t, out, "Deleted checkpoint "+cpID+".")
+		assert.False(t, env.CheckpointExistsOnRemote(bare, cpID))
+		if backend == StoreGitBranch {
+			trackingTree := testutil.RunGit(t, env.RepoDir, "ls-tree", "-r", "--name-only", tracking)
+			assert.NotContains(t, trackingTree, CheckpointSummaryPath(cpID), "the tracking ref follows the removal")
+		}
 	})
 }
 

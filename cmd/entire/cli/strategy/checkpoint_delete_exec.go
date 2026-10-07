@@ -84,7 +84,10 @@ var errNothingToRemove = errors.New("checkpoint subtree already absent")
 // and pushes refs that exist locally, so deleting remote-first would let it
 // push the ref back between the two deletes. Remote failures are reported per
 // target and never restore the local copy; the user retries with --remote.
-func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, opts CheckpointDeleteOptions) (*CheckpointDeleteResult, error) {
+func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, opts CheckpointDeleteOptions) (_ *CheckpointDeleteResult, retErr error) {
+	if err := plan.CheckLocalV1Propagation(opts.Targets, opts.LocalOnly); err != nil {
+		return nil, err
+	}
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
@@ -108,25 +111,43 @@ func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, op
 	if err := deletedList.Record(cid); err != nil {
 		return result, fmt.Errorf("record deleted checkpoint: %w", err)
 	}
+	// A delete that fails before removing any copy must not leave the ID
+	// listed: hooks would strip the trailer of a checkpoint that still exists.
+	copyDeleted := false
+	defer func() {
+		if retErr == nil || copyDeleted {
+			return
+		}
+		if err := deletedList.Remove(cid); err != nil {
+			logging.Warn(ctx, "checkpoint delete: could not unrecord a delete that removed nothing",
+				slog.String("checkpoint_id", cid.String()), slog.String("error", err.Error()))
+		}
+	}()
 
 	for _, sessionID := range sessionsHoldingCheckpoint(ctx, plan) {
+		changed := false
 		if err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
 			if !clearDeletedCheckpointFromState(state, cid) {
 				return ErrMutationSkip
 			}
+			changed = true
 			return nil
 		}); err != nil && !errors.Is(err, ErrStateNotFound) {
 			return result, fmt.Errorf("clear checkpoint from session %s: %w", sessionID, err)
 		}
-		result.StatesCleared = append(result.StatesCleared, sessionID)
+		if changed {
+			result.StatesCleared = append(result.StatesCleared, sessionID)
+		}
 	}
 
-	if err := deleteLocalCheckpointRef(ctx, root, repo, plan); err != nil {
+	refDeleted, err := deleteLocalCheckpointRef(ctx, root, repo, plan)
+	copyDeleted = refDeleted
+	if refDeleted {
+		result.LocalRef = DeleteOutcomeDeleted
+	}
+	if err != nil {
 		result.LocalRef = DeleteOutcomeFailed
 		return result, err
-	}
-	if plan.LocalRef != "" {
-		result.LocalRef = DeleteOutcomeDeleted
 	}
 
 	if plan.LocalV1 {
@@ -137,6 +158,7 @@ func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, op
 		}
 		if removed {
 			result.LocalV1 = DeleteOutcomeDeleted
+			copyDeleted = true
 		}
 	}
 
@@ -170,18 +192,21 @@ func sessionsHoldingCheckpoint(ctx context.Context, plan *CheckpointDeletePlan) 
 	return ids
 }
 
-// deleteLocalCheckpointRef drops the ref from the push queue and deletes it
-// with a compare-and-swap on the planned oid. The queue entry goes even when
-// the ref is already absent, so a stale entry cannot linger.
-func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Repository, plan *CheckpointDeletePlan) error {
+// deleteLocalCheckpointRef deletes the local ref with a compare-and-swap on
+// the planned oid, then drops it from the push queue, reporting whether the
+// ref was deleted. The queue entry goes even when the ref is already absent,
+// so a stale entry cannot linger.
+func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Repository, plan *CheckpointDeletePlan) (bool, error) {
+	deleted := false
 	if plan.LocalRef != "" {
 		if err := gitrepo.CompareAndSwapRef(ctx, root, plan.LocalRef, plumbing.ZeroHash, plan.LocalRefOID); err != nil {
-			return fmt.Errorf("delete local ref %s: %w", plan.LocalRef, err)
+			return false, fmt.Errorf("delete local ref %s: %w", plan.LocalRef, err)
 		}
+		deleted = true
 	}
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
-		return err //nolint:wrapcheck // already names the push queue
+		return deleted, err //nolint:wrapcheck // already names the push queue
 	}
 	refs := []plumbing.ReferenceName{}
 	if plan.LocalRef != "" {
@@ -191,9 +216,9 @@ func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Reposi
 		refs = append(refs, canonical)
 	}
 	if err := queue.Remove(refs); err != nil {
-		return fmt.Errorf("remove checkpoint from push queue: %w", err)
+		return deleted, fmt.Errorf("remove checkpoint from push queue: %w", err)
 	}
-	return nil
+	return deleted, nil
 }
 
 // removeLocalV1Checkpoint commits the subtree's removal onto the local v1
@@ -251,13 +276,13 @@ func deleteFromTarget(ctx context.Context, root string, cid id.CheckpointID, tar
 	res := CheckpointDeleteTargetResult{Target: target, Ref: DeleteOutcomeAbsent, V1: DeleteOutcomeAbsent}
 	var errs []string
 	if !target.RefOID.IsZero() {
-		outcome, reason := deleteRemoteRef(ctx, root, target.URL, target.RefName, target.RefOID)
+		outcome, reason := deleteRemoteRef(ctx, root, target.URL, cid, target.RefName, target.RefOID)
 		res.Ref = outcome
 		if reason != "" {
 			errs = append(errs, reason)
 		}
 	}
-	if cid.Kind() == id.KindLegacy && !target.V1Tip.IsZero() && target.V1 != V1CopyAbsent {
+	if !target.V1Tip.IsZero() && target.V1 != V1CopyAbsent {
 		outcome, reason := deleteFromRemoteV1(ctx, root, cid, target)
 		res.V1 = outcome
 		if reason != "" {
@@ -270,8 +295,10 @@ func deleteFromTarget(ctx context.Context, root string, cid id.CheckpointID, tar
 
 // deleteRemoteRef runs `git push --force-with-lease=<ref>:<oid> <target> :<ref>`.
 // The lease keeps a copy another clone pushed since the probe from being
-// removed unseen.
-func deleteRemoteRef(ctx context.Context, root, target string, ref plumbing.ReferenceName, oid plumbing.Hash) (DeleteOutcome, string) {
+// removed unseen. A lease that fails because the ref is gone is success: the
+// same repository can be reached under two spellings (a push URL and a fetch
+// URL), and the first target's delete makes the second one's lease stale.
+func deleteRemoteRef(ctx context.Context, root, target string, cid id.CheckpointID, ref plumbing.ReferenceName, oid plumbing.Hash) (DeleteOutcome, string) {
 	res, err := remote.PushWithOptions(ctx, remote.PushOptions{
 		Remote:    target,
 		RefSpecs:  []string{":" + ref.String()},
@@ -279,6 +306,11 @@ func deleteRemoteRef(ctx context.Context, root, target string, ref plumbing.Refe
 		Dir:       root,
 	})
 	outcome, reason := classifyRemoteDelete(res.Output, err)
+	if outcome == DeleteOutcomeFailed && isStaleLease(res.Output) {
+		if listing, lsErr := lsRemoteCheckpoint(ctx, root, target, cid); lsErr == nil && listing.refOID.IsZero() {
+			return DeleteOutcomeAbsent, ""
+		}
+	}
 	if outcome == DeleteOutcomeFailed {
 		logging.Warn(ctx, "checkpoint delete: remote ref delete failed",
 			slog.String("target", remote.RedactURLOrPath(target)),
@@ -300,13 +332,17 @@ func classifyRemoteDelete(output string, pushErr error) (DeleteOutcome, string) 
 	switch {
 	case strings.Contains(output, "remote ref does not exist"):
 		return DeleteOutcomeAbsent, ""
-	case strings.Contains(output, "stale info"):
+	case isStaleLease(output):
 		return DeleteOutcomeFailed, "the remote copy changed since it was inspected (another clone may have pushed it); run the delete again"
 	}
 	if m := rejectedReasonPattern.FindStringSubmatch(output); m != nil {
 		return DeleteOutcomeFailed, "rejected by the remote: " + m[1]
 	}
 	return DeleteOutcomeFailed, pushErr.Error()
+}
+
+func isStaleLease(output string) bool {
+	return strings.Contains(output, "stale info")
 }
 
 // deleteFromRemoteV1 removes cid's subtree from target's v1 branch: it fetches
@@ -335,6 +371,9 @@ func deleteFromRemoteV1(ctx context.Context, root string, cid id.CheckpointID, t
 
 	commit, err := buildCheckpointRemovalCommit(ctx, repo, tip, cid)
 	if errors.Is(err, errNothingToRemove) {
+		// Already gone there (for example deleted through another spelling
+		// of the same URL): the tracking ref still has to stop showing it.
+		advanceTrackingV1(ctx, root, repo, target, tip)
 		return DeleteOutcomeAbsent, ""
 	}
 	if err != nil {
@@ -357,10 +396,13 @@ func deleteFromRemoteV1(ctx context.Context, root string, cid id.CheckpointID, t
 	return DeleteOutcomeDeleted, ""
 }
 
-// advanceTrackingV1 moves each named remote's existing v1 tracking ref to the
-// tip just pushed, so read fallbacks and migration stop seeing the checkpoint.
-// Only remotes that FETCH from the target are moved: a remote that matched the
-// target through its push URL tracks a different repository.
+// advanceTrackingV1 moves each named remote's existing v1 tracking ref to tip,
+// a v1 commit of the target without the checkpoint, so read fallbacks and
+// migration stop seeing it. Only remotes that FETCH from the target are moved:
+// a remote that matched the target through its push URL may track a different
+// repository. When the push URL and fetch URL are two spellings of one
+// repository, the fetch-URL target moves the ref, even when its own delete
+// found the checkpoint already gone.
 func advanceTrackingV1(ctx context.Context, root string, repo *git.Repository, target CheckpointDeleteTarget, tip plumbing.Hash) {
 	for _, name := range target.Remotes {
 		if name == CheckpointRemoteTargetName {
@@ -394,13 +436,17 @@ func recheckRemoteRefs(ctx context.Context, root string, cid id.CheckpointID, re
 		if err != nil || listing.refOID.IsZero() {
 			continue
 		}
-		outcome, reason := deleteRemoteRef(ctx, root, r.Target.URL, listing.ref, listing.refOID)
+		outcome, reason := deleteRemoteRef(ctx, root, r.Target.URL, cid, listing.ref, listing.refOID)
 		if outcome == DeleteOutcomeDeleted {
 			r.Ref = DeleteOutcomeDeleted
 		}
 		if outcome == DeleteOutcomeFailed {
 			r.Ref = DeleteOutcomeFailed
-			r.Error = "the checkpoint was pushed again while it was being deleted: " + reason
+			msg := "the checkpoint was pushed again while it was being deleted: " + reason
+			if r.Error != "" {
+				msg = r.Error + "; " + msg
+			}
+			r.Error = msg
 		}
 	}
 }

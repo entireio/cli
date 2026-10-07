@@ -58,4 +58,22 @@ func TestDeletedCheckpoints_CorruptFileIsAnError(t *testing.T) {
 
 	_, err := NewDeletedCheckpoints(dir).Load()
 	require.Error(t, err, "a corrupt list must not read as empty, or deleted IDs come back")
+	assert.Contains(t, err.Error(), filepath.Join(dir, deletedCheckpointsFileName), "the error names the file to fix")
+}
+
+func TestDeletedCheckpoints_Remove(t *testing.T) {
+	t.Parallel()
+	list := NewDeletedCheckpoints(t.TempDir())
+	kept := id.MustCheckpointID("a1b2c3d4e5f6")
+	removed := id.MustCheckpointID("01K6ZQ2M8E3V7R5T9Y4X6W2A1B")
+	require.NoError(t, list.Record(kept))
+	require.NoError(t, list.Record(removed))
+
+	require.NoError(t, list.Remove(removed))
+	require.NoError(t, list.Remove(removed), "removing an absent ID is a no-op")
+
+	deleted, err := list.Load()
+	require.NoError(t, err)
+	assert.True(t, deleted.Contains(kept))
+	assert.False(t, deleted.Contains(removed))
 }

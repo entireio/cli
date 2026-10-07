@@ -27,6 +27,16 @@ type checkpointDeleteFlags struct {
 	json      bool
 }
 
+// checkpointDeleteTargetSelector asks which of several holding remotes to
+// delete from.
+type checkpointDeleteTargetSelector func(ctx context.Context, targets []strategy.CheckpointDeleteTarget) ([]strategy.CheckpointDeleteTarget, error)
+
+// checkpointDeletePrompts are the interactive seams, injectable for tests.
+type checkpointDeletePrompts struct {
+	canPrompt     func() bool
+	selectTargets checkpointDeleteTargetSelector
+}
+
 func newCheckpointDeleteCmd() *cobra.Command {
 	return newCheckpointDeleteCmdWithPrompt(interactive.CanPromptInteractively)
 }
@@ -34,6 +44,10 @@ func newCheckpointDeleteCmd() *cobra.Command {
 // newCheckpointDeleteCmdWithPrompt takes the "can we prompt?" probe so tests
 // can exercise both the interactive and the non-interactive paths.
 func newCheckpointDeleteCmdWithPrompt(canPrompt func() bool) *cobra.Command {
+	return newCheckpointDeleteCmdWithPrompts(checkpointDeletePrompts{canPrompt: canPrompt, selectTargets: promptCheckpointDeleteTargets})
+}
+
+func newCheckpointDeleteCmdWithPrompts(prompts checkpointDeletePrompts) *cobra.Command {
 	var flags checkpointDeleteFlags
 
 	cmd := &cobra.Command{
@@ -45,6 +59,10 @@ that holds it.
 The full checkpoint ID is required; prefixes are not accepted. Deleting from a
 remote cannot be undone. A checkpoint on the entire/checkpoints/v1 branch is
 removed from the branch tip only: the branch's history still contains it.
+
+With --local-only no remote is contacted. On the git-branch backend a local
+removal reaches the sync remote on the next git push, so --local-only (or a
+selection that leaves that remote out) is refused there.
 
 Other checkpoints of the same sessions are listed but not deleted. Each one
 carries the session's full transcript, so the session stays visible on
@@ -61,7 +79,7 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
-			return runCheckpointDelete(cmd, args[0], flags, canPrompt())
+			return runCheckpointDelete(cmd, args[0], flags, prompts.canPrompt(), prompts.selectTargets)
 		},
 	}
 
@@ -83,7 +101,7 @@ func validateCheckpointDeleteFlags(flags checkpointDeleteFlags) error {
 	return nil
 }
 
-func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDeleteFlags, canPrompt bool) error {
+func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDeleteFlags, canPrompt bool, selectTargets checkpointDeleteTargetSelector) error {
 	ctx := cmd.Context()
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
 	if err := validateCheckpointDeleteFlags(flags); err != nil {
@@ -97,8 +115,16 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 		return NewSilentError(errors.New("entire is disabled in this repository"))
 	}
 
-	plan, err := strategy.PlanCheckpointDelete(ctx, cid)
+	plan, err := strategy.PlanCheckpointDelete(ctx, cid, strategy.CheckpointDeletePlanOptions{LocalOnly: flags.localOnly})
 	if err != nil {
+		if flags.json && plan != nil && errors.Is(err, strategy.ErrCheckpointDeleteNotFound) {
+			doc := buildCheckpointDeleteJSON(plan, nil, nil, flags.dryRun, flags.localOnly)
+			doc.NotFound = true
+			if writeErr := writeCheckpointDeleteJSON(out, doc); writeErr != nil {
+				return writeErr
+			}
+			return NewSilentError(fmt.Errorf("delete checkpoint: %w", err))
+		}
 		return fmt.Errorf("delete checkpoint: %w", err)
 	}
 	targets, err := selectCheckpointDeleteTargets(plan, flags)
@@ -107,10 +133,18 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 	}
 
 	if flags.dryRun {
+		refusal := plan.CheckLocalV1Propagation(targets, flags.localOnly)
 		if flags.json {
-			return writeCheckpointDeleteJSON(out, plan, targets, nil, true)
+			doc := buildCheckpointDeleteJSON(plan, targets, nil, true, flags.localOnly)
+			if refusal != nil {
+				doc.Refusal = refusal.Error()
+			}
+			return writeCheckpointDeleteJSON(out, doc)
 		}
 		printCheckpointDeletePlan(out, plan, targets, flags.localOnly)
+		if refusal != nil {
+			fmt.Fprintf(out, "\nThis delete would be refused: %s\n", refusal)
+		}
 		fmt.Fprintln(out, "\nDry run: nothing was changed.")
 		return nil
 	}
@@ -121,15 +155,29 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 	if !plan.HasLocalCopy() && len(targets) == 0 {
 		return fmt.Errorf("checkpoint %s has no local copy and no selected remote holds it; nothing to delete", cid)
 	}
+	if err := plan.CheckLocalV1Propagation(targets, flags.localOnly); err != nil {
+		return err //nolint:wrapcheck // names the checkpoint and the remedy already
+	}
 
 	if !flags.json {
 		printCheckpointDeletePlan(out, plan, targets, flags.localOnly)
 		fmt.Fprintln(out)
 	}
 	if !flags.force && canPrompt && len(targets) > 1 {
-		targets, err = promptCheckpointDeleteTargets(ctx, targets)
+		targets, err = selectTargets(ctx, targets)
+		if errors.Is(err, huh.ErrUserAborted) || errors.Is(err, context.Canceled) {
+			fmt.Fprintln(out, "Deletion cancelled.")
+			return nil
+		}
 		if err != nil {
 			return err
+		}
+		if !plan.HasLocalCopy() && len(targets) == 0 {
+			fmt.Fprintln(out, "No remote selected and there is no local copy; deletion cancelled.")
+			return nil
+		}
+		if err := plan.CheckLocalV1Propagation(targets, flags.localOnly); err != nil {
+			return err //nolint:wrapcheck // names the checkpoint and the remedy already
 		}
 	}
 	confirmed, err := confirmControlPlaneDeletion(ctx, out, "checkpoint "+cid.String(), flags.force, canPrompt)
@@ -139,11 +187,11 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 
 	result, execErr := strategy.ExecuteCheckpointDelete(ctx, plan, strategy.CheckpointDeleteOptions{Targets: targets, LocalOnly: flags.localOnly})
 	if flags.json && result != nil {
-		if err := writeCheckpointDeleteJSON(out, plan, targets, result, false); err != nil {
+		if err := writeCheckpointDeleteJSON(out, buildCheckpointDeleteJSON(plan, targets, result, false, flags.localOnly)); err != nil {
 			return err
 		}
 	} else if result != nil {
-		printCheckpointDeleteResult(out, plan, result, flags)
+		printCheckpointDeleteResult(out, plan, targets, result, flags)
 	}
 	if execErr != nil {
 		return fmt.Errorf("delete checkpoint %s: %w", cid, execErr)
@@ -234,6 +282,9 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	if plan.LocalV1 {
 		fmt.Fprintf(w, "  %s branch\n", paths.MetadataBranchName)
 	}
+	for _, name := range plan.TrackingV1 {
+		fmt.Fprintf(w, "  remote-tracking %s (stays until %s's copy is deleted)\n", trackingV1RefName(name), name)
+	}
 
 	fmt.Fprintln(w, "\nRemotes:")
 	if len(plan.Targets) == 0 {
@@ -269,7 +320,7 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 			fmt.Fprintln(w, "  (scan truncated; there may be more)")
 		}
 	}
-	if checkpointDeleteTouchesV1(plan) {
+	if checkpointDeleteTouchesV1(plan, targets, localOnly) {
 		fmt.Fprintf(w, "\nNote: on the %s branch the checkpoint is removed from the tip only; its content stays in the branch history.\n", paths.MetadataBranchName)
 	}
 	if plan.PushSessionsDisabled && !localOnly {
@@ -280,7 +331,14 @@ func printCheckpointDeletePlan(w io.Writer, plan *strategy.CheckpointDeletePlan,
 	}
 }
 
+func trackingV1RefName(remoteName string) string {
+	return "refs/remotes/" + remoteName + "/" + paths.MetadataBranchName
+}
+
 func describeDeleteTarget(t strategy.CheckpointDeleteTarget) string {
+	if t.NotChecked {
+		return "not checked (--local-only)"
+	}
 	if !t.Reachable {
 		return "unreachable"
 	}
@@ -311,16 +369,22 @@ func selectionNote(t strategy.CheckpointDeleteTarget, selected []strategy.Checkp
 	return ""
 }
 
-func checkpointDeleteTouchesV1(plan *strategy.CheckpointDeletePlan) bool {
-	if plan.LocalV1 || len(plan.TrackingV1) > 0 {
+// checkpointDeleteTouchesV1 reports whether this delete removes a v1 copy,
+// leaving its content in that branch's history: the local branch, or a
+// selected remote's.
+func checkpointDeleteTouchesV1(plan *strategy.CheckpointDeletePlan, targets []strategy.CheckpointDeleteTarget, localOnly bool) bool {
+	if plan.LocalV1 {
 		return true
 	}
-	return slices.ContainsFunc(plan.Targets, func(t strategy.CheckpointDeleteTarget) bool {
+	if localOnly {
+		return false
+	}
+	return slices.ContainsFunc(targets, func(t strategy.CheckpointDeleteTarget) bool {
 		return t.V1 == strategy.V1CopyPresent || t.V1 == strategy.V1CopyUnknown
 	})
 }
 
-func printCheckpointDeleteResult(w io.Writer, plan *strategy.CheckpointDeletePlan, result *strategy.CheckpointDeleteResult, flags checkpointDeleteFlags) {
+func printCheckpointDeleteResult(w io.Writer, plan *strategy.CheckpointDeletePlan, selected []strategy.CheckpointDeleteTarget, result *strategy.CheckpointDeleteResult, flags checkpointDeleteFlags) {
 	fmt.Fprintf(w, "Local ref: %s\n", result.LocalRef)
 	if plan.LocalV1 {
 		fmt.Fprintf(w, "Local %s: %s\n", paths.MetadataBranchName, result.LocalV1)
@@ -335,28 +399,65 @@ func printCheckpointDeleteResult(w io.Writer, plan *strategy.CheckpointDeletePla
 	if result.Failed() {
 		return
 	}
-	unchecked := unreachableTargetNames(plan, flags)
-	if len(unchecked) == 0 {
+	notSelected := unselectedHolderNames(plan, selected, flags)
+	notChecked := notCheckedTargetNames(plan)
+	unreachable := unreachableTargetNames(plan, flags)
+	if len(notSelected) == 0 && len(notChecked) == 0 && len(unreachable) == 0 {
 		fmt.Fprintf(w, "Deleted checkpoint %s.\n", plan.CheckpointID)
 		return
 	}
-	fmt.Fprintf(w, "Deleted checkpoint %s from every remote that could be reached. Could not check %s, which may still hold it; retry with:\n",
-		plan.CheckpointID, strings.Join(unchecked, ", "))
-	for _, name := range unchecked {
-		fmt.Fprintf(w, "  entire checkpoint delete %s --remote %s\n", plan.CheckpointID, name)
+	if flags.localOnly {
+		fmt.Fprintf(w, "Deleted the local copy of checkpoint %s.\n", plan.CheckpointID)
+	} else {
+		fmt.Fprintf(w, "Deleted checkpoint %s from the selected locations.\n", plan.CheckpointID)
 	}
+	for _, name := range notSelected {
+		fmt.Fprintf(w, "Still on %s (not selected).\n", name)
+	}
+	for _, name := range notChecked {
+		fmt.Fprintf(w, "%s was not checked (--local-only) and may still hold it.\n", name)
+	}
+	if len(unreachable) > 0 {
+		fmt.Fprintf(w, "Could not check %s, which may still hold it; retry with:\n", strings.Join(unreachable, ", "))
+		for _, name := range unreachable {
+			fmt.Fprintf(w, "  entire checkpoint delete %s --remote %s\n", plan.CheckpointID, name)
+		}
+	}
+}
+
+// unselectedHolderNames names the reachable holders this delete left alone:
+// excluded by --remote or deselected at the prompt. --local-only never probes,
+// so it has no known holders; notCheckedTargetNames covers it.
+func unselectedHolderNames(plan *strategy.CheckpointDeletePlan, selected []strategy.CheckpointDeleteTarget, flags checkpointDeleteFlags) []string {
+	if flags.localOnly {
+		return nil
+	}
+	var names []string
+	for _, t := range plan.HolderTargets() {
+		if !slices.ContainsFunc(selected, func(s strategy.CheckpointDeleteTarget) bool { return s.URL == t.URL }) {
+			names = append(names, t.Name())
+		}
+	}
+	return names
+}
+
+func notCheckedTargetNames(plan *strategy.CheckpointDeletePlan) []string {
+	var names []string
+	for _, t := range plan.Targets {
+		if t.NotChecked {
+			names = append(names, t.Name())
+		}
+	}
+	return names
 }
 
 // unreachableTargetNames names the targets the probe could not reach. An
 // unreachable remote is a warning, never a failure, but the summary must not
 // claim the checkpoint is gone everywhere while one of them may still hold it.
 func unreachableTargetNames(plan *strategy.CheckpointDeletePlan, flags checkpointDeleteFlags) []string {
-	if flags.localOnly {
-		return nil
-	}
 	var names []string
 	for _, t := range plan.Targets {
-		if t.Reachable {
+		if t.Reachable || t.NotChecked {
 			continue
 		}
 		if len(flags.remotes) > 0 && !slices.ContainsFunc(t.Remotes, func(n string) bool { return slices.Contains(flags.remotes, n) }) {
@@ -378,15 +479,22 @@ type checkpointDeleteJSON struct {
 	OtherLocalTruncated  bool                          `json:"other_local_session_checkpoints_truncated,omitempty"`
 	V1HistoryRetained    bool                          `json:"v1_history_retained"`
 	PushSessionsDisabled bool                          `json:"push_sessions_disabled,omitempty"`
-	Warnings             []string                      `json:"warnings,omitempty"`
+	// NotFound: no local copy and no reachable remote holds it.
+	NotFound bool `json:"not_found,omitempty"`
+	// Refusal: why a dry run's delete would be refused.
+	Refusal  string   `json:"refusal,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type checkpointDeleteLocalJSON struct {
-	Ref       string `json:"ref,omitempty"`
-	RefOID    string `json:"ref_oid,omitempty"`
-	V1        bool   `json:"v1"`
-	RefResult string `json:"ref_result,omitempty"`
-	V1Result  string `json:"v1_result,omitempty"`
+	Ref    string `json:"ref,omitempty"`
+	RefOID string `json:"ref_oid,omitempty"`
+	V1     bool   `json:"v1"`
+	// TrackingV1 names remotes whose remote-tracking v1 ref holds it; each
+	// stays until that remote's copy is deleted.
+	TrackingV1 []string `json:"tracking_v1,omitempty"`
+	RefResult  string   `json:"ref_result,omitempty"`
+	V1Result   string   `json:"v1_result,omitempty"`
 }
 
 type checkpointDeleteRemoteJSON struct {
@@ -425,17 +533,17 @@ type checkpointDeleteSiblingJSON struct {
 	SessionIDs   []string `json:"session_ids"`
 }
 
-func buildCheckpointDeleteJSON(plan *strategy.CheckpointDeletePlan, targets []strategy.CheckpointDeleteTarget, result *strategy.CheckpointDeleteResult, dryRun bool) checkpointDeleteJSON {
+func buildCheckpointDeleteJSON(plan *strategy.CheckpointDeletePlan, targets []strategy.CheckpointDeleteTarget, result *strategy.CheckpointDeleteResult, dryRun, localOnly bool) checkpointDeleteJSON {
 	doc := checkpointDeleteJSON{
 		CheckpointID:         plan.CheckpointID.String(),
 		DryRun:               dryRun,
-		Local:                checkpointDeleteLocalJSON{Ref: plan.LocalRef.String(), V1: plan.LocalV1},
+		Local:                checkpointDeleteLocalJSON{Ref: plan.LocalRef.String(), V1: plan.LocalV1, TrackingV1: plan.TrackingV1},
 		Remotes:              []checkpointDeleteRemoteJSON{},
 		Sessions:             []checkpointDeleteSessionJSON{},
 		SessionStates:        []checkpointDeleteStateJSON{},
 		OtherLocal:           []checkpointDeleteSiblingJSON{},
 		OtherLocalTruncated:  plan.OtherLocalTruncated,
-		V1HistoryRetained:    checkpointDeleteTouchesV1(plan),
+		V1HistoryRetained:    checkpointDeleteTouchesV1(plan, targets, localOnly),
 		PushSessionsDisabled: plan.PushSessionsDisabled,
 		Warnings:             plan.Warnings,
 	}
@@ -488,6 +596,8 @@ func buildCheckpointDeleteJSON(plan *strategy.CheckpointDeletePlan, targets []st
 
 func checkpointDeleteTargetStatus(t strategy.CheckpointDeleteTarget) string {
 	switch {
+	case t.NotChecked:
+		return "not_checked"
 	case !t.Reachable:
 		return "unreachable"
 	case t.HoldsCheckpoint():
@@ -497,8 +607,8 @@ func checkpointDeleteTargetStatus(t strategy.CheckpointDeleteTarget) string {
 	}
 }
 
-func writeCheckpointDeleteJSON(w io.Writer, plan *strategy.CheckpointDeletePlan, targets []strategy.CheckpointDeleteTarget, result *strategy.CheckpointDeleteResult, dryRun bool) error {
-	data, err := json.MarshalIndent(buildCheckpointDeleteJSON(plan, targets, result, dryRun), "", "  ")
+func writeCheckpointDeleteJSON(w io.Writer, doc checkpointDeleteJSON) error {
+	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode JSON: %w", err)
 	}

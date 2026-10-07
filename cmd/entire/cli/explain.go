@@ -653,7 +653,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		slog.String("commit", abbreviateCommitHash(lookup.repo, hash)),
 		slog.String("checkpoint_id", cpID.String()))
 	if err := runExplainCheckpointWithLookup(ctx, w, errW, cpID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, lookup, nil, summaryTimeoutSeconds); err != nil {
-		return trailerCheckpointError(lookup.repo, hash, cpID, err)
+		return trailerCheckpointError(ctx, lookup.repo, hash, cpID, err)
 	}
 	return nil
 }
@@ -3036,22 +3036,29 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 	// Delegate to checkpoint detail view, forwarding the full flag set so
 	// --generate / --raw-transcript / --force work via --commit as well.
 	if err := runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds); err != nil {
-		return trailerCheckpointError(repo, hash, checkpointID, err)
+		return trailerCheckpointError(ctx, repo, hash, checkpointID, err)
 	}
 	return nil
 }
 
 // trailerCheckpointError attributes a checkpoint failure to the commit whose
-// Entire-Checkpoint trailer named it. A miss gets its own wording: commits keep
-// their trailers when `entire checkpoint delete` removes a checkpoint, so
-// "not found" there usually means deleted, not a broken store.
-func trailerCheckpointError(repo *git.Repository, hash plumbing.Hash, cpID id.CheckpointID, err error) error {
-	if errors.Is(err, checkpoint.ErrCheckpointNotFound) && shouldFallBackToCommitResolution(err) {
-		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w (may have been deleted)", abbreviateCommitHash(repo, hash), cpID, checkpoint.ErrCheckpointNotFound)
+// Entire-Checkpoint trailer named it. Commits keep their trailers when
+// `entire checkpoint delete` removes a checkpoint, so a miss on an ID this
+// clone deleted says so; any other miss stays a plain not-found.
+func trailerCheckpointError(ctx context.Context, repo *git.Repository, hash plumbing.Hash, cpID id.CheckpointID, err error) error {
+	if errors.Is(err, checkpoint.ErrCheckpointNotFound) && shouldFallBackToCommitResolution(err) && deletedFromThisClone(ctx, cpID) {
+		return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w (deleted with `entire checkpoint delete`)", abbreviateCommitHash(repo, hash), cpID, checkpoint.ErrCheckpointNotFound)
 	}
 	// The user typed a commit, not this checkpoint ID — without the trailer
 	// linkage the error reads as if they asked for an unknown ID.
 	return fmt.Errorf("commit %s references checkpoint %s via its Entire-Checkpoint trailer: %w", abbreviateCommitHash(repo, hash), cpID, err)
+}
+
+// deletedFromThisClone reports whether cpID is on the local deleted list. An
+// unreadable list answers no: the hint is informational.
+func deletedFromThisClone(ctx context.Context, cpID id.CheckpointID) bool {
+	deleted, err := checkpoint.LoadDeletedCheckpoints(ctx)
+	return err == nil && deleted.Contains(cpID)
 }
 
 // pagerLookupEnv is overridable for tests so pager env-gate behavior can be

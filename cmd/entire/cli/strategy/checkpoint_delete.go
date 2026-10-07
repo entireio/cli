@@ -27,6 +27,11 @@ import (
 // holds the checkpoint.
 var ErrCheckpointDeleteNotFound = errors.New("checkpoint not found")
 
+// ErrCheckpointDeleteV1WouldPropagate refuses a delete that would remove the
+// local v1 copy while leaving the copy on the remote the next pre-push sends
+// the v1 branch to: that push would carry the removal there anyway.
+var ErrCheckpointDeleteV1WouldPropagate = errors.New("the local v1 removal would reach an unselected remote on the next push")
+
 // CheckpointRemoteTargetName names the dedicated checkpoint_remote store in
 // delete plans and in --remote selection, which otherwise take git remote names.
 const CheckpointRemoteTargetName = "checkpoint_remote"
@@ -61,9 +66,12 @@ type CheckpointDeleteTarget struct {
 	Remotes []string
 	// URL is passed verbatim to git. Display it through Display only.
 	URL string
-	// Reachable is false when the probe failed; ProbeError says why.
+	// Reachable is false when the probe failed (ProbeError says why) or was
+	// skipped (NotChecked).
 	Reachable  bool
 	ProbeError string
+	// NotChecked: --local-only planned the delete without contacting it.
+	NotChecked bool
 	// RefOID is the checkpoint ref's oid on the remote, zero when absent.
 	RefOID plumbing.Hash
 	// RefName is the checkpoint ref as the remote spells it (its shard's case
@@ -127,7 +135,11 @@ type CheckpointDeletePlan struct {
 	// LocalV1 reports a copy on the local entire/checkpoints/v1 branch.
 	LocalV1 bool
 	// TrackingV1 lists remote names whose remote-tracking v1 ref holds it.
-	TrackingV1            []string
+	// Those refs move only when that remote's copy is deleted.
+	TrackingV1 []string
+	// V1PushURL is where the next pre-push sends the local v1 branch: set only
+	// when git-branch is the primary backend and pushes are enabled.
+	V1PushURL             string
 	Targets               []CheckpointDeleteTarget
 	Sessions              []CheckpointDeleteSession
 	SessionStates         []CheckpointDeleteState
@@ -166,9 +178,51 @@ func (p *CheckpointDeletePlan) ActiveStates() []CheckpointDeleteState {
 	return out
 }
 
+// CheckpointDeletePlanOptions narrows what PlanCheckpointDelete inspects.
+type CheckpointDeletePlanOptions struct {
+	// LocalOnly resolves the remote targets but never contacts them: each is
+	// marked NotChecked.
+	LocalOnly bool
+}
+
+// UnreachableTargetNames names the targets the probe could not reach.
+func (p *CheckpointDeletePlan) UnreachableTargetNames() []string {
+	var names []string
+	for _, t := range p.Targets {
+		if !t.Reachable && !t.NotChecked {
+			names = append(names, t.Name())
+		}
+	}
+	return names
+}
+
+// CheckLocalV1Propagation refuses a delete whose local v1 removal the next
+// pre-push would carry to a remote the user did not select. The removal is a
+// commit on the local v1 branch, and pre-push fast-forwards the sync remote's
+// v1 branch to it, deleting that remote's copy too. A sync remote probed and
+// found without a v1 copy loses nothing, so it need not be selected.
+func (p *CheckpointDeletePlan) CheckLocalV1Propagation(targets []CheckpointDeleteTarget, localOnly bool) error {
+	if !p.LocalV1 || p.V1PushURL == "" {
+		return nil
+	}
+	if !localOnly && slices.ContainsFunc(targets, func(t CheckpointDeleteTarget) bool { return t.URL == p.V1PushURL }) {
+		return nil
+	}
+	dest := CheckpointDeleteTarget{URL: p.V1PushURL}
+	if i := slices.IndexFunc(p.Targets, func(t CheckpointDeleteTarget) bool { return t.URL == p.V1PushURL }); i >= 0 {
+		dest = p.Targets[i]
+	}
+	if dest.Reachable && dest.V1 == V1CopyAbsent {
+		return nil
+	}
+	return fmt.Errorf("refusing to delete checkpoint %s: %w: it is on the local %s branch, and the next git push sends that branch to %s (%s), "+
+		"removing that remote's copy too; delete it from %s as well (drop --local-only, or add --remote %s), or switch to the git-refs checkpoint backend",
+		p.CheckpointID, ErrCheckpointDeleteV1WouldPropagate, paths.MetadataBranchName, dest.Name(), dest.Display(), dest.Name(), dest.Name())
+}
+
 // PlanCheckpointDelete inspects the local repository and every checkpoint
 // remote for cid. It writes nothing: no fetch, no ref update, no state save.
-func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID) (*CheckpointDeletePlan, error) {
+func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID, opts CheckpointDeletePlanOptions) (*CheckpointDeletePlan, error) {
 	if cid.Kind() == id.KindUnknown {
 		return nil, fmt.Errorf("invalid checkpoint ID %q", cid)
 	}
@@ -192,20 +246,27 @@ func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID) (*Checkpoint
 	if err != nil {
 		return nil, err
 	}
-	if cid.Kind() == id.KindLegacy {
-		plan.LocalV1 = commitHasCheckpoint(repo, refTip(repo, v1BranchRef), cid)
-		plan.TrackingV1 = trackingV1Holders(ctx, repo, cid)
-	}
+	// Any ID kind: a git-branch mirror writes ULID checkpoints to v1 too.
+	plan.LocalV1 = commitHasCheckpoint(repo, refTip(repo, v1BranchRef), cid)
+	plan.TrackingV1 = trackingV1Holders(ctx, repo, cid)
 
-	plan.Targets = probeDeleteTargets(ctx, root, repo, cid, resolveDeleteTargets(ctx, root, plan))
+	targets := resolveDeleteTargets(ctx, root, plan)
+	if opts.LocalOnly {
+		for i := range targets {
+			targets[i].NotChecked = true
+		}
+		plan.Targets = targets
+	} else {
+		plan.Targets = probeDeleteTargets(ctx, root, repo, cid, targets)
+	}
 	for _, t := range plan.Targets {
-		if !t.Reachable {
+		if !t.Reachable && !t.NotChecked {
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not reach %s (%s): %s", t.Name(), t.Display(), t.ProbeError))
 		}
 	}
 
 	if !plan.HasLocalCopy() && len(plan.HolderTargets()) == 0 {
-		return plan, fmt.Errorf("%w: %s is not in this repository or on any reachable checkpoint remote", ErrCheckpointDeleteNotFound, cid)
+		return plan, notFoundError(plan, opts.LocalOnly)
 	}
 
 	readCheckpointSessions(ctx, repo, plan)
@@ -214,6 +275,19 @@ func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID) (*Checkpoint
 	}
 	collectOtherSessionCheckpoints(ctx, repo, plan)
 	return plan, nil
+}
+
+// notFoundError says where the checkpoint was looked for, naming any remote
+// that could not be checked, since one of those may still hold it.
+func notFoundError(plan *CheckpointDeletePlan, localOnly bool) error {
+	if localOnly {
+		return fmt.Errorf("%w: %s is not in this repository (remotes were not checked: --local-only)", ErrCheckpointDeleteNotFound, plan.CheckpointID)
+	}
+	if unreachable := plan.UnreachableTargetNames(); len(unreachable) > 0 {
+		return fmt.Errorf("%w: %s is not in this repository or on any reachable checkpoint remote (could not reach %s)",
+			ErrCheckpointDeleteNotFound, plan.CheckpointID, strings.Join(unreachable, ", "))
+	}
+	return fmt.Errorf("%w: %s is not in this repository or on any reachable checkpoint remote", ErrCheckpointDeleteNotFound, plan.CheckpointID)
 }
 
 // findLocalCheckpointRef lists refs/entire/checkpoints/*/<id> and matches with
@@ -319,9 +393,11 @@ func resolveDeleteTargets(ctx context.Context, root string, plan *CheckpointDele
 	s, settingsErr := settings.Load(ctx)
 	checkpointRemoteConfigured := settingsErr == nil && s.GetCheckpointRemote() != nil
 
+	dedicatedPushURL := ""
 	if checkpointRemoteConfigured && elected.Name != "" {
 		if url, enabled, err := remote.PushURL(ctx, elected.Name); err == nil && enabled {
 			add(CheckpointRemoteTargetName, url)
+			dedicatedPushURL = url
 		}
 	}
 	if checkpointRemoteConfigured {
@@ -345,10 +421,21 @@ func resolveDeleteTargets(ctx context.Context, root string, plan *CheckpointDele
 	for _, name := range names {
 		if urls, err := remote.GetPushURLs(ctx, name); err == nil && len(urls) > 0 {
 			add(name, urls[0])
+			if name == elected.Name && dedicatedPushURL == "" {
+				plan.V1PushURL = urls[0]
+			}
 		}
 		if url, err := remote.GetRemoteURL(ctx, name); err == nil {
 			add(name, url)
 		}
+	}
+	// pre-push sends the local v1 branch only on a git-branch primary, to the
+	// dedicated store when one is in use, else to the sync remote by name.
+	switch {
+	case plan.PushSessionsDisabled || primaryIsGitRefs(ctx):
+		plan.V1PushURL = ""
+	case dedicatedPushURL != "":
+		plan.V1PushURL = dedicatedPushURL
 	}
 	return dedupeDeleteTargets(candidates)
 }
@@ -392,13 +479,19 @@ func probeDeleteTargets(ctx context.Context, root string, repo *git.Repository, 
 
 func classifyRemoteV1(repo *git.Repository, cid id.CheckpointID, tip plumbing.Hash) V1CopyState {
 	switch {
-	case tip.IsZero() || cid.Kind() != id.KindLegacy:
+	case tip.IsZero():
 		return V1CopyAbsent
 	case commitHasCheckpoint(repo, tip, cid):
 		return V1CopyPresent
 	default:
 		if _, err := repo.CommitObject(tip); err == nil {
 			return V1CopyAbsent // the tip is local and has no such subtree
+		}
+		// A ULID reaches a remote v1 branch only through a pushed git-branch
+		// mirror, which pre-push does not do yet: treating an unfetched tip as
+		// unknown would fetch the whole branch for every ULID delete.
+		if cid.Kind() != id.KindLegacy {
+			return V1CopyAbsent
 		}
 		return V1CopyUnknown
 	}
