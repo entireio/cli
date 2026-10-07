@@ -633,6 +633,7 @@ func HydrateListedCheckpointInfo(ctx context.Context, store interface {
 	out.FilesTouched = summary.FilesTouched
 	out.SessionCount = len(summary.Sessions)
 	out.Imported = summary.Imported
+	out.LinkedCommits = summary.LinkedCommits
 	out.SessionIDs = nil
 	lastMetaOK := len(summary.Sessions) == 0
 	for i := range summary.Sessions {

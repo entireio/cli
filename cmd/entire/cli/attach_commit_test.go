@@ -333,9 +333,10 @@ func TestAttributionResolver_LinkedCheckpoints(t *testing.T) {
 	store := &listingAttributionStub{infos: []cpkg.CheckpointInfo{
 		{CheckpointID: "111111111111", LinkedCommits: []cpkg.LinkedCommit{{SHA: sha}}},
 	}}
+	commit := &object.Commit{Hash: plumbing.NewHash(sha)}
 	r := &attributionResolver{ctx: context.Background(), store: store}
 	for range 2 {
-		if got := r.linkedCheckpoints(sha); len(got) != 1 || got[0] != "111111111111" {
+		if got := r.linkedCheckpoints(commit); len(got) != 1 || got[0] != "111111111111" {
 			t.Fatalf("linkedCheckpoints = %v", got)
 		}
 	}
@@ -344,11 +345,11 @@ func TestAttributionResolver_LinkedCheckpoints(t *testing.T) {
 	}
 
 	plain := &attributionResolver{ctx: context.Background(), store: &attributionCheckpointReaderStub{}}
-	if got := plain.linkedCheckpoints(sha); len(got) != 0 {
+	if got := plain.linkedCheckpoints(commit); len(got) != 0 {
 		t.Fatalf("a store that cannot list links nothing, got %v", got)
 	}
 	failing := &attributionResolver{ctx: context.Background(), store: &listingAttributionStub{listErr: context.Canceled}}
-	if got := failing.linkedCheckpoints(sha); len(got) != 0 {
+	if got := failing.linkedCheckpoints(commit); len(got) != 0 {
 		t.Fatalf("a failed listing links nothing, got %v", got)
 	}
 }
@@ -460,6 +461,49 @@ func TestAttachCommit_RefusesToAmendWhenAFetchFails(t *testing.T) {
 	}
 	if got := headCommitOf(t); got.Hash != head.Hash {
 		t.Fatalf("HEAD was rewritten after a failed fetch: %s", got.Hash)
+	}
+}
+
+// A session that already has a checkpoint is linked to HEAD by amending. When
+// HEAD carries another checkpoint's trailer and is already pushed, that amend
+// would rewrite a shared commit, so it is refused.
+func TestAttachCommit_ExistingCheckpointNeverAmendsAPushedHead(t *testing.T) {
+	setupAttachTestRepo(t)
+	if out, err := attachHeadless(t, "attach-existing-cp", attachOptions{}); err != nil {
+		t.Fatalf("first attach: %v\n%s", err, out)
+	}
+	dir := mustGetwd(t)
+	testutil.WriteFile(t, dir, "other.txt", "other")
+	testutil.GitAdd(t, dir, "other.txt")
+	testutil.GitCommit(t, dir, "other work\n\nEntire-Checkpoint: a1b2c3d4e5f6")
+	head := headCommitOf(t)
+	pushToOrigin(t)
+
+	out, err := attachHeadless(t, "attach-existing-cp", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "already pushed") {
+		t.Fatalf("err = %v, want a refusal to rewrite the pushed HEAD\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("pushed HEAD was rewritten: %s %q", got.Hash, got.Message)
+	}
+}
+
+// Only the remotes the branch pushes to are checked, so an unrelated remote
+// that can't be reached (an old fork, say) doesn't block amending an unpushed
+// HEAD.
+func TestAttachCommit_IgnoresAnUnreachableUnrelatedRemote(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+	pushToOrigin(t)
+	testutil.RunGit(t, mustGetwd(t), "remote", "add", "oldfork", filepath.Join(t.TempDir(), "missing.git"))
+	commitAt(t, "more.txt")
+
+	out, err := attachHeadless(t, "attach-unrelated-remote", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if _, ok := trailers.ParseCheckpoint(headCommitOf(t).Message); !ok {
+		t.Fatalf("unpushed HEAD was not amended:\n%s", out)
 	}
 }
 

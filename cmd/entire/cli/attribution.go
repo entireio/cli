@@ -141,6 +141,9 @@ type attributionResolver struct {
 	// linked lists checkpoints once, for commits linked without a trailer
 	// (`entire session attach --commit`). nil until first needed.
 	linked []checkpoint.CheckpointInfo
+	// linkedByCommit caches linkedCheckpoints per commit, since reading a
+	// remote-discovered stub for its links can fetch.
+	linkedByCommit map[string][]id.CheckpointID
 }
 
 func newBlameCmd() *cobra.Command {
@@ -409,7 +412,7 @@ func (r *attributionResolver) resolveLine(raw rawBlameLine, file string) attribu
 
 	cpIDs := trailers.ParseAllCheckpoints(commit.Message)
 	if len(cpIDs) == 0 {
-		cpIDs = r.linkedCheckpoints(raw.CommitSHA)
+		cpIDs = r.linkedCheckpoints(commit)
 	}
 	if len(cpIDs) == 0 {
 		line.Authorship = attributionHuman
@@ -445,10 +448,14 @@ func (r *attributionResolver) commit(sha string) (*object.Commit, error) {
 	return commit, nil
 }
 
-// linkedCheckpoints returns the checkpoints that link commitSHA without a
+// linkedCheckpoints returns the checkpoints that link commit without a
 // trailer. The store is listed once per blame run; a store that cannot list
 // contributes none.
-func (r *attributionResolver) linkedCheckpoints(commitSHA string) []id.CheckpointID {
+func (r *attributionResolver) linkedCheckpoints(commit *object.Commit) []id.CheckpointID {
+	sha := commit.Hash.String()
+	if ids, ok := r.linkedByCommit[sha]; ok {
+		return ids
+	}
 	if r.linked == nil {
 		r.linked = []checkpoint.CheckpointInfo{}
 		if lister, ok := r.store.(interface {
@@ -459,7 +466,12 @@ func (r *attributionResolver) linkedCheckpoints(commitSHA string) []id.Checkpoin
 			}
 		}
 	}
-	return checkpoint.CheckpointsLinkedTo(r.linked, commitSHA)
+	ids := checkpoint.CheckpointsLinkedToWithStubs(r.ctx, r.store, r.linked, sha, commit.Committer.When)
+	if r.linkedByCommit == nil {
+		r.linkedByCommit = make(map[string][]id.CheckpointID)
+	}
+	r.linkedByCommit[sha] = ids
+	return ids
 }
 
 func (r *attributionResolver) checkpointContext(cpID id.CheckpointID, file string) attributionCheckpointContext {

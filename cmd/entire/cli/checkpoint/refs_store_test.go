@@ -570,6 +570,28 @@ func TestHydrateListedCheckpointInfo_MatchesLocalList(t *testing.T) {
 	assert.Equal(t, local, hydrated)
 }
 
+// A remote-discovered stub carries no links until hydrated; hydration must
+// copy them, as local List does, or a commit linked by attach in another clone
+// looks unlinked.
+func TestHydrateListedCheckpointInfo_CopiesLinkedCommits(t *testing.T) {
+	t.Parallel()
+
+	store := newRefsStore(t)
+	cid := id.MustCheckpointID("01KVBJCWYA4YW6J5M9GP655HZN")
+	links := []LinkedCommit{{SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Repo: "github/o/r"}}
+	require.NoError(t, store.Write(context.Background(), Session{
+		CheckpointID:  cid,
+		SessionID:     "sess-linked",
+		Strategy:      "manual-commit",
+		Transcript:    redact.AlreadyRedacted([]byte("transcript")),
+		LinkedCommits: links,
+	}))
+
+	hydrated := HydrateListedCheckpointInfo(context.Background(), store, remoteDiscoveredInfo(cid))
+	assert.Equal(t, links, hydrated.LinkedCommits)
+	assert.Equal(t, []id.CheckpointID{cid}, CheckpointsLinkedTo([]CheckpointInfo{hydrated}, links[0].SHA))
+}
+
 func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)

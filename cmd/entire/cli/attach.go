@@ -466,6 +466,23 @@ func linkExistingCheckpoint(logCtx context.Context, w, errW io.Writer, sessionID
 			sessionID, cpID, plan.target.Hash.String()[:12],
 		)
 	}
+	// HEAD carrying another checkpoint's trailer was planned without a push
+	// check, but adding this one is still an amend: make sure no remote has it.
+	if plan.mode == attachJoinExisting && !slices.Contains(trailers.ParseAllCheckpoints(plan.target.Message), existingState.LastCheckpointID) {
+		remote, unreachable, err := remoteHoldingPushedCommit(logCtx, plan.target)
+		if err != nil {
+			return err
+		}
+		if remote != "" {
+			return fmt.Errorf(
+				"session %s already has checkpoint %s, and HEAD %s is already pushed to %s, so it won't be rewritten; recording a link to it in an existing checkpoint is not supported yet",
+				sessionID, cpID, plan.target.Hash.String()[:12], remote,
+			)
+		}
+		if err := unconfirmedUnpushedError(plan.target, unreachable); err != nil {
+			return err
+		}
+	}
 	fmt.Fprintf(w, "Session %s already has checkpoint %s\n", sessionID, cpID)
 	amendOrPrintTrailer(logCtx, w, errW, plan.target, cpID)
 	return nil
@@ -513,44 +530,60 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 	if len(trailers.ParseAllCheckpoints(target.Message)) > 0 {
 		return attachLinkPlan{target: target, mode: attachJoinExisting}, nil
 	}
-	// Remote-tracking refs can be stale — someone may have pushed this commit
-	// from another clone — and amending a shared commit is what this rule
-	// exists to avoid, so refresh them first.
-	fetchRemotesForAttach(ctx)
-	remote, err := remoteHoldingCommit(ctx, target)
+	remote, unreachable, err := remoteHoldingPushedCommit(ctx, target)
 	if err != nil {
 		return attachLinkPlan{}, err
-	}
-	var unreachable []string
-	if remote == "" {
-		// Tracking refs may not cover every branch (single-branch clones,
-		// narrowed refspecs), so ask each remote directly.
-		remote, unreachable = remoteContainingCommit(ctx, target)
 	}
 	switch {
 	case remote != "":
 		return attachLinkPlan{target: target, mode: attachRecordLink, remote: remote}, nil
-	case target.Hash.Equal(headCommit.Hash) && len(unreachable) > 0:
-		// Absence from a remote we couldn't reach proves nothing; amending a
-		// commit someone already pushed is what this rule exists to prevent.
-		return attachLinkPlan{}, fmt.Errorf("couldn't confirm that HEAD %s isn't already pushed (could not reach %s), so it won't be amended; retry when the remote is reachable",
-			target.Hash.String()[:12], strings.Join(unreachable, ", "))
 	case target.Hash.Equal(headCommit.Hash):
+		if err := unconfirmedUnpushedError(target, unreachable); err != nil {
+			return attachLinkPlan{}, err
+		}
 		return attachLinkPlan{target: target, mode: attachAmendHead}, nil
 	default:
 		return attachLinkPlan{}, fmt.Errorf("commit %s is not pushed and is not HEAD, so it can't be linked: amending it would mean a rebase, and a recorded link wouldn't survive one. Push it first, or attach while it is HEAD", target.Hash.String()[:12])
 	}
 }
 
-// checkpointLinkedTo finds the most recent local checkpoint whose recorded
-// links name target. A listing failure finds none.
+// remoteHoldingPushedCommit returns a remote whose branches contain target, or
+// "" when none does, plus the remotes it could not reach. Remote-tracking refs
+// can be stale — someone may have pushed this commit from another clone — and
+// amending a shared commit is what attach must avoid, so the remotes the branch
+// pushes to are refreshed first, then asked directly: tracking refs may not
+// cover every branch (single-branch clones, narrowed refspecs).
+func remoteHoldingPushedCommit(ctx context.Context, target *object.Commit) (remote string, unreachable []string, err error) {
+	remotes := attachRemotesToCheck(ctx)
+	fetchRemotesForAttach(ctx, remotes)
+	if remote, err = remoteHoldingCommit(ctx, target); err != nil || remote != "" {
+		return remote, nil, err
+	}
+	remote, unreachable = remoteContainingCommit(ctx, target, remotes)
+	return remote, unreachable, nil
+}
+
+// unconfirmedUnpushedError refuses to amend target when a remote it might have
+// been pushed to couldn't be reached: absence from that remote proves nothing,
+// and amending a commit someone already pushed is what attach must avoid.
+func unconfirmedUnpushedError(target *object.Commit, unreachable []string) error {
+	if len(unreachable) == 0 {
+		return nil
+	}
+	return fmt.Errorf("couldn't confirm that HEAD %s isn't already pushed (could not reach %s), so it won't be amended; retry when the remote is reachable",
+		target.Hash.String()[:12], strings.Join(unreachable, ", "))
+}
+
+// checkpointLinkedTo finds the most recent checkpoint whose recorded links
+// name target, reading remote-discovered stubs for theirs. A listing failure
+// finds none.
 func checkpointLinkedTo(ctx context.Context, store cpkg.PersistentStore, target *object.Commit) (id.CheckpointID, bool) {
 	infos, err := store.List(ctx)
 	if err != nil {
 		logging.Debug(ctx, "attach: listing checkpoints for a recorded link failed", slog.String("error", err.Error()))
 		return id.EmptyCheckpointID, false
 	}
-	linked := cpkg.CheckpointsLinkedTo(infos, target.Hash.String())
+	linked := cpkg.CheckpointsLinkedToWithStubs(ctx, store, infos, target.Hash.String(), target.Committer.When)
 	if len(linked) == 0 {
 		return id.EmptyCheckpointID, false
 	}
@@ -570,6 +603,33 @@ func attachRemotes(ctx context.Context) []string {
 	return strings.Fields(string(out))
 }
 
+// attachRemotesToCheck lists the remotes a commit on the current branch would
+// have been pushed to: the branch's upstream and push remotes, else origin, else
+// every remote (detached HEAD, or no origin). Unrelated remotes, like an old
+// fork's, are left alone, so one that is unreachable doesn't block attach.
+func attachRemotesToCheck(ctx context.Context) []string {
+	all := attachRemotes(ctx)
+	var remotes []string
+	if branch, err := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD").Output(); err == nil {
+		out, err := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(upstream:remotename)%0a%(push:remotename)", "--", strings.TrimSpace(string(branch))).Output()
+		if err == nil {
+			for _, name := range strings.Fields(string(out)) {
+				if slices.Contains(all, name) && !slices.Contains(remotes, name) {
+					remotes = append(remotes, name)
+				}
+			}
+		}
+	}
+	switch {
+	case len(remotes) > 0:
+		return remotes
+	case slices.Contains(all, defaultMirrorRemote):
+		return []string{defaultMirrorRemote}
+	default:
+		return all
+	}
+}
+
 // attachGitCommand runs git against a remote without credential prompts. SSH
 // keeps the user's own configuration: attach is a foreground command, and
 // without a terminal ssh can't prompt anyway.
@@ -579,25 +639,25 @@ func attachGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// fetchRemotesForAttach refreshes every remote's tracking refs, best-effort:
-// a configured refspec can fail without the remote being unreachable, so
+// fetchRemotesForAttach refreshes remotes' tracking refs, best-effort: a
+// configured refspec can fail without the remote being unreachable, so
 // reachability is decided by remoteContainingCommit instead.
-func fetchRemotesForAttach(ctx context.Context) {
-	for _, remote := range attachRemotes(ctx) {
+func fetchRemotesForAttach(ctx context.Context, remotes []string) {
+	for _, remote := range remotes {
 		fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
 		_ = attachGitCommand(fetchCtx, "fetch", "--quiet", "--no-tags", "--", remote).Run() //nolint:errcheck // best-effort; see doc comment
 		cancel()
 	}
 }
 
-// remoteContainingCommit asks each remote directly whether any of its branches
-// contains target, and returns the first that does plus the remotes it could
-// not reach. Branch tips come from ls-remote; when target is not a tip, the
-// remote's branch objects are fetched without writing any ref, so a commit
-// someone pushed and then built on is still found.
-func remoteContainingCommit(ctx context.Context, target *object.Commit) (holder string, unreachable []string) {
+// remoteContainingCommit asks each of remotes directly whether any of its
+// branches contains target, and returns the first that does plus the remotes it
+// could not reach. Branch tips come from ls-remote; when target is not a tip,
+// the branches whose tips aren't already local are fetched without writing any
+// ref, so a commit someone pushed and then built on is still found.
+func remoteContainingCommit(ctx context.Context, target *object.Commit, remotes []string) (holder string, unreachable []string) {
 	sha := target.Hash.String()
-	for _, remote := range attachRemotes(ctx) {
+	for _, remote := range remotes {
 		branches, tips, err := remoteBranchTips(ctx, remote)
 		if err != nil {
 			unreachable = append(unreachable, remote)
@@ -606,18 +666,18 @@ func remoteContainingCommit(ctx context.Context, target *object.Commit) (holder 
 		if slices.Contains(tips, sha) {
 			return remote, unreachable
 		}
-		if len(branches) == 0 {
-			continue
-		}
-		// Fetch the branches by name (a source-only glob refspec is invalid),
-		// writing no ref, only to get their objects for the ancestry check.
-		fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--", remote}, branches...)
-		fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
-		err = attachGitCommand(fetchCtx, fetchArgs...).Run()
-		cancel()
-		if err != nil {
-			unreachable = append(unreachable, remote)
-			continue
+		if missing := branchesWithMissingTips(ctx, branches, tips); len(missing) > 0 {
+			// Fetch the branches by name (a source-only glob refspec is
+			// invalid), writing no ref, only to get their objects for the
+			// ancestry check.
+			fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--", remote}, missing...)
+			fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+			err = attachGitCommand(fetchCtx, fetchArgs...).Run()
+			cancel()
+			if err != nil {
+				unreachable = append(unreachable, remote)
+				continue
+			}
 		}
 		for _, tip := range tips {
 			if exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", sha, tip).Run() == nil {
@@ -626,6 +686,28 @@ func remoteContainingCommit(ctx context.Context, target *object.Commit) (holder 
 		}
 	}
 	return "", unreachable
+}
+
+// branchesWithMissingTips returns the branches whose tip commit isn't in the
+// local object store. After a default refresh that is usually none, so nothing
+// is fetched twice.
+func branchesWithMissingTips(ctx context.Context, branches, tips []string) []string {
+	if len(tips) == 0 {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "cat-file", "--batch-check=%(objectname)")
+	cmd.Stdin = strings.NewReader(strings.Join(tips, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		return branches
+	}
+	var missing []string
+	for i, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if i < len(branches) && strings.HasSuffix(line, " missing") {
+			missing = append(missing, branches[i])
+		}
+	}
+	return missing
 }
 
 // remoteBranchTips lists remote's branches and the commit at each tip.

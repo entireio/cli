@@ -643,7 +643,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 	if !hasCheckpoint {
 		// A commit linked by `entire session attach --commit` carries no
 		// trailer; its checkpoint names it instead. Most recent wins.
-		if linked := checkpoint.CheckpointsLinkedTo(lookup.committed, hash.String()); len(linked) > 0 {
+		if linked := checkpoint.CheckpointsLinkedToWithStubs(ctx, lookup.store, lookup.committed, hash.String(), commit.Committer.When); len(linked) > 0 {
 			cpID, hasCheckpoint = linked[0], true
 			linkVia = "a link recorded by entire session attach"
 		}

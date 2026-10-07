@@ -2989,9 +2989,46 @@ func unionLinkedCommits(existing, added []LinkedCommit) []LinkedCommit {
 func CheckpointsLinkedTo(infos []CheckpointInfo, commitSHA string) []id.CheckpointID {
 	var ids []id.CheckpointID
 	for _, info := range infos {
-		if slices.ContainsFunc(info.LinkedCommits, func(l LinkedCommit) bool { return l.SHA == commitSHA }) {
+		if linksCommit(info.LinkedCommits, commitSHA) {
 			ids = append(ids, info.CheckpointID)
 		}
 	}
 	return ids
+}
+
+// linkedStubSkew is how far before a commit a checkpoint linking it may claim
+// to have been minted, allowing for clock skew between machines.
+const linkedStubSkew = 24 * time.Hour
+
+// CheckpointsLinkedToWithStubs is CheckpointsLinkedTo for a listing that may
+// hold names-only stubs (git-refs checkpoints discovered on a remote), whose
+// links are unknown until read. A stub minted no earlier than committedAt
+// (less linkedStubSkew) is read for its links; an older one predates the commit
+// and can't link it. Reads share ListHydrationPassTimeout, and a stub that
+// can't be read links nothing.
+func CheckpointsLinkedToWithStubs(ctx context.Context, reader interface {
+	Read(ctx context.Context, checkpointID id.CheckpointID) (*CheckpointSummary, error)
+}, infos []CheckpointInfo, commitSHA string, committedAt time.Time) []id.CheckpointID {
+	passCtx, cancel := context.WithTimeout(ctx, ListHydrationPassTimeout)
+	defer cancel()
+	since := committedAt.Add(-linkedStubSkew)
+	var ids []id.CheckpointID
+	for _, info := range infos {
+		links := info.LinkedCommits
+		if info.ListedStub && !info.CreatedAt.Before(since) && passCtx.Err() == nil {
+			readCtx, readCancel := context.WithTimeout(passCtx, ListHydrationTimeout)
+			if summary, err := reader.Read(readCtx, info.CheckpointID); err == nil && summary != nil {
+				links = summary.LinkedCommits
+			}
+			readCancel()
+		}
+		if linksCommit(links, commitSHA) {
+			ids = append(ids, info.CheckpointID)
+		}
+	}
+	return ids
+}
+
+func linksCommit(links []LinkedCommit, commitSHA string) bool {
+	return slices.ContainsFunc(links, func(l LinkedCommit) bool { return l.SHA == commitSHA })
 }

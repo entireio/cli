@@ -696,13 +696,16 @@ When condensing multiple concurrent sessions:
 `entire session attach <id> [--commit <rev>]` (default HEAD) picks how to
 link from the target commit, never from a flag (`planAttachLink`):
 - the commit already carries an `Entire-Checkpoint` trailer: the session joins
-  that checkpoint;
+  that checkpoint (a session that already has its own checkpoint would amend
+  that one in, so it gets the same push check and is refused on a pushed HEAD);
 - the commit is HEAD and no remote holds it: the trailer is amended in, without
   a prompt (nobody else has the commit, and a trailer survives a later rebase).
-  "No remote holds it" must be confirmed: attach fetches every remote and also
-  asks each remote whether a branch tip is the commit (single-branch clones
-  don't track every branch). If any remote can't be reached, it refuses rather
-  than amend a commit it couldn't check;
+  "No remote holds it" must be confirmed against the remotes the branch pushes
+  to (its upstream and push remotes, else `origin`, else every remote): attach
+  fetches them and asks each whether a branch contains the commit, fetching
+  only branches whose tips aren't local (single-branch clones don't track every
+  branch). If one can't be reached, it refuses rather than amend a commit it
+  couldn't check; an unrelated remote, like an old fork, is not consulted;
 - a remote branch already holds the commit: the link is recorded in the
   checkpoint and the commit is left unchanged, so nothing needs a force-push;
 - an older commit no remote holds is refused (amending it means a rebase, and a
@@ -719,7 +722,9 @@ verifies it only when the authenticated checkpoint pusher is the commit's
 author (otherwise it is stored as an unverified attachment; attach warns when
 the local git author differs). Rewrites of the checkpoint keep existing entries
 (`unionLinkedCommits`). Readers consult trailers first and fall back to
-`checkpoint.CheckpointsLinkedTo` (`explain <commit>`, `blame`/`why`). Attach
+`checkpoint.CheckpointsLinkedToWithStubs` (`explain <commit>`, `blame`/`why`,
+and attach itself), which also reads git-refs stubs discovered on a remote
+that were minted no earlier than a day before the commit. Attach
 pushes the checkpoint itself through the pre-push path, since no later push may
 carry it, and confirms the remote's ref now matches before reporting success:
 for a pushed commit the checkpoint is the only record of the link, so a skipped
