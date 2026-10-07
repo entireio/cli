@@ -16,6 +16,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// The tests in this file assert on git ignore results. The developer's global
+// git config (a global excludes file) cannot leak into them: the package's
+// TestMain isolates git config process-wide with gitenv.IsolateMain, which
+// spawned git commands inherit.
+
 // setupIgnoreRouteRepo creates a repo whose .gitignore excludes ignored.env,
 // chdirs into it, and returns the repo dir (symlinks resolved) and a mock agent
 // whose transcript analyzer names both the ignored file and a normal one.
@@ -131,7 +136,16 @@ func addSubmodule(t *testing.T, dir string) string {
 	testutil.GitCommit(t, subSrc, "lib v1")
 	testutil.RunGit(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subSrc, "sub")
 	testutil.RunGit(t, dir, "commit", "-q", "-m", "add submodule")
-	return filepath.Join(dir, "sub")
+	sub := filepath.Join(dir, "sub")
+	// The submodule is a fresh clone: it does not inherit the local identity
+	// testutil.InitRepo wrote into subSrc, and the test process's git config
+	// is isolated, so give the clone the same identity before committing in it.
+	// Without this, git falls back to host-derived identity, which works on a
+	// developer machine and fails on CI.
+	testutil.RunGit(t, sub, "config", "user.name", "Test User")
+	testutil.RunGit(t, sub, "config", "user.email", "test@example.com")
+	testutil.RunGit(t, sub, "config", "commit.gpgsign", "false")
+	return sub
 }
 
 // A dirty submodule pointer reaches turn end through the git-status merge.
@@ -151,7 +165,7 @@ func TestHandleLifecycleTurnEnd_DropsSubmoduleGitlink(t *testing.T) {
 	}))
 	// Move the submodule's checked-out commit so the parent sees `M sub`.
 	testutil.WriteFile(t, sub, "lib.txt", "v2\n")
-	testutil.RunGit(t, sub, "commit", "-q", "-am", "lib v2")
+	testutil.RunGit(t, sub, "-c", "user.useConfigOnly=true", "commit", "-q", "-am", "lib v2") // useConfigOnly: never fall back to a host-derived identity
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent.txt"), []byte("agent"), 0o600))
 	require.Contains(t, testutil.RunGit(t, dir, "--no-optional-locks", "status", "--porcelain"), " M sub")
 
@@ -179,7 +193,7 @@ func TestHandleLifecycleSubagentEnd_DropsSubmoduleGitlink(t *testing.T) {
 
 	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
 	testutil.WriteFile(t, sub, "lib.txt", "v2\n")
-	testutil.RunGit(t, sub, "commit", "-q", "-am", "lib v2")
+	testutil.RunGit(t, sub, "-c", "user.useConfigOnly=true", "commit", "-q", "-am", "lib v2") // useConfigOnly: never fall back to a host-derived identity
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent.txt"), []byte("agent"), 0o600))
 	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, &agent.Event{
 		Type: agent.SubagentEnd, SessionID: sessionID, SessionRef: transcriptPath, ToolUseID: toolUseID, Timestamp: time.Now(),

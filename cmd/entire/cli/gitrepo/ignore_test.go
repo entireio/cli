@@ -11,8 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// isolateGitConfig keeps the developer's global and system git config — in
+// particular a global excludes file — out of git subprocesses for the rest of
+// the test, so ignore results depend only on the fixture's own .gitignore.
+// gitrepo has no process-wide isolation (no TestMain), so this is done per
+// test with t.Setenv, which is why these tests cannot run in parallel.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	empty := filepath.Join(t.TempDir(), "empty-gitconfig")
+	require.NoError(t, os.WriteFile(empty, nil, 0o600))
+	t.Setenv("GIT_CONFIG_GLOBAL", empty)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
 func TestIgnoredPaths(t *testing.T) {
-	t.Parallel()
+	// Not parallel: isolateGitConfig uses t.Setenv.
+	isolateGitConfig(t)
 	dir := t.TempDir()
 	initCmd := exec.CommandContext(t.Context(), "git", "init", "-q", dir)
 	initCmd.Env = EnvWithoutRepoOverrides()
