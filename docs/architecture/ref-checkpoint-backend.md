@@ -168,7 +168,7 @@ To close that gap `List` supports **opt-in remote discovery**:
 - **Creates (`Session`) are not kind-routed.** They target the configured primary (+ mirrors); the minted ID already matches the primary's format.
 - **Backfills (`SessionSummary`, `SessionTranscript`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
 
-All general read paths — resume, explain, attribution, blame, tokens, attach — inherit this routing for free through `checkpoint.Open`; there is no per-command config knob.
+All general read paths — resume, explain, blame, why, tokens, attach — inherit this routing for free through `checkpoint.Open`; there is no per-command config knob.
 
 ## Configuration and rollout
 

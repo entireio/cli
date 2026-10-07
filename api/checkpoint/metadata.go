@@ -1,7 +1,6 @@
 package checkpoint
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -229,11 +228,6 @@ type WriteOptions struct {
 
 	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
 	SessionMetrics *SessionMetrics
-
-	// CombinedAttribution carries an existing checkpoint's holistic attribution
-	// through migration so v1 root summaries keep it. The CLI no longer computes
-	// line attribution; normal condensation leaves this nil.
-	CombinedAttribution *Attribution
 
 	// Summary is an optional AI-generated summary for this checkpoint.
 	// This field may be nil when:
@@ -492,15 +486,6 @@ type Metadata struct {
 	// AI-generated summary of the checkpoint
 	Summary *Summary `json:"summary,omitempty"`
 
-	// Attribution is the line-level attribution older CLIs calculated at commit
-	// time. The CLI no longer writes it; it is read from existing checkpoints
-	// only, and absent on new ones.
-	Attribution *Attribution `json:"initial_attribution,omitempty"`
-
-	// PromptAttributions is the raw per-prompt attribution diagnostics older
-	// CLIs wrote alongside Attribution. Read-only, like Attribution.
-	PromptAttributions json.RawMessage `json:"prompt_attributions,omitempty"`
-
 	// Kind identifies the session purpose (e.g., "agent_review"). Empty for normal sessions.
 	Kind string `json:"kind,omitempty"`
 
@@ -567,8 +552,8 @@ type SessionFilePaths struct {
 
 // CheckpointSummary is the root-level metadata.json for a checkpoint.
 // It contains aggregated statistics from all sessions and a map of session IDs
-// to their file paths. Session-specific data (including initial_attribution)
-// is stored in the session's subdirectory metadata.json.
+// to their file paths. Session-specific data is stored in the session's
+// subdirectory metadata.json.
 //
 // Structure on entire/checkpoints/v1 branch:
 //
@@ -590,12 +575,11 @@ type CheckpointSummary struct {
 	Strategy     string          `json:"strategy"`
 	Branch       string          `json:"branch,omitempty"`
 	// CommitSHA: import-only anchor; see WriteOptions.CommitSHA.
-	CommitSHA           string             `json:"commit_sha,omitempty"`
-	CheckpointsCount    int                `json:"checkpoints_count"`
-	FilesTouched        []string           `json:"files_touched"`
-	Sessions            []SessionFilePaths `json:"sessions"`
-	TokenUsage          *types.TokenUsage  `json:"token_usage,omitempty"`
-	CombinedAttribution *Attribution       `json:"combined_attribution,omitempty"`
+	CommitSHA        string             `json:"commit_sha,omitempty"`
+	CheckpointsCount int                `json:"checkpoints_count"`
+	FilesTouched     []string           `json:"files_touched"`
+	Sessions         []SessionFilePaths `json:"sessions"`
+	TokenUsage       *types.TokenUsage  `json:"token_usage,omitempty"`
 
 	// HasReview is the umbrella "any review happened" flag: true when at least
 	// one session in this checkpoint has a review-kind Kind (currently
@@ -650,26 +634,4 @@ type CodeLearning struct {
 	Line    int    `json:"line,omitempty"`     // Start line number
 	EndLine int    `json:"end_line,omitempty"` // End line for ranges (optional)
 	Finding string `json:"finding"`            // What was learned
-}
-
-// Attribution captures line-level attribution metrics at commit time, as
-// written by CLI versions that computed it. Current versions do not compute
-// line attribution; the type remains so existing checkpoints stay readable.
-//
-// Attribution Metrics:
-//   - TotalCommitted keeps the historical "net additions" view for compatibility
-//   - TotalLinesChanged measures total committed line changes (adds + modifies + removes)
-//   - AgentPercentage represents "of the lines changed in this commit, what percentage came from the agent"
-//   - AgentRemoved tracks committed deletions performed by the agent
-type Attribution struct {
-	CalculatedAt      time.Time `json:"calculated_at"`
-	AgentLines        int       `json:"agent_lines"`              // Lines added by agent that remain in the commit
-	AgentRemoved      int       `json:"agent_removed"`            // Lines removed by agent that remain removed in the commit
-	HumanAdded        int       `json:"human_added"`              // Lines added by human (excluding modifications)
-	HumanModified     int       `json:"human_modified"`           // Lines modified by human (estimate: min(added, removed))
-	HumanRemoved      int       `json:"human_removed"`            // Lines removed by human (excluding modifications)
-	TotalCommitted    int       `json:"total_committed"`          // Net additions in commit (legacy additions-focused metric)
-	TotalLinesChanged int       `json:"total_lines_changed"`      // Total committed line changes (adds + modifies + removes)
-	AgentPercentage   float64   `json:"agent_percentage"`         // (agent_lines + agent_removed) / total_lines_changed * 100
-	MetricVersion     int       `json:"metric_version,omitempty"` // 0/absent = legacy (additions-only %), 2 = changed-lines %
 }

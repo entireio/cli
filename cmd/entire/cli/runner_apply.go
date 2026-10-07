@@ -184,8 +184,7 @@ const diffContextLines = 3
 // renderTemplateDiff renders a line-level diff of two prompt templates, with
 // unchanged runs longer than twice the context collapsed to a count.
 // diffmatchpatch is character-oriented, so the templates are folded to one
-// char per line first (the DiffLinesToChars/DiffCharsToLines pattern, as in
-// strategy/manual_commit_attribution.go).
+// char per line first (the DiffLinesToChars/DiffCharsToLines pattern).
 func renderTemplateDiff(oldText, newText string) string {
 	dmp := diffmatchpatch.New()
 	a, b, lines := dmp.DiffLinesToChars(oldText, newText)

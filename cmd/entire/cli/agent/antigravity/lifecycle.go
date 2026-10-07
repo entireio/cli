@@ -57,7 +57,7 @@ func (a *AntigravityAgent) ParseHookEvent(_ context.Context, hookName string, st
 //
 // Background: agy's PreInvocation fires per *model invocation*, but Entire's
 // TurnStart event is designed for per-*user-prompt*. The framework's TurnStart
-// handler re-captures pre-prompt state (preUntrackedFiles, attribution
+// handler re-captures pre-prompt state (preUntrackedFiles, transcript
 // baseline) on every call. If we emit TurnStart on every PreInvocation, the
 // baseline gets clobbered each time — by the time TurnEnd fires at Stop, the
 // pre-state reflects the post-tool-use snapshot, and DetectFileChanges sees

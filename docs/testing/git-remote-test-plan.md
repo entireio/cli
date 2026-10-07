@@ -83,7 +83,7 @@ These mostly **pin current behavior first**; several will surface product decisi
 | B6 | `ENTIRE_CHECKPOINT_TOKEN` with SSH-shaped origin URL (`git@host:o/r.git` pointing at the HTTPS test server via insteadOf or URL rewrite): fetch **and** push both coerce to HTTPS (regression `7afdaa33e`) | integration (HTTPS) | both |
 | B7 | Local-path origin (bare dir added as `origin`): `ParseURL` fails → raw-origin fallback still pushes/fetches correctly; no crash in URL derivation (pin; latent gap `isLocalPath`) | integration | both |
 
-### C. Cross-machine: clone → fetch → resume/explain/attribution — P0
+### C. Cross-machine: clone → fetch → resume/explain/blame — P0
 
 | # | Test | Layer | Backend |
 |---|---|---|---|
@@ -92,7 +92,7 @@ These mostly **pin current behavior first**; several will surface product decisi
 | C3 | git-refs offline read: unreachable remote + locally-missing ref → real error, **not** "checkpoint not found" (regression `7bbdad09c`) | integration | gr |
 | C4 | Clone over HTTPS with token: resume auto-fetch works with auth (e2e today is file-path only) | integration (HTTPS) | both |
 | C5 | Shallow user clone (`git clone --depth=1`): enable, session, commit, push, resume — no `.git/shallow` self-infliction (regressions #1443, #1276), replay refuses at shallow boundary rather than corrupting | integration | both |
-| C6 | Partial clone (`--filter=blob:none`): explain/attribution lazily fetch blobs via `fetch-pack`, no promisor config stamped onto `[remote "origin"]` (regressions #1069, #934 — extend the existing config-guard) | integration | both |
+| C6 | Partial clone (`--filter=blob:none`): explain/blame lazily fetch blobs via `fetch-pack`, no promisor config stamped onto `[remote "origin"]` (regressions #1069, #934 — extend the existing config-guard) | integration | both |
 
 ### D. Divergence & recovery matrix — P0 (the most re-broken area)
 

@@ -154,11 +154,6 @@ func (s *Store) writeSession(opts cp.WriteOptions) error {
 	// Summary-level flags accumulate across sessions and survive recompute.
 	sc.Summary.HasReview = sc.Summary.HasReview || opts.HasReview
 	sc.Summary.HasInvestigation = sc.Summary.HasInvestigation || opts.HasInvestigation
-	if opts.CombinedAttribution != nil {
-		// Migration path: an initial write may carry an existing checkpoint's
-		// holistic attribution. Normal condensation never sets it.
-		sc.Summary.CombinedAttribution = opts.CombinedAttribution
-	}
 
 	recomputeSummary(sc)
 	return s.save(sc)

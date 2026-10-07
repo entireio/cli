@@ -518,7 +518,7 @@ func checkpointLsTreeCommand(checkpointID id.CheckpointID, basePath string) stri
 //	basePath/
 //	├── metadata.json         # CheckpointSummary (aggregated stats)
 //	├── 1/                    # First session
-//	│   ├── metadata.json     # Metadata (session-specific, includes initial_attribution)
+//	│   ├── metadata.json     # Metadata (session-specific)
 //	│   ├── full.jsonl        # Raw agent transcript (CLI resume/explain)
 //	│   ├── transcript.jsonl  # Compact transcript scoped to this checkpoint (pushed; not yet referenced by metadata.json)
 //	│   ├── prompt.txt
@@ -685,7 +685,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		)
 	}
 
-	// Write session-level metadata.json (Metadata with all fields including initial_attribution)
+	// Write session-level metadata.json (Metadata with all fields)
 	sessionMetadata := Metadata{
 		CheckpointID:                opts.CheckpointID,
 		SessionID:                   opts.SessionID,
@@ -743,7 +743,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		return fmt.Errorf("failed to aggregate session stats: %w", err)
 	}
 
-	combinedAttribution := opts.CombinedAttribution
 	hasReview := opts.HasReview
 	hasInvestigation := opts.HasInvestigation
 	// imported is the umbrella flag: true when any session in this checkpoint
@@ -755,9 +754,6 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
 		if readErr == nil {
-			if combinedAttribution == nil {
-				combinedAttribution = existingSummary.CombinedAttribution
-			}
 			if !hasReview {
 				hasReview = existingSummary.HasReview
 			}
@@ -777,19 +773,18 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	}
 
 	summary := CheckpointSummary{
-		CheckpointID:        opts.CheckpointID,
-		CLIVersion:          versioninfo.Version,
-		Strategy:            opts.Strategy,
-		Branch:              opts.Branch,
-		CommitSHA:           commitSHA,
-		CheckpointsCount:    checkpointsCount,
-		FilesTouched:        filesTouched,
-		Sessions:            sessions,
-		TokenUsage:          tokenUsage,
-		CombinedAttribution: combinedAttribution,
-		HasReview:           hasReview,
-		HasInvestigation:    hasInvestigation,
-		Imported:            imported,
+		CheckpointID:     opts.CheckpointID,
+		CLIVersion:       versioninfo.Version,
+		Strategy:         opts.Strategy,
+		Branch:           opts.Branch,
+		CommitSHA:        commitSHA,
+		CheckpointsCount: checkpointsCount,
+		FilesTouched:     filesTouched,
+		Sessions:         sessions,
+		TokenUsage:       tokenUsage,
+		HasReview:        hasReview,
+		HasInvestigation: hasInvestigation,
+		Imported:         imported,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")

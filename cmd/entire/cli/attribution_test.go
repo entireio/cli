@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +23,6 @@ import (
 	"github.com/entireio/cli/redact"
 
 	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,7 +91,7 @@ func TestParseAttributionLineRange(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestAttributionBlameShowsHumanAndAICheckpointLines(t *testing.T) {
+func TestAttributionBlameShowsCommitAndCheckpointLines(t *testing.T) {
 	repoRoot := newAttributionRepo(t)
 	writeAttributionCheckpoint(t, repoRoot, "a1b2c3d4e5f6", checkpoint.WriteOptions{
 		SessionID:        "session-ai-12345678",
@@ -110,16 +108,16 @@ func TestAttributionBlameShowsHumanAndAICheckpointLines(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, runAttributionBlame(context.Background(), &out, "auth.py", attributionBlameOptions{}))
 	text := out.String()
-	require.Contains(t, text, "[HU]")
-	require.Contains(t, text, "[AI]")
+	require.NotContains(t, text, "[AI]", "blame no longer classifies authorship")
+	require.NotContains(t, text, "Human:")
 	require.Contains(t, text, "Agent")
 	require.Contains(t, text, "Author")
 	require.Contains(t, text, "Checkpoint")
 	require.NotContains(t, text, "Model")
 	require.NotContains(t, text, "Checkpoint/Session")
 	require.Contains(t, text, "a1b2c3d4e5f6")
-	require.Contains(t, text, "AI: 1")
-	require.Contains(t, text, "Human: 1")
+	require.Contains(t, text, "Linked to a checkpoint: 1 (50%)")
+	require.Contains(t, text, "Other commits: 1 (50%)")
 	requireCompactBlameTableFits(t, text, 80)
 	requireCompactBlameColumnsAlign(t, text)
 }
@@ -128,13 +126,13 @@ func TestAttributionBlameColumnExpandsForFiveDigitLines(t *testing.T) {
 	lines := []attributionLine{
 		{
 			LineNumber: 9999,
-			Authorship: attributionHuman,
+			Status:     lineStatusCommit,
 			Author:     "Suhaan",
 			Content:    "human_line = 1",
 		},
 		{
 			LineNumber:   10000,
-			Authorship:   attributionAI,
+			Status:       lineStatusCheckpoint,
 			Agent:        "Codex",
 			Author:       "Codex",
 			CheckpointID: "a1b2c3d4e5f6",
@@ -152,7 +150,7 @@ func TestAttributionBlameColumnExpandsForFiveDigitLines(t *testing.T) {
 	text := out.String()
 
 	requireCompactBlameColumnsAlign(t, text)
-	require.Contains(t, text, "10000  [AI]")
+	require.Contains(t, text, "10000  Codex")
 	require.Equal(t, 5, attributionLineColumnWidth(lines))
 }
 
@@ -179,34 +177,6 @@ func TestAttributionBlameLongShowsDetailedColumns(t *testing.T) {
 	require.Contains(t, text, "Checkpoint/Session")
 	require.Contains(t, text, "claude-sonne")
 	require.Contains(t, text, "a2b2c3d4e5f6")
-}
-
-func TestAttributionBlameMarksMixedCheckpoint(t *testing.T) {
-	repoRoot := newAttributionRepo(t)
-	writeAttributionCheckpoint(t, repoRoot, "b1b2c3d4e5f6", checkpoint.WriteOptions{
-		SessionID:        "session-mixed-12345678",
-		Prompts:          []string{"Change agent code, then keep a user tweak."},
-		FilesTouched:     []string{"auth.py"},
-		Agent:            agent.AgentTypeClaudeCode,
-		Model:            "claude-sonnet-test",
-		CheckpointsCount: 1,
-	})
-	injectLegacySessionAttribution(t, repoRoot, "b1b2c3d4e5f6", &checkpoint.Attribution{
-		AgentLines:        1,
-		HumanModified:     1,
-		TotalCommitted:    1,
-		TotalLinesChanged: 2,
-		AgentPercentage:   50,
-		MetricVersion:     2,
-	})
-	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nmixed_line = 2\n")
-	testutil.GitAdd(t, repoRoot, "auth.py")
-	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("mixed update", checkpointid.MustCheckpointID("b1b2c3d4e5f6")))
-
-	var out bytes.Buffer
-	require.NoError(t, runAttributionBlame(context.Background(), &out, "auth.py", attributionBlameOptions{LineFlag: "2"}))
-	require.Contains(t, out.String(), "[MX]")
-	require.Contains(t, out.String(), "Mixed: 1")
 }
 
 func TestAttributionWhyLineShowsPromptAndCheckpoint(t *testing.T) {
@@ -251,7 +221,12 @@ func TestAttributionBlameJSONIsStable(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
 	require.Equal(t, "auth.py", payload.File)
 	require.Len(t, payload.Lines, 2)
-	require.Equal(t, attributionAI, payload.Lines[1].Authorship)
+	require.Equal(t, lineStatusCheckpoint, payload.Lines[1].Status)
+	require.Equal(t, lineStatusCommit, payload.Lines[0].Status)
+	require.Equal(t, 1, payload.Summary.CheckpointLines)
+	require.Equal(t, 1, payload.Summary.CommitLines)
+	require.NotContains(t, out.String(), `"authorship"`)
+	require.NotContains(t, out.String(), `"ai_lines"`)
 	require.Equal(t, "d1b2c3d4e5f6", payload.Lines[1].CheckpointID)
 	require.Contains(t, payload.Checkpoints, "d1b2c3d4e5f6")
 }
@@ -285,7 +260,7 @@ func TestAttributionBlameJSONLineFilterPrunesCheckpoints(t *testing.T) {
 	var humanPayload fileAttributionResult
 	require.NoError(t, json.Unmarshal(humanOut.Bytes(), &humanPayload))
 	require.Len(t, humanPayload.Lines, 1)
-	require.Equal(t, attributionHuman, humanPayload.Lines[0].Authorship)
+	require.Equal(t, lineStatusCommit, humanPayload.Lines[0].Status)
 	require.Empty(t, humanPayload.Checkpoints)
 
 	var aiOut bytes.Buffer
@@ -293,11 +268,13 @@ func TestAttributionBlameJSONLineFilterPrunesCheckpoints(t *testing.T) {
 	var aiPayload fileAttributionResult
 	require.NoError(t, json.Unmarshal(aiOut.Bytes(), &aiPayload))
 	require.Len(t, aiPayload.Lines, 1)
-	require.Equal(t, attributionAI, aiPayload.Lines[0].Authorship)
+	require.Equal(t, lineStatusCheckpoint, aiPayload.Lines[0].Status)
 	require.Contains(t, aiPayload.Checkpoints, "e1b2c3d4e5f6")
 }
 
-func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
+// When a commit links several checkpoints (e.g. a squash), the line takes the
+// checkpoint whose session touched the file.
+func TestAttributionBlameUsesFileMatchingCheckpoint(t *testing.T) {
 	repoRoot := newAttributionRepo(t)
 	writeAttributionCheckpoint(t, repoRoot, "f1b2c3d4e5f6", checkpoint.WriteOptions{
 		SessionID:        "session-auth-12345678",
@@ -308,18 +285,10 @@ func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
 	})
 	writeAttributionCheckpoint(t, repoRoot, "f2b2c3d4e5f6", checkpoint.WriteOptions{
 		SessionID:        "session-other-12345678",
-		Prompts:          []string{"Mixed update in another file."},
+		Prompts:          []string{"Update another file."},
 		FilesTouched:     []string{"other.py"},
 		Agent:            agent.AgentTypeClaudeCode,
 		CheckpointsCount: 1,
-	})
-	injectLegacySessionAttribution(t, repoRoot, "f2b2c3d4e5f6", &checkpoint.Attribution{
-		AgentLines:        1,
-		HumanModified:     1,
-		TotalCommitted:    1,
-		TotalLinesChanged: 2,
-		AgentPercentage:   50,
-		MetricVersion:     2,
 	})
 	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nai_line = 2\n")
 	testutil.GitAdd(t, repoRoot, "auth.py")
@@ -330,10 +299,10 @@ func TestAttributionBlameMixedUsesFileMatchingCheckpoint(t *testing.T) {
 	var payload fileAttributionResult
 	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
 	require.Len(t, payload.Lines, 1)
-	require.Equal(t, attributionAI, payload.Lines[0].Authorship)
+	require.Equal(t, lineStatusCheckpoint, payload.Lines[0].Status)
 	require.Equal(t, "f1b2c3d4e5f6", payload.Lines[0].CheckpointID)
-	require.Equal(t, 0, payload.Summary.MixedLines)
-	require.Equal(t, 1, payload.Summary.AILines)
+	require.Len(t, payload.Lines[0].Candidates, 2)
+	require.Equal(t, 1, payload.Summary.CheckpointLines)
 }
 
 func TestAttributionResolverUsesCheckpointReader(t *testing.T) {
@@ -425,40 +394,6 @@ func (s *attributionCheckpointReaderStub) ReadSessionMetadataAndPrompts(context.
 	return &s.content.Metadata, s.content.Prompts, nil
 }
 
-func TestAttributionBlameScopesMixedToSessionNotCheckpoint(t *testing.T) {
-	repoRoot := newAttributionRepo(t)
-	writeAttributionCheckpoint(t, repoRoot, "a9b2c3d4e5f6", checkpoint.WriteOptions{
-		SessionID:        "session-scoped-12345678",
-		Prompts:          []string{"Agent-only edit to auth.py."},
-		FilesTouched:     []string{"auth.py"},
-		Agent:            agent.AgentTypeClaudeCode,
-		CheckpointsCount: 1,
-		// The checkpoint as a whole mixed agent and human work (e.g. a
-		// human-edited file elsewhere in the same checkpoint), as recorded by
-		// CLIs that computed line attribution; the session that touched
-		// auth.py recorded none.
-		CombinedAttribution: &checkpoint.Attribution{
-			AgentLines:        1,
-			HumanModified:     1,
-			TotalCommitted:    2,
-			TotalLinesChanged: 2,
-			AgentPercentage:   50,
-			MetricVersion:     2,
-		},
-	})
-	testutil.WriteFile(t, repoRoot, "auth.py", "human_line = 1\nai_line = 2\n")
-	testutil.GitAdd(t, repoRoot, "auth.py")
-	testutil.GitCommit(t, repoRoot, trailers.FormatCheckpoint("scoped update", checkpointid.MustCheckpointID("a9b2c3d4e5f6")))
-
-	var out bytes.Buffer
-	require.NoError(t, runAttributionBlame(context.Background(), &out, "auth.py", attributionBlameOptions{LineFlag: "2", JSON: true}))
-	var payload fileAttributionResult
-	require.NoError(t, json.Unmarshal(out.Bytes(), &payload))
-	require.Len(t, payload.Lines, 1)
-	require.Equal(t, attributionAI, payload.Lines[0].Authorship)
-	require.Equal(t, 0, payload.Summary.MixedLines)
-}
-
 func TestAttributionFlagsSessionFallbackForUnmatchedFile(t *testing.T) {
 	repoRoot := newAttributionRepo(t)
 	// One checkpoint, two sessions, neither recording a touch to auth.py (e.g.
@@ -487,7 +422,7 @@ func TestAttributionFlagsSessionFallbackForUnmatchedFile(t *testing.T) {
 	var payload fileAttributionResult
 	require.NoError(t, json.Unmarshal(jsonOut.Bytes(), &payload))
 	require.Len(t, payload.Lines, 1)
-	require.Equal(t, attributionAI, payload.Lines[0].Authorship)
+	require.Equal(t, lineStatusCheckpoint, payload.Lines[0].Status)
 	require.True(t, payload.Lines[0].SessionFallback)
 
 	var whyOut bytes.Buffer
@@ -572,20 +507,20 @@ func TestAttributionWhyHidesExplainHintWhenMetadataMissing(t *testing.T) {
 
 func TestSummarizeAttributionLinesPercentagesSumTo100(t *testing.T) {
 	lines := []attributionLine{
-		{Authorship: attributionAI},
-		{Authorship: attributionHuman},
-		{Authorship: attributionMixed},
+		{Status: lineStatusCheckpoint},
+		{Status: lineStatusCommit},
+		{Status: lineStatusCommit},
 	}
 	summary := summarizeAttributionLines(lines)
-	require.Equal(t, 100, summary.AIPercentage+summary.HumanPercentage+summary.MixedPercentage)
+	require.Equal(t, 100, summary.CheckpointPercentage+summary.CommitPercentage)
 
-	// An uncommitted line shares the 100%, so the three visible percentages
+	// An uncommitted line shares the 100%, so the two visible percentages
 	// total less than 100 rather than each independently flooring to a sum
 	// that drifts away from a coherent whole.
-	lines = append(lines, attributionLine{Authorship: attributionUncommitted})
+	lines = append(lines, attributionLine{Status: lineStatusUncommitted})
 	summary = summarizeAttributionLines(lines)
-	visible := summary.AIPercentage + summary.HumanPercentage + summary.MixedPercentage
-	require.Equal(t, 75, visible)
+	require.Equal(t, 75, summary.CheckpointPercentage+summary.CommitPercentage)
+	require.Equal(t, 1, summary.UncommittedLines)
 }
 
 func TestRunGitBlameWrapsExecError(t *testing.T) {
@@ -602,8 +537,7 @@ func TestAttributionWhyPreservesLineIndentation(t *testing.T) {
 	var out bytes.Buffer
 	renderAttributionLineWhy(&out, "auth.py", attributionLine{
 		LineNumber:     2,
-		Authorship:     attributionHuman,
-		Tag:            "[HU]",
+		Status:         lineStatusCommit,
 		Author:         "Test User",
 		ShortCommitSHA: "abcdef12",
 		Content:        "    return True",
@@ -737,55 +671,6 @@ func writeAttributionCheckpoint(t *testing.T, repoRoot, checkpointID string, opt
 	require.NoError(t, err)
 }
 
-// injectLegacySessionAttribution rewrites the first session's metadata.json of
-// a committed checkpoint to carry initial_attribution, the way CLIs that
-// computed line attribution wrote it. The CLI no longer writes attribution, but
-// blame still reads it from existing checkpoints.
-func injectLegacySessionAttribution(t *testing.T, repoRoot, checkpointID string, attr *checkpoint.Attribution) {
-	t.Helper()
-	ctx := context.Background()
-	repo, err := git.PlainOpen(repoRoot)
-	require.NoError(t, err)
-	defer repo.Close()
-
-	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	ref, err := repo.Reference(refName, true)
-	require.NoError(t, err)
-	parent, err := repo.CommitObject(ref.Hash())
-	require.NoError(t, err)
-	tree, err := parent.Tree()
-	require.NoError(t, err)
-	entries := make(map[string]object.TreeEntry)
-	require.NoError(t, checkpoint.FlattenTree(repo, tree, "", entries))
-
-	metadataPath := checkpointid.MustCheckpointID(checkpointID).Path() + "/0/" + paths.MetadataFileName
-	entry, ok := entries[metadataPath]
-	require.True(t, ok, "session metadata %s not found", metadataPath)
-	blob, err := repo.BlobObject(entry.Hash)
-	require.NoError(t, err)
-	reader, err := blob.Reader()
-	require.NoError(t, err)
-	raw, err := io.ReadAll(reader)
-	require.NoError(t, reader.Close())
-	require.NoError(t, err)
-
-	var meta checkpoint.Metadata
-	require.NoError(t, json.Unmarshal(raw, &meta))
-	meta.Attribution = attr
-	updated, err := json.Marshal(meta)
-	require.NoError(t, err)
-	blobHash, err := checkpoint.CreateBlobFromContent(repo, updated)
-	require.NoError(t, err)
-	entry.Hash = blobHash
-	entries[metadataPath] = entry
-
-	treeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
-	require.NoError(t, err)
-	commitHash, err := checkpoint.CreateCommit(ctx, repo, treeHash, ref.Hash(), "legacy attribution fixture", "Test User", attributionTestEmail)
-	require.NoError(t, err)
-	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, commitHash)))
-}
-
 func formatCheckpointTrailers(message string, checkpointIDs ...string) string {
 	var b strings.Builder
 	b.WriteString(message)
@@ -796,14 +681,17 @@ func formatCheckpointTrailers(message string, checkpointIDs ...string) string {
 	return b.String()
 }
 
+// blameRowPattern matches a blame table row: leading indent, then the
+// right-aligned line number.
+var blameRowPattern = regexp.MustCompile(`^\s+\d+\s`)
+
 func requireCompactBlameTableFits(t *testing.T, text string, width int) {
 	t.Helper()
 	for _, line := range strings.Split(text, "\n") {
 		switch {
-		case strings.Contains(line, "Line  Tag"):
+		case strings.Contains(line, "Line  Agent"):
 		case strings.Contains(line, "──"):
-		case strings.Contains(line, "[HU]"):
-		case strings.Contains(line, "[AI]"):
+		case blameRowPattern.MatchString(line):
 		default:
 			continue
 		}
@@ -811,42 +699,53 @@ func requireCompactBlameTableFits(t *testing.T, text string, width int) {
 	}
 }
 
+// requireCompactBlameColumnsAlign checks that a row linked to a checkpoint
+// (agent column filled) and a plain commit row (agent column empty) both line
+// up under the header's Agent and Author columns.
 func requireCompactBlameColumnsAlign(t *testing.T, text string) {
 	t.Helper()
-	lines := strings.Split(text, "\n")
-	var header, humanRow, aiRow string
-	for _, line := range lines {
+	var header string
+	var rows []string
+	for _, line := range strings.Split(text, "\n") {
 		switch {
-		case strings.Contains(line, "Line  Tag"):
+		case strings.Contains(line, "Line  Agent"):
 			header = line
-		case humanRow == "" && strings.Contains(line, "[HU]"):
-			humanRow = line
-		case aiRow == "" && strings.Contains(line, "[AI]"):
-			aiRow = line
+		case blameRowPattern.MatchString(line):
+			rows = append(rows, line)
 		}
 	}
 	require.NotEmpty(t, header)
-	require.NotEmpty(t, humanRow)
-	require.NotEmpty(t, aiRow)
 
-	tagCol := strings.Index(header, "Tag")
 	agentCol := strings.Index(header, "Agent")
 	authorCol := strings.Index(header, "Author")
 	checkpointCol := strings.Index(header, "Checkpoint")
-	require.NotEqual(t, -1, tagCol)
 	require.NotEqual(t, -1, agentCol)
 	require.NotEqual(t, -1, authorCol)
 	require.NotEqual(t, -1, checkpointCol)
-
-	require.Equal(t, tagCol, strings.Index(humanRow, "[HU]"))
-	require.Equal(t, tagCol, strings.Index(aiRow, "[AI]"))
 	require.Equal(t, 8, authorCol-agentCol)
-	require.Equal(t, agentCol, firstNonSpaceIndex(aiRow, agentCol, authorCol))
-	require.Equal(t, authorCol, firstNonSpaceIndex(humanRow, authorCol, checkpointCol))
-	require.Equal(t, authorCol, firstNonSpaceIndex(aiRow, authorCol, checkpointCol))
-	require.NotEmpty(t, strings.TrimSpace(aiRow[agentCol:authorCol]))
-	require.NotEmpty(t, strings.TrimSpace(humanRow[authorCol:checkpointCol]))
-	require.NotEmpty(t, strings.TrimSpace(aiRow[authorCol:checkpointCol]))
+
+	var commitRow, checkpointRow string
+	for _, row := range rows {
+		if len(row) < checkpointCol {
+			continue
+		}
+		switch {
+		case strings.TrimSpace(row[agentCol:authorCol]) == "":
+			if commitRow == "" {
+				commitRow = row
+			}
+		case checkpointRow == "":
+			checkpointRow = row
+		}
+	}
+	require.NotEmpty(t, commitRow, "expected a row with no linked checkpoint")
+	require.NotEmpty(t, checkpointRow, "expected a row linked to a checkpoint")
+
+	require.Equal(t, agentCol, firstNonSpaceIndex(checkpointRow, agentCol, authorCol))
+	require.Equal(t, authorCol, firstNonSpaceIndex(commitRow, authorCol, checkpointCol))
+	require.Equal(t, authorCol, firstNonSpaceIndex(checkpointRow, authorCol, checkpointCol))
+	require.NotEmpty(t, strings.TrimSpace(commitRow[authorCol:checkpointCol]))
+	require.NotEmpty(t, strings.TrimSpace(checkpointRow[authorCol:checkpointCol]))
 }
 
 func firstNonSpaceIndex(s string, start, end int) int {

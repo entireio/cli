@@ -30,7 +30,6 @@ type (
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary
 	CodeLearning     = apicheckpoint.CodeLearning
-	Attribution      = apicheckpoint.Attribution
 
 	// Operation option types.
 	WriteOptions               = apicheckpoint.WriteOptions

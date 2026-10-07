@@ -182,8 +182,7 @@ func TestWhyRendersSessionLevelPromptCaveat(t *testing.T) {
 	var out bytes.Buffer
 	renderAttributionLineWhy(&out, "src/main.js", attributionLine{
 		LineNumber:         279,
-		Authorship:         attributionMixed,
-		Tag:                "[MX]",
+		Status:             lineStatusCheckpoint,
 		Agent:              "Codex",
 		Model:              "gpt-5.5",
 		CheckpointID:       "bfc2c1df9e4b",
@@ -202,8 +201,7 @@ func TestWhyRendersPlainPromptLabelForCheckpointPrompt(t *testing.T) {
 	var out bytes.Buffer
 	renderAttributionLineWhy(&out, "a.go", attributionLine{
 		LineNumber:   1,
-		Authorship:   attributionAI,
-		Tag:          "[AI]",
+		Status:       lineStatusCheckpoint,
 		Agent:        "Claude",
 		CheckpointID: "abc123abc123",
 		Prompt:       "do the thing",
@@ -283,11 +281,11 @@ func TestWhyLineFlagRejectsRange(t *testing.T) {
 func TestBlameCompactMarksApproximateAndAmbiguousLines(t *testing.T) {
 	t.Parallel()
 	lines := []attributionLine{
-		{LineNumber: 1, Authorship: attributionHuman, Author: "blackg", Content: "human = 1"},
-		{LineNumber: 2, Authorship: attributionAI, Agent: "Claude", Author: "blackg", CheckpointID: "a1b2c3d4e5f6", Content: "ok = 2"},
-		{LineNumber: 3, Authorship: attributionAI, Agent: "Codex", Author: "blackg", CheckpointID: "b1b2c3d4e5f6", SessionFallback: true, Content: "guess = 3"},
+		{LineNumber: 1, Status: lineStatusCommit, Author: "blackg", Content: "human = 1"},
+		{LineNumber: 2, Status: lineStatusCheckpoint, Agent: "Claude", Author: "blackg", CheckpointID: "a1b2c3d4e5f6", Content: "ok = 2"},
+		{LineNumber: 3, Status: lineStatusCheckpoint, Agent: "Codex", Author: "blackg", CheckpointID: "b1b2c3d4e5f6", SessionFallback: true, Content: "guess = 3"},
 		{
-			LineNumber: 4, Authorship: attributionMixed, Agent: "Codex", Author: "blackg", CheckpointID: "c1b2c3d4e5f6",
+			LineNumber: 4, Status: lineStatusCheckpoint, Agent: "Codex", Author: "blackg", CheckpointID: "c1b2c3d4e5f6",
 			Candidates: []attributionCandidate{{CheckpointID: "c1b2c3d4e5f6"}, {CheckpointID: "d1b2c3d4e5f6"}},
 			Content:    "amb = 4",
 		},
@@ -300,7 +298,7 @@ func TestBlameCompactMarksApproximateAndAmbiguousLines(t *testing.T) {
 
 	require.Contains(t, text, "~", "approximate line should carry a marker")
 	require.Contains(t, text, "?", "ambiguous line should carry a marker")
-	require.Contains(t, text, "best-effort attribution")
+	require.Contains(t, text, "best-effort session match")
 	require.Contains(t, text, "candidate checkpoints")
 	requireCompactBlameColumnsAlign(t, text)
 	requireCompactBlameTableFits(t, text, 80)
@@ -309,15 +307,15 @@ func TestBlameCompactMarksApproximateAndAmbiguousLines(t *testing.T) {
 func TestBlameCompactNoLegendWhenAllConfident(t *testing.T) {
 	t.Parallel()
 	lines := []attributionLine{
-		{LineNumber: 1, Authorship: attributionHuman, Author: "blackg", Content: "human = 1"},
-		{LineNumber: 2, Authorship: attributionAI, Agent: "Claude", Author: "blackg", CheckpointID: "a1b2c3d4e5f6", Content: "ok = 2"},
+		{LineNumber: 1, Status: lineStatusCommit, Author: "blackg", Content: "human = 1"},
+		{LineNumber: 2, Status: lineStatusCheckpoint, Agent: "Claude", Author: "blackg", CheckpointID: "a1b2c3d4e5f6", Content: "ok = 2"},
 	}
 	result := &fileAttributionResult{File: "f.py", Lines: lines, Summary: summarizeAttributionLines(lines)}
 
 	var out bytes.Buffer
 	renderAttributionBlameCompact(&out, result, "")
 	text := out.String()
-	require.NotContains(t, text, "best-effort attribution")
+	require.NotContains(t, text, "best-effort session match")
 	require.NotContains(t, text, "candidate checkpoints")
 	requireCompactBlameColumnsAlign(t, text)
 }

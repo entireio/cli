@@ -386,7 +386,7 @@ func repoHasNoRemotes(ctx context.Context) bool {
 }
 
 // HookCheckpointRefFetcher returns the write-probe fetcher for git-hook
-// contexts (post-commit attribution, stop-time transcript finalize): the
+// contexts (post-commit condensation, stop-time transcript finalize): the
 // bounded budget plus BatchMode SSH, so a passphrase-protected key can never
 // prompt — or invisibly hang — inside a hook the user's git command is
 // waiting on.
