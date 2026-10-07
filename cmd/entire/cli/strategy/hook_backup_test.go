@@ -467,9 +467,13 @@ func TestInstallHooks_ReclaimedChainRunsEachHookOnce(t *testing.T) { //nolint:tp
 	for name, tc := range map[string]struct {
 		wrapper     func(string) string
 		interpreter string
+		reinstall   bool
 	}{
-		"bash template":   {preCommitWrapper, "bash"},
-		"python template": {preCommitPythonWrapper, "python3"},
+		"bash template":   {preCommitWrapper, "bash", false},
+		"python template": {preCommitPythonWrapper, "python3", false},
+		// pre-commit install again after the reclaim: its wrapper runs Entire's
+		// hook as .legacy, and Entire's backup is that same wrapper.
+		"pre-commit installed again": {preCommitWrapper, "bash", true},
 	} {
 		// Not parallel: two of these exec'ing fresh scripts at once stall in
 		// dyld on macOS under -race.
@@ -477,22 +481,25 @@ func TestInstallHooks_ReclaimedChainRunsEachHookOnce(t *testing.T) { //nolint:tp
 			if _, err := exec.LookPath(tc.interpreter); err != nil {
 				t.Skipf("wrapper needs %s", tc.interpreter)
 			}
-			runReclaimedChain(t, tc.wrapper("commit-msg"))
+			runReclaimedChain(t, tc.wrapper("commit-msg"), tc.reinstall)
 		})
 	}
 }
 
-func runReclaimedChain(t *testing.T, wrapper string) {
+func runReclaimedChain(t *testing.T, wrapper string, reinstall bool) {
 	t.Helper()
 	f := newHooksFixture(t)
 	bin := t.TempDir()
 	log := filepath.Join(t.TempDir(), "log")
 	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
-	// hook-impl --config=... --hook-type=T --hook-dir D -- args: run D/T.legacy, then the checks.
+	// hook-impl --config=... --hook-type=T --hook-dir D -- args: run D/T.legacy
+	// with PRE_COMMIT_RUNNING_LEGACY set, then the checks. Like hook-impl, it
+	// refuses to run inside its own legacy hook (migration mode).
 	writeExec(t, filepath.Join(bin, "pre-commit"), `#!/bin/sh
+if [ -n "$PRE_COMMIT_RUNNING_LEGACY" ]; then echo "bug: migration mode" >&2; exit 1; fi
 type=; dir=
 while [ $# -gt 0 ]; do case "$1" in --hook-type=*) type=${1#--hook-type=};; --hook-dir) dir=$2; shift;; --) shift; break;; esac; shift; done
-if [ -x "$dir/$type.legacy" ]; then "$dir/$type.legacy" "$@" || exit $?; fi
+if [ -x "$dir/$type.legacy" ]; then PRE_COMMIT_RUNNING_LEGACY=1 "$dir/$type.legacy" "$@" || exit $?; fi
 echo pre-commit >> `+log+"\n")
 	spec := specFor(t, "commit-msg")
 	f.write("commit-msg", wrapper)
@@ -500,6 +507,12 @@ echo pre-commit >> `+log+"\n")
 	f.write("commit-msg"+backupSuffix, "#!/bin/sh\necho user >> "+log+"\n")
 
 	f.install(spec)
+	if reinstall {
+		if err := os.Rename(filepath.Join(f.dir, "commit-msg"), filepath.Join(f.dir, "commit-msg"+legacySuffix)); err != nil {
+			t.Fatal(err)
+		}
+		writeExec(t, filepath.Join(f.dir, "commit-msg"), wrapper)
+	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second) // a recursive chain never ends
 	defer cancel()
@@ -668,4 +681,29 @@ func TestInstallHooks_LinkedHookOverEntireLegacyIsRefused(t *testing.T) {
 		"commit-msg" + legacySuffix: chained,
 		"commit-msg" + backupSuffix: userHookV1,
 	})
+}
+
+// Uninstalling after pre-commit installed over Entire, before any reclaim:
+// the user's hook moves from .pre-entire, which pre-commit does not run, to
+// .legacy, which it does.
+func TestRemoveHooks_BeforeReclaimMovesUserHookToLegacy(t *testing.T) {
+	t.Parallel()
+	spec := specFor(t, "commit-msg")
+	wrapper := preCommitWrapper("commit-msg")
+	f := newHooksFixture(t)
+	f.write("commit-msg", userHookV1)
+	f.install(spec)
+	if err := os.Rename(filepath.Join(f.dir, "commit-msg"), filepath.Join(f.dir, "commit-msg"+legacySuffix)); err != nil {
+		t.Fatal(err)
+	}
+	f.write("commit-msg", wrapper)
+
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err != nil {
+		t.Fatalf("removeHooks: %v", err)
+	}
+
+	assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg" + legacySuffix: userHookV1})
+	if f.exists("commit-msg" + backupSuffix) {
+		t.Error("commit-msg.pre-entire left behind")
+	}
 }

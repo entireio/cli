@@ -947,12 +947,27 @@ func generateChainedContent(baseContent, hookName string) string {
 		return generatePostRewriteChainedContent(baseContent)
 	}
 
-	return baseContent + fmt.Sprintf(`%s
+	return baseContent + chainCall(hookName, "")
+}
+
+// chainCall runs <hook>.pre-entire, with stdin as redirect gives it. When
+// pre-commit's wrapper ran this hook as <hook>.legacy and is itself the
+// backup, calling it again would trip pre-commit's migration-mode guard, so
+// the user's hook Entire kept for .legacy (see reclaimFromPreCommit) runs
+// instead.
+func chainCall(hookName, redirect string) string {
+	backup := hookName + backupSuffix
+	keep := hookName + keepSuffix
+	return fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
-if [ -x "$_entire_hook_dir/%s%s" ]; then
-    "$_entire_hook_dir/%s%s" "$@"
+if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
+    if [ -x "$_entire_hook_dir/%s" ]; then
+        "$_entire_hook_dir/%s" "$@"%s
+    fi
+elif [ -x "$_entire_hook_dir/%s" ]; then
+    "$_entire_hook_dir/%s" "$@"%s
 fi
-`, chainComment, hookName, backupSuffix, hookName, backupSuffix)
+`, chainComment, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {
@@ -968,13 +983,7 @@ trap 'rm -f "$_entire_stdin"' EXIT
 	body := strings.TrimPrefix(baseContent, "#!/bin/sh\n")
 	body = strings.Replace(body, original, replacement, 1)
 
-	return replayPrefix + body + fmt.Sprintf(`
-%s
-_entire_hook_dir="$(dirname "$0")"
-if [ -x "$_entire_hook_dir/post-rewrite%s" ]; then
-    "$_entire_hook_dir/post-rewrite%s" "$@" < "$_entire_stdin"
-fi
-`, chainComment, backupSuffix, backupSuffix)
+	return replayPrefix + body + "\n" + chainCall(postRewriteHook, ` < "$_entire_stdin"`)
 }
 
 // hookCmdPrefix returns the command prefix for hook scripts and warning messages.

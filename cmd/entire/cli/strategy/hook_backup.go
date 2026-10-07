@@ -383,10 +383,17 @@ func reclaimFromPreCommit(root *os.Root, hook string) (bool, error) {
 // restoreLegacy undoes reclaimFromPreCommit on uninstall: .legacy gets the
 // user's hook back if pre-commit moved Entire's onto it, and the keep copy goes.
 func restoreLegacy(root *os.Root, hook string) error {
-	legacy, keep := hook+legacySuffix, hook+keepSuffix
+	legacy, keep, backup := hook+legacySuffix, hook+keepSuffix, hook+backupSuffix
 	keepExists := hookFileExists(root, keep)
 	if carriesEntireMarker(root, legacy) {
 		if !keepExists {
+			// pre-commit installed over Entire before any reclaim: the user's
+			// hook is still in .pre-entire, which pre-commit does not run, so
+			// it goes to .legacy, which it does.
+			if isPreCommitWrapper(root, hook, hook) && hookFileExists(root, backup) &&
+				!carriesEntireMarker(root, backup) && !isPreCommitWrapper(root, backup, hook) {
+				return root.Rename(backup, legacy) //nolint:wrapcheck // caller adds the hook name
+			}
 			return root.Remove(legacy) //nolint:wrapcheck // caller adds the hook name
 		}
 		return root.Rename(keep, legacy) //nolint:wrapcheck // caller adds the hook name
