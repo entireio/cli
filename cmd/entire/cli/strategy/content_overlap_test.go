@@ -972,6 +972,74 @@ func TestFilesWithRemainingAgentChanges_RecreatedDeletion(t *testing.T) {
 	assert.Empty(t, remaining)
 }
 
+// TestFilesWithRemainingAgentChanges_StagedEditCommittedDeletionPending: the
+// user staged an edit to a file, the agent then deleted it from the worktree,
+// and the user committed the staged edit. The commit modified the path — it is
+// in the commit's changed set — but the commit tree still has it and the
+// worktree still lacks it, so the agent's deletion is still pending.
+func TestFilesWithRemainingAgentChanges_StagedEditCommittedDeletionPending(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+
+	target := filepath.Join(dir, "edited.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original\n"), 0o644))
+	_, err = wt.Add("edited.txt")
+	require.NoError(t, err)
+	_, err = wt.Commit("Add file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	// The user stages an edit...
+	require.NoError(t, os.WriteFile(target, []byte("original\nuser edit\n"), 0o644))
+	_, err = wt.Add("edited.txt")
+	require.NoError(t, err)
+	// ...the agent deletes the file from the worktree...
+	require.NoError(t, os.Remove(target))
+	// ...and the user commits what was staged.
+	testutil.GitCommit(t, dir, "Commit the staged edit")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	_, err = commit.File("edited.txt")
+	require.NoError(t, err, "fixture: the commit carries the staged edit, not the deletion")
+
+	hashes := map[string]string{"edited.txt": touchedFileDeleted}
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"edited.txt"}, map[string]struct{}{"edited.txt": {}})
+	assert.Equal(t, []string{"edited.txt"}, remaining)
+}
+
+// TestFilesWithRemainingAgentChanges_NoRecordedHash_PendingTrackedDeletion: a
+// path with no recorded hash that the commit still has but the worktree lacks
+// is a pending deletion of a tracked file (an older CLI's state, or a route
+// that records no hash), not a phantom. Only a path absent from both the
+// commit and the worktree is a phantom.
+func TestFilesWithRemainingAgentChanges_NoRecordedHash_PendingTrackedDeletion(t *testing.T) {
+	t.Parallel()
+	_, repo, wt, _ := recordedDeletionRepo(t)
+
+	require.NoError(t, os.WriteFile(filepath.Join(wt.Filesystem().Root(), "other.txt"), []byte("other"), 0o644))
+	_, err := wt.Add("other.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit("Commit another file", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(commitHash)
+	require.NoError(t, err)
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, nil, commit,
+		[]string{"to_delete.txt", "other.txt", "never_existed.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Equal(t, []string{"to_delete.txt"}, remaining,
+		"the pending tracked deletion stays; the committed file and the phantom drop")
+}
+
 // TestFilesOverlapWithContent_CarriedForwardDeletionLinks: the later commit
 // that finally deletes a carried-forward recorded deletion (the parent has the
 // path, HEAD does not) links the session.

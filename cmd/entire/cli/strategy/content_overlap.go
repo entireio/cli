@@ -269,9 +269,10 @@ func hasOverlappingFiles(stagedFiles, filesTouched []string) bool {
 // same way against the commit, minus the recorded-hash shortcut: once
 // committed, it stays while the working tree still differs from the committed
 // blob and drops when they match. An uncommitted one stays unless it is
-// missing from the worktree (the phantom-path guard: transcript parsing can
-// name files the agent never created, and carrying those forward would never
-// end).
+// absent from both the commit and the worktree (the phantom-path guard:
+// transcript parsing can name files the agent never created, and carrying
+// those forward would never end); one the commit still has but the worktree
+// lacks is a pending deletion of a tracked file and stays.
 //
 // A recorded agent deletion stays while it is still pending: the commit tree
 // still has the path and the worktree still lacks it, so the later commit that
@@ -426,7 +427,7 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 	recorded, hasHash, deleted := recordedFileHash(hashes, filePath)
 	switch {
 	case deleted:
-		if deletionStillPending(c.commitTree, c.root, c.worktreeRoot, filePath, wasCommitted) {
+		if c.deletionPending(filePath) {
 			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: recorded deletion not yet committed, keeping",
 				slog.String("file", filePath))
 			return true, nil
@@ -435,9 +436,12 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 			slog.String("file", filePath))
 		return false, nil
 	case !wasCommitted && !hasHash:
-		// Phantom guard: a path the agent never actually produced.
-		if c.root != nil && !worktreeEntryExists(c.root, c.worktreeRoot, filePath) {
-			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file without recorded hash missing from worktree, skipping",
+		// Phantom guard: a path the agent never actually produced is absent
+		// from both the commit and the worktree. A path the commit still has
+		// but the worktree lacks is a pending deletion of a tracked file
+		// (an older CLI's state, or a route that records no hash), and stays.
+		if c.knownAbsentFromWorktree(filePath) && !c.inCommit(filePath) {
+			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file without recorded hash missing from commit and worktree, skipping",
 				slog.String("file", filePath))
 			return false, nil
 		}
@@ -452,7 +456,7 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 	if err != nil {
 		// The commit removed the path. A recorded version is agent content
 		// left to commit; without one, only something back in the worktree is.
-		if hasHash || (c.root != nil && worktreeEntryExists(c.root, c.worktreeRoot, filePath)) {
+		if hasHash || (c.root != nil && !c.knownAbsentFromWorktree(filePath)) {
 			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not in commit tree but has content left, keeping",
 				slog.String("file", filePath))
 			return true, nil
@@ -474,21 +478,29 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 	}
 }
 
-// deletionStillPending reports whether a recorded agent deletion of path has
-// not reached a commit yet: the commit did not touch the path, still has it,
-// and the worktree still lacks it. When the worktree root cannot be opened,
-// the deletion is treated as pending, so it is never dropped on a guess.
-func deletionStillPending(commitTree *object.Tree, root *os.Root, worktreeRoot, path string, wasCommitted bool) bool {
-	if wasCommitted {
+// deletionPending reports whether a recorded agent deletion of path has not
+// reached a commit yet: the commit tree still has the path and the worktree
+// still lacks it. Whether the commit touched the path does not matter — a
+// commit of a staged edit to it leaves the deletion pending. When the worktree
+// cannot be inspected, a deletion the commit tree still has counts as pending,
+// so it is never dropped on a guess.
+func (c remainingClassifier) deletionPending(path string) bool {
+	if !c.inCommit(path) {
 		return false
 	}
-	if _, err := commitTree.File(path); err != nil {
-		return false
-	}
-	if root == nil {
-		return true
-	}
-	return !worktreeEntryExists(root, worktreeRoot, path)
+	return c.root == nil || c.knownAbsentFromWorktree(path)
+}
+
+// inCommit reports whether the commit's tree has path.
+func (c remainingClassifier) inCommit(path string) bool {
+	_, err := c.commitTree.File(path)
+	return err == nil
+}
+
+// knownAbsentFromWorktree reports whether path is definitely not in the
+// worktree; false when the worktree cannot be inspected.
+func (c remainingClassifier) knownAbsentFromWorktree(path string) bool {
+	return c.root != nil && !worktreeEntryExists(c.root, c.worktreeRoot, path)
 }
 
 // workingTreeMatchesBlob checks whether the raw file representation hashes to

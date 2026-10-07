@@ -1082,8 +1082,9 @@ func TestPostCommit_ActiveSession_CarryForward_PartialCommit(t *testing.T) {
 // TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes covers a
 // session whose state was written by an older CLI: FilesTouched and StepCount
 // from the old format, no TouchedFileHashes at all. A partial commit must still
-// carry forward the file whose rest is in the worktree and the file that was
-// not committed, and drop only the fully committed one.
+// carry forward the file whose rest is in the worktree, the file that was not
+// committed, and the agent's still-pending deletion of a tracked file, and drop
+// only the fully committed one.
 func TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes(t *testing.T) {
 	dir := setupGitRepo(t)
 	t.Chdir(dir)
@@ -1099,6 +1100,12 @@ func TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes(t *testing
 	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName),
 		[]byte(testTranscriptPromptResponse), 0o644))
 
+	// gone.txt is tracked before the session; the agent deletes it.
+	testutil.WriteFile(t, dir, "gone.txt", "tracked\n")
+	testutil.GitAdd(t, dir, "gone.txt")
+	testutil.GitCommit(t, dir, "add gone.txt")
+	require.NoError(t, os.Remove(filepath.Join(dir, "gone.txt")))
+
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "full.txt"), []byte("all of it\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "half.txt"), []byte("first half\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "later.txt"), []byte("not yet\n"), 0o644))
@@ -1106,6 +1113,7 @@ func TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes(t *testing
 	require.NoError(t, s.SaveStep(context.Background(), StepContext{
 		SessionID:     sessionID,
 		NewFiles:      []string{"full.txt", "half.txt", "later.txt"},
+		DeletedFiles:  []string{"gone.txt"},
 		MetadataDir:   metadataDir,
 		CommitMessage: "Checkpoint",
 		AuthorName:    "Test",
@@ -1142,8 +1150,8 @@ func TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes(t *testing
 	state, err = s.loadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	assert.Equal(t, []string{"half.txt", "later.txt"}, state.FilesTouched,
-		"the partially committed and the uncommitted file carry forward; the fully committed one drops")
+	assert.Equal(t, []string{"gone.txt", "half.txt", "later.txt"}, state.FilesTouched,
+		"the pending deletion, the partially committed and the uncommitted file carry forward; the fully committed one drops")
 	assert.Equal(t, 1, state.StepCount)
 }
 
