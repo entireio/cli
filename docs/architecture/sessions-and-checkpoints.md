@@ -697,9 +697,12 @@ When condensing multiple concurrent sessions:
 link from the target commit, never from a flag (`planAttachLink`):
 - the commit already carries an `Entire-Checkpoint` trailer: the session joins
   that checkpoint;
-- the commit is HEAD and no remote branch holds it: the trailer is amended in,
-  without a prompt (nobody else has the commit, and a trailer survives a later
-  rebase);
+- the commit is HEAD and no remote holds it: the trailer is amended in, without
+  a prompt (nobody else has the commit, and a trailer survives a later rebase).
+  "No remote holds it" must be confirmed: attach fetches every remote and also
+  asks each remote whether a branch tip is the commit (single-branch clones
+  don't track every branch). If any remote can't be reached, it refuses rather
+  than amend a commit it couldn't check;
 - a remote branch already holds the commit: the link is recorded in the
   checkpoint and the commit is left unchanged, so nothing needs a force-push;
 - an older commit no remote holds is refused (amending it means a rebase, and a
@@ -708,14 +711,21 @@ link from the target commit, never from a flag (`planAttachLink`):
 A recorded link is `linked_commits` on the root `CheckpointSummary`: a list of
 `{sha, repo}` objects (`repo` is `<forge>/<owner>/<repo>` from the remote that
 holds the commit, possibly empty). Unlike the import anchor below it is an
-**attributing** link: the server treats a verified entry like a trailer, and
+**attributing** link: the server credits a verified entry as it would a
+trailer. Unlike a trailer it names one exact commit, so it does not follow a
+later rebase or amend of that commit; attach says so, and the remedy is to
+attach the session to the new commit. The server
 verifies it only when the authenticated checkpoint pusher is the commit's
 author (otherwise it is stored as an unverified attachment; attach warns when
 the local git author differs). Rewrites of the checkpoint keep existing entries
 (`unionLinkedCommits`). Readers consult trailers first and fall back to
 `checkpoint.CheckpointsLinkedTo` (`explain <commit>`, `blame`/`why`). Attach
 pushes the checkpoint itself through the pre-push path, since no later push may
-carry it. Git hooks keep writing trailers while a commit is made; nothing in
+carry it, and confirms the remote's ref now matches before reporting success:
+for a pushed commit the checkpoint is the only record of the link, so a skipped
+or rejected push (push_sessions off, remote gating) is an error. A second
+attach to a linked commit finds the checkpoint through every copy, fetches it
+into the local store through the availability guard, and joins it. Git hooks keep writing trailers while a commit is made; nothing in
 Entire rewrites a commit that a remote already holds. A CLI that predates the
 field drops it if it rewrites that checkpoint's root metadata.
 

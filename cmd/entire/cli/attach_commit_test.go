@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -386,10 +388,11 @@ func TestAttachCommit_SecondSessionJoinsTheRecordedLinkCheckpoint(t *testing.T) 
 	}
 }
 
-// A checkpoint that exists only on the remote-tracking copy must not be joined
-// blind: writing under its ID without the local copy would rebuild it from
-// scratch and overwrite the original on push. The lookup only joins a local one.
-func TestAttachCommit_DoesNotJoinARemoteOnlyLinkedCheckpoint(t *testing.T) {
+// A pushed commit whose linked checkpoint isn't in the local store yet (a fresh
+// clone, a deleted local metadata ref) is joined, not duplicated: attach finds
+// it through the remote-tracking copy, fetches it into the local store through
+// the availability guard, and appends — never rebuilding it from scratch.
+func TestAttachCommit_JoinsARemoteOnlyLinkedCheckpointAfterFetchingIt(t *testing.T) {
 	setupAttachTestRepo(t)
 	commitAt(t, "work.txt")
 	pushToOrigin(t)
@@ -401,9 +404,6 @@ func TestAttachCommit_DoesNotJoinARemoteOnlyLinkedCheckpoint(t *testing.T) {
 		t.Fatalf("load first state: %v, %v", first, err)
 	}
 	dir := mustGetwd(t)
-	if refs := testutil.RunGit(t, dir, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/entire/"); !strings.Contains(refs, "checkpoints") {
-		t.Fatalf("expected a remote-tracking checkpoint ref after the push, got:\n%s", refs)
-	}
 	testutil.RunGit(t, dir, "update-ref", "-d", "refs/heads/entire/checkpoints/v1")
 
 	if out, err := attachHeadless(t, "attach-remote-only-second", attachOptions{}); err != nil {
@@ -413,8 +413,11 @@ func TestAttachCommit_DoesNotJoinARemoteOnlyLinkedCheckpoint(t *testing.T) {
 	if err != nil || second == nil {
 		t.Fatalf("load second state: %v, %v", second, err)
 	}
-	if second.LastCheckpointID == first.LastCheckpointID {
-		t.Fatalf("second attach wrote into checkpoint %s, which exists only on the remote-tracking ref", first.LastCheckpointID)
+	if second.LastCheckpointID != first.LastCheckpointID {
+		t.Fatalf("second attach started checkpoint %s; want it to join the commit's existing %s", second.LastCheckpointID, first.LastCheckpointID)
+	}
+	if summary := readSummary(t, first.LastCheckpointID.String()); len(summary.Sessions) != 2 {
+		t.Fatalf("checkpoint has %d sessions, want both (the original kept, the new one appended)", len(summary.Sessions))
 	}
 }
 
@@ -440,5 +443,67 @@ func TestAttachCommit_FetchesBeforeDecidingAHeadIsUnpushed(t *testing.T) {
 	}
 	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
 		t.Fatalf("a commit the remote already holds was amended: %s %q\n%s", got.Hash, got.Message, out)
+	}
+}
+
+// Finding 1: a failed fetch is not evidence the commit is unpushed. attach
+// refuses to amend rather than rewrite a commit it couldn't check.
+func TestAttachCommit_RefusesToAmendWhenAFetchFails(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	dir := mustGetwd(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", filepath.Join(t.TempDir(), "missing.git"))
+
+	out, err := attachHeadless(t, "attach-fetch-fails", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "couldn't confirm") {
+		t.Fatalf("err = %v, want a refusal explaining the commit's push state couldn't be confirmed\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD was rewritten after a failed fetch: %s", got.Hash)
+	}
+}
+
+// Finding 1: a remote's branch tip is checked directly, so a commit pushed to a
+// branch this clone's fetch refspec doesn't track still reads as pushed.
+func TestAttachCommit_SeesACommitPushedToAnUntrackedBranch(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	dir := mustGetwd(t)
+	remote := t.TempDir()
+	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
+	testutil.RunGit(t, dir, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/someone-elses-branch")
+
+	out, err := attachHeadless(t, "attach-untracked-branch", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("a commit the remote already holds was amended: %s %q\n%s", got.Hash, got.Message, out)
+	}
+}
+
+// Finding 2: a recorded link only exists in the checkpoint, so attach must not
+// report success when the checkpoint never reached the remote.
+func TestAttachCommit_FailsWhenTheCheckpointIsNotDelivered(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+	pushToOrigin(t)
+	writeAttachTestSettings(t, `{"enabled": true, "strategy_options": {"push_sessions": false}}`)
+
+	out, err := attachHeadless(t, "attach-not-delivered", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "push_sessions") {
+		t.Fatalf("err = %v, want an error naming push_sessions as the reason nothing was pushed\n%s", err, out)
+	}
+	if strings.Contains(out, "Pushed checkpoint metadata") {
+		t.Fatalf("reported a push that didn't happen:\n%s", out)
+	}
+}
+
+func writeAttachTestSettings(t *testing.T, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(mustGetwd(t), ".entire", "settings.json"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

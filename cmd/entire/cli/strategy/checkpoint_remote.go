@@ -324,3 +324,15 @@ func urlTargetsCheckpointRepo(url string, config *settings.CheckpointRemoteConfi
 	}
 	return strings.EqualFold(info.Owner+"/"+info.Repo, config.Repo)
 }
+
+// CheckpointPushTarget returns where PrePush sends checkpoint metadata for
+// pushRemoteName — the checkpoint_remote URL when one is configured, otherwise
+// the remote itself — and whether push_sessions turns pushing off. Callers use
+// it to confirm delivery after a push, since PrePush is deliberately fail-soft.
+func CheckpointPushTarget(ctx context.Context, pushRemoteName string) (target string, disabled bool) {
+	ps := resolvePushSettings(ctx, pushRemoteName)
+	if ps.checkpointURL != "" {
+		return ps.checkpointURL, ps.pushDisabled
+	}
+	return ps.remote, ps.pushDisabled
+}

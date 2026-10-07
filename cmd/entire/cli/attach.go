@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -101,9 +102,13 @@ choose and no prompt:
     amended in. Nobody else has the commit yet, and a trailer survives a
     later rebase.
   - The commit is already pushed: the link is recorded in the checkpoint and
-    the commit is left unchanged, so nothing needs a force-push. It counts
-    once the commit's author attaches it.
+    the commit is left unchanged, so nothing needs a force-push. The
+    checkpoint is pushed right away. It counts once the commit's author
+    attaches it, and names that exact commit: after a rebase or amend,
+    attach the session to the new commit.
   - An older commit that isn't pushed is refused: push it first.
+  - If a remote can't be reached to confirm HEAD isn't already pushed, attach
+    refuses rather than risk rewriting a shared commit.
 
 Use --review to tag the attached session as an agent review. The
 first user prompt in the transcript is recorded as the review prompt.
@@ -258,7 +263,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	}
 	// Decide how to link before writing anything, so a commit that can't be
 	// linked is refused with nothing left behind.
-	plan, err := planAttachLink(ctx, errW, repo, headCommit, opts)
+	plan, err := planAttachLink(ctx, repo, headCommit, opts)
 	if err != nil {
 		return err
 	}
@@ -298,13 +303,14 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// A pushed commit an earlier attach already linked has no trailer to find
 	// its checkpoint by; its checkpoint names it instead. Join that one, as the
 	// trailer paths do, rather than start a second checkpoint for the commit.
-	// Only a locally present checkpoint is joined: one on the remote-tracking
-	// copy alone would be rebuilt from scratch under its ID and overwrite the
-	// original on push. The availability guard below then runs on it as on any
-	// existing checkpoint.
+	// The lookup reads every copy, remote-tracking included, so a fresh clone
+	// joins the commit's checkpoint instead of starting a duplicate. The
+	// availability guard below then fetches it into the local store and
+	// verifies it, as for any existing checkpoint, and refuses if it can't —
+	// so a remote-only copy is never rebuilt from scratch under its ID.
 	if plan.mode == attachRecordLink && !isExistingCheckpoint {
-		if localStore, openErr := openAttachStore(ctx, repo, refs.PrimaryAsLocalRead()); openErr == nil {
-			if linkedID, ok := checkpointLinkedTo(ctx, localStore, target); ok {
+		if readStore, openErr := openAttachStore(ctx, repo, refs); openErr == nil {
+			if linkedID, ok := checkpointLinkedTo(ctx, readStore, target); ok {
 				checkpointID, isExistingCheckpoint = linkedID, true
 			}
 		}
@@ -409,26 +415,25 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 
 	fmt.Fprintf(w, "Attached session %s\n", sessionID)
 	printAttachFooter(w, meta, tokenUsage)
-	finishAttachLink(ctx, logCtx, w, errW, plan, headCommit, checkpointID, isExistingCheckpoint)
-	return nil
+	return finishAttachLink(ctx, logCtx, w, errW, plan, headCommit, checkpointID, isExistingCheckpoint)
 }
 
 // finishAttachLink reports the checkpoint and completes its link to the target
 // commit: amending an unpushed HEAD, or reporting and pushing a recorded link.
-func finishAttachLink(ctx, logCtx context.Context, w, errW io.Writer, plan attachLinkPlan, headCommit *object.Commit, checkpointID id.CheckpointID, isExistingCheckpoint bool) {
+func finishAttachLink(ctx, logCtx context.Context, w, errW io.Writer, plan attachLinkPlan, headCommit *object.Commit, checkpointID id.CheckpointID, isExistingCheckpoint bool) error {
 	if isExistingCheckpoint {
 		fmt.Fprintf(w, "  Added to existing checkpoint %s\n", checkpointID)
 		if plan.mode == attachRecordLink {
-			pushAttachedCheckpoint(ctx, w, errW, plan.remote)
+			return pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
 		}
-		return
+		return nil
 	}
 	fmt.Fprintf(w, "  Created checkpoint %s\n", checkpointID)
 	if plan.mode == attachRecordLink {
-		reportLinkedCommit(ctx, w, errW, plan)
-		return
+		return reportLinkedCommit(ctx, w, errW, plan, checkpointID)
 	}
 	amendOrPrintTrailer(logCtx, w, errW, headCommit, checkpointID.String())
+	return nil
 }
 
 // linkExistingCheckpoint handles a session that already has a checkpoint: it
@@ -496,7 +501,7 @@ type attachLinkPlan struct {
 // decides how to link it. An older commit no remote holds is refused: amending
 // it means a rebase, and a recorded link wouldn't survive the rebase still
 // likely to come.
-func planAttachLink(ctx context.Context, errW io.Writer, repo *git.Repository, headCommit *object.Commit, opts attachOptions) (attachLinkPlan, error) {
+func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *object.Commit, opts attachOptions) (attachLinkPlan, error) {
 	target := headCommit
 	if opts.Commit != "" {
 		var err error
@@ -510,14 +515,26 @@ func planAttachLink(ctx context.Context, errW io.Writer, repo *git.Repository, h
 	// Remote-tracking refs can be stale — someone may have pushed this commit
 	// from another clone — and amending a shared commit is what this rule
 	// exists to avoid, so refresh them first.
-	fetchRemotesForAttach(ctx, errW)
+	unreachable := fetchRemotesForAttach(ctx)
 	remote, err := remoteHoldingCommit(ctx, target)
 	if err != nil {
 		return attachLinkPlan{}, err
 	}
+	if remote == "" {
+		// A fetch refspec may not cover every branch (single-branch clones), so
+		// also ask each remote whether a branch tip is this commit.
+		var tipUnreachable []string
+		remote, tipUnreachable = remoteWithTipAt(ctx, target)
+		unreachable = append(unreachable, tipUnreachable...)
+	}
 	switch {
 	case remote != "":
 		return attachLinkPlan{target: target, mode: attachRecordLink, remote: remote}, nil
+	case target.Hash.Equal(headCommit.Hash) && len(unreachable) > 0:
+		// Absence from a remote we couldn't reach proves nothing; amending a
+		// commit someone already pushed is what this rule exists to prevent.
+		return attachLinkPlan{}, fmt.Errorf("couldn't confirm that HEAD %s isn't already pushed (could not reach %s), so it won't be amended; retry when the remote is reachable",
+			target.Hash.String()[:12], strings.Join(unreachable, ", "))
 	case target.Hash.Equal(headCommit.Hash):
 		return attachLinkPlan{target: target, mode: attachAmendHead}, nil
 	default:
@@ -544,25 +561,56 @@ func checkpointLinkedTo(ctx context.Context, store cpkg.PersistentStore, target 
 // whether a commit is pushed.
 const attachFetchTimeout = 30 * time.Second
 
-// fetchRemotesForAttach refreshes every remote's tracking refs without
-// credential prompts. A failure is reported and attach decides from the last
-// fetch.
-func fetchRemotesForAttach(ctx context.Context, errW io.Writer) {
+// attachRemotes lists the repository's remotes.
+func attachRemotes(ctx context.Context) []string {
 	out, err := exec.CommandContext(ctx, "git", "remote").Output()
 	if err != nil {
-		return
+		return nil
 	}
-	for _, remote := range strings.Fields(string(out)) {
+	return strings.Fields(string(out))
+}
+
+// attachGitCommand runs git against a remote without credential prompts. SSH
+// keeps the user's own configuration: attach is a foreground command, and
+// without a terminal ssh can't prompt anyway.
+func attachGitCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
+
+// fetchRemotesForAttach refreshes every remote's tracking refs and returns the
+// remotes it could not fetch.
+func fetchRemotesForAttach(ctx context.Context) (unreachable []string) {
+	for _, remote := range attachRemotes(ctx) {
 		fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
-		cmd := exec.CommandContext(fetchCtx, "git", "fetch", "--quiet", "--no-tags", "--", remote)
-		// No credential prompts; SSH keeps the user's own configuration (attach
-		// is a foreground command, and without a terminal ssh can't prompt anyway).
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-		if output, fetchErr := cmd.CombinedOutput(); fetchErr != nil {
-			fmt.Fprintf(errW, "Could not fetch %s (%s); deciding from its last fetch.\n", remote, firstLine(strings.TrimSpace(string(output))+" "+fetchErr.Error()))
+		if err := attachGitCommand(fetchCtx, "fetch", "--quiet", "--no-tags", "--", remote).Run(); err != nil {
+			unreachable = append(unreachable, remote)
 		}
 		cancel()
 	}
+	return unreachable
+}
+
+// remoteWithTipAt returns a remote with a branch whose tip is target, asking
+// each remote directly, and the remotes it could not reach.
+func remoteWithTipAt(ctx context.Context, target *object.Commit) (holder string, unreachable []string) {
+	sha := target.Hash.String()
+	for _, remote := range attachRemotes(ctx) {
+		lsCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+		out, err := attachGitCommand(lsCtx, "ls-remote", "--heads", "--", remote).Output()
+		cancel()
+		if err != nil {
+			unreachable = append(unreachable, remote)
+			continue
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if fields := strings.Fields(line); len(fields) > 0 && fields[0] == sha && holder == "" {
+				holder = remote
+			}
+		}
+	}
+	return holder, unreachable
 }
 
 // remoteHoldingCommit returns a remote whose branches contain target, or "" when
@@ -583,13 +631,16 @@ func remoteHoldingCommit(ctx context.Context, target *object.Commit) (string, er
 // reportLinkedCommit tells the user the commit was linked in the checkpoint,
 // warns when the link won't count because they didn't author the commit, and
 // pushes the checkpoint.
-func reportLinkedCommit(ctx context.Context, w, errW io.Writer, plan attachLinkPlan) {
+func reportLinkedCommit(ctx context.Context, w, errW io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID) error {
 	fmt.Fprintf(w, "  Linked to commit %s in the checkpoint; the commit is unchanged (already pushed)\n", plan.target.Hash.String()[:12])
+	// Finding 4 (rebase): a recorded link names this exact commit and does not
+	// follow it through a later rebase or amend, unlike a trailer.
+	fmt.Fprintf(errW, "Note: this link names commit %s. If the commit is later rebased or amended, attach the session to the new commit.\n", plan.target.Hash.String()[:12])
 	if author, err := GetGitAuthor(ctx); err == nil && !strings.EqualFold(author.Email, plan.target.Author.Email) {
 		fmt.Fprintf(errW, "Note: commit %s was authored by %s. A link recorded in the checkpoint counts only when the commit's author attaches it.\n",
 			plan.target.Hash.String()[:12], plan.target.Author.Email)
 	}
-	pushAttachedCheckpoint(ctx, w, errW, plan.remote)
+	return pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
 }
 
 // attachLinkRepo names the code repository for a link as
@@ -606,16 +657,54 @@ func attachLinkRepo(ctx context.Context, remote string) string {
 	return forge + "/" + owner + "/" + repo
 }
 
-// pushAttachedCheckpoint pushes the checkpoint metadata now: a --commit link
-// usually names a commit that is already pushed, so no later git push would
-// carry it. Uses the same path as the pre-push hook, which honors
-// push_sessions, checkpoint_remote and the privacy filter.
-func pushAttachedCheckpoint(ctx context.Context, w, errW io.Writer, remote string) {
+// pushAttachedCheckpoint pushes the checkpoint metadata now and confirms it
+// arrived. For a pushed commit the checkpoint is the only record of the link,
+// and no later git push of that commit will carry it, so an undelivered push is
+// an error rather than a note. Uses the pre-push path, which honors
+// push_sessions, checkpoint_remote and the privacy filter; that path is
+// fail-soft, so delivery is checked against the remote afterwards.
+func pushAttachedCheckpoint(ctx context.Context, w io.Writer, remote string, checkpointID id.CheckpointID) error {
+	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
+	if disabled {
+		return fmt.Errorf("checkpoint %s was written locally but not pushed: push_sessions is turned off in settings, so the link stays invisible to others until the checkpoint is pushed", checkpointID)
+	}
 	if err := strategy.NewManualCommitStrategy().PrePush(ctx, remote); err != nil {
-		fmt.Fprintf(errW, "Could not push the checkpoint to %s (%s). It is pushed on your next git push to %s.\n", remote, firstLine(err.Error()), remote)
-		return
+		return fmt.Errorf("checkpoint %s was written locally but could not be pushed to %s: %w", checkpointID, remote, err)
+	}
+	if err := confirmCheckpointDelivered(ctx, target, checkpointID); err != nil {
+		return fmt.Errorf("checkpoint %s was written locally but did not reach %s: %w", checkpointID, remote, err)
 	}
 	fmt.Fprintf(w, "  Pushed checkpoint metadata to %s\n", remote)
+	return nil
+}
+
+// confirmCheckpointDelivered checks that the ref holding checkpointID points at
+// the same commit on target as locally.
+func confirmCheckpointDelivered(ctx context.Context, target string, checkpointID id.CheckpointID) error {
+	cfg, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve checkpoints config: %w", err)
+	}
+	ref := checkpointStorageRefsFor(cfg, checkpointID)[0]
+	if !isCheckpointRef(ref) {
+		ref = "refs/heads/" + ref
+	}
+	local, err := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", ref).Output()
+	if err != nil {
+		return fmt.Errorf("read local %s: %w", ref, err)
+	}
+	out, err := remote.LsRemoteInDir(ctx, "", target, ref)
+	if err != nil {
+		return err //nolint:wrapcheck // already names ls-remote and the target
+	}
+	remoteHash := ""
+	if fields := strings.Fields(string(out)); len(fields) > 0 {
+		remoteHash = fields[0]
+	}
+	if remoteHash != strings.TrimSpace(string(local)) {
+		return fmt.Errorf("the remote's %s is not the checkpoint just written (push skipped or rejected)", ref)
+	}
+	return nil
 }
 
 // resolveAttachCommit resolves --commit to a commit in this repository,
