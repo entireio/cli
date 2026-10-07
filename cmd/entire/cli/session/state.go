@@ -942,10 +942,11 @@ func (s *State) AdvanceCheckpointWindow(pos int) {
 	s.SetTokenStart(pos)
 }
 
-// AdvanceDisplayWindow moves only CheckpointTranscriptStart to pos, for the
-// turn-end advances that skip already-condensed content without storing its
-// tokens. The token offset is pinned first so an unset one cannot follow
-// CheckpointTranscriptStart forward through TokenStart's fallback.
+// AdvanceDisplayWindow moves only CheckpointTranscriptStart to pos, for paths
+// that change what a checkpoint shows without storing tokens: the turn-end
+// advances past already-condensed content, and carry-forward's restart at 0.
+// The token offset is pinned first so an unset one cannot follow
+// CheckpointTranscriptStart through TokenStart's fallback.
 func (s *State) AdvanceDisplayWindow(pos int) {
 	s.SetTokenStart(s.TokenStart())
 	s.CheckpointTranscriptStart = pos

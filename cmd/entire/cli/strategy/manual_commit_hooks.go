@@ -3899,7 +3899,9 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	// An alternative would be incremental checkpoints (only new content since last condensation),
 	// but this would complicate checkpoint retrieval and require careful tracking of dependencies.
 	state.StepCount = 1
-	state.CheckpointTranscriptStart = 0
+	// Only the displayed window restarts; the token offset stays where the
+	// last condensation left it so this checkpoint counts only new tokens.
+	state.AdvanceDisplayWindow(0)
 	state.CheckpointTranscriptSize = 0
 	// Carry-forward deliberately restarts the offset at 0; a pending turn-end
 	// advance from before the carry-forward must not re-apply on top of it.
