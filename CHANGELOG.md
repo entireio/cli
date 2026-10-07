@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.4] - 2026-10-06
+
+### Breaking changes and migrations
+
+- `entire repo mirror get` is removed; `entire repo view` is now the one repository view for both forges, listing name, visibility and every cluster holding a copy with its role, clone URL and status. It takes `/et/<project>/<repo>`, `/gh/<owner>/<repo>` or an `entire://` clone URL; the repo ULID and bare name with `--project` are no longer accepted. The CLUSTER column now prints the public host that `--cluster` accepts, and primary and mirror rows share one status vocabulary (`ready`, `processing`) ([#2547](https://github.com/entireio/cli/pull/2547))
+- A trailing `.git` is never part of a repo name: every ref parser drops it, so `/et/p/foo` and `/et/p/foo.git` address one repository, and `entire repo create` refuses names ending in `.git` in any letter case. This reverts the 0.11.2 rule that treated the suffix as part of a native repo name ([#2616](https://github.com/entireio/cli/pull/2616), [#2630](https://github.com/entireio/cli/pull/2630))
+
+### Added
+
+- `entire checkpoint explain` exposes subagent task records and the full session token breakdown (`subagent_tokens`, `subagent_tokens_complete`, `api_call_count`) ([#2649](https://github.com/entireio/cli/pull/2649))
+- Hidden `entire checkpoint create [session-id]` writes a checkpoint from a session that changed no files (research, planning, review), which previously never produced one ([#2632](https://github.com/entireio/cli/pull/2632))
+- `entire agent-help <plugin>` delegates to an installed `entire-<plugin>` command's own `agent-help` ([#2599](https://github.com/entireio/cli/pull/2599))
+- `entire trail create --repo` creates a trail through the API alone, without a local clone; `--title`, `--base` and `--branch` (or `--no-branch`) are required and the branch must already exist on the repo ([#2622](https://github.com/entireio/cli/pull/2622))
+- Project and repo grant lists show account display names, as org member lists already did ([#2614](https://github.com/entireio/cli/pull/2614))
+- `entire repo mirror add` also suggests the `entire repo remote add origin --override` command to repoint an existing checkout at the new mirror ([#2600](https://github.com/entireio/cli/pull/2600))
+- A committed `checkpoint_remote` rejected by the ownership check is now reported to the user, with an offer to claim it when the store is theirs, instead of only a warning in `.entire/logs` ([#2521](https://github.com/entireio/cli/pull/2521))
+
+### Changed
+
+- Org names resolve against the caller's own org list instead of the server's global name lookup; when several of your orgs share a name, the CLI lists them and asks for the ULID ([#2601](https://github.com/entireio/cli/pull/2601))
+- Google handles printed as `google:<id>` by `entire auth status` are now accepted as grantees, and org member names are shown in grant output ([#2603](https://github.com/entireio/cli/pull/2603))
+- `entire trail delete` now fails with a pointer to `entire trail update --status closed`, since the server no longer allows deleting trails. The command is hidden but stays registered so existing scripts get the guidance ([#2666](https://github.com/entireio/cli/pull/2666))
+
+### Fixed
+
+- `entire review` no longer loads execution-capable agent config from the reviewed checkout: Claude Code ignores project settings, hooks, MCP servers, commands and skills; pi ignores project-local extensions; Codex runs `--target` reviews with the checkout marked untrusted ([#2598](https://github.com/entireio/cli/pull/2598))
+- Claude Code turns that end on an API error (`StopFailure`: rate limit, overload, auth or billing failure, max output tokens) now end the turn, instead of leaving the session `ACTIVE` until the next prompt. Existing installs need to re-run `entire enable` to add the new hook; until then `entire doctor` reports the Claude Code hook config as outdated ([#2656](https://github.com/entireio/cli/pull/2656))
+- Session resume, attach and transcript lookup honor each agent's home relocation variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `FACTORY_HOME_OVERRIDE`, pi's dirs), including a `CLAUDE_CONFIG_DIR` set in Claude's own settings. Relative values are refused and reported by `entire status` ([#2375](https://github.com/entireio/cli/pull/2375))
+- Subagent capture: Claude Code background subagents now reach checkpoints, task records carry token usage, files and Codex completion before commit, Codex child transcripts resolve when the parent commits before its own Stop, and an aborted Codex turn counts as ended ([#2644](https://github.com/entireio/cli/pull/2644), [#2647](https://github.com/entireio/cli/pull/2647), [#2645](https://github.com/entireio/cli/pull/2645), [#2652](https://github.com/entireio/cli/pull/2652))
+- Read-only review sessions are no longer condensed into another session's mid-turn commit ([#2617](https://github.com/entireio/cli/pull/2617))
+- Commits redone after a `git reset` keep the dropped commits' `Entire-Checkpoint` trailers, so the session stays on the trail ([#2582](https://github.com/entireio/cli/pull/2582))
+- OPF redaction splits entities that span two batched leaves instead of dropping them, which previously left both unredacted under `Entire-OPF-Applied: true` ([#2624](https://github.com/entireio/cli/pull/2624))
+- `review_prompt` and `investigate_topic` in checkpoint `metadata.json` are redacted like prompts ([#2596](https://github.com/entireio/cli/pull/2596))
+- Redaction no longer replaces Claude Code tool-use ids or Codex `agent_message` ciphertext with `REDACTED` ([#2648](https://github.com/entireio/cli/pull/2648))
+- Checkpoint ref push fallback is bounded to two minutes or five consecutive failures, unpushed refs stay queued and rotate so later refs get a turn, and fetch errors keep their underlying cause ([#2522](https://github.com/entireio/cli/pull/2522))
+- Protocol v2 pushes through `git-remote-entire` declare their size, so an oversized push is refused up front with a clear 413 message instead of uploading fully and failing with `the remote end hung up unexpectedly` ([#2625](https://github.com/entireio/cli/pull/2625))
+- Missing-checkpoint errors name the refs where the checkpoint can actually live under the configured backend, instead of always suggesting a fetch of `entire/checkpoints/v1` ([#2620](https://github.com/entireio/cli/pull/2620))
+- `entire import` derives ULID checkpoint IDs under the git-refs backend ([#2609](https://github.com/entireio/cli/pull/2609))
+- On Windows, `entire status` and `entire doctor` no longer report approved Codex hooks as needing approval ([#2607](https://github.com/entireio/cli/pull/2607))
+- `entire search` and `entire dispatch` work from an Entire-native clone instead of failing with "remote is not a GitHub repository": the default scope comes from the origin's forge (`et/…` or `gh/…`), so a native repo and a same-named GitHub mirror stay distinct. `entire search` with `--repo`, `repo:` or `--all-repos` no longer requires a readable origin, and the `entire dispatch` wizard now discovers native checkouts ([#2639](https://github.com/entireio/cli/pull/2639), [#2667](https://github.com/entireio/cli/pull/2667))
+- `entire session adopt` validates declared subagent transcript paths against the agent's session directory and clears paths it cannot verify, instead of copying them unchecked into checkpoints ([#2655](https://github.com/entireio/cli/pull/2655))
+
+### Housekeeping
+
+- Local commit and reference reads use go-git ([#2590](https://github.com/entireio/cli/pull/2590))
+- Cluster discovery drops the unused jurisdiction audience fields and requirement ([#2602](https://github.com/entireio/cli/pull/2602))
+- Command-layer tests pin refusal of off-manifest 421 redirects ([#2500](https://github.com/entireio/cli/pull/2500))
+- Control-plane E2E login handles the new sign-in provider picker ([#2629](https://github.com/entireio/cli/pull/2629))
+
 ## [0.11.3] - 2026-09-25
 
 ### Breaking changes and migrations
