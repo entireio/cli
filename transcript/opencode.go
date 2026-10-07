@@ -191,10 +191,10 @@ func emitOpenCodeAssistant(result *[]byte, base transcriptLine, msg openCodeMess
 func openCodeToolResult(state map[string]json.RawMessage) json.RawMessage {
 	r := toolResultJSON{
 		Output: unquote(state["output"]),
-		Status: toolResultStatusSuccess,
+		Status: ToolStatusSuccess,
 	}
 	if s := unquote(state["status"]); s != "" && s != "completed" {
-		r.Status = toolResultStatusError
+		r.Status = ToolStatusError
 	}
 	b, err := json.Marshal(r)
 	if err != nil {

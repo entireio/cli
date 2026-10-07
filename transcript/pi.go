@@ -294,9 +294,9 @@ func piDecodeResultOutput(raw json.RawMessage) string {
 
 func piResultStatus(isError bool) string {
 	if isError {
-		return toolResultStatusError
+		return ToolStatusError
 	}
-	return toolResultStatusSuccess
+	return ToolStatusSuccess
 }
 
 func piTimestampJSON(ts string) json.RawMessage {

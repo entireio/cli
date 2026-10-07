@@ -1,6 +1,7 @@
 // Package transcript converts native agent transcripts into the Entire Transcript
-// Format (also called compact or unified transcripts). This API is versioned with
-// the CLI and may change; consumers should pin a version.
+// Format (also called compact or unified transcripts) and decodes that format
+// into typed lines (Decode, Parse). The format is specified in README.md. This
+// API is versioned with the CLI and may change; consumers should pin a version.
 package transcript
 
 import (
@@ -42,11 +43,6 @@ func newTranscriptLine(opts Options) transcriptLine {
 		CLIVersion: opts.CLIVersion,
 	}
 }
-
-const (
-	toolResultStatusSuccess = "success"
-	toolResultStatusError   = "error"
-)
 
 // toolResultJSON is the compact result object inlined into tool_use blocks.
 type toolResultJSON struct {
@@ -483,11 +479,11 @@ func inlineToolResults(assistant, user parsedEntry) parsedEntry {
 func buildToolResult(tr toolResultEntry) json.RawMessage {
 	r := toolResultJSON{
 		Output:     tr.output,
-		Status:     toolResultStatusSuccess,
+		Status:     ToolStatusSuccess,
 		MatchCount: tr.matchCount,
 	}
 	if tr.isError {
-		r.Status = toolResultStatusError
+		r.Status = ToolStatusError
 	}
 	if tr.file != nil {
 		r.File = &toolResultFileJSON{
