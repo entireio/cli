@@ -119,3 +119,74 @@ func TestHandleLifecycleToolUse_DropsIgnoredFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"agent.txt"}, state.FilesTouched)
 }
+
+// addSubmodule creates a separate repo and adds it as submodule "sub" of dir
+// with a real `git submodule add`, committing the gitlink.
+func addSubmodule(t *testing.T, dir string) string {
+	t.Helper()
+	subSrc := t.TempDir()
+	testutil.InitRepo(t, subSrc)
+	testutil.WriteFile(t, subSrc, "lib.txt", "v1\n")
+	testutil.GitAdd(t, subSrc, "lib.txt")
+	testutil.GitCommit(t, subSrc, "lib v1")
+	testutil.RunGit(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subSrc, "sub")
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "add submodule")
+	return filepath.Join(dir, "sub")
+}
+
+// A dirty submodule pointer reaches turn end through the git-status merge.
+// It is a gitlink, not a file of the session's work, so it must never enter
+// FilesTouched. Not parallel: t.Chdir.
+func TestHandleLifecycleTurnEnd_DropsSubmoduleGitlink(t *testing.T) {
+	dir, ag := setupIgnoreRouteRepo(t)
+	ag.analyzerFiles = []string{filepath.Join(dir, "agent.txt")}
+	sub := addSubmodule(t, dir)
+	ctx := context.Background()
+	sessionID := "sess-submodule-turn-end"
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	require.NoError(t, handleLifecycleTurnStart(ctx, ag, &agent.Event{
+		Type: agent.TurnStart, SessionID: sessionID, SessionRef: transcriptPath, Prompt: "work", Timestamp: time.Now(),
+	}))
+	// Move the submodule's checked-out commit so the parent sees `M sub`.
+	testutil.WriteFile(t, sub, "lib.txt", "v2\n")
+	testutil.RunGit(t, sub, "commit", "-q", "-am", "lib v2")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent.txt"), []byte("agent"), 0o600))
+	require.Contains(t, testutil.RunGit(t, dir, "--no-optional-locks", "status", "--porcelain"), " M sub")
+
+	require.NoError(t, handleLifecycleTurnEnd(ctx, ag, &agent.Event{
+		Type: agent.TurnEnd, SessionID: sessionID, SessionRef: transcriptPath, Timestamp: time.Now(),
+	}))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "agent.txt")
+	require.NotContains(t, state.FilesTouched, "sub")
+}
+
+// Task-record route twin of TestHandleLifecycleTurnEnd_DropsSubmoduleGitlink.
+// Not parallel: t.Chdir.
+func TestHandleLifecycleSubagentEnd_DropsSubmoduleGitlink(t *testing.T) {
+	dir, ag := setupIgnoreRouteRepo(t)
+	ag.analyzerFiles = []string{filepath.Join(dir, "agent.txt")}
+	sub := addSubmodule(t, dir)
+	ctx := context.Background()
+	sessionID := "sess-submodule-task"
+	toolUseID := "toolu-submodule-01"
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	require.NoError(t, CapturePreTaskState(ctx, toolUseID))
+	testutil.WriteFile(t, sub, "lib.txt", "v2\n")
+	testutil.RunGit(t, sub, "commit", "-q", "-am", "lib v2")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent.txt"), []byte("agent"), 0o600))
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, &agent.Event{
+		Type: agent.SubagentEnd, SessionID: sessionID, SessionRef: transcriptPath, ToolUseID: toolUseID, Timestamp: time.Now(),
+	}))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Contains(t, state.FilesTouched, "agent.txt")
+	require.NotContains(t, state.FilesTouched, "sub")
+}

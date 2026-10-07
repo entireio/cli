@@ -2813,8 +2813,14 @@ func captureSessionOwner(state *SessionState) {
 
 // getStagedFiles returns a list of files staged for commit using native git CLI.
 // This is much faster than go-git's worktree.Status() which scans the entire
-// working tree. `git diff --cached --name-only` uses native git's optimized index
+// working tree. `git diff --cached --raw` uses native git's optimized index
 // and filesystem monitors.
+//
+// Submodule gitlinks (mode 160000 on the staged side, or on the HEAD side of a
+// staged removal) are skipped: a submodule pointer is not a file of the
+// session's work, and treating one as a staged new file would stamp a trailer
+// no condensation can claim. A rename or copy reports its new path, as
+// `--name-only` did.
 //
 // Returns (non-nil empty slice, nil) when no files are staged — callers can
 // distinguish "no staged files" from "error resolving staged files" (nil, err).
@@ -2824,20 +2830,50 @@ func getStagedFiles(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only", "-z")
+	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--raw", "-z")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git diff --cached: %w", err)
 	}
+	return parseStagedRaw(output), nil
+}
 
+// gitlinkMode is the tree-entry mode git uses for a submodule commit pointer.
+const gitlinkMode = "160000"
+
+// parseStagedRaw parses `git diff --raw -z` output into the staged paths,
+// skipping submodule gitlinks. Each record is
+// ":<src mode> <dst mode> <src sha> <dst sha> <status>\0<path>\0", with a
+// second path for renames and copies (status R or C).
+func parseStagedRaw(output []byte) []string {
 	staged := []string{}
-	for _, name := range bytes.Split(output, []byte{0}) {
-		if len(name) != 0 {
-			staged = append(staged, filepath.ToSlash(string(name)))
+	fields := bytes.Split(output, []byte{0})
+	for i := 0; i < len(fields); i++ {
+		header := string(fields[i])
+		if !strings.HasPrefix(header, ":") {
+			continue
+		}
+		meta := strings.Fields(strings.TrimPrefix(header, ":"))
+		if len(meta) < 5 || i+1 >= len(fields) {
+			break
+		}
+		status := meta[4]
+		path := string(fields[i+1])
+		i++
+		if (status[0] == 'R' || status[0] == 'C') && i+1 < len(fields) {
+			path = string(fields[i+1])
+			i++
+		}
+		srcMode, dstMode := meta[0], meta[1]
+		if dstMode == gitlinkMode || (status == "D" && srcMode == gitlinkMode) {
+			continue
+		}
+		if path != "" {
+			staged = append(staged, filepath.ToSlash(path))
 		}
 	}
-	return staged, nil
+	return staged
 }
 
 // getLastPrompt retrieves the most recent user prompt of a session from its
