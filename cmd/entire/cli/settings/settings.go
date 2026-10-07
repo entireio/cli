@@ -542,11 +542,31 @@ type ReviewConfig struct {
 	// settings by any route other than Load() (LoadFromFile, LoadFromBytes)
 	// get the ungated value and must not hand it to an agent.
 	Prompt string `json:"prompt,omitempty"`
+
+	// Config, when set, replaces the reviewed checkout's agent config for this
+	// reviewer: the checkout's hooks, MCP servers and extensions are not
+	// loaded, and these are used instead. Presence (even {}) means isolated.
+	//
+	// It names commands Entire runs, so Load() honors it only from a
+	// developer-owned layer, like Prompt; see enforceAgentPromptTrust.
+	Config *ReviewAgentConfig `json:"config,omitempty"`
+}
+
+// ReviewAgentConfig is a reviewer's own agent config, in each agent's native
+// shape. Which fields an agent accepts is checked when the review runs.
+type ReviewAgentConfig struct {
+	// Settings is a Claude Code settings object (hooks, permissions, env, ...).
+	Settings json.RawMessage `json:"settings,omitempty"`
+	// MCPServers maps a server name to its definition ({command, args, env}
+	// or {url}), for Claude Code and Codex.
+	MCPServers map[string]json.RawMessage `json:"mcp_servers,omitempty"`
+	// Extensions are absolute paths of Pi extension files.
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 // IsZero reports whether the config is effectively unset.
 func (c ReviewConfig) IsZero() bool {
-	return c.Agent == "" && c.Model == "" && len(c.Skills) == 0 && c.Prompt == ""
+	return c.Agent == "" && c.Model == "" && len(c.Skills) == 0 && c.Prompt == "" && c.Config == nil
 }
 
 // LocalLayerRejection reports why .entire/settings.local.json was ignored, or

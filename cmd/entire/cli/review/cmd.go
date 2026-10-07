@@ -83,7 +83,7 @@ type Deps struct {
 	CheckoutTarget func(ctx context.Context, out, errOut io.Writer, target ResolvedTarget, untrusted bool) (TargetWorktree, error)
 
 	// InspectTrust lists what a checkout would run for the named agents.
-	InspectTrust func(ctx context.Context, source TrustSource, agents []string) (TrustInventory, error)
+	InspectTrust func(ctx context.Context, source TrustSource, agents []TrustAgent) (TrustInventory, error)
 
 	// RemoveTarget removes a worktree created specifically for this review.
 	// Reused worktrees are never passed to it.
@@ -114,6 +114,10 @@ Flags:
   --set-model    with --configure: per-reviewer model as agent=model (repeatable)
   --set-slot     with --configure: a reviewer slot as agent[=model] (repeatable;
                  the same agent/model may repeat to run it multiple times)
+  --set-config   with --configure: a reviewer's own agent config as
+                 reviewer=<config.json|isolated|none> (repeatable). It replaces
+                 the reviewed checkout's hooks, MCP servers and extensions; the
+                 checkout's skills still load. Saved to clone-local preferences.
   --edit         re-open the advanced profile skill picker
   --findings     browse local findings; pass a handle to print one saved run
   --agent NAME   run only one reviewer from the selected profile
@@ -173,6 +177,7 @@ func NewCommand(deps Deps) *cobra.Command {
 	var setTask string
 	var setModels []string
 	var setSlots []string
+	var setConfigs []string
 	var target string
 	var cleanupWorktree bool
 	var trustTarget string
@@ -262,13 +267,14 @@ func NewCommand(deps Deps) *cobra.Command {
 			}
 			if configure {
 				return runReviewConfigure(ctx, cmd, profileName, reviewConfigureOptions{
-					Agents: setAgents,
-					Judge:  setJudge,
-					Output: setOutput,
-					Local:  setLocal,
-					Task:   setTask,
-					Models: setModels,
-					Slots:  setSlots,
+					Agents:  setAgents,
+					Judge:   setJudge,
+					Output:  setOutput,
+					Local:   setLocal,
+					Task:    setTask,
+					Models:  setModels,
+					Slots:   setSlots,
+					Configs: setConfigs,
 				}, deps)
 			}
 			if edit {
@@ -303,6 +309,7 @@ func NewCommand(deps Deps) *cobra.Command {
 	cmd.Flags().StringVar(&setTask, "set-task", "", "with --configure: the profile's canonical task text")
 	cmd.Flags().StringArrayVar(&setModels, "set-model", nil, "with --configure: per-reviewer model as agent=model (repeatable)")
 	cmd.Flags().StringArrayVar(&setSlots, "set-slot", nil, "with --configure: a reviewer slot as agent[=model] (repeatable; same agent/model may repeat)")
+	cmd.Flags().StringArrayVar(&setConfigs, "set-config", nil, "with --configure: a reviewer's own agent config as reviewer=<config.json|isolated|none> (repeatable; saved to clone-local preferences)")
 	cmd.Flags().BoolVar(&edit, "edit", false, "re-open the advanced review profile skill picker")
 	cmd.Flags().BoolVar(&findings, "findings", false, "browse local review findings; pass a handle to print one saved run")
 	cmd.Flags().BoolVar(&listAgents, "agents", false, "list the reviewer agents you can pass to --agent for the selected profile")
@@ -333,6 +340,8 @@ type reviewConfigureOptions struct {
 	Task   string   // profile task text (--set-task)
 	Models []string // per-reviewer "agent=model" entries (--set-model)
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
+	// Configs are reviewer agent configs as "reviewer=<file|isolated|none>" (--set-config).
+	Configs []string
 }
 
 // reviewCommandIsInteractive requires the exact stdin consumed by huh and
@@ -374,7 +383,7 @@ func (o reviewConfigureOptions) scripted() bool {
 	// Local selects the destination only; by itself it must not force the
 	// non-interactive/scripted path. `entire review --configure --local` should
 	// still run the guided picker and preselect the local settings file.
-	return len(o.Agents) > 0 || o.Judge != "" || o.Output != "" || o.Task != "" || len(o.Models) > 0 || len(o.Slots) > 0
+	return len(o.Agents) > 0 || o.Judge != "" || o.Output != "" || o.Task != "" || len(o.Models) > 0 || len(o.Slots) > 0 || len(o.Configs) > 0
 }
 
 func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride string, opts reviewConfigureOptions, deps Deps) error {
@@ -406,6 +415,9 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 
 	// Scripted path: build + save the profile from --set-* flags, no TUI. The
 	// destination is the --local flag (default: project settings).
+	if len(opts.Configs) > 0 && !opts.withoutConfigs().scripted() {
+		return configureAgentConfigs(ctx, cmd, profileName, opts.Configs, silentErr)
+	}
 	if opts.scripted() {
 		profile, buildErr := buildConfiguredProfile(ctx, profileName, opts, s, deps)
 		if buildErr != nil {
@@ -421,6 +433,11 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 			return err
 		}
 		fmt.Fprintf(out, "Review profile %q saved to %s with %s.\n", profileName, scope.file(), strings.Join(sortedMapKeys(profile.Agents), ", "))
+		if len(opts.Configs) > 0 {
+			if err := configureAgentConfigs(ctx, cmd, profileName, opts.Configs, silentErr); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintf(out, "Run `entire review %s` to start.\n", profileName)
 		return nil
 	}
@@ -545,7 +562,11 @@ func runReviewListProfiles(ctx context.Context, cmd *cobra.Command, deps Deps) e
 			if model == "" {
 				model = "default"
 			}
-			reviewers = append(reviewers, reviewAgentName(w, cfg)+" · "+model)
+			label := reviewAgentName(w, cfg) + " · " + model
+			if cfg.Config != nil {
+				label += " · own agent config"
+			}
+			reviewers = append(reviewers, label)
 		}
 		fmt.Fprintf(out, "    reviewers: %s\n", strings.Join(reviewers, ", "))
 
@@ -956,6 +977,17 @@ func resolveReviewProfile(ctx context.Context, cmd *cobra.Command, profileOverri
 		return reviewProfileSelection{}, silentErr(err)
 	}
 	notifyDroppedReviewPrompts(cmd.ErrOrStderr(), s, profileName)
+	// A reviewer config the user set locally but that can't be honored must
+	// stop the review: running it with the checkout's config instead would
+	// silently undo the isolation they asked for.
+	for _, rej := range s.AgentPromptRejections() {
+		if strings.HasPrefix(rej.Field, "review_profiles."+profileName+".") && settings.AgentConfigRejectionUnverified(rej) {
+			cmd.SilenceUsage = true
+			err := fmt.Errorf("%s can't be applied: .entire/settings.local.json could not be verified as untracked; move the profile to clone-local preferences (entire review --configure --set-config)", rej.Field)
+			fmt.Fprintln(cmd.ErrOrStderr(), "Not run: "+err.Error())
+			return reviewProfileSelection{}, silentErr(err)
+		}
+	}
 	profile.Task = profileTask(profileName, profile)
 	profile.Agents = nonZeroAgentConfigs(profile.Agents)
 	return reviewProfileSelection{name: profileName, profile: profile, installed: installed}, nil
@@ -979,11 +1011,16 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	profileName, profile, installed := selection.name, selection.profile, selection.installed
 
 	// Gate before the reviewers load the checkout's configuration.
-	if err := gatePlainReview(ctx, cmd, gateOpts, profileAgentNames(profile, agentOverride), deps); err != nil {
+	if err := gatePlainReview(ctx, cmd, gateOpts, profileTrustAgents(profile, agentOverride), deps); err != nil {
 		if errors.Is(err, errTrustCancelled) {
 			return nil
 		}
 		return err
+	}
+	for _, worker := range sortedMapKeys(nonZeroAgentConfigs(profile.Agents)) {
+		if profile.Agents[worker].Config != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s: using your profile's agent config (this checkout's hooks, MCP servers and extensions are not loaded).\n", worker)
+		}
 	}
 
 	outputMode := profileOutput(profile)
@@ -1780,6 +1817,7 @@ func applyReviewConfig(runCfg *reviewtypes.RunConfig, cfg settings.ReviewConfig)
 	runCfg.Model = strings.TrimSpace(cfg.Model)
 	runCfg.Skills = cfg.Skills
 	runCfg.AlwaysPrompt = cfg.Prompt
+	runCfg.AgentConfig = toAgentConfig(cfg.Config)
 }
 
 // findTUISink returns the first *TUISink in the slice (if any). Used by the

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 		AgentName: "codex",
 		BuildCmd:  buildCodexReviewCmd,
 		Parser:    parseCodexOutput,
+		Prepare:   prepareCodexReviewConfig,
 	}
 }
 
@@ -54,10 +56,18 @@ func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.C
 	promptCfg := cfg
 	promptCfg.Skills = codexNativeSkillInvocations(cfg.Skills)
 	args := []string{codexExecCommand, "--skip-git-repo-check", "--json", "-c", review.CodexGuardrailConfig()}
+	args = append(args, cfg.ExtraArgs...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	args = append(args, "-")
 	prompt := review.ComposeReviewPrompt(promptCfg)
 	cmd := exec.CommandContext(ctx, "codex", args...)
+	if cfg.AgentConfig != nil {
+		// Codex keys project trust on its working directory, so run from
+		// exactly the directory the untrusted override names.
+		if root, err := filepath.EvalSymlinks(cfg.WorkDir); err == nil && cfg.WorkDir != "" {
+			cmd.Dir = root
+		}
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "codex", cfg, prompt)
 	return cmd

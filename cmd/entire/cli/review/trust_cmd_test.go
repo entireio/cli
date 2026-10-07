@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,8 +58,8 @@ func setupForeignBranchRepo(t *testing.T) (reviewer *captureRunConfigReviewer, d
 			}
 			return nil
 		},
-		InspectTrust: func(_ context.Context, source review.TrustSource, agents []string) (review.TrustInventory, error) {
-			if source.WorktreeRoot == "" || len(agents) != 1 || agents[0] != "claude-code" {
+		InspectTrust: func(_ context.Context, source review.TrustSource, agents []review.TrustAgent) (review.TrustInventory, error) {
+			if source.WorktreeRoot == "" || len(agents) != 1 || agents[0].Name != "claude-code" {
 				t.Errorf("InspectTrust(%+v, %v): want the current worktree and the profile's agent", source, agents)
 			}
 			return review.TrustInventory{Entries: []review.TrustEntry{
@@ -141,5 +142,44 @@ func TestRunReview_GateFlagsValidatedForEveryMode(t *testing.T) {
 		if err := cmd.Execute(); err == nil {
 			t.Errorf("review %v succeeded; want a flag error", args)
 		}
+	}
+}
+
+// --set-config validates the file and saves to clone-local preferences,
+// never the committed settings file.
+func TestConfigure_SetConfigSavesToClonePreferences(t *testing.T) {
+	_, deps, _ := setupForeignBranchRepo(t)
+	cfgFile := filepath.Join(t.TempDir(), "review-config.json")
+	if err := os.WriteFile(cfgFile, []byte(`{"settings":{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/true"}]}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) error {
+		cmd := review.NewCommand(deps)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		return cmd.Execute()
+	}
+	if err := run("--configure", "general", "--set-config", "claude-code="+cfgFile); err != nil {
+		t.Fatalf("--set-config: %v", err)
+	}
+	s, err := settings.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.ReviewProfiles["general"].Agents["claude-code"].Config
+	if cfg == nil || !strings.Contains(string(cfg.Settings), "/usr/bin/true") {
+		t.Fatalf("config not applied: %+v", cfg)
+	}
+	if data, err := os.ReadFile(filepath.Join(".entire", "settings.json")); err == nil && strings.Contains(string(data), `"config"`) {
+		t.Fatalf("config written to the committed settings file:\n%s", data)
+	}
+
+	bad := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(bad, []byte(`{"settings":{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"./hook.sh"}]}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("--configure", "general", "--set-config", "claude-code="+bad); err == nil {
+		t.Fatal("a hook running from the checkout was accepted")
 	}
 }

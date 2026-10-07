@@ -23,11 +23,11 @@ import (
 func trustInventoryBoth(t *testing.T, dir string, agents ...string) cliReview.TrustInventory {
 	t.Helper()
 	head := gitOutputInDir(t, dir, "rev-parse", "HEAD")
-	fromTree, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{RepoRoot: dir, Commit: head}, agents)
+	fromTree, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{RepoRoot: dir, Commit: head}, trustAgents(agents...))
 	if err != nil {
 		t.Fatalf("inspect tree: %v", err)
 	}
-	fromDisk, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{WorktreeRoot: dir}, agents)
+	fromDisk, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{WorktreeRoot: dir}, trustAgents(agents...))
 	if err != nil {
 		t.Fatalf("inspect disk: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestTrustInventory_InstalledHooksAreEntire(t *testing.T) {
 			t.Fatalf("InstallHooks(%s): %v", name, err)
 		}
 	}
-	inv, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{WorktreeRoot: dir}, []string{"claude-code", "codex", "pi"})
+	inv, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{WorktreeRoot: dir}, trustAgents("claude-code", "codex", "pi"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestTrustInventory_MixedCaseConfigInTree(t *testing.T) {
 		".MCP.json":             `{"mcpServers":{"evil":{"command":"evil-mcp"}}}`,
 	})
 	head := gitOutputInDir(t, dir, "rev-parse", "HEAD")
-	inv, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{RepoRoot: dir, Commit: head}, []string{"claude-code"})
+	inv, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{RepoRoot: dir, Commit: head}, trustAgents("claude-code"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,5 +493,49 @@ func TestTrustInventory_UnnamedSecretsAreRedactedByContent(t *testing.T) {
 	}
 	if want := "docker run REDACTED"; got["mcp gh"] != want {
 		t.Errorf("mcp gh = %q, want %q", got["mcp gh"], want)
+	}
+}
+
+func trustAgents(names ...string) []cliReview.TrustAgent {
+	agents := make([]cliReview.TrustAgent, 0, len(names))
+	for _, name := range names {
+		agents = append(agents, cliReview.TrustAgent{Name: name})
+	}
+	return agents
+}
+
+// With a profile config, only what still loads from the checkout is listed:
+// Claude's skills and commands, Pi's settings and skills (not extensions).
+func TestTrustInventory_IsolatedAgentsListOnlyWhatStillLoads(t *testing.T) {
+	t.Parallel()
+	dir := newTrustInventoryRepo(t, map[string]string{
+		".claude/settings.json":          `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"evil-hook"}]}]}}`,
+		".mcp.json":                      `{"mcpServers":{"evil":{"command":"evil-mcp"}}}`,
+		".claude/skills/review/SKILL.md": "x",
+		".pi/extensions/evil/index.ts":   "x",
+		".pi/settings.json":              `{"packages":["npm:evil"]}`,
+	})
+	head := gitOutputInDir(t, dir, "rev-parse", "HEAD")
+	agents := []cliReview.TrustAgent{{Name: "claude-code", Isolated: true}, {Name: "pi", Isolated: true}}
+	inv, err := inspectReviewTrust(t.Context(), cliReview.TrustSource{RepoRoot: dir, Commit: head}, agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inv.Isolated || !slices.Equal(inv.IsolatedAgents, []string{"claude-code", "pi"}) {
+		t.Fatalf("Isolated = %v, IsolatedAgents = %v", inv.Isolated, inv.IsolatedAgents)
+	}
+	got := map[string]bool{}
+	for _, e := range inv.Entries {
+		got[e.Command] = true
+	}
+	for _, gone := range []string{"evil-hook", "evil-mcp", ".pi/extensions/evil/index.ts"} {
+		if got[gone] {
+			t.Errorf("%q listed although the profile config replaces it", gone)
+		}
+	}
+	for _, want := range []string{".claude/skills/review", `["npm:evil"]`} {
+		if !got[want] {
+			t.Errorf("%q not listed although it still loads; got %v", want, got)
+		}
 	}
 }

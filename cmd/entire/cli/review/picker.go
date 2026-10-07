@@ -828,6 +828,7 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 	fmt.Fprintln(out)
 
 	selected := map[string]settings.ReviewConfig{}
+	configs := map[string]*settings.ReviewAgentConfig{}
 	for i, c := range configurable {
 		curated := skilldiscovery.CuratedBuiltinsFor(string(c.name))
 
@@ -892,6 +893,14 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 			Skills: dedupeStrings(append(builtinPicks, discoveredPicks...)),
 			Prompt: strings.TrimSpace(prompt),
 		}
+		agentCfg, changed, err := promptReviewAgentConfig(ctx, string(c.name), existing[string(c.name)].Config)
+		if err != nil {
+			return err
+		}
+		if changed {
+			configs[string(c.name)] = agentCfg
+		}
+		cfg.Config = agentCfg
 		if !cfg.IsZero() {
 			selected[string(c.name)] = cfg
 		}
@@ -923,6 +932,13 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 		return err
 	}
 	fmt.Fprintf(out, "Saved review profile %q to %s. Edit later with `entire review --edit --profile %s`.\n", profileName, scope.file(), profileName)
+	if len(configs) > 0 {
+		where, err := saveReviewAgentConfigs(ctx, profileName, configs)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Saved reviewer agent config to %s (agent config is never written to the shared settings file).\n", where)
+	}
 	return nil
 }
 
@@ -965,6 +981,8 @@ func saveReviewProfileConfig(ctx context.Context, profileName string, agents map
 	// clobbered with built-in defaults.
 	profile := profiles[profileName]
 	profile.Agents = agents
+	// Reviewer configs are saved separately, to a developer-owned layer.
+	profile = stripAgentConfigs(profile)
 	if strings.TrimSpace(judgeAgent) != "" {
 		profile.Judge = &settings.ReviewConfig{Agent: strings.TrimSpace(judgeAgent)}
 	} else {
@@ -1344,4 +1362,54 @@ func dedupeStrings(xs []string) []string {
 		out = append(out, x)
 	}
 	return out
+}
+
+// promptReviewAgentConfig asks which agent config a reviewer runs with. It
+// reports whether the choice changed anything.
+func promptReviewAgentConfig(ctx context.Context, agentName string, current *settings.ReviewAgentConfig) (*settings.ReviewAgentConfig, bool, error) {
+	if _, supported := agentConfigFields[agentName]; !supported {
+		return current, false, nil
+	}
+	choice := agentConfigCheckout
+	options := []huh.Option[string]{
+		huh.NewOption("Use the reviewed checkout's config (hooks, MCP servers, settings)", agentConfigCheckout),
+		huh.NewOption("Use my own config, with nothing extra", agentConfigIsolated),
+		huh.NewOption("Use my own config, loaded from a file…", agentConfigFile),
+	}
+	if current != nil {
+		choice = agentConfigKeep
+		options = append([]huh.Option[string]{huh.NewOption("Keep my current config", agentConfigKeep)}, options...)
+	}
+	form := newAccessibleForm(huh.NewGroup(huh.NewSelect[string]().
+		Title("Agent config for " + agentName).
+		Description("Your own config replaces the checkout's hooks, MCP servers and extensions; the checkout's skills still load.").
+		Options(options...).
+		Value(&choice)))
+	if err := form.RunWithContext(ctx); err != nil {
+		return nil, false, fmt.Errorf("agent config for %s: %w", agentName, err)
+	}
+	switch choice {
+	case agentConfigKeep:
+		return current, false, nil
+	case agentConfigCheckout:
+		return nil, current != nil, nil
+	case agentConfigIsolated:
+		return &settings.ReviewAgentConfig{}, true, nil
+	}
+	var path string
+	input := newAccessibleForm(huh.NewGroup(huh.NewInput().
+		Title("Config file for " + agentName).
+		Description(`JSON: {"settings": {...}, "mcp_servers": {...}, "extensions": [...]}`).
+		Value(&path)))
+	if err := input.RunWithContext(ctx); err != nil {
+		return nil, false, fmt.Errorf("agent config file for %s: %w", agentName, err)
+	}
+	cfg, err := loadAgentConfigFile(strings.TrimSpace(path))
+	if err != nil {
+		return nil, false, err
+	}
+	if err := validateAgentConfigForSave(ctx, agentName, cfg); err != nil {
+		return nil, false, fmt.Errorf("agent config for %s: %w", agentName, err)
+	}
+	return cfg, true, nil
 }
