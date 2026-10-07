@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -1038,6 +1039,73 @@ func TestFilesWithRemainingAgentChanges_NoRecordedHash_PendingTrackedDeletion(t 
 		[]string{"to_delete.txt", "other.txt", "never_existed.txt"}, map[string]struct{}{"other.txt": {}})
 	assert.Equal(t, []string{"to_delete.txt"}, remaining,
 		"the pending tracked deletion stays; the committed file and the phantom drop")
+}
+
+// TestFilesWithRemainingAgentChanges_HashedFileDeletedByCommit: the agent
+// edited a tracked file (so a hash is recorded), and the human deleted it and
+// committed the deletion. The recorded hash is history, not remaining work:
+// with the file gone from both the commit and the worktree, nothing is left to
+// carry forward.
+func TestFilesWithRemainingAgentChanges_HashedFileDeletedByCommit(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	testutil.WriteFile(t, dir, "edited.txt", "original\n")
+	testutil.GitAdd(t, dir, "edited.txt")
+	testutil.GitCommit(t, dir, "Add file")
+	testutil.WriteFile(t, dir, "edited.txt", "agent edit\n")
+	hashes := map[string]string{"edited.txt": gitHashObject(t, dir, "edited.txt")}
+
+	testutil.RunGit(t, dir, "rm", "-q", "-f", "--", "edited.txt")
+	testutil.GitCommit(t, dir, "Delete the file")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"edited.txt"}, map[string]struct{}{"edited.txt": {}})
+	assert.Empty(t, remaining)
+}
+
+// TestFilesWithRemainingAgentChanges_UnreadableParentKeepsDeletion: when the
+// worktree cannot be inspected (here the parent directory is unreadable, so
+// Lstat fails with a permission error rather than "does not exist"), a pending
+// recorded deletion is kept rather than dropped as re-created.
+func TestFilesWithRemainingAgentChanges_UnreadableParentKeepsDeletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits do not block Lstat on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	t.Parallel()
+	dir := setupGitRepo(t)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	testutil.WriteFile(t, dir, "locked/gone.txt", "tracked\n")
+	testutil.WriteFile(t, dir, "other.txt", "other\n")
+	testutil.GitAdd(t, dir, "locked/gone.txt")
+	testutil.GitCommit(t, dir, "Add file")
+	require.NoError(t, os.Remove(filepath.Join(dir, "locked", "gone.txt")))
+	testutil.GitAdd(t, dir, "other.txt")
+	testutil.GitCommit(t, dir, "Commit another file")
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+
+	locked := filepath.Join(dir, "locked")
+	require.NoError(t, os.Chmod(locked, 0))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) }) //nolint:errcheck // best-effort so t.TempDir can clean up
+
+	hashes := map[string]string{"locked/gone.txt": touchedFileDeleted}
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, hashes, commit,
+		[]string{"locked/gone.txt"}, map[string]struct{}{"other.txt": {}})
+	assert.Equal(t, []string{"locked/gone.txt"}, remaining)
 }
 
 // TestFilesOverlapWithContent_CarriedForwardDeletionLinks: the later commit

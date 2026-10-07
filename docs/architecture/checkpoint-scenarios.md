@@ -210,8 +210,9 @@ The carry-forward logic uses **content-aware comparison** to determine which fil
 2. **File in commit, hash matches the recorded turn-end hash** → fully committed, no carry-forward
 3. **File in commit, hash differs from the recorded one, but the clean-filtered working-tree hash matches the commit** → the user replaced the agent content and committed it fully, no carry-forward
 4. **File in commit, hash differs from both the recorded hash and the clean-filtered working tree** → partial commit (e.g., `git add -p`), carry forward
-5. **Recorded deletion** → carried forward while still pending (the commit tree has the path and the worktree lacks it, even if the commit modified the path), so the commit that finally deletes it links; dropped once a commit removes the path or the file is re-created
-6. **No recorded hash** (a session from an older CLI, hashing failed, a symlink, or a path from a task record or per-tool hook) → if committed, kept while the working tree differs from the committed blob and dropped when it matches; if not committed, kept unless absent from both the commit and the worktree (a path the commit still has but the worktree lacks is a pending deletion)
+5. **Commit deleted the file** → dropped when the worktree lacks it too, recorded hash or not; kept while the worktree still has it (re-created, or `git rm --cached`)
+6. **Recorded deletion** → carried forward while still pending (the commit tree has the path and the worktree lacks it, even if the commit modified the path), so the commit that finally deletes it links; dropped once a commit removes the path or the file is re-created
+7. **No recorded hash** (a session from an older CLI, hashing failed, a symlink, or a path from a task record or per-tool hook) → if committed, kept while the working tree differs from the committed blob and dropped when it matches; if not committed, kept unless absent from both the commit and the worktree (a path the commit still has but the worktree lacks is a pending deletion)
 
 The recorded hashes and the working-tree hash are computed by native Git (`git hash-object`), so `core.autocrlf`, Git LFS, `ident`, and custom clean filters do not create phantom differences. Symlinks are never hashed at turn end because `git hash-object` follows the link rather than hashing its target-path string; they fall back to name matching.
 

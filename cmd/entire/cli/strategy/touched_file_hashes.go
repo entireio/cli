@@ -198,14 +198,45 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 	pruneTouchedFileHashes(state)
 }
 
-// worktreeEntryExists reports whether path names an entry (of any type,
-// without following a final symlink) in the worktree. Any error other than
-// "does not exist" counts as existing, so an unreadable path is never dropped.
-func worktreeEntryExists(root *os.Root, worktreeRoot, path string) bool {
+// worktreeEntryState is what a probe of one worktree path found.
+type worktreeEntryState int
+
+const (
+	// worktreeEntryUnknown: the path could not be inspected (no worktree
+	// root, an invalid name, or an error other than "does not exist", such as
+	// an unreadable parent directory). Callers must treat it as whatever keeps
+	// pending work.
+	worktreeEntryUnknown worktreeEntryState = iota
+	// worktreeEntryPresent: an entry of any type exists at the path.
+	worktreeEntryPresent
+	// worktreeEntryAbsent: the path definitely does not exist.
+	worktreeEntryAbsent
+)
+
+// probeWorktreeEntry reports whether path names an entry (of any type,
+// without following a final symlink) in the worktree, distinguishing "absent"
+// from "could not tell".
+func probeWorktreeEntry(root *os.Root, worktreeRoot, path string) worktreeEntryState {
+	if root == nil {
+		return worktreeEntryUnknown
+	}
 	name, err := worktreedir.Name(worktreeRoot, path)
 	if err != nil {
-		return true
+		return worktreeEntryUnknown
 	}
-	_, err = root.Lstat(name)
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
+	switch _, err = root.Lstat(name); {
+	case err == nil:
+		return worktreeEntryPresent
+	case errors.Is(err, fs.ErrNotExist):
+		return worktreeEntryAbsent
+	default:
+		return worktreeEntryUnknown
+	}
+}
+
+// worktreeEntryExists reports whether path names an entry in the worktree.
+// Anything but a definite "does not exist" counts as existing, so an
+// unreadable path is never dropped as a phantom.
+func worktreeEntryExists(root *os.Root, worktreeRoot, path string) bool {
+	return probeWorktreeEntry(root, worktreeRoot, path) != worktreeEntryAbsent
 }

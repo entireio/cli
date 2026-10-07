@@ -1155,6 +1155,54 @@ func TestPostCommit_UpgradedSession_CarryForwardWithoutRecordedHashes(t *testing
 	assert.Equal(t, 1, state.StepCount)
 }
 
+// TestPostCommit_HashedFileDeletedByCommit_NotCarriedForward: the agent edits
+// a tracked file (SaveStep records its hash), the human deletes the file and
+// commits the deletion. Nothing is left of the agent's edit, so PostCommit must
+// not carry the path forward or re-arm carry-forward for it.
+func TestPostCommit_HashedFileDeletedByCommit_NotCarriedForward(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-hashed-file-deleted"
+
+	metadataDir := ".entire/metadata/" + sessionID
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, metadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName),
+		[]byte(testTranscriptPromptResponse), 0o644))
+
+	testutil.WriteFile(t, dir, "doomed.txt", "original\n")
+	testutil.GitAdd(t, dir, "doomed.txt")
+	testutil.GitCommit(t, dir, "add doomed.txt")
+	testutil.WriteFile(t, dir, "doomed.txt", "agent edit\n")
+
+	require.NoError(t, s.SaveStep(context.Background(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"doomed.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+	}))
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Contains(t, state.TouchedFileHashes, "doomed.txt", "fixture: the agent edit has a recorded hash")
+	state.Phase = session.PhaseIdle
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	testutil.RunGit(t, dir, "rm", "-q", "-f", "--", "doomed.txt")
+	testutil.GitCommit(t, dir, "delete doomed.txt\n\n"+trailers.CheckpointTrailerKey+": "+"cd34ef56ab12")
+
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.NotContains(t, state.FilesTouched, "doomed.txt")
+	assert.NotContains(t, state.TouchedFileHashes, "doomed.txt")
+	assert.Zero(t, state.StepCount, "carry-forward must not be re-armed for a deleted file")
+}
+
 // TestPostCommit_ActiveSession_CarryForward_AllCommitted verifies that when an
 // ACTIVE session's files are ALL included in the commit, no carry-forward occurs.
 func TestPostCommit_ActiveSession_CarryForward_AllCommitted(t *testing.T) {
