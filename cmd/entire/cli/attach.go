@@ -639,7 +639,7 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 // branch (single-branch clones, narrowed refspecs).
 func remoteHoldingPushedCommit(ctx context.Context, target *object.Commit, remotes []string) (remote string, unreachable []string, err error) {
 	fetchRemotesForAttach(ctx, remotes)
-	if remote, err = remoteHoldingCommit(ctx, target); err != nil || remote != "" {
+	if remote, err = remoteHoldingCommit(ctx, target, remotes); err != nil || remote != "" {
 		return remote, nil, err
 	}
 	remote, unreachable = remoteContainingCommit(ctx, target, remotes)
@@ -800,16 +800,19 @@ func remoteBranchTips(ctx context.Context, remote string) (branches, tips []stri
 	return branches, tips, nil
 }
 
-// remoteHoldingCommit returns a remote whose branches contain target, or "" when
-// none does.
-func remoteHoldingCommit(ctx context.Context, target *object.Commit) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "branch", "-r", "--contains", target.Hash.String(), "--format=%(refname:short)").Output()
+// remoteHoldingCommit returns one of remotes whose tracking branches contain
+// target, or "" when none does. Other remotes' tracking refs are ignored, as
+// an unrelated remote's would name a remote attach then pushes to.
+func remoteHoldingCommit(ctx context.Context, target *object.Commit, remotes []string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "branch", "-r", "--contains", target.Hash.String(), "--format=%(refname)").Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to check which remote branches contain %s: %w", target.Hash.String()[:12], err)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if remote, _, ok := strings.Cut(strings.TrimSpace(line), "/"); ok && remote != "" {
-			return remote, nil
+	for _, ref := range strings.Fields(string(out)) {
+		for _, remote := range remotes {
+			if strings.HasPrefix(ref, "refs/remotes/"+remote+"/") {
+				return remote, nil
+			}
 		}
 	}
 	return "", nil

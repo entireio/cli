@@ -626,6 +626,26 @@ func TestAttachCommit_IgnoresAnUnreachableUnrelatedRemote(t *testing.T) {
 	}
 }
 
+// A stale tracking ref from an unrelated remote doesn't make the commit
+// "pushed": only the remotes the branch pushes to count.
+func TestAttachCommit_IgnoresAnUnrelatedRemotesTrackingRef(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+	pushToOrigin(t)
+	dir := mustGetwd(t)
+	commitAt(t, "more.txt")
+	testutil.RunGit(t, dir, "remote", "add", "oldfork", filepath.Join(t.TempDir(), "missing.git"))
+	testutil.RunGit(t, dir, "update-ref", "refs/remotes/oldfork/main", "HEAD")
+
+	out, err := attachHeadless(t, "attach-unrelated-tracking-ref", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if _, ok := trailers.ParseCheckpoint(headCommitOf(t).Message); !ok {
+		t.Fatalf("unpushed HEAD was not amended:\n%s", out)
+	}
+}
+
 // Finding 1: a remote's branch tip is checked directly, so a commit pushed to a
 // branch this clone's fetch refspec doesn't track still reads as pushed.
 func TestAttachCommit_SeesACommitPushedToAnUntrackedBranch(t *testing.T) {
