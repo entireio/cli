@@ -103,6 +103,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 
 	"checkpoint":         {agentHelpAudienceTaskDriven, true},
 	"checkpoint create":  {agentHelpAudienceUserOwned, false},  // hidden; writes a checkpoint
+	"checkpoint delete":  {agentHelpAudienceUserOwned, false},  // destructive, irreversible on remotes
 	"checkpoint explain": {agentHelpAudienceTaskDriven, false}, // --generate writes a summary
 	"checkpoint list":    {agentHelpAudienceReadOnly, false},
 	"checkpoint search":  {agentHelpAudienceReadOnly, false},
@@ -210,6 +211,9 @@ var agentHelpGuidance = map[string]string{
 		"so pass it only when the user asked for a summary. To see what subagents\n" +
 		"did, read \"tasks\" in --json, then stream one subagent's transcript with\n" +
 		"--transcript --task <tool_use_id>.",
+
+	"checkpoint delete": "Destructive and irreversible on the remote. Never run this unless the user\n" +
+		"explicitly asks to delete that checkpoint; do not pass --force on your own.",
 }
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
@@ -274,11 +278,11 @@ func agentHelpAudienceNote(cmd *cobra.Command, facts agentHelpFacts, trailsEnabl
 		switch cf.audience {
 		case agentHelpAudienceReadOnly:
 			readOnly = append(readOnly, child.Name())
-		case agentHelpAudienceTaskDriven:
+		case agentHelpAudienceTaskDriven, agentHelpAudienceUserOwned:
+			// A user-owned child (`checkpoint delete`) writes too. Its "do not run
+			// this unprompted" rule lives in agentHelpGuidance and the drill-down's
+			// per-subcommand audience; here it only must not read as read-only.
 			writes = append(writes, child.Name())
-		case agentHelpAudienceUserOwned:
-			// A user-owned child inside a listed group would need its own phrasing.
-			// None exists today; the completeness guard surfaces one if it lands.
 		}
 	}
 	switch {

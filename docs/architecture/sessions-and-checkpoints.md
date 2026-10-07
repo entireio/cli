@@ -817,6 +817,42 @@ are for human readability in `git log` only. The CLI always reads from the tree 
 
 The checkpoint ID creates a **bidirectional link**: user commits can find their metadata, and metadata can find the commits that reference it.
 
+### Deleting a Checkpoint
+
+`entire checkpoint delete <id>` removes one checkpoint from this clone and from
+every checkpoint remote that holds it (`--remote` narrows that, `--local-only`
+skips remotes, `--dry-run` only reports). Mechanics are in the
+[ref backend](ref-checkpoint-backend.md#non-force-fast-forward-only) reference.
+What it means for the domain model:
+
+- **Sessions and checkpoints are many-to-many, and each checkpoint carries the
+  session's full compacted transcript.** Deleting one checkpoint removes almost
+  none of a long session's content: any remaining checkpoint of that session
+  can rebuild it. The command lists other local checkpoints of the same
+  sessions (a local, capped scan) and deletes none of them; the session stays
+  visible on entire.io while any remain.
+- **Token totals.** Each session entry stores the token delta since the previous
+  condensation, so removing a checkpoint subtracts its delta from server-side
+  session sums. Local `SessionState` token offsets, usage and baselines are
+  never touched: resetting any of them would make the next checkpoint
+  re-count tokens surviving checkpoints already carry.
+- **Session state.** States holding the ID lose `LastCheckpointID` (and its
+  commit hash), a matching `CondensationAttempt`, and the ID in
+  `TurnCheckpointIDs`, so an amend cannot restore the trailer and a pending
+  condensation cannot re-create the checkpoint. Clearing `LastCheckpointID`
+  makes an ended state eligible for cleanup. A session that has not ended
+  blocks the delete unless `--force` is passed.
+- **Commits keep their trailers.** `explain` on such a commit reports
+  "checkpoint not found (may have been deleted)". On an amend,
+  `prepare-commit-msg` drops a trailer whose ID is on this clone's
+  deleted-checkpoints list; new agent work in the amend gets a fresh ID.
+- **The `v1` branch keeps history.** A hex checkpoint is removed from the
+  branch tip; its content stays in the branch history on every remote.
+- **`--local-only` copies can come back into view:** reads (explain, backfill)
+  can still fetch the copy the remote holds.
+- **Server side.** The CLI deletes the git data; removing indexed rows on
+  entire.io is the backend's job when it observes the ref delete.
+
 ### Package Structure
 
 ```

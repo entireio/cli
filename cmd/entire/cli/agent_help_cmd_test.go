@@ -727,7 +727,7 @@ func TestRenderAgentHelpTop_ListsCuratedSubsetWithInlineAudience(t *testing.T) {
 	// Listed commands appear with their audience.
 	for _, want := range []string{
 		"status", "trail", "checkpoint", "session", "why", "search",
-		"read-only except: explain",                     // checkpoint, one line
+		"read-only except: delete, explain",             // checkpoint, one line
 		"read-only except: adopt, attach, resume, stop", // session, one line
 		"read-only: approvals, list, show, watch",       // trail: minority side named
 	} {
@@ -779,7 +779,7 @@ func TestRenderAgentHelpCommand_SubcommandsCarryAudienceNote(t *testing.T) {
 		t.Fatal("checkpoint command not found")
 	}
 	out := renderAgentHelpCommand(child, agentHelpTestRepo, true)
-	if !strings.Contains(out, "read-only except: explain") {
+	if !strings.Contains(out, "read-only except: delete, explain") {
 		t.Errorf("text drill-down must state which subcommands write:\n%s", out)
 	}
 }
@@ -820,7 +820,7 @@ func TestRenderAgentHelpJSON_CarriesAudienceWhereClassified(t *testing.T) {
 	drill := drillJSON(t, root, "checkpoint")
 	want := map[string]string{
 		"list": "read-only", "explain": "task-driven", "search": "read-only",
-		"tokens": "read-only",
+		"tokens": "read-only", "delete": agentHelpUserOwnedSlug,
 	}
 	for _, sub := range drill.Subcommands {
 		if w, ok := want[sub.Name]; ok && sub.Audience != w {

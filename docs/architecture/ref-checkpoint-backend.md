@@ -131,6 +131,36 @@ All checkpoint-ref pushes are **fast-forward-only — never a force push.** Ther
 
 When a push *is* rejected as non-fast-forward — genuine divergence, e.g. the same checkpoint was written on two machines — recovery **fetches the remote ref and replays the local-only commits on top** (`fetchAndRebaseRefCommon`), then retries. After the replay the local ref is a fast-forward over the remote, so the retry is *still* non-force and the remote commit is preserved as an ancestor rather than overwritten. A genuine cherry-pick conflict (both sides rewrote the same file, e.g. root `metadata.json`) leaves the ref queued — degrading to the safe state, never forcing.
 
+**The deliberate exception: `entire checkpoint delete`.** Deleting a checkpoint
+pushes `:<ref>` with `--force-with-lease=<ref>:<oid>`, where `<oid>` is what
+`ls-remote` reported moments earlier. That is a non-fast-forward update by
+definition, so it is confined to the one ref, runs only on an explicit user
+command (agents are told never to run it unprompted), and is leased so a copy
+another clone pushed since the probe is never removed unseen. Each remote is
+resolved to one concrete URL first (push destination, `checkpoint_remote` push
+and fetch URLs, and every read candidate's fetch and first push URL), so the
+probe, the lease, and the push address the same repository.
+
+The local ref is deleted (compare-and-swap) and dropped from the push queue
+before any remote: pre-push drains the queue and pushes refs that exist locally,
+so remote-first ordering would let a concurrent push put it back. Each remote
+is then re-checked once with `ls-remote` and the delete retried if a push had
+already re-landed it. A remote that refuses is reported with an
+`entire checkpoint delete <id> --remote <name>` retry command; the local copy is
+not restored, and a remote-only delete (no local copy) is allowed. The ID is
+also recorded in the git common dir's deleted-checkpoints list
+(`entire-deleted-checkpoints.json`), which `prepare-commit-msg` uses to drop the
+ID's trailer on an amend and which migration skips. Other clones still holding
+the ref can push it back; remote tombstones are deferred.
+
+A hex checkpoint on the `v1` branch is deleted per remote by fetching that
+remote's branch tip into a temporary ref, committing the subtree's removal on
+it, and pushing with a lease on the fetched tip (a fast-forward). Local `v1`
+commits are never pushed by a delete, so unpushed (for example not yet
+OPF-redacted) data stays local. The remote-tracking `v1` ref of each named
+remote is advanced to the pushed tip so read fallbacks and migration stop
+seeing the checkpoint. The content remains in the branch's history.
+
 ### On-demand fetch (reads and backfill writes)
 
 A checkpoint written on another machine has no local ref. When a read — or a backfill write's base resolution (`refBaseForBackfill`) — misses locally and a **ref fetcher** is configured, `resolveRefMaybeFetch` fetches that one ref from the remote and retries once. It carefully distinguishes:
@@ -230,6 +260,8 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 | `settings/checkpoints.go` | `checkpoints` block parsing + env override |
 | `strategy/manual_commit_push.go` | Pre-push: drain queue, batch push, per-ref recovery |
 | `strategy/push_common.go` | `batchPushRefs`, `pushCheckpointRefWithRecovery`, fetch+replay |
+| `strategy/checkpoint_delete*.go` | `entire checkpoint delete`: read-only plan, leased per-remote deletes |
+| `checkpoint/deleted_list.go` | Local deleted-checkpoints list in the git common dir |
 
 ## Known limitations and deferred work
 

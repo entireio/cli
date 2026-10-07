@@ -4286,6 +4286,14 @@ func TestRunExplainCommit_WithCheckpointTrailer(t *testing.T) {
 	if !strings.Contains(err.Error(), "checkpoint not found") && !strings.Contains(err.Error(), "abc123def456") {
 		t.Errorf("expected error about checkpoint not found, got: %v", err)
 	}
+	// A trailer can outlive its checkpoint (`entire checkpoint delete`), so the
+	// miss says so instead of reading like a corrupt store.
+	if !strings.Contains(err.Error(), "checkpoint not found (may have been deleted)") {
+		t.Errorf("expected the may-have-been-deleted hint, got: %v", err)
+	}
+	if !errors.Is(err, checkpoint.ErrCheckpointNotFound) {
+		t.Errorf("error must still match checkpoint.ErrCheckpointNotFound: %v", err)
+	}
 }
 
 func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {

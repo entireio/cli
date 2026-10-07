@@ -33,7 +33,10 @@ the commands are always runnable in every build.
   `current` and a bare `tokens` answer "which session is running this command?"
   through `strategy.ResolveCallerSession`, not "which state file moved last" —
   see [Resolving the calling session](caller-session-resolution.md#resolving-the-calling-session).
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`.
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, `delete`.
+  `delete` is user-owned in `agent-help` (agents must not run it unprompted) and
+  confirms through `confirmControlPlaneDeletion`; see
+  [Deleting a Checkpoint](../architecture/sessions-and-checkpoints.md#deleting-a-checkpoint).
   `explain` also takes a forge-qualified `--repo` (`gh/<owner>/<name>` or
   `et/<project>/<name>`), the drill-down for a cross-repo `search` hit: it
   reads the checkpoint from that repo's entire-api cell over
