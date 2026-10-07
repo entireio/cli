@@ -797,6 +797,13 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			content = generateChainedContent(spec.content, spec.name)
 		}
 
+		afterHookBackup(spec.name)
+		if !hookUnchanged(root, spec.name, class) {
+			return installedCount, fmt.Errorf("%w: %s changed while Entire was installing its hook; "+
+				"it was left as it is, so re-run 'entire enable' to back it up and chain to it",
+				errHookChangedDuringInstall, filepath.Join(hooksDir, spec.name))
+		}
+
 		written, err := writeHookFile(root, spec.name, content)
 		if err != nil {
 			return installedCount, fmt.Errorf("failed to install %s hook: %w", spec.name, err)

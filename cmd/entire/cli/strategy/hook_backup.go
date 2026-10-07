@@ -52,6 +52,32 @@ func acquireHooksLock(ctx context.Context, lockRoot *os.Root, hooksDir string) (
 	return release, nil
 }
 
+// errLinkedHookOverLegacy: a symlinked hook sits over Entire's hook in .legacy.
+var errLinkedHookOverLegacy = errors.New("cannot verify a linked hook")
+
+// errHookChangedDuringInstall: something replaced the hook after Entire read it.
+var errHookChangedDuringInstall = errors.New("hook changed during install")
+
+// afterHookBackup runs between backing a hook up and replacing it; tests swap
+// the hook here.
+var afterHookBackup = func(string) {}
+
+// hookUnchanged reports whether name is still what the install classified as
+// class and, for a foreign hook, backed up, so the write replaces nothing that
+// lacks a backup. A writer outside Entire's lock can still land between this
+// check and the rename; this narrows that gap to the write itself.
+func hookUnchanged(root *os.Root, name string, class hookClassification) bool {
+	switch class {
+	case hookForeign:
+		return sameHookFile(root, name, name+backupSuffix)
+	case hookOurs:
+		return carriesEntireMarker(root, name)
+	case hookAbsent:
+		return !hookFileExists(root, name)
+	}
+	return false
+}
+
 // backupAction is what prepareHookBackup did with a foreign hook.
 type backupAction int
 
@@ -76,8 +102,9 @@ const (
 
 // prepareHookBackup makes <name>.pre-entire hold the foreign hook at name. It
 // only links or copies, never moves name away, so name keeps a runnable hook
-// until the caller's atomic write replaces it, and a crash at any step leaves
-// every version on disk. A different existing backup is kept as
+// until the caller's atomic write replaces it, and a process that dies at any
+// step leaves every version on disk. Nothing is fsynced, so that holds for a
+// killed or crashed process, not for power loss or a kernel crash. A different existing backup is kept as
 // <name>.pre-entire.<timestamp> unless an identical older copy exists. The
 // caller holds the hooks lock.
 func prepareHookBackup(root *os.Root, name string, now time.Time) (backupAction, string, error) {
@@ -314,7 +341,18 @@ func isHookNameByte(b byte) bool {
 // Entire -> pre-commit -> the user's hook. Reports whether it changed anything.
 func reclaimFromPreCommit(root *os.Root, hook string) (bool, error) {
 	legacy, backup, keep := hook+legacySuffix, hook+backupSuffix, hook+keepSuffix
-	if !isPreCommitWrapper(root, hook, hook) || !carriesEntireMarker(root, legacy) {
+	if !carriesEntireMarker(root, legacy) {
+		return false, nil
+	}
+	if info, err := root.Lstat(hook); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		// Possibly a linked pre-commit wrapper, which runs .legacy: backing it up
+		// and chaining to it would loop through Entire's hook. Entire does not
+		// read through the link to find out, so it changes nothing.
+		return false, fmt.Errorf("%w: %s is a symbolic link and %s holds Entire's hook, "+
+			"so chaining to the link may run Entire's hook again; replace the link with the file it points to, "+
+			"or remove %s, then re-run 'entire enable'", errLinkedHookOverLegacy, hook, legacy, legacy)
+	}
+	if !isPreCommitWrapper(root, hook, hook) {
 		return false, nil
 	}
 	userHookInBackup := hookFileExists(root, backup) &&

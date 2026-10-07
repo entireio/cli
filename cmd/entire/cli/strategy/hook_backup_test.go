@@ -605,3 +605,67 @@ func TestRemoveHooks_FailedLegacyRestoreLeavesHookForRetry(t *testing.T) {
 	}
 	assertHooks(t, f, map[string]string{"commit-msg": wrapper, "commit-msg" + legacySuffix: userHookV1})
 }
+
+// A hook replaced after Entire backed it up is left alone, not overwritten
+// without a backup. Not parallel: it swaps the package-level afterHookBackup.
+func TestInstallHooks_HookReplacedDuringInstallIsKept(t *testing.T) { //nolint:paralleltest // sets afterHookBackup
+	spec := specFor(t, "pre-push")
+	for name, before := range map[string]string{"foreign hook": userHookV1, "no hook": ""} {
+		t.Run(name, func(t *testing.T) {
+			f := newHooksFixture(t)
+			if before != "" {
+				f.write("pre-push", before)
+			}
+			// As pre-commit installs: a new file at the path, not a write in place
+			// (which would also change the hard-linked backup).
+			afterHookBackup = func(string) {
+				f.write("pre-push.new", userHookV2)
+				if err := os.Rename(filepath.Join(f.dir, "pre-push.new"), filepath.Join(f.dir, "pre-push")); err != nil {
+					t.Error(err)
+				}
+			}
+			t.Cleanup(func() { afterHookBackup = func(string) {} })
+
+			_, err := installHooks(context.Background(), f.lockRoot, f.root, f.dir, []hookSpec{spec}, backupClock)
+			if !errors.Is(err, errHookChangedDuringInstall) {
+				t.Fatalf("installHooks = %v, want errHookChangedDuringInstall", err)
+			}
+			if got := f.read("pre-push"); got != userHookV2 {
+				t.Errorf("pre-push = %q, want the replacement left in place", got)
+			}
+			if before != "" && f.read("pre-push"+backupSuffix) != before {
+				t.Errorf("backup lost the original hook")
+			}
+		})
+	}
+}
+
+// A symlinked hook over Entire's hook in .legacy may be a linked pre-commit
+// wrapper, which would run Entire's hook again; Entire refuses and changes nothing.
+func TestInstallHooks_LinkedHookOverEntireLegacyIsRefused(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	spec := specFor(t, "commit-msg")
+	chained := generateChainedContent(spec.content, spec.name)
+	f := newHooksFixture(t)
+	f.write("wrapper", preCommitWrapper("commit-msg"))
+	if err := os.Symlink("wrapper", filepath.Join(f.dir, "commit-msg")); err != nil {
+		t.Fatal(err)
+	}
+	f.write("commit-msg"+legacySuffix, chained)
+	f.write("commit-msg"+backupSuffix, userHookV1)
+
+	_, err := installHooks(context.Background(), f.lockRoot, f.root, f.dir, []hookSpec{spec}, backupClock)
+	if !errors.Is(err, errLinkedHookOverLegacy) {
+		t.Fatalf("installHooks = %v, want errLinkedHookOverLegacy", err)
+	}
+	if target, err := os.Readlink(filepath.Join(f.dir, "commit-msg")); err != nil || target != "wrapper" {
+		t.Errorf("commit-msg link = %q, %v; want it untouched", target, err)
+	}
+	assertHooks(t, f, map[string]string{
+		"commit-msg" + legacySuffix: chained,
+		"commit-msg" + backupSuffix: userHookV1,
+	})
+}
