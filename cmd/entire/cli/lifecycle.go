@@ -1750,7 +1750,8 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// ToolUseID, which keys the exactly-once completion and the checkpoint's
 	// tasks/<tool_use_id>/ tree.
 	newExecution := false
-	if event.ToolUseID == "" && !event.CompletionWithoutLaunch {
+	keyedByAgentID := event.ToolUseID == "" && !event.CompletionWithoutLaunch
+	if keyedByAgentID {
 		event.ToolUseID, newExecution = taskRecordKeyForStop(state, event)
 	}
 
@@ -1776,7 +1777,9 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		// An event with no ToolUseID that matched no record is expected: a
 		// Claude Code foreground subagent's SubagentStop arrives before the
 		// PostToolUse that captures it, so there is nothing to complete yet.
-		if !event.CompletionWithoutLaunch && event.ToolUseID != "" && (event.SubagentID != "" || event.SubagentTranscriptPath != "") {
+		// So is a stop found only by agent ID whose record is complete: a
+		// background agent stops again each time a child it launched wakes it.
+		if !event.CompletionWithoutLaunch && !keyedByAgentID && event.ToolUseID != "" && (event.SubagentID != "" || event.SubagentTranscriptPath != "") {
 			logging.Warn(logCtx, "no in-flight marker for completed subagent — foreground dedup, a duplicate event, or a misintegrated agent setting Final without launch markers",
 				slog.String("session_id", event.SessionID),
 				slog.String("tool_use_id", event.ToolUseID),
