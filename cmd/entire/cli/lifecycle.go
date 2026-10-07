@@ -850,7 +850,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if readPromptErr != nil && !errors.Is(readPromptErr, fs.ErrNotExist) {
 		logging.Warn(logCtx, "failed to read prompt.txt, skipping backfill",
 			slog.String("error", readPromptErr.Error()))
-	} else if len(existingPrompt) == 0 {
+	} else if len(existingPrompt) == 0 && !turnHasMidTurnCheckpoints(ctx, sessionID) {
 		if extractor, ok := agent.AsPromptExtractor(ag); ok {
 			prompts, extractErr := extractor.ExtractPrompts(transcriptRef, transcriptOffset)
 			if extractErr != nil {
@@ -2278,6 +2278,20 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 }
 
 // --- Helper functions ---
+
+// turnHasMidTurnCheckpoints reports whether a commit during this turn already
+// condensed the session (TurnCheckpointIDs). That condensation consumed and
+// released prompt.txt, and turn-end finalization rewrites those checkpoints'
+// prompts from prompt.txt, so backfilling it with prompts recorded after the
+// commit would replace the committed checkpoint's prompts with later ones. The
+// next condensation extracts those later prompts from the transcript itself.
+func turnHasMidTurnCheckpoints(ctx context.Context, sessionID string) bool {
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	if err != nil || state == nil {
+		return false
+	}
+	return len(state.TurnCheckpointIDs) > 0
+}
 
 // resolveTranscriptOffset determines the transcript offset to use for parsing.
 // Prefers pre-prompt state, falls back to session state.
