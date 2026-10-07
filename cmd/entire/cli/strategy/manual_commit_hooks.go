@@ -2246,7 +2246,19 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 		return nil
 	}
 
-	return normalizeTranscriptFilePaths(ctx, state, modifiedFiles)
+	// Transcript output reaches FilesTouched through mid-turn carry-forward
+	// and condensation, so it gets the same filter as every capture route.
+	normalized := normalizeTranscriptFilePaths(ctx, state, modifiedFiles)
+	repoRoot := state.WorktreePath
+	if repoRoot == "" {
+		if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+			repoRoot = root
+		}
+	}
+	if repoRoot == "" {
+		return normalized
+	}
+	return filterTrackableFiles(ctx, repoRoot, normalized)
 }
 
 // normalizeTranscriptFilePaths converts transcript file paths to repo-relative

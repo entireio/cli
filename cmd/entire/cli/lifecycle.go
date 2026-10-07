@@ -414,8 +414,7 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
 	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
 
-	kept := dropUntrackablePaths(ctx, repoRoot, modified, added, deleted)
-	modified, added, deleted = kept[0], kept[1], kept[2]
+	modified, added, deleted = strategy.FilterTrackableChanges(ctx, repoRoot, modified, added, deleted)
 	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
 		return nil
 	}
@@ -991,9 +990,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// created-then-deleted within the session (absent from HEAD) and make
 	// checkpoint rewind resurrect them.
 	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
-	// Drop paths no commit can carry (see dropUntrackablePaths).
-	kept := dropUntrackablePaths(ctx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)
-	relModifiedFiles, relNewFiles, relDeletedFiles = kept[0], kept[1], kept[2]
+	// Drop paths no commit can carry (see strategy.FilterTrackableChanges).
+	relModifiedFiles, relNewFiles, relDeletedFiles = strategy.FilterTrackableChanges(ctx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)
 	normalizeSpan.End()
 
 	// Codex owns an authoritative child ledger. Refresh it before the
@@ -1388,7 +1386,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 			usage = types.WithClearedSubagentTokens(usage, false)
 		}
 		for _, child := range extraction.Children {
-			childFiles := dropUntrackablePaths(ctx, current.WorktreePath, FilterAndNormalizePaths(child.ModifiedFiles, current.WorktreePath))[0]
+			childFiles, _, _ := strategy.FilterTrackableChanges(ctx, current.WorktreePath, FilterAndNormalizePaths(child.ModifiedFiles, current.WorktreePath), nil, nil)
 			current.UpdateSubagentTranscriptPaths(child.AgentID, "", child.ResolvedPath)
 			for _, turnID := range child.TerminalTurnIDs {
 				if !current.FinalizeSubagentTurn(child.AgentID, turnID) {
@@ -2040,8 +2038,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
-	kept := dropUntrackablePaths(logCtx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)
-	relModifiedFiles, relNewFiles, relDeletedFiles = kept[0], kept[1], kept[2]
+	relModifiedFiles, relNewFiles, relDeletedFiles = strategy.FilterTrackableChanges(logCtx, repoRoot, relModifiedFiles, relNewFiles, relDeletedFiles)
 
 	// If no changes, skip — unless this is a Final (SubagentStop) capture: a
 	// read-only background subagent (e.g. a reviewer) still produced a

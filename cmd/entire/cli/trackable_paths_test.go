@@ -204,3 +204,54 @@ func TestHandleLifecycleSubagentEnd_DropsSubmoduleGitlink(t *testing.T) {
 	require.Contains(t, state.FilesTouched, "agent.txt")
 	require.NotContains(t, state.FilesTouched, "sub")
 }
+
+// A tracked file that matches an ignore rule (added with -f) is committable,
+// and so is its deletion. `git check-ignore` reports a path whose deletion is
+// staged, because it has left the index, so the ignore filter must never run
+// over deletions: the agent's `git rm` (staged) or plain `rm` (unstaged) of
+// such a file stays in FilesTouched as a recorded deletion and links the
+// commit that deletes it. Not parallel: t.Chdir.
+func TestHandleLifecycleTurnEnd_KeepsDeletionOfTrackedIgnoredFile(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		delete func(t *testing.T, dir string)
+	}{
+		{"staged git rm", func(t *testing.T, dir string) {
+			t.Helper()
+			testutil.RunGit(t, dir, "rm", "-q", "foo.log")
+		}},
+		{"unstaged rm", func(t *testing.T, dir string) {
+			t.Helper()
+			require.NoError(t, os.Remove(filepath.Join(dir, "foo.log")))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, ag := setupIgnoreRouteRepo(t)
+			testutil.WriteFile(t, dir, ".gitignore", "ignored.env\n*.log\n")
+			testutil.WriteFile(t, dir, "foo.log", "tracked log\n")
+			testutil.GitAdd(t, dir, ".gitignore")
+			testutil.GitAddForce(t, dir, "foo.log")
+			testutil.GitCommit(t, dir, "track foo.log despite the ignore rule")
+			ag.analyzerFiles = nil
+
+			ctx := context.Background()
+			sessionID := "sess-tracked-ignored-delete"
+			transcriptPath := filepath.Join(dir, "transcript.jsonl")
+			require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+			require.NoError(t, handleLifecycleTurnStart(ctx, ag, &agent.Event{
+				Type: agent.TurnStart, SessionID: sessionID, SessionRef: transcriptPath, Prompt: "delete foo.log", Timestamp: time.Now(),
+			}))
+			tc.delete(t, dir)
+			require.NoError(t, handleLifecycleTurnEnd(ctx, ag, &agent.Event{
+				Type: agent.TurnEnd, SessionID: sessionID, SessionRef: transcriptPath, Timestamp: time.Now(),
+			}))
+
+			state, err := strategy.LoadSessionState(ctx, sessionID)
+			require.NoError(t, err)
+			require.Contains(t, state.FilesTouched, "foo.log")
+			hash, recorded := state.TouchedFileHashes["foo.log"]
+			require.True(t, recorded, "the deletion is recorded")
+			require.Empty(t, hash, `a recorded deletion is ""`)
+		})
+	}
+}
