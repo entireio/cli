@@ -507,3 +507,31 @@ func writeAttachTestSettings(t *testing.T, content string) {
 		t.Fatal(err)
 	}
 }
+
+// A commit someone pushed and then built on, on a branch this clone doesn't
+// track, is an ancestor of that branch's tip rather than the tip itself. It is
+// still pushed, so attach must not amend it.
+func TestAttachCommit_SeesACommitBuriedInAnUntrackedBranch(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := commitAt(t, "work.txt")
+	dir := mustGetwd(t)
+	remote := t.TempDir()
+	testutil.RunGit(t, remote, "init", "--bare", "-q")
+	testutil.RunGit(t, dir, "remote", "add", "origin", remote)
+	testutil.RunGit(t, dir, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+	testutil.RunGit(t, dir, "push", "-q", remote, "HEAD:refs/heads/shared")
+	other := filepath.Join(t.TempDir(), "other")
+	testutil.RunGit(t, t.TempDir(), "clone", "-q", "--branch", "shared", remote, other)
+	testutil.WriteFile(t, other, "more.txt", "more")
+	testutil.GitAdd(t, other, "more.txt")
+	testutil.RunGit(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.com", "commit", "-q", "-m", "built on top")
+	testutil.RunGit(t, other, "push", "-q", "origin", "shared")
+
+	out, err := attachHeadless(t, "attach-buried", attachOptions{})
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash || strings.Contains(got.Message, "Entire-Checkpoint") {
+		t.Fatalf("a commit already on the remote (buried under another commit) was amended: %s %q\n%s", got.Hash, got.Message, out)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -515,17 +516,16 @@ func planAttachLink(ctx context.Context, repo *git.Repository, headCommit *objec
 	// Remote-tracking refs can be stale — someone may have pushed this commit
 	// from another clone — and amending a shared commit is what this rule
 	// exists to avoid, so refresh them first.
-	unreachable := fetchRemotesForAttach(ctx)
+	fetchRemotesForAttach(ctx)
 	remote, err := remoteHoldingCommit(ctx, target)
 	if err != nil {
 		return attachLinkPlan{}, err
 	}
+	var unreachable []string
 	if remote == "" {
-		// A fetch refspec may not cover every branch (single-branch clones), so
-		// also ask each remote whether a branch tip is this commit.
-		var tipUnreachable []string
-		remote, tipUnreachable = remoteWithTipAt(ctx, target)
-		unreachable = append(unreachable, tipUnreachable...)
+		// Tracking refs may not cover every branch (single-branch clones,
+		// narrowed refspecs), so ask each remote directly.
+		remote, unreachable = remoteContainingCommit(ctx, target)
 	}
 	switch {
 	case remote != "":
@@ -579,38 +579,70 @@ func attachGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// fetchRemotesForAttach refreshes every remote's tracking refs and returns the
-// remotes it could not fetch.
-func fetchRemotesForAttach(ctx context.Context) (unreachable []string) {
+// fetchRemotesForAttach refreshes every remote's tracking refs, best-effort:
+// a configured refspec can fail without the remote being unreachable, so
+// reachability is decided by remoteContainingCommit instead.
+func fetchRemotesForAttach(ctx context.Context) {
 	for _, remote := range attachRemotes(ctx) {
 		fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
-		if err := attachGitCommand(fetchCtx, "fetch", "--quiet", "--no-tags", "--", remote).Run(); err != nil {
-			unreachable = append(unreachable, remote)
-		}
+		_ = attachGitCommand(fetchCtx, "fetch", "--quiet", "--no-tags", "--", remote).Run() //nolint:errcheck // best-effort; see doc comment
 		cancel()
 	}
-	return unreachable
 }
 
-// remoteWithTipAt returns a remote with a branch whose tip is target, asking
-// each remote directly, and the remotes it could not reach.
-func remoteWithTipAt(ctx context.Context, target *object.Commit) (holder string, unreachable []string) {
+// remoteContainingCommit asks each remote directly whether any of its branches
+// contains target, and returns the first that does plus the remotes it could
+// not reach. Branch tips come from ls-remote; when target is not a tip, the
+// remote's branch objects are fetched without writing any ref, so a commit
+// someone pushed and then built on is still found.
+func remoteContainingCommit(ctx context.Context, target *object.Commit) (holder string, unreachable []string) {
 	sha := target.Hash.String()
 	for _, remote := range attachRemotes(ctx) {
-		lsCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
-		out, err := attachGitCommand(lsCtx, "ls-remote", "--heads", "--", remote).Output()
+		branches, tips, err := remoteBranchTips(ctx, remote)
+		if err != nil {
+			unreachable = append(unreachable, remote)
+			continue
+		}
+		if slices.Contains(tips, sha) {
+			return remote, unreachable
+		}
+		if len(branches) == 0 {
+			continue
+		}
+		// Fetch the branches by name (a source-only glob refspec is invalid),
+		// writing no ref, only to get their objects for the ancestry check.
+		fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--", remote}, branches...)
+		fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+		err = attachGitCommand(fetchCtx, fetchArgs...).Run()
 		cancel()
 		if err != nil {
 			unreachable = append(unreachable, remote)
 			continue
 		}
-		for _, line := range strings.Split(string(out), "\n") {
-			if fields := strings.Fields(line); len(fields) > 0 && fields[0] == sha && holder == "" {
-				holder = remote
+		for _, tip := range tips {
+			if exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", sha, tip).Run() == nil {
+				return remote, unreachable
 			}
 		}
 	}
-	return holder, unreachable
+	return "", unreachable
+}
+
+// remoteBranchTips lists remote's branches and the commit at each tip.
+func remoteBranchTips(ctx context.Context, remote string) (branches, tips []string, err error) {
+	lsCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
+	defer cancel()
+	out, err := attachGitCommand(lsCtx, "ls-remote", "--heads", "--", remote).Output()
+	if err != nil {
+		return nil, nil, fmt.Errorf("ls-remote %s: %w", remote, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 {
+			tips = append(tips, fields[0])
+			branches = append(branches, fields[1])
+		}
+	}
+	return branches, tips, nil
 }
 
 // remoteHoldingCommit returns a remote whose branches contain target, or "" when
