@@ -144,6 +144,29 @@ type attributionResolver struct {
 	// linkedByCommit caches linkedCheckpoints per commit, since reading a
 	// remote-discovered stub for its links can fetch.
 	linkedByCommit map[string][]id.CheckpointID
+	// linkedStubs reads each remote-discovered stub at most once per run, and
+	// linkedDeadline gives every such read in the run one shared budget.
+	linkedStubs    *stubSummaryCache
+	linkedDeadline time.Time
+}
+
+// stubSummaryCache remembers each checkpoint summary it reads, failures
+// included, so a blame run reads a stub at most once.
+type stubSummaryCache struct {
+	reader    attributionCheckpointReader
+	summaries map[id.CheckpointID]*checkpoint.CheckpointSummary
+}
+
+func (c *stubSummaryCache) Read(ctx context.Context, cpID id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
+	if summary, ok := c.summaries[cpID]; ok {
+		return summary, nil
+	}
+	summary, err := c.reader.Read(ctx, cpID)
+	if err != nil {
+		summary = nil
+	}
+	c.summaries[cpID] = summary
+	return summary, err //nolint:wrapcheck // callers treat a failed read as no links
 }
 
 func newBlameCmd() *cobra.Command {
@@ -458,6 +481,8 @@ func (r *attributionResolver) linkedCheckpoints(commit *object.Commit) []id.Chec
 	}
 	if r.linked == nil {
 		r.linked = []checkpoint.CheckpointInfo{}
+		r.linkedStubs = &stubSummaryCache{reader: r.store, summaries: make(map[id.CheckpointID]*checkpoint.CheckpointSummary)}
+		r.linkedDeadline = time.Now().Add(checkpoint.ListHydrationPassTimeout)
 		if lister, ok := r.store.(interface {
 			List(ctx context.Context) ([]checkpoint.CheckpointInfo, error)
 		}); ok {
@@ -466,7 +491,9 @@ func (r *attributionResolver) linkedCheckpoints(commit *object.Commit) []id.Chec
 			}
 		}
 	}
-	ids := checkpoint.CheckpointsLinkedToWithStubs(r.ctx, r.store, r.linked, sha, commit.Committer.When)
+	ctx, cancel := context.WithDeadline(r.ctx, r.linkedDeadline)
+	ids := checkpoint.CheckpointsLinkedToWithStubs(ctx, r.linkedStubs, r.linked, sha, commit.Committer.When)
+	cancel()
 	if r.linkedByCommit == nil {
 		r.linkedByCommit = make(map[string][]id.CheckpointID)
 	}

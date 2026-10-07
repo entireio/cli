@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -351,6 +353,34 @@ func TestAttributionResolver_LinkedCheckpoints(t *testing.T) {
 	failing := &attributionResolver{ctx: context.Background(), store: &listingAttributionStub{listErr: context.Canceled}}
 	if got := failing.linkedCheckpoints(commit); len(got) != 0 {
 		t.Fatalf("a failed listing links nothing, got %v", got)
+	}
+}
+
+type countingStubReader struct {
+	listingAttributionStub
+
+	reads int
+}
+
+func (s *countingStubReader) Read(context.Context, checkpointid.CheckpointID) (*cpkg.CheckpointSummary, error) {
+	s.reads++
+	return &cpkg.CheckpointSummary{}, nil
+}
+
+// Blame reads a remote-discovered stub for its links once per run, not once per
+// trailer-less commit.
+func TestAttributionResolver_ReadsEachStubOncePerRun(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	store := &countingStubReader{listingAttributionStub: listingAttributionStub{infos: []cpkg.CheckpointInfo{
+		{CheckpointID: "111111111111", ListedStub: true, CreatedAt: now},
+	}}}
+	r := &attributionResolver{ctx: context.Background(), store: store}
+	for _, sha := range []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"} {
+		r.linkedCheckpoints(&object.Commit{Hash: plumbing.NewHash(sha), Committer: object.Signature{When: now}})
+	}
+	if store.reads != 1 {
+		t.Fatalf("stub read %d times, want once per run", store.reads)
 	}
 }
 
