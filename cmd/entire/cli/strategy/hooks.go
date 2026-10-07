@@ -786,7 +786,7 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
 			case backupRotated:
 				fmt.Fprintf(os.Stderr, "[entire] %s changed since Entire backed it up. The current version now runs after Entire's; the older copy was kept as %s and no longer runs.\n", spec.name, older)
-				logging.Info(ctx, "git hook backup rotated", slog.String("hook", spec.name))
+				logging.Warn(ctx, "git hook backup rotated; the older copy no longer runs", slog.String("hook", spec.name), slog.String("older_copy", older))
 			case backupReplacedSame:
 			}
 		}
@@ -860,19 +860,29 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 
 	lockRoot, err := userdirs.CacheRoot()
 	if err != nil {
-		return 0, fmt.Errorf("open the git hooks lock directory: %w", err)
+		fmt.Fprintf(os.Stderr, "[entire] Warning: cannot open the git hooks lock directory (%v)\n", err)
+		lockRoot = nil // removeHooks goes ahead without the lock
 	}
 	return removeHooks(ctx, lockRoot, root, hooksDir, restoreLegacy)
 }
 
 // removeHooks is RemoveGitHook on an opened hooks root, under the hooks lock.
 // restore is restoreLegacy; tests pass a failing one.
+//
+// Uninstall is cleanup and must finish, so a lock that cannot be used at all
+// (nil lockRoot, or a lock file that will not open) is warned about and
+// skipped. A lock another Entire process HOLDS still stops it: going ahead
+// would interleave with the moves the lock serializes, and a retry succeeds.
 func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, restore func(*os.Root, string) error) (int, error) {
 	release, err := acquireHooksLock(ctx, lockRoot, hooksDir)
-	if err != nil {
+	switch {
+	case err == nil:
+		defer release()
+	case errors.Is(err, errHooksLockUnavailable):
+		fmt.Fprintf(os.Stderr, "[entire] Warning: %v; removing hooks without it\n", err)
+	default:
 		return 0, err
 	}
-	defer release()
 
 	removed := 0
 	var removeErrors []string
@@ -955,19 +965,30 @@ func generateChainedContent(baseContent, hookName string) string {
 // backup, calling it again would trip pre-commit's migration-mode guard, so
 // the user's hook Entire kept for .legacy (see reclaimFromPreCommit) runs
 // instead.
+//
+// The chain also sets a per-hook guard before calling out and skips it when the
+// guard is already set. Any other hook manager that moves Entire's hook aside
+// and runs it from its own wrapper becomes the backup on the next install, so
+// without the guard Entire -> wrapper -> Entire -> ... never ends. The cost: a
+// git command run by the chained hook does not chain that same hook again.
 func chainCall(hookName, redirect string) string {
 	backup := hookName + backupSuffix
 	keep := hookName + keepSuffix
+	guard := "ENTIRE_CHAINING_" + strings.ToUpper(strings.ReplaceAll(hookName, "-", "_"))
 	return fmt.Sprintf(`%s
 _entire_hook_dir="$(dirname "$0")"
-if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
-    if [ -x "$_entire_hook_dir/%s" ]; then
+if [ -z "${%s:-}" ]; then
+    %s=1
+    export %s
+    if [ -n "${PRE_COMMIT_RUNNING_LEGACY:-}" ] && grep -q '^%s' "$_entire_hook_dir/%s" 2>/dev/null; then
+        if [ -x "$_entire_hook_dir/%s" ]; then
+            "$_entire_hook_dir/%s" "$@"%s
+        fi
+    elif [ -x "$_entire_hook_dir/%s" ]; then
         "$_entire_hook_dir/%s" "$@"%s
     fi
-elif [ -x "$_entire_hook_dir/%s" ]; then
-    "$_entire_hook_dir/%s" "$@"%s
 fi
-`, chainComment, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
+`, chainComment, guard, guard, guard, preCommitSignatures[0], backup, keep, keep, redirect, backup, backup, redirect)
 }
 
 func generatePostRewriteChainedContent(baseContent string) string {

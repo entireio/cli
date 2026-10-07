@@ -707,3 +707,116 @@ func TestRemoveHooks_BeforeReclaimMovesUserHookToLegacy(t *testing.T) {
 		t.Error("commit-msg.pre-entire left behind")
 	}
 }
+
+// unusableLockRoot is a lock directory the lock file cannot be created in.
+func unusableLockRoot(t *testing.T) *os.Root {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test user cannot write")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { // restore so TempDir cleanup can remove it
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return root
+}
+
+// A lock file that cannot be opened is not another Entire process at work.
+func TestInstallHooks_UnusableLockIsNotReportedAsContention(t *testing.T) {
+	t.Parallel()
+	f := newHooksFixture(t)
+	_, err := installHooks(context.Background(), unusableLockRoot(t), f.root, f.dir, []hookSpec{specFor(t, "pre-push")}, backupClock)
+	if err == nil {
+		t.Fatal("install succeeded without its lock")
+	}
+	if strings.Contains(err.Error(), "another Entire process") {
+		t.Errorf("err = %v, reported as contention", err)
+	}
+}
+
+// Uninstall is cleanup: a lock it cannot use, or no lock directory at all,
+// must not stop it from removing Entire's hooks.
+func TestRemoveHooks_ProceedsWithoutAUsableLock(t *testing.T) {
+	t.Parallel()
+	for name, lockRoot := range map[string]func(*testing.T) *os.Root{
+		"unusable lock file": unusableLockRoot,
+		"no lock directory":  func(*testing.T) *os.Root { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newHooksFixture(t)
+			spec := specFor(t, "pre-push")
+			f.write("pre-push", spec.content)
+			f.write("pre-push"+backupSuffix, userHookV1)
+
+			if _, err := removeHooks(context.Background(), lockRoot(t), f.root, f.dir, restoreLegacy); err != nil {
+				t.Fatalf("removeHooks: %v", err)
+			}
+			assertHooks(t, f, map[string]string{"pre-push": userHookV1})
+		})
+	}
+}
+
+// Another Entire process mid-move still stops uninstall: going ahead would
+// interleave with the moves the lock exists to serialize.
+func TestRemoveHooks_HeldLockStillStops(t *testing.T) {
+	t.Parallel()
+	f := newHooksFixture(t)
+	release, err := acquireHooksLock(context.Background(), f.lockRoot, f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := removeHooks(context.Background(), f.lockRoot, f.root, f.dir, restoreLegacy); err == nil {
+		t.Error("removeHooks ran while another process held the hooks lock")
+	}
+}
+
+// A hook manager other than pre-commit that moves Entire's hook aside and runs
+// it from its own wrapper becomes Entire's backup on the next install. The
+// chain must end rather than run Entire -> wrapper -> Entire -> ... forever.
+func TestInstallHooks_ForeignWrapperOverEntireDoesNotRecurse(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("runs POSIX shell hooks")
+	}
+	f := newHooksFixture(t)
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "log")
+	writeExec(t, filepath.Join(bin, "entire"), "#!/bin/sh\necho entire >> "+log+"\n")
+	spec := specFor(t, "commit-msg")
+	// Entire chained to a user hook, then the tool moved Entire's hook to
+	// commit-msg.tool-old and put its wrapper in front.
+	f.write("commit-msg"+backupSuffix, "#!/bin/sh\necho user >> "+log+"\n")
+	f.write("commit-msg.tool-old", generateChainedContent(spec.content, spec.name))
+	f.write("commit-msg", "#!/bin/sh\n\"$(dirname \"$0\")/commit-msg.tool-old\" \"$@\" || exit $?\necho tool >> "+log+"\n")
+
+	f.install(spec)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second) // a recursive chain never ends
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(f.dir, "commit-msg"), filepath.Join(t.TempDir(), "MSG"))
+	cmd.WaitDelay = time.Second
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hook failed: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Entire's hook runs again inside the tool's wrapper; only the chain stops.
+	if got := strings.Join(strings.Fields(string(data)), ","); got != "entire,entire,tool" {
+		t.Errorf("ran %s, want entire,entire,tool", got)
+	}
+}

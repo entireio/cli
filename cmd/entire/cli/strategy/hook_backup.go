@@ -38,18 +38,36 @@ func hooksLockFile(hooksDir string) (string, error) {
 	return "hooks-" + hex.EncodeToString(sum[:8]) + ".lock", nil
 }
 
+// errHooksLockUnavailable: the hooks lock could not be used at all (no lock
+// directory, or a lock file that cannot be opened), as opposed to being held.
+var errHooksLockUnavailable = errors.New("git hooks lock unavailable")
+
+// acquireHooksLock takes the hooks lock for hooksDir. Only a timeout means
+// another Entire process holds it; any other failure wraps
+// errHooksLockUnavailable. A nil lockRoot means the lock directory could not
+// be opened.
 func acquireHooksLock(ctx context.Context, lockRoot *os.Root, hooksDir string) (func(), error) {
+	if lockRoot == nil {
+		return nil, fmt.Errorf("%w: no lock directory", errHooksLockUnavailable)
+	}
 	name, err := hooksLockFile(hooksDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errHooksLockUnavailable, err)
 	}
+	lockPath := filepath.Join(lockRoot.Name(), name)
 	ctx, cancel := context.WithTimeout(ctx, hooksLockTimeout)
 	defer cancel()
 	release, err := flock.AcquireContextIn(ctx, lockRoot, name)
-	if err != nil {
-		return nil, fmt.Errorf("another Entire process is changing git hooks (lock %s): %w", filepath.Join(lockRoot.Name(), name), err)
+	switch {
+	case err == nil:
+		return release, nil
+	case errors.Is(err, context.DeadlineExceeded):
+		return nil, fmt.Errorf("another Entire process is changing git hooks (lock %s): %w", lockPath, err)
+	case errors.Is(err, context.Canceled):
+		return nil, fmt.Errorf("git hooks lock %s: %w", lockPath, err)
+	default:
+		return nil, fmt.Errorf("%w (%s): %w", errHooksLockUnavailable, lockPath, err)
 	}
-	return release, nil
 }
 
 // errLinkedHookOverLegacy: a symlinked hook sits over Entire's hook in .legacy.
