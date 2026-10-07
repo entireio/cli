@@ -130,7 +130,7 @@ func TestAttach_ExistingCheckpoint_AddSession(t *testing.T) {
 	}
 
 	// Attach the second session
-	output := env.RunCLI("session", "attach", session2ID, "-a", agentClaudeCode)
+	output := env.RunCLI("session", "attach", session2ID, "-a", agentClaudeCode, "-f")
 
 	if !strings.Contains(output, "Attached session") {
 		t.Errorf("expected 'Attached session' in output, got:\n%s", output)
@@ -203,8 +203,8 @@ func TestAttach_AlreadyTracked_NoCheckpoint(t *testing.T) {
 	}
 }
 
-// TestAttach_AlreadyTracked_HasCheckpoint tests that re-attaching a session that already
-// has a checkpoint just offers to link it (no duplicate checkpoint created).
+// TestAttach_AlreadyTracked_HasCheckpoint tests that re-attaching a session to the
+// commit whose checkpoint already holds it changes nothing.
 func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	t.Parallel()
 	env := NewFeatureBranchEnv(t)
@@ -245,8 +245,8 @@ func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	// Re-attach the same session
 	output := env.RunCLI("session", "attach", session1.ID, "-a", agentClaudeCode)
 
-	if !strings.Contains(output, "already has checkpoint") {
-		t.Errorf("expected 'already has checkpoint' in output, got:\n%s", output)
+	if !strings.Contains(output, "is already in checkpoint "+firstCpID) {
+		t.Errorf("expected 'is already in checkpoint %s' in output, got:\n%s", firstCpID, output)
 	}
 
 	// Verify no duplicate trailer was added

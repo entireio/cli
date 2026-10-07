@@ -85,12 +85,14 @@ func countUserTurns(prompts []string) int {
 // agent-native prompt and model extraction when available. Native extractors
 // are authoritative because they understand format-specific nesting and
 // conversation branches (Pi, Codex, Droid, etc.); failures remain best-effort
-// and preserve whatever the generic parser found.
-func extractTranscriptMetadataForAgent(ag agent.Agent, sessionRef string, data []byte) transcriptMetadata {
-	meta := extractTranscriptMetadata(data)
+// and preserve whatever the generic parser found. Prompts and turns are counted
+// from start, a transcript position in the agent's own metric (0 for the whole
+// session); the model is read from the whole transcript.
+func extractTranscriptMetadataForAgent(ag agent.Agent, sessionRef string, data []byte, start int) transcriptMetadata {
+	meta := extractTranscriptMetadata(sliceTranscriptFrom(ag, data, start))
 
 	if extractor, ok := agent.AsPromptExtractor(ag); ok {
-		if prompts, err := extractor.ExtractPrompts(sessionRef, 0); err == nil && len(prompts) > 0 {
+		if prompts, err := extractor.ExtractPrompts(sessionRef, start); err == nil && len(prompts) > 0 {
 			// Native extractors return every user-role item in transcript order,
 			// including the agent's own injected preambles (Codex leads with an
 			// AGENTS.md dump and/or <environment_context>). Title from the first
@@ -111,4 +113,16 @@ func extractTranscriptMetadataForAgent(ag agent.Agent, sessionRef string, data [
 	}
 
 	return meta
+}
+
+// sliceTranscriptFrom returns the part of data after start, counted by the
+// agent's own position metric where it has one, else by JSONL lines.
+func sliceTranscriptFrom(ag agent.Agent, data []byte, start int) []byte {
+	if start <= 0 {
+		return data
+	}
+	if lw, ok := agent.AsLateTranscriptWriter(ag); ok {
+		return lw.SliceTranscriptFromPosition(data, start)
+	}
+	return transcript.SliceFromLine(data, start)
 }

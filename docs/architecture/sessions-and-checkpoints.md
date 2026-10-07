@@ -694,22 +694,43 @@ When condensing multiple concurrent sessions:
 - `files_touched` is merged from all sessions
 
 `entire session attach <id> [--commit <rev>]` (default HEAD) picks how to
-link from the target commit, never from a flag (`planAttachLink`):
+link from two facts about the target commit, the same for HEAD and `--commit`
+(`planAttachLink`):
 - the commit already carries an `Entire-Checkpoint` trailer: the session joins
-  that checkpoint (a session that already has its own checkpoint would amend
-  that one in, so it gets the same push check and is refused on a pushed HEAD);
-- the commit is HEAD and no remote holds it: the trailer is amended in, without
-  a prompt (nobody else has the commit, and a trailer survives a later rebase).
-  "No remote holds it" must be confirmed against the remotes the branch pushes
-  to (its upstream and push remotes, else `origin`, else every remote): attach
-  fetches them and asks each whether a branch contains the commit, fetching
-  only branches whose tips aren't local (single-branch clones don't track every
-  branch). If one can't be reached, it refuses rather than amend a commit it
-  couldn't check; an unrelated remote, like an old fork, is not consulted;
-- a remote branch already holds the commit: the link is recorded in the
-  checkpoint and the commit is left unchanged, so nothing needs a force-push;
-- an older commit no remote holds is refused (amending it means a rebase, and a
-  recorded link would not survive one).
+  that checkpoint, and history is unchanged;
+- a remote branch already holds the commit: the link is recorded in a new
+  checkpoint (or joins one an earlier attach recorded for it) and the commit
+  is left unchanged, so nothing needs a force-push;
+- no remote holds it: the trailer is added, rewriting the commit and every
+  commit after it up to HEAD (`attachRewriteChain`, `rewriteWithTrailer`).
+  The replay reuses each tree, author and message through `git commit-tree`
+  and moves the branch with a compare-and-swap `update-ref`, so the worktree
+  and index are untouched and no commit hooks run; session state naming the
+  old commits is remapped through `PostRewrite`. Merges after the target, a
+  target off the current branch, and an operation in progress (rebase, merge,
+  cherry-pick, revert, bisect) are refused. "No remote holds it" is checked
+  against the remotes the branch pushes to (its upstream and push remotes,
+  else `origin`, else every remote): attach fetches them and asks each whether
+  a branch contains the commit, fetching only branches whose tips aren't local
+  (single-branch clones don't track every branch). If one can't be reached it
+  refuses rather than rewrite a commit it couldn't check.
+
+Before writing anything attach prints what it will do (`attachWarning`): the
+commits it rewrites, or the remote that holds the commit and that the
+transcript is pushed now, plus author and rebase caveats. It asks on a
+terminal; without one (an agent, a script) it changes nothing and exits
+non-zero unless `--force` is passed, and agent-help tells agents to show the
+user that output and pass `--force` only once they agree.
+
+A session can be attached to several commits. Each checkpoint records the
+turns since the session's previous checkpoint: the window starts at the
+state's `CheckpointTranscriptStart` (recorded as the checkpoint's
+`checkpoint_transcript_start`, with prompts, turn count and token usage
+scoped to it), and an ended session's offset then advances to the transcript
+end in the agent's own position metric. A running session's offset belongs to
+its hooks and is left alone. The state's `TokenUsage` stays the whole
+session's. Re-attaching a session to the checkpoint that already holds it is a
+no-op.
 
 A recorded link is `linked_commits` on the root `CheckpointSummary`: a list of
 `{sha, repo}` objects (`repo` is `<forge>/<owner>/<repo>` from the remote that

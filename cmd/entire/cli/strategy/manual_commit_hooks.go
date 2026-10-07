@@ -322,6 +322,35 @@ func isGitSequenceOperation(ctx context.Context) bool {
 	return false
 }
 
+// GitOperationInProgress names the git operation the worktree is in the middle
+// of (rebase or am, cherry-pick, revert, merge, bisect), or returns "" when
+// none is. A command about to move a branch must not do so mid-operation. A
+// git dir that can't be read reports none, as isGitSequenceOperation does.
+func GitOperationInProgress(ctx context.Context) string {
+	gitDir, err := GetGitDir(ctx)
+	if err != nil {
+		return ""
+	}
+	// Per-worktree markers; see isGitSequenceOperation.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return ""
+	}
+	for _, m := range []struct{ marker, op string }{
+		{"rebase-merge", "a rebase"},
+		{"rebase-apply", "a rebase or am"},
+		{"CHERRY_PICK_HEAD", "a cherry-pick"},
+		{"REVERT_HEAD", "a revert"},
+		{"MERGE_HEAD", "a merge"},
+		{"BISECT_LOG", "a bisect"},
+	} {
+		if _, err := root.Lstat(m.marker); err == nil {
+			return m.op
+		}
+	}
+	return ""
+}
+
 // PrepareCommitMsg is called by the git prepare-commit-msg hook.
 // Adds an Entire-Checkpoint trailer to the commit message with a stable checkpoint ID.
 // Only adds a trailer if there's actually new session content to condense.
