@@ -296,11 +296,6 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	// turns since the session's previous one, as hook-made checkpoints do.
 	window := attachTranscriptWindowFor(errW, ag, transcriptPath, existingState)
 	meta := extractTranscriptMetadataForAgent(ag, transcriptPath, transcriptData, window.start)
-	if window.start > 0 && meta.TurnCount == 0 {
-		fmt.Fprintf(errW, "warning: the session has no new turns since checkpoint %s.\n", window.since)
-	} else {
-		warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
-	}
 
 	refs := opts.committedRefs(ctx)
 	cp, err := resolveAttachCheckpoint(ctx, logCtx, repo, refs, plan, sessionID, opts)
@@ -320,6 +315,11 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return nil
 	}
 	checkpointID, isExistingCheckpoint := cp.id, cp.existing
+	if window.start > 0 && meta.TurnCount == 0 {
+		fmt.Fprintf(errW, "warning: the session has no new turns since checkpoint %s.\n", window.since)
+	} else {
+		warnEmptyTranscriptMetadata(errW, ag.Name(), meta, opts)
+	}
 
 	if err := confirmAttach(w, errW, attachWarning(ctx, plan, sessionID, checkpointID, isExistingCheckpoint, window), opts.Force); err != nil {
 		if errors.Is(err, errAttachDeclined) {

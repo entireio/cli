@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -876,6 +877,9 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 
 	// Find associated commits (git commits with matching Entire-Checkpoint trailer)
 	associatedCommits, _ := getAssociatedCommits(ctx, lookup.repo, fullCheckpointID, searchAll) //nolint:errcheck // Best-effort
+	if summary != nil {
+		associatedCommits = withLinkedCommits(lookup.repo, associatedCommits, summary.LinkedCommits)
+	}
 
 	// Derive author from the first associated commit (the user who made the commit).
 	// Fall back to the committed checkpoint store for checkpoints
@@ -1811,6 +1815,37 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 	return sb.String(), true, nil
 }
 
+func newAssociatedCommit(c *object.Commit) associatedCommit {
+	fullSHA := c.Hash.String()
+	shortSHA := fullSHA
+	if len(fullSHA) >= 7 {
+		shortSHA = fullSHA[:7]
+	}
+	return associatedCommit{
+		SHA:      fullSHA,
+		ShortSHA: shortSHA,
+		Message:  strings.Split(c.Message, "\n")[0],
+		Author:   c.Author.Name,
+		Email:    c.Author.Email,
+		Date:     c.Author.When,
+	}
+}
+
+// withLinkedCommits adds the commits a checkpoint records links to (`entire
+// session attach` on a pushed commit), which carry no trailer for
+// getAssociatedCommits to find. A linked commit not in this clone is skipped.
+func withLinkedCommits(repo *git.Repository, commits []associatedCommit, links []checkpoint.LinkedCommit) []associatedCommit {
+	for _, link := range links {
+		if slices.ContainsFunc(commits, func(c associatedCommit) bool { return c.SHA == link.SHA }) {
+			continue
+		}
+		if c, err := repo.CommitObject(plumbing.NewHash(link.SHA)); err == nil {
+			commits = append(commits, newAssociatedCommit(c))
+		}
+	}
+	return commits
+}
+
 // getAssociatedCommits finds git commits that reference the given checkpoint ID.
 // Searches commits on the current branch for Entire-Checkpoint trailer matches.
 // When searchAll is true, uses full DAG walk with no depth limit (may be slow).
@@ -1825,19 +1860,7 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 	targetID := checkpointID.String()
 
 	collectCommit := func(c *object.Commit) {
-		fullSHA := c.Hash.String()
-		shortSHA := fullSHA
-		if len(fullSHA) >= 7 {
-			shortSHA = fullSHA[:7]
-		}
-		commits = append(commits, associatedCommit{
-			SHA:      fullSHA,
-			ShortSHA: shortSHA,
-			Message:  strings.Split(c.Message, "\n")[0],
-			Author:   c.Author.Name,
-			Email:    c.Author.Email,
-			Date:     c.Author.When,
-		})
+		commits = append(commits, newAssociatedCommit(c))
 	}
 
 	if searchAll {

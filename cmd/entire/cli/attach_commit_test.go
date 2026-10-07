@@ -329,6 +329,10 @@ func TestAttachCommit_ExplainFindsTheLinkedCheckpoint(t *testing.T) {
 	if strings.Contains(got, "no Entire-Checkpoint trailer") || !strings.Contains(got, state.LastCheckpointID.String()) {
 		t.Fatalf("explain did not resolve the linked checkpoint %s:\n%s", state.LastCheckpointID, got)
 	}
+	// The linked commit has no trailer, but the checkpoint lists it.
+	if strings.Contains(got, "(none on this branch)") || !strings.Contains(got, target.Hash.String()[:7]) {
+		t.Errorf("explain should list the linked commit %s:\n%s", target.Hash.String()[:7], got)
+	}
 }
 
 func TestCheckpointsLinkedTo(t *testing.T) {

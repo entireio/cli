@@ -112,7 +112,11 @@ func rewriteWarning(ctx context.Context, chain []*object.Commit, checkedRemotes 
 			lines = append(lines, "  "+describeCommit(c))
 		}
 	}
-	lines = append(lines, "Their SHAs change; their content doesn't.")
+	if len(chain) == 1 {
+		lines = append(lines, "Its SHA changes; its content doesn't.")
+	} else {
+		lines = append(lines, "Their SHAs change; their content doesn't.")
+	}
 	if len(checkedRemotes) > 0 {
 		lines = append(lines, fmt.Sprintf("It isn't on %s. If you pushed it somewhere else, rewriting it means a force-push there.", strings.Join(checkedRemotes, ", ")))
 	}
