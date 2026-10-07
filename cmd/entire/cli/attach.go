@@ -724,8 +724,9 @@ func remoteContainingCommit(ctx context.Context, target *object.Commit, remotes 
 		if missing := branchesWithMissingTips(ctx, branches, tips); len(missing) > 0 {
 			// Fetch the branches by name (a source-only glob refspec is
 			// invalid), writing no ref, only to get their objects for the
-			// ancestry check.
-			fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--", remote}, missing...)
+			// ancestry check: an empty --refmap stops git updating the
+			// remote-tracking refs the configured refspec maps them to.
+			fetchArgs := append([]string{"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "--", remote}, missing...)
 			fetchCtx, cancel := context.WithTimeout(ctx, attachFetchTimeout)
 			err = attachGitCommand(fetchCtx, fetchArgs...).Run()
 			cancel()
