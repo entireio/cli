@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -1042,4 +1043,31 @@ func TestExtractWorkflowRunIDs_EveryRunInAResult(t *testing.T) {
 	parsed, err := transcript.ParseFromBytes(buildJSONL(string(result)))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"wf_new-1", "wf_old-2"}, ExtractWorkflowRunIDs(parsed))
+}
+
+// TestCalculateTotalTokenUsage_SameWorkflowAgentInTwoRunsCountsOnce pins that
+// an agent ID present in two launched runs is counted once, from its newest
+// transcript, not summed or taken from whichever run is read last.
+func TestCalculateTotalTokenUsage_SameWorkflowAgentInTwoRunsCountsOnce(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	const agentID = "ae3d7b8f2930c8787"
+	older := filepath.Join(subagentsDir, "workflows", "wf_2", "agent-"+agentID+".jsonl")
+	newer := filepath.Join(subagentsDir, "workflows", "wf_1", "agent-"+agentID+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(older), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(newer), 0o755))
+	writeJSONLFile(t, older, `{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":1,"output_tokens":1}}}`)
+	writeJSONLFile(t, newer, `{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":7,"output_tokens":8}}}`)
+	base := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(older, base, base))
+	require.NoError(t, os.Chtimes(newer, base.Add(time.Minute), base.Add(time.Minute)))
+
+	lines := append(makeWorkflowLaunchLines(t, "toolu_wf1", "wf_1"), makeWorkflowLaunchLines(t, "toolu_wf2", "wf_2")...)
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(lines...), 0, subagentsDir)
+	require.NoError(t, err)
+	require.NotNil(t, usage.SubagentTokens)
+	assert.Equal(t, 7, usage.SubagentTokens.InputTokens)
+	assert.Equal(t, 8, usage.SubagentTokens.OutputTokens)
+	assert.Equal(t, 1, usage.SubagentTokens.APICallCount)
 }

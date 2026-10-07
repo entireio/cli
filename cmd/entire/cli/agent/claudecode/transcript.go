@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -466,7 +465,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 func subagentTranscriptPaths(spawnedAgentIDs map[string]string, runIDs []string, subagentsDir string) map[string]string {
 	agentPaths := make(map[string]string)
 	for _, runID := range runIDs {
-		maps.Copy(agentPaths, paths.WorkflowRunAgentTranscripts(subagentsDir, runID))
+		paths.MergeWorkflowAgentTranscripts(agentPaths, paths.WorkflowRunAgentTranscripts(subagentsDir, runID))
 	}
 	for agentID := range spawnedAgentIDs {
 		direct := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))

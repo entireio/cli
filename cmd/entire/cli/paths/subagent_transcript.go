@@ -40,9 +40,10 @@ func ResolveSubagentTranscriptPath(transcriptDir, sessionID, agentID string) str
 // WorkflowAgentTranscripts maps the ID of every Workflow agent with a
 // transcript in any run under subagentsDir to that transcript's path. It
 // serves lookups by agent ID, where the run is not known; see
-// WorkflowRunAgentTranscripts for the rules a transcript must meet. Symlinked
-// run directories are skipped. A missing or unreadable directory yields an
-// empty map: no Workflow ran, or none can be read.
+// WorkflowRunAgentTranscripts for the rules a transcript must meet. An agent ID
+// found in more than one run resolves as MergeWorkflowAgentTranscripts does.
+// Symlinked run directories are skipped. A missing or unreadable directory
+// yields an empty map: no Workflow ran, or none can be read.
 //
 // The reads here go straight to the agent's session store without a root, the
 // read-side gap docs/development/filesystem-safety.md records under
@@ -61,11 +62,36 @@ func WorkflowAgentTranscripts(subagentsDir string) map[string]string {
 		if !run.IsDir() {
 			continue
 		}
-		for agentID, path := range WorkflowRunAgentTranscripts(subagentsDir, run.Name()) {
-			found[agentID] = path
-		}
+		MergeWorkflowAgentTranscripts(found, WorkflowRunAgentTranscripts(subagentsDir, run.Name()))
 	}
 	return found
+}
+
+// MergeWorkflowAgentTranscripts adds src's agent transcripts to dst. An agent
+// ID already in dst (the same agent in another run, as a resumed run can
+// carry it) keeps whichever transcript was modified last, so the choice does
+// not depend on the order runs are read in and the agent is counted once.
+func MergeWorkflowAgentTranscripts(dst, src map[string]string) {
+	for agentID, path := range src {
+		if existing, ok := dst[agentID]; ok && !modifiedAfter(path, existing) {
+			continue
+		}
+		dst[agentID] = path
+	}
+}
+
+// modifiedAfter reports whether a was modified after b; a file that cannot be
+// stat'ed never wins, and a tie keeps b.
+func modifiedAfter(a, b string) bool {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		return true
+	}
+	return aInfo.ModTime().After(bInfo.ModTime())
 }
 
 // WorkflowRunAgentTranscripts maps the ID of every agent with a transcript in

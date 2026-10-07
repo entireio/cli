@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,4 +139,31 @@ func TestWorkflowRunAgentTranscripts(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	assert.Empty(t, WorkflowRunAgentTranscripts(subagentsDir, "wf_linked"), "a linked run directory is not read")
+}
+
+// TestWorkflowAgentTranscripts_SameAgentInTwoRuns pins that an agent ID found
+// in more than one run resolves to its most recently modified transcript,
+// whatever order the runs are read in, rather than to whichever run is read
+// last.
+func TestWorkflowAgentTranscripts_SameAgentInTwoRuns(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := t.TempDir()
+	const agentID = "ae3d7b8f2930c8787"
+	// wf_b sorts after wf_a, so the old last-read-wins rule picked it.
+	older := filepath.Join(subagentsDir, SubagentWorkflowsDirName, "wf_b", "agent-"+agentID+".jsonl")
+	newer := filepath.Join(subagentsDir, SubagentWorkflowsDirName, "wf_a", "agent-"+agentID+".jsonl")
+	for _, p := range []string{older, newer} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte("{}\n"), 0o600))
+	}
+	base := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(older, base, base))
+	require.NoError(t, os.Chtimes(newer, base.Add(time.Minute), base.Add(time.Minute)))
+
+	assert.Equal(t, newer, WorkflowAgentTranscripts(subagentsDir)[agentID])
+
+	merged := map[string]string{agentID: newer}
+	MergeWorkflowAgentTranscripts(merged, map[string]string{agentID: older})
+	assert.Equal(t, newer, merged[agentID], "an older transcript must not replace a newer one")
 }
