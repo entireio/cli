@@ -77,3 +77,16 @@ func TestDeletedCheckpoints_Remove(t *testing.T) {
 	assert.True(t, deleted.Contains(kept))
 	assert.False(t, deleted.Contains(removed))
 }
+
+func TestDeletedCheckpoints_AddReportsWhetherItAdded(t *testing.T) {
+	t.Parallel()
+	list := NewDeletedCheckpoints(t.TempDir())
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	added, err := list.Add(cid)
+	require.NoError(t, err)
+	assert.True(t, added)
+	added, err = list.Add(cid)
+	require.NoError(t, err)
+	assert.False(t, added, "an ID an earlier run recorded is not this run's to remove")
+}

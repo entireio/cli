@@ -164,9 +164,11 @@ OPF-redacted) data stays local. The remote-tracking `v1` ref of each named
 remote whose fetch URL is the target is advanced to the pushed tip (or to the
 fetched tip when the checkpoint was already gone there) so read fallbacks and
 migration stop seeing the checkpoint. The content remains in the branch's
-history. The local `v1` removal is a commit the next pre-push sends to the
-sync remote, so on the git-branch primary a delete that leaves that remote out
-is refused before any write.
+history. The local `v1` removal is a commit the next pre-push sends to every
+`v1` push destination, so on the git-branch primary a delete that leaves one
+out is refused before any write if it holds a copy or cannot be reached. After
+pushing the removal to a destination, local `v1` is rebuilt on the pushed
+commit (unpushed local commits replayed) so the branches do not diverge.
 
 ### On-demand fetch (reads and backfill writes)
 

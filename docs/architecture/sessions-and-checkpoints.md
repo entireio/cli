@@ -847,17 +847,29 @@ What it means for the domain model:
   "checkpoint not found (deleted with `entire checkpoint delete`)" when the ID
   is on this clone's deleted-checkpoints list, and a plain not-found otherwise.
   Every `prepare-commit-msg` outside a rebase, cherry-pick or revert (not only
-  an amend) drops `Entire-Checkpoint` trailer-block lines whose ID is on that
-  list, and squash/redo inheritance skips those IDs; new agent work in an amend
-  gets a fresh ID.
+  an amend) drops every whole `Entire-Checkpoint` line after the subject whose
+  ID is on that list (wherever git would see a trailer), an amend never
+  preserves a deleted ID, and squash/redo inheritance skips those IDs; new
+  agent work in an amend gets a fresh ID.
 - **The `v1` branch keeps history.** A checkpoint (of any ID kind; a git-branch
   mirror stores ULIDs there too) is removed from the branch tip; its content
   stays in the branch history on every remote.
-- **`--local-only` on the git-branch primary is refused.** The local removal
-  is a `v1` commit, and the next pre-push fast-forwards the sync remote (or
-  `checkpoint_remote`) to it, deleting that copy too. A delete whose selection
-  leaves that remote out is refused the same way, before anything is written;
-  delete from it as well or use the git-refs backend.
+- **On the git-branch primary, a delete must not leave a v1 push destination
+  holding the copy.** The local removal is a `v1` commit, and the next
+  pre-push fast-forwards every destination (each pushurl of the sync remote,
+  or the dedicated `checkpoint_remote` URL derived from any remote) to it,
+  deleting those copies too. `--local-only` probes only those destinations; a
+  delete whose selection leaves one out is refused before anything is written
+  when that destination holds a `v1` copy (remedy: also delete there, or use
+  the git-refs backend) or cannot be reached (remedy: retry once reachable).
+  Known limitation: a push to a not-yet-elected remote can elect it on the spot
+  (capture) and send `v1` there; such a remote is not checked. With
+  `push_sessions` disabled nothing is pushed, but re-enabling it later carries
+  the removal to the sync remote.
+- **Local and remote `v1` stay in one line.** After the removal is pushed to
+  a `v1` push destination, local `v1` is rebuilt on that pushed commit (local
+  unpushed checkpoints replayed on top), so the next push is a fast-forward and
+  the OPF pre-push rewrite does not see a diverged branch.
 - **`--local-only` copies can come back into view.** On git-refs, a read
   (explain, backfill) that misses locally fetches the remote copy and recreates
   the local ref. On git-branch, reads do not refetch a deleted local copy.

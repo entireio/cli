@@ -60,9 +60,11 @@ The full checkpoint ID is required; prefixes are not accepted. Deleting from a
 remote cannot be undone. A checkpoint on the entire/checkpoints/v1 branch is
 removed from the branch tip only: the branch's history still contains it.
 
-With --local-only no remote is contacted. On the git-branch backend a local
-removal reaches the sync remote on the next git push, so --local-only (or a
-selection that leaves that remote out) is refused there.
+With --local-only no remote is contacted, except on the git-branch backend:
+there a local removal reaches the sync remote on the next git push, so that
+remote is checked, and --local-only (or a selection that leaves it out) is
+refused while it holds a copy or cannot be reached. With push_sessions
+disabled the removal is not pushed, but re-enabling it later pushes it.
 
 Other checkpoints of the same sessions are listed but not deleted. Each one
 carries the session's full transcript, so the session stays visible on
@@ -131,9 +133,10 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 	if err != nil {
 		return err
 	}
+	selection := checkpointDeleteSelection(flags)
 
 	if flags.dryRun {
-		refusal := plan.CheckLocalV1Propagation(targets, flags.localOnly)
+		refusal := plan.CheckLocalV1Propagation(targets, selection)
 		if flags.json {
 			doc := buildCheckpointDeleteJSON(plan, targets, nil, true, flags.localOnly)
 			if refusal != nil {
@@ -155,7 +158,7 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 	if !plan.HasLocalCopy() && len(targets) == 0 {
 		return fmt.Errorf("checkpoint %s has no local copy and no selected remote holds it; nothing to delete", cid)
 	}
-	if err := plan.CheckLocalV1Propagation(targets, flags.localOnly); err != nil {
+	if err := plan.CheckLocalV1Propagation(targets, selection); err != nil {
 		return err //nolint:wrapcheck // names the checkpoint and the remedy already
 	}
 
@@ -172,11 +175,12 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 		if err != nil {
 			return err
 		}
+		selection = strategy.SelectionPrompt
 		if !plan.HasLocalCopy() && len(targets) == 0 {
 			fmt.Fprintln(out, "No remote selected and there is no local copy; deletion cancelled.")
 			return nil
 		}
-		if err := plan.CheckLocalV1Propagation(targets, flags.localOnly); err != nil {
+		if err := plan.CheckLocalV1Propagation(targets, selection); err != nil {
 			return err //nolint:wrapcheck // names the checkpoint and the remedy already
 		}
 	}
@@ -185,7 +189,7 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 		return err
 	}
 
-	result, execErr := strategy.ExecuteCheckpointDelete(ctx, plan, strategy.CheckpointDeleteOptions{Targets: targets, LocalOnly: flags.localOnly})
+	result, execErr := strategy.ExecuteCheckpointDelete(ctx, plan, strategy.CheckpointDeleteOptions{Targets: targets, LocalOnly: flags.localOnly, Selection: selection})
 	if flags.json && result != nil {
 		if err := writeCheckpointDeleteJSON(out, buildCheckpointDeleteJSON(plan, targets, result, false, flags.localOnly)); err != nil {
 			return err
@@ -205,6 +209,18 @@ func runCheckpointDelete(cmd *cobra.Command, rawID string, flags checkpointDelet
 		return NewSilentError(fmt.Errorf("checkpoint %s was not deleted from every remote", cid))
 	}
 	return nil
+}
+
+// checkpointDeleteSelection names how the flags chose the targets.
+func checkpointDeleteSelection(flags checkpointDeleteFlags) strategy.CheckpointDeleteSelection {
+	switch {
+	case flags.localOnly:
+		return strategy.SelectionLocalOnly
+	case len(flags.remotes) > 0:
+		return strategy.SelectionRemoteFlag
+	default:
+		return strategy.SelectionAllHolders
+	}
 }
 
 // selectCheckpointDeleteTargets picks the remote targets a delete acts on:
@@ -399,7 +415,7 @@ func printCheckpointDeleteResult(w io.Writer, plan *strategy.CheckpointDeletePla
 	if result.Failed() {
 		return
 	}
-	notSelected := unselectedHolderNames(plan, selected, flags)
+	notSelected := unselectedHolderNames(plan, selected)
 	notChecked := notCheckedTargetNames(plan)
 	unreachable := unreachableTargetNames(plan, flags)
 	if len(notSelected) == 0 && len(notChecked) == 0 && len(unreachable) == 0 {
@@ -426,12 +442,9 @@ func printCheckpointDeleteResult(w io.Writer, plan *strategy.CheckpointDeletePla
 }
 
 // unselectedHolderNames names the reachable holders this delete left alone:
-// excluded by --remote or deselected at the prompt. --local-only never probes,
-// so it has no known holders; notCheckedTargetNames covers it.
-func unselectedHolderNames(plan *strategy.CheckpointDeletePlan, selected []strategy.CheckpointDeleteTarget, flags checkpointDeleteFlags) []string {
-	if flags.localOnly {
-		return nil
-	}
+// excluded by --remote or --local-only, or deselected at the prompt. Remotes
+// --local-only did not probe are covered by notCheckedTargetNames.
+func unselectedHolderNames(plan *strategy.CheckpointDeletePlan, selected []strategy.CheckpointDeleteTarget) []string {
 	var names []string
 	for _, t := range plan.HolderTargets() {
 		if !slices.ContainsFunc(selected, func(s strategy.CheckpointDeleteTarget) bool { return s.URL == t.URL }) {

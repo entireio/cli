@@ -268,7 +268,8 @@ func TestCheckpointDelete_LocalOnlyLeavesRemotes(t *testing.T) {
 		out, err := env.RunCLIWithError("checkpoint", "delete", cpID, "--local-only", "--force")
 		if backend == StoreGitBranch {
 			require.Error(t, err, "a local v1 removal would reach origin on the next push")
-			assert.Contains(t, out, "the next git push sends that branch to origin")
+			assert.Contains(t, out, "which the next git push sends to origin")
+			assert.Contains(t, out, "run without --local-only")
 			assert.True(t, env.checkpointExistsLocally(cpID), "a refused delete writes nothing")
 		} else {
 			require.NoError(t, err, out)
@@ -388,4 +389,44 @@ func TestCheckpointDelete_MigrateAfterDeleteWithOnlyTrackingV1(t *testing.T) {
 
 	env.RunCLI("doctor", "migrate-checkpoints")
 	assert.False(t, anyRefNamed(t, env.RepoDir, cpID), "migration must not re-create a deleted checkpoint")
+}
+
+// After a git-branch delete reaches the remote, the next push still delivers
+// new checkpoints: the delete commits the removal on the local v1 branch and on
+// the remote's tip separately, so local v1 must end up descending from the tip
+// the delete pushed. Otherwise the branches diverge, and with OPF enabled a
+// diverged v1 aborts the user's push (V1DivergedError).
+func TestCheckpointDelete_BranchBackendNextPushAfterRemoteDelete(t *testing.T) {
+	t.Parallel()
+	for _, unpushedFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "local in sync", true: "local has an unpushed checkpoint"}[unpushedFirst], func(t *testing.T) {
+			t.Parallel()
+			env := NewFeatureBranchEnv(t)
+			env.CheckpointStore = StoreGitBranch
+			bare := env.SetupBareRemote()
+			cpID := createCheckpointedCommit(t, env, "Add nu", "nu.go", "package nu", "Add nu")
+			env.GitPushWithHooks("origin", "HEAD")
+			var unpushedID string
+			if unpushedFirst {
+				unpushedID = createCheckpointedCommit(t, env, "Add omicron", "omicron.go", "package omicron", "Add omicron")
+			}
+
+			env.RunCLI("checkpoint", "delete", cpID, "--force")
+			require.False(t, env.CheckpointExistsOnRemote(bare, cpID))
+			if unpushedFirst {
+				assert.False(t, env.CheckpointExistsOnRemote(bare, unpushedID), "a delete never pushes unrelated local v1 commits")
+			}
+			remoteTip := strings.TrimSpace(testutil.RunGit(t, bare, "rev-parse", "refs/heads/"+paths.MetadataBranchName))
+			testutil.RunGit(t, env.RepoDir, "merge-base", "--is-ancestor", remoteTip, "refs/heads/"+paths.MetadataBranchName)
+
+			nextID := createCheckpointedCommit(t, env, "Add xi", "xi.go", "package xi", "Add xi")
+			env.GitPushWithHooks("origin", "HEAD")
+			assert.True(t, env.CheckpointExistsOnRemote(bare, nextID), "the next checkpoint still reaches the remote")
+			if unpushedFirst {
+				assert.True(t, env.CheckpointExistsOnRemote(bare, unpushedID))
+			}
+			assert.False(t, env.CheckpointExistsOnRemote(bare, cpID), "and the deleted one stays gone")
+			assert.False(t, env.checkpointExistsLocally(cpID))
+		})
+	}
 }

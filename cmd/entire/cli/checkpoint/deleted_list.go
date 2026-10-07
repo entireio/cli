@@ -87,15 +87,26 @@ func loadDeletedForRepo(repo *git.Repository) (DeletedCheckpointSet, error) {
 
 // Record adds cid to the list. Recording an ID already present is a no-op.
 func (d *DeletedCheckpoints) Record(cid id.CheckpointID) error {
+	_, err := d.Add(cid)
+	return err
+}
+
+// Add records cid and reports whether this call added it (false when it was
+// already listed), so a caller that undoes its own record never removes an
+// entry an earlier delete made.
+func (d *DeletedCheckpoints) Add(cid id.CheckpointID) (bool, error) {
 	if cid.Kind() == id.KindUnknown {
-		return fmt.Errorf("record deleted checkpoint: invalid checkpoint ID %q", cid)
+		return false, fmt.Errorf("record deleted checkpoint: invalid checkpoint ID %q", cid)
 	}
-	return d.update(func(ids []id.CheckpointID) ([]id.CheckpointID, bool) {
+	added := false
+	err := d.update(func(ids []id.CheckpointID) ([]id.CheckpointID, bool) {
 		if slices.Contains(ids, cid) {
 			return ids, false
 		}
+		added = true
 		return append(ids, cid), true
 	})
+	return added, err
 }
 
 // Remove takes cid off the list again, for a delete that failed before it

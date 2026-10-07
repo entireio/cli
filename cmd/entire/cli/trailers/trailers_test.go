@@ -420,7 +420,7 @@ func TestRemoveCheckpointTrailers(t *testing.T) {
 		{
 			name:        "canonical trailer",
 			msg:         "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n",
-			want:        "Subject\n\n",
+			want:        "Subject\n",
 			wantRemoved: []checkpointID.CheckpointID{dead},
 		},
 		{
@@ -447,9 +447,53 @@ func TestRemoveCheckpointTrailers(t *testing.T) {
 			want: "Subject\n\nEntire-Checkpoint: a1b2c3d4e5f6 was wrong, see below.\nMore prose here.\n",
 		},
 		{
-			name: "paragraph mixing prose and the trailer is not a trailer block",
-			msg:  "Subject\n\nSome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
-			want: "Subject\n\nSome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			// git accepts mixed trailer blocks; any whole trailer line goes.
+			name:        "paragraph mixing prose and the trailer",
+			msg:         "Subject\n\nSome prose\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "Subject\n\nSome prose\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "cherry-pick -x note below the trailer",
+			msg:         "subject\n\nbody\n\nEntire-Checkpoint: a1b2c3d4e5f6\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n",
+			want:        "subject\n\nbody\n\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "non-trailer line in the block",
+			msg:         "subject\n\nSigned-off-by: A\nEntire-Checkpoint: a1b2c3d4e5f6\nnot a trailer line\n",
+			want:        "subject\n\nSigned-off-by: A\nnot a trailer line\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "token with a space",
+			msg:         "subject\n\nBREAKING CHANGE: api\nEntire-Checkpoint: a1b2c3d4e5f6\n",
+			want:        "subject\n\nBREAKING CHANGE: api\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "skip-ci marker after the trailer",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n[skip ci]\n",
+			want:        "subject\n\n[skip ci]\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "custom comment character below the trailer",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n; Please enter the commit message\n",
+			want:        "subject\n\n; Please enter the commit message\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "no blank lines left behind",
+			msg:         "subject\n\nbody\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n",
+			want:        "subject\n\nbody\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
+		},
+		{
+			name:        "blank paragraph gap collapsed",
+			msg:         "subject\n\nEntire-Checkpoint: a1b2c3d4e5f6\n\n# comment\n",
+			want:        "subject\n\n# comment\n",
+			wantRemoved: []checkpointID.CheckpointID{dead},
 		},
 		{
 			name: "subject line is never a trailer",

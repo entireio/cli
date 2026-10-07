@@ -137,14 +137,17 @@ type CheckpointDeletePlan struct {
 	// TrackingV1 lists remote names whose remote-tracking v1 ref holds it.
 	// Those refs move only when that remote's copy is deleted.
 	TrackingV1 []string
-	// V1PushURL is where the next pre-push sends the local v1 branch: set only
-	// when git-branch is the primary backend and pushes are enabled.
-	V1PushURL             string
+	// V1PushURLs are where the next pre-push sends the local v1 branch: set
+	// only when git-branch is the primary backend and pushes are enabled.
+	V1PushURLs            []string
 	Targets               []CheckpointDeleteTarget
 	Sessions              []CheckpointDeleteSession
 	SessionStates         []CheckpointDeleteState
 	OtherLocalCheckpoints []CheckpointDeleteSibling
 	OtherLocalTruncated   bool
+	// branchPrimary records a git-branch primary, whose remote v1 branches
+	// can hold ULID checkpoints too.
+	branchPrimary bool
 	// PushSessionsDisabled reports push_sessions=false; the delete still
 	// reaches remotes when the user asks for it.
 	PushSessionsDisabled bool
@@ -196,28 +199,70 @@ func (p *CheckpointDeletePlan) UnreachableTargetNames() []string {
 	return names
 }
 
+// CheckpointDeleteSelection says how the remote targets were chosen, so a
+// refusal can name a remedy that works for that way of choosing.
+type CheckpointDeleteSelection int
+
+const (
+	// SelectionAllHolders: every reachable holder (no narrowing).
+	SelectionAllHolders CheckpointDeleteSelection = iota
+	// SelectionLocalOnly: --local-only, no remote at all.
+	SelectionLocalOnly
+	// SelectionRemoteFlag: narrowed with --remote.
+	SelectionRemoteFlag
+	// SelectionPrompt: narrowed in the interactive remote picker.
+	SelectionPrompt
+)
+
 // CheckLocalV1Propagation refuses a delete whose local v1 removal the next
-// pre-push would carry to a remote the user did not select. The removal is a
-// commit on the local v1 branch, and pre-push fast-forwards the sync remote's
-// v1 branch to it, deleting that remote's copy too. A sync remote probed and
-// found without a v1 copy loses nothing, so it need not be selected.
-func (p *CheckpointDeletePlan) CheckLocalV1Propagation(targets []CheckpointDeleteTarget, localOnly bool) error {
-	if !p.LocalV1 || p.V1PushURL == "" {
+// pre-push would carry to a remote the delete leaves alone. The removal is a
+// commit on the local v1 branch, and pre-push fast-forwards each v1 push
+// destination to it, deleting that destination's copy too. A destination
+// probed and found without a v1 copy loses nothing; one that could not be
+// probed is refused, since its copy cannot be ruled out.
+//
+// Known limitation: a push to a remote that is not yet the sync remote can
+// elect it on the spot (capture) and send v1 there; such a remote is not a
+// destination here until it is elected.
+func (p *CheckpointDeletePlan) CheckLocalV1Propagation(targets []CheckpointDeleteTarget, selection CheckpointDeleteSelection) error {
+	if !p.LocalV1 {
 		return nil
 	}
-	if !localOnly && slices.ContainsFunc(targets, func(t CheckpointDeleteTarget) bool { return t.URL == p.V1PushURL }) {
-		return nil
+	for _, url := range p.V1PushURLs {
+		if selection != SelectionLocalOnly && slices.ContainsFunc(targets, func(t CheckpointDeleteTarget) bool { return t.URL == url }) {
+			continue
+		}
+		dest := CheckpointDeleteTarget{URL: url}
+		if i := slices.IndexFunc(p.Targets, func(t CheckpointDeleteTarget) bool { return t.URL == url }); i >= 0 {
+			dest = p.Targets[i]
+		}
+		if dest.Reachable && dest.V1 == V1CopyAbsent {
+			continue
+		}
+		return p.v1PropagationError(dest, selection)
 	}
-	dest := CheckpointDeleteTarget{URL: p.V1PushURL}
-	if i := slices.IndexFunc(p.Targets, func(t CheckpointDeleteTarget) bool { return t.URL == p.V1PushURL }); i >= 0 {
-		dest = p.Targets[i]
+	return nil
+}
+
+func (p *CheckpointDeletePlan) v1PropagationError(dest CheckpointDeleteTarget, selection CheckpointDeleteSelection) error {
+	where := fmt.Sprintf("it is on the local %s branch, which the next git push sends to %s (%s)", paths.MetadataBranchName, dest.Name(), dest.Display())
+	if !dest.Reachable {
+		return fmt.Errorf("refusing to delete checkpoint %s: %w: %s, but %s could not be reached to check its copy; retry when %s is reachable",
+			p.CheckpointID, ErrCheckpointDeleteV1WouldPropagate, where, dest.Name(), dest.Name())
 	}
-	if dest.Reachable && dest.V1 == V1CopyAbsent {
-		return nil
+	var remedy string
+	switch selection {
+	case SelectionLocalOnly:
+		remedy = "run without --local-only to delete that copy as well, or switch to the git-refs checkpoint backend"
+	case SelectionRemoteFlag:
+		remedy = "add --remote " + dest.Name() + " to delete that copy as well"
+	case SelectionPrompt:
+		remedy = "select " + dest.Name() + " too"
+	case SelectionAllHolders:
+		remedy = "delete it from " + dest.Name() + " as well"
 	}
-	return fmt.Errorf("refusing to delete checkpoint %s: %w: it is on the local %s branch, and the next git push sends that branch to %s (%s), "+
-		"removing that remote's copy too; delete it from %s as well (drop --local-only, or add --remote %s), or switch to the git-refs checkpoint backend",
-		p.CheckpointID, ErrCheckpointDeleteV1WouldPropagate, paths.MetadataBranchName, dest.Name(), dest.Display(), dest.Name(), dest.Name())
+	return fmt.Errorf("refusing to delete checkpoint %s: %w: %s, removing that copy too; %s",
+		p.CheckpointID, ErrCheckpointDeleteV1WouldPropagate, where, remedy)
 }
 
 // PlanCheckpointDelete inspects the local repository and every checkpoint
@@ -250,14 +295,24 @@ func PlanCheckpointDelete(ctx context.Context, cid id.CheckpointID, opts Checkpo
 	plan.LocalV1 = commitHasCheckpoint(repo, refTip(repo, v1BranchRef), cid)
 	plan.TrackingV1 = trackingV1Holders(ctx, repo, cid)
 
+	plan.branchPrimary = !primaryIsGitRefs(ctx)
 	targets := resolveDeleteTargets(ctx, root, plan)
 	if opts.LocalOnly {
-		for i := range targets {
-			targets[i].NotChecked = true
+		// No remote is contacted, except a v1 push destination when this
+		// clone holds a v1 copy: CheckLocalV1Propagation needs to know
+		// whether the next push would remove a copy there.
+		var probe, skip []CheckpointDeleteTarget
+		for _, t := range targets {
+			if plan.LocalV1 && slices.Contains(plan.V1PushURLs, t.URL) {
+				probe = append(probe, t)
+				continue
+			}
+			t.NotChecked = true
+			skip = append(skip, t)
 		}
-		plan.Targets = targets
+		plan.Targets = append(probeDeleteTargets(ctx, root, repo, cid, probe, plan.branchPrimary), skip...)
 	} else {
-		plan.Targets = probeDeleteTargets(ctx, root, repo, cid, targets)
+		plan.Targets = probeDeleteTargets(ctx, root, repo, cid, targets, plan.branchPrimary)
 	}
 	for _, t := range plan.Targets {
 		if !t.Reachable && !t.NotChecked {
@@ -385,6 +440,13 @@ func resolveDeleteTargets(ctx context.Context, root string, plan *CheckpointDele
 			candidates = append(candidates, deleteTargetCandidate{name: name, url: url})
 		}
 	}
+	var v1Dests []string
+	addV1Dest := func(name, url string) {
+		add(name, url)
+		if url != "" && !slices.Contains(v1Dests, url) {
+			v1Dests = append(v1Dests, url)
+		}
+	}
 
 	elected, electErr := ResolveCheckpointSyncRemote(ctx)
 	if electErr != nil {
@@ -392,15 +454,23 @@ func resolveDeleteTargets(ctx context.Context, root string, plan *CheckpointDele
 	}
 	s, settingsErr := settings.Load(ctx)
 	checkpointRemoteConfigured := settingsErr == nil && s.GetCheckpointRemote() != nil
+	branchPrimary := !primaryIsGitRefs(ctx)
 
-	dedicatedPushURL := ""
-	if checkpointRemoteConfigured && elected.Name != "" {
-		if url, enabled, err := remote.PushURL(ctx, elected.Name); err == nil && enabled {
-			add(CheckpointRemoteTargetName, url)
-			dedicatedPushURL = url
-		}
-	}
+	// With a dedicated checkpoint_remote, pre-push derives its URL from
+	// whichever remote the user pushes to and bypasses the sync-remote gate,
+	// so every configured remote can send v1 there, elected or not.
+	electedUsesDedicated := false
 	if checkpointRemoteConfigured {
+		pushNames, _ := configuredRemotesInConfigOrderResult(ctx) //nolint:errcheck // an unreadable remote list adds no destinations
+		if elected.Name != "" && !slices.Contains(pushNames, elected.Name) {
+			pushNames = append([]string{elected.Name}, pushNames...)
+		}
+		for _, name := range pushNames {
+			if url, enabled, err := remote.PushURL(ctx, name); err == nil && enabled {
+				addV1Dest(CheckpointRemoteTargetName, url)
+				electedUsesDedicated = electedUsesDedicated || name == elected.Name
+			}
+		}
 		lead := LeadCheckpointReadRemote(ctx)
 		if dedicated, err := remote.ReadsDedicatedStore(ctx, lead); err == nil && dedicated {
 			if url, urlErr := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: root, LeadReadRemote: lead}); urlErr == nil {
@@ -420,22 +490,24 @@ func resolveDeleteTargets(ctx context.Context, root string, plan *CheckpointDele
 	}
 	for _, name := range names {
 		if urls, err := remote.GetPushURLs(ctx, name); err == nil && len(urls) > 0 {
-			add(name, urls[0])
-			if name == elected.Name && dedicatedPushURL == "" {
-				plan.V1PushURL = urls[0]
+			switch {
+			case name == elected.Name && branchPrimary && !electedUsesDedicated:
+				// git pushes the v1 branch to every pushurl of the sync remote.
+				for _, url := range urls {
+					addV1Dest(name, url)
+				}
+			default:
+				add(name, urls[0])
 			}
 		}
 		if url, err := remote.GetRemoteURL(ctx, name); err == nil {
 			add(name, url)
 		}
 	}
-	// pre-push sends the local v1 branch only on a git-branch primary, to the
-	// dedicated store when one is in use, else to the sync remote by name.
-	switch {
-	case plan.PushSessionsDisabled || primaryIsGitRefs(ctx):
-		plan.V1PushURL = ""
-	case dedicatedPushURL != "":
-		plan.V1PushURL = dedicatedPushURL
+	// pre-push sends the local v1 branch only on a git-branch primary, and
+	// not at all while push_sessions is disabled.
+	if branchPrimary && !plan.PushSessionsDisabled {
+		plan.V1PushURLs = v1Dests
 	}
 	return dedupeDeleteTargets(candidates)
 }
@@ -461,7 +533,7 @@ func dedupeDeleteTargets(candidates []deleteTargetCandidate) []CheckpointDeleteT
 
 // probeDeleteTargets ls-remotes each target for the checkpoint ref and the v1
 // branch. A failed probe marks the target unreachable.
-func probeDeleteTargets(ctx context.Context, root string, repo *git.Repository, cid id.CheckpointID, targets []CheckpointDeleteTarget) []CheckpointDeleteTarget {
+func probeDeleteTargets(ctx context.Context, root string, repo *git.Repository, cid id.CheckpointID, targets []CheckpointDeleteTarget, branchPrimary bool) []CheckpointDeleteTarget {
 	for i := range targets {
 		t := &targets[i]
 		listing, err := lsRemoteCheckpoint(ctx, root, t.URL, cid)
@@ -472,12 +544,12 @@ func probeDeleteTargets(ctx context.Context, root string, repo *git.Repository, 
 		t.Reachable = true
 		t.RefName, t.RefOID = listing.ref, listing.refOID
 		t.V1Tip = listing.v1Tip
-		t.V1 = classifyRemoteV1(repo, cid, listing.v1Tip)
+		t.V1 = classifyRemoteV1(repo, cid, listing.v1Tip, branchPrimary)
 	}
 	return targets
 }
 
-func classifyRemoteV1(repo *git.Repository, cid id.CheckpointID, tip plumbing.Hash) V1CopyState {
+func classifyRemoteV1(repo *git.Repository, cid id.CheckpointID, tip plumbing.Hash, branchPrimary bool) V1CopyState {
 	switch {
 	case tip.IsZero():
 		return V1CopyAbsent
@@ -487,10 +559,12 @@ func classifyRemoteV1(repo *git.Repository, cid id.CheckpointID, tip plumbing.Ha
 		if _, err := repo.CommitObject(tip); err == nil {
 			return V1CopyAbsent // the tip is local and has no such subtree
 		}
-		// A ULID reaches a remote v1 branch only through a pushed git-branch
-		// mirror, which pre-push does not do yet: treating an unfetched tip as
-		// unknown would fetch the whole branch for every ULID delete.
-		if cid.Kind() != id.KindLegacy {
+		// On a git-refs primary a ULID is never pushed to a remote v1 branch
+		// (pre-push does not push a git-branch mirror), so an unfetched tip
+		// cannot hold one; treating it as unknown would fetch the whole branch
+		// for every ULID delete. A git-branch primary pushes whatever IDs it
+		// wrote, so its tip has to be checked at delete time.
+		if cid.Kind() != id.KindLegacy && !branchPrimary {
 			return V1CopyAbsent
 		}
 		return V1CopyUnknown

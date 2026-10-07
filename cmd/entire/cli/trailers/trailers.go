@@ -148,76 +148,84 @@ func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
 // however the separator is spaced ("Entire-Checkpoint:<id>", a tab).
 var checkpointTrailerLineRegex = regexp.MustCompile(`^` + CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)\s*$`)
 
-// trailerKeyLineRegex is the loose "Key:" shape used to decide whether a
-// paragraph is a trailer block; unlike IsTrailerLine it does not require a
-// space after the colon.
-var trailerKeyLineRegex = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*:`)
-
-// RemoveCheckpointTrailers removes the Entire-Checkpoint trailers whose ID
-// drop selects, returning the new message and the IDs removed (nil when the
-// message is unchanged). Only lines in a trailer block count: a paragraph
-// after the subject made solely of "Key:" lines (and their indented
-// continuations). Blank lines and '#' comment lines separate paragraphs, so a
-// squash message's per-commit trailer blocks are each considered. The same
-// match decides what is removed and what is reported, so a caller never sees
-// an ID reported as removed while its line stays.
+// RemoveCheckpointTrailers removes every whole Entire-Checkpoint trailer line
+// whose ID drop selects, anywhere after the subject paragraph, and returns the
+// new message with the IDs removed (nil when the message is unchanged). It
+// does not try to reproduce git's trailer-block rules (mixed blocks, a
+// "(cherry picked from ...)" note, custom comment characters): a line that is
+// exactly a checkpoint trailer is one in every form git accepts, and leaving
+// one behind would let an amend keep a deleted checkpoint alive. Prose that
+// merely mentions an ID is not a whole trailer line and stays. Blank lines
+// left behind by a removal are collapsed and trimmed from the end.
 func RemoveCheckpointTrailers(message string, drop func(checkpointID.CheckpointID) bool) (string, []checkpointID.CheckpointID) {
 	lines := strings.Split(message, "\n")
+	bodyStart := subjectParagraphEnd(lines)
 	removeLine := make([]bool, len(lines))
 	var removed []checkpointID.CheckpointID
-	paragraph := 0
-	for i := 0; i < len(lines); {
-		if isParagraphBoundary(lines[i]) {
-			i++
+	for i := bodyStart; i < len(lines); i++ {
+		match := checkpointTrailerLineRegex.FindStringSubmatch(lines[i])
+		if match == nil {
 			continue
 		}
-		start := i
-		for i < len(lines) && !isParagraphBoundary(lines[i]) {
-			i++
-		}
-		paragraph++
-		if paragraph == 1 || !isTrailerParagraph(lines[start:i]) {
+		cpID, err := checkpointID.NewCheckpointID(match[1])
+		if err != nil || !drop(cpID) {
 			continue
 		}
-		for j := start; j < i; j++ {
-			match := checkpointTrailerLineRegex.FindStringSubmatch(lines[j])
-			if match == nil {
-				continue
-			}
-			cpID, err := checkpointID.NewCheckpointID(match[1])
-			if err != nil || !drop(cpID) {
-				continue
-			}
-			removeLine[j] = true
-			if !slices.Contains(removed, cpID) {
-				removed = append(removed, cpID)
-			}
+		removeLine[i] = true
+		if !slices.Contains(removed, cpID) {
+			removed = append(removed, cpID)
 		}
 	}
 	if len(removed) == 0 {
 		return message, nil
 	}
+	return strings.Join(keepLines(lines, removeLine, strings.HasSuffix(message, "\n")), "\n"), removed
+}
+
+// subjectParagraphEnd returns the index just past the subject paragraph: the
+// first run of non-blank lines.
+func subjectParagraphEnd(lines []string) int {
+	i := 0
+	for i < len(lines) && isBlankLine(lines[i]) {
+		i++
+	}
+	for i < len(lines) && !isBlankLine(lines[i]) {
+		i++
+	}
+	return i
+}
+
+// keepLines drops the removed lines, collapses a blank line that a removal
+// would leave doubled, and trims trailing blank lines, keeping the message's
+// final newline.
+func keepLines(lines []string, removeLine []bool, endsWithNewline bool) []string {
 	kept := make([]string, 0, len(lines))
+	afterRemoval := false
 	for i, line := range lines {
-		if !removeLine[i] {
-			kept = append(kept, line)
+		if removeLine[i] {
+			afterRemoval = true
+			continue
 		}
+		blank := isBlankLine(line)
+		if blank && afterRemoval && len(kept) > 0 && isBlankLine(kept[len(kept)-1]) {
+			continue
+		}
+		if !blank {
+			afterRemoval = false
+		}
+		kept = append(kept, line)
 	}
-	return strings.Join(kept, "\n"), removed
+	for len(kept) > 0 && isBlankLine(kept[len(kept)-1]) {
+		kept = kept[:len(kept)-1]
+	}
+	if endsWithNewline {
+		kept = append(kept, "")
+	}
+	return kept
 }
 
-func isParagraphBoundary(line string) bool {
-	return strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#")
-}
-
-func isTrailerParagraph(lines []string) bool {
-	for i, line := range lines {
-		continuation := i > 0 && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t"))
-		if !continuation && !trailerKeyLineRegex.MatchString(line) {
-			return false
-		}
-	}
-	return true
+func isBlankLine(line string) bool {
+	return strings.TrimSpace(line) == ""
 }
 
 // FormatSourceRef creates a formatted source ref string for the trailer.

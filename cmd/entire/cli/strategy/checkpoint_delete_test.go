@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -364,6 +365,11 @@ func TestCheckpointDelete_V1RemoteAheadAndUnpushedLocalCommits(t *testing.T) {
 	localTree := testutil.RunGit(t, f.workDir, "ls-tree", "-r", "--name-only", "entire/checkpoints/v1")
 	assert.NotContains(t, localTree, cid.Path()+"/")
 	assert.Contains(t, localTree, unpushed.Path()+"/")
+
+	// Local v1 is rebuilt on the tip the delete pushed, so the branches do not
+	// diverge (a diverged v1 aborts an OPF push with V1DivergedError).
+	remoteTip := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "rev-parse", "entire/checkpoints/v1"))
+	testutil.RunGit(t, f.workDir, "merge-base", "--is-ancestor", remoteTip, "entire/checkpoints/v1")
 }
 
 // addFileToBranchTree returns a tree hash: branch's tree plus one file.
@@ -401,13 +407,13 @@ func TestCheckpointDelete_BranchPrimaryRefusesLocalV1RemovalThatWouldPropagate(t
 	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{LocalOnly: true})
 	require.NoError(t, err)
 	require.True(t, plan.LocalV1)
-	for _, target := range plan.Targets {
-		assert.True(t, target.NotChecked, "--local-only does not probe %s", target.Name())
-	}
+	require.Len(t, plan.Targets, 1)
+	assert.True(t, plan.Targets[0].Reachable, "--local-only probes the v1 push destination, and only it")
+	assert.Equal(t, V1CopyPresent, plan.Targets[0].V1)
 
-	err = plan.CheckLocalV1Propagation(nil, true)
+	err = plan.CheckLocalV1Propagation(nil, SelectionLocalOnly)
 	require.ErrorIs(t, err, ErrCheckpointDeleteV1WouldPropagate)
-	assert.Contains(t, err.Error(), "origin")
+	assert.Contains(t, err.Error(), "run without --local-only")
 
 	_, err = ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{LocalOnly: true})
 	require.ErrorIs(t, err, ErrCheckpointDeleteV1WouldPropagate)
@@ -420,9 +426,13 @@ func TestCheckpointDelete_BranchPrimaryRefusesLocalV1RemovalThatWouldPropagate(t
 	// Selecting the sync remote too is allowed.
 	full, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
 	require.NoError(t, err)
-	require.NoError(t, full.CheckLocalV1Propagation(full.HolderTargets(), false))
-	require.ErrorIs(t, full.CheckLocalV1Propagation(nil, false), ErrCheckpointDeleteV1WouldPropagate,
-		"a selection that leaves the sync remote out is refused like --local-only")
+	require.NoError(t, full.CheckLocalV1Propagation(full.HolderTargets(), SelectionAllHolders))
+	err = full.CheckLocalV1Propagation(nil, SelectionRemoteFlag)
+	require.ErrorIs(t, err, ErrCheckpointDeleteV1WouldPropagate, "a selection that leaves the sync remote out is refused like --local-only")
+	assert.Contains(t, err.Error(), "add --remote origin")
+	err = full.CheckLocalV1Propagation(nil, SelectionPrompt)
+	require.ErrorIs(t, err, ErrCheckpointDeleteV1WouldPropagate)
+	assert.Contains(t, err.Error(), "select origin too")
 }
 
 // --local-only never contacts a remote: targets are listed, unchecked.
@@ -519,4 +529,161 @@ func TestExecuteCheckpointDelete_StatesClearedOnlyListsChangedStates(t *testing.
 	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{LocalOnly: true})
 	require.NoError(t, err)
 	assert.Empty(t, result.StatesCleared)
+}
+
+// The sync remote could not be probed: the delete cannot know whether the next
+// push would remove a copy there, so it refuses, and says to retry.
+func TestCheckLocalV1Propagation_UnreachableSyncRemote(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	f.writeCheckpoint(t, cid, "sess-1")
+	testutil.RunGit(t, f.workDir, "push", "--no-verify", "origin", "entire/checkpoints/v1")
+	testutil.RunGit(t, f.workDir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	err = plan.CheckLocalV1Propagation(plan.HolderTargets(), SelectionAllHolders)
+	require.ErrorIs(t, err, ErrCheckpointDeleteV1WouldPropagate)
+	assert.Contains(t, err.Error(), "could not be reached")
+	assert.Contains(t, err.Error(), "retry when origin is reachable")
+	assert.NotContains(t, err.Error(), "--local-only")
+}
+
+// --local-only probes only the sync remote; a checkpoint that never reached it
+// is not refused.
+func TestCheckpointDelete_LocalOnlyAllowedWhenSyncRemoteHasNoV1Copy(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	f.writeCheckpoint(t, cid, "sess-1") // never pushed
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{LocalOnly: true})
+	require.NoError(t, err)
+	require.NoError(t, plan.CheckLocalV1Propagation(nil, SelectionLocalOnly))
+	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{LocalOnly: true})
+	require.NoError(t, err)
+	assert.Equal(t, DeleteOutcomeDeleted, result.LocalV1)
+}
+
+// git pushes the v1 branch to every pushurl of the sync remote; each one is a
+// destination the local removal would reach.
+func TestCheckLocalV1Propagation_EveryPushURL(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	second := t.TempDir()
+	testutil.RunGit(t, second, "init", "--bare")
+	testutil.RunGit(t, f.workDir, "remote", "set-url", "--add", "--push", "origin", f.bareDir)
+	testutil.RunGit(t, f.workDir, "remote", "set-url", "--add", "--push", "origin", second)
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	f.writeCheckpoint(t, cid, "sess-1")
+	testutil.RunGit(t, f.workDir, "push", "--no-verify", "origin", "entire/checkpoints/v1")
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{f.bareDir, second}, plan.V1PushURLs)
+	require.NoError(t, plan.CheckLocalV1Propagation(plan.HolderTargets(), SelectionAllHolders))
+
+	var onlyFirst []CheckpointDeleteTarget
+	for _, target := range plan.HolderTargets() {
+		if target.URL == f.bareDir {
+			onlyFirst = append(onlyFirst, target)
+		}
+	}
+	err = plan.CheckLocalV1Propagation(onlyFirst, SelectionPrompt)
+	require.ErrorIs(t, err, ErrCheckpointDeleteV1WouldPropagate)
+	assert.Contains(t, err.Error(), second)
+}
+
+// A misconfigured checkpoint_push_remote elects nothing, but pre-push still
+// sends v1 to the dedicated checkpoint_remote URL; the delete must know that.
+func TestResolveDeleteTargets_DedicatedStoreWithoutElectedRemote(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	testutil.RunGit(t, f.workDir, "remote", "set-url", "origin", "git@github.com:org/app.git")
+	require.NoError(t, os.MkdirAll(filepath.Join(f.workDir, ".entire"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(f.workDir, ".entire", "settings.json"),
+		[]byte(`{"enabled": true, "strategy_options": {"checkpoint_push_remote": "nope", "checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`), 0o644))
+
+	plan := &CheckpointDeletePlan{CheckpointID: id.MustCheckpointID("a1b2c3d4e5f6")}
+	targets := resolveDeleteTargets(t.Context(), f.workDir, plan)
+	require.Len(t, plan.V1PushURLs, 1)
+	assert.Contains(t, plan.V1PushURLs[0], "org/checkpoints")
+	assert.True(t, slices.ContainsFunc(targets, func(target CheckpointDeleteTarget) bool { return target.URL == plan.V1PushURLs[0] }),
+		"the destination is a selectable target")
+}
+
+func TestClassifyRemoteV1_ULIDWithUnfetchedTip(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	repo, err := gitrepo.OpenPath(f.workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	ulid := id.MustCheckpointID("01K6ZQ2M8E3V7R5T9Y4X6W2A1B")
+	unfetched := plumbing.NewHash("1111111111111111111111111111111111111111")
+
+	assert.Equal(t, V1CopyUnknown, classifyRemoteV1(repo, ulid, unfetched, true), "a git-branch primary can have pushed ULIDs to v1")
+	assert.Equal(t, V1CopyAbsent, classifyRemoteV1(repo, ulid, unfetched, false))
+}
+
+// A retry that fails before deleting anything must not take the ID off the
+// list an earlier run put it on.
+func TestExecuteCheckpointDelete_KeepsAnEarlierRunsRecord(t *testing.T) {
+	f := newDeleteFixture(t, "git-refs")
+	cid := id.MustCheckpointID("01K6ZQ2M8E3V7R5T9Y4X6W2A1B")
+	f.writeCheckpoint(t, cid, "sess-1")
+	recordDeleted(t, cid)
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	plan.LocalRefOID = plumbing.NewHash("1111111111111111111111111111111111111111")
+	_, err = ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{LocalOnly: true})
+	require.Error(t, err)
+
+	deleted, err := checkpoint.LoadDeletedCheckpoints(t.Context())
+	require.NoError(t, err)
+	assert.True(t, deleted.Contains(cid))
+}
+
+// Remote-only, and the only remote refuses: nothing was removed, so nothing
+// stays recorded.
+func TestExecuteCheckpointDelete_UnrecordsWhenEveryRemoteFailed(t *testing.T) {
+	f := newDeleteFixture(t, "git-refs")
+	cid := id.MustCheckpointID("01K6ZQ2M8E3V7R5T9Y4X6W2A1B")
+	f.writeCheckpoint(t, cid, "sess-1")
+	ref, err := checkpoint.RefName(cid)
+	require.NoError(t, err)
+	testutil.RunGit(t, f.workDir, "push", "--no-verify", "origin", ref.String()+":"+ref.String())
+	testutil.RunGit(t, f.workDir, "update-ref", "-d", ref.String())
+	require.NoError(t, os.WriteFile(filepath.Join(f.bareDir, "hooks", "pre-receive"), []byte("#!/bin/sh\nexit 1\n"), 0o755))
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{Targets: plan.HolderTargets()})
+	require.NoError(t, err)
+	require.True(t, result.Failed())
+
+	deleted, err := checkpoint.LoadDeletedCheckpoints(t.Context())
+	require.NoError(t, err)
+	assert.False(t, deleted.Contains(cid))
+}
+
+// With OPF enabled, the pre-push rewrite refuses a local v1 that diverged from
+// the remote. After a delete that reached the remote (with an unpushed local
+// checkpoint in between), the rewrite must still go through.
+func TestCheckpointDelete_OPFRewriteAfterRemoteV1Delete(t *testing.T) {
+	f := newDeleteFixture(t, "git-branch")
+	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	f.writeCheckpoint(t, cid, "sess-1")
+	testutil.RunGit(t, f.workDir, "push", "--no-verify", "origin", "entire/checkpoints/v1")
+	f.writeCheckpoint(t, id.MustCheckpointID("b2c3d4e5f6a1"), "sess-2") // unpushed
+
+	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
+	require.NoError(t, err)
+	result, err := ExecuteCheckpointDelete(t.Context(), plan, CheckpointDeleteOptions{Targets: plan.HolderTargets()})
+	require.NoError(t, err)
+	require.False(t, result.Failed())
+
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	repo, err := gitrepo.OpenPath(f.workDir)
+	require.NoError(t, err)
+	defer repo.Close()
+	_, err = RewriteUnpushedV1WithOPF(t.Context(), repo, "origin")
+	var diverged *V1DivergedError
+	require.NotErrorAs(t, err, &diverged, "local v1 must not diverge from the remote after a delete")
 }

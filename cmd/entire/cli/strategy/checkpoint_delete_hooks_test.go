@@ -112,8 +112,10 @@ func TestStripDeletedCheckpointTrailers_NonCanonicalSpelling(t *testing.T) {
 		wantStripped bool
 		wantContent  string
 	}{
-		{name: "no space", msg: "msg\n\nEntire-Checkpoint:abc123def456\n", wantStripped: true, wantContent: "msg\n\n"},
-		{name: "tab", msg: "msg\n\nEntire-Checkpoint:\tabc123def456\n", wantStripped: true, wantContent: "msg\n\n"},
+		{name: "no space", msg: "msg\n\nEntire-Checkpoint:abc123def456\n", wantStripped: true, wantContent: "msg\n"},
+		{name: "tab", msg: "msg\n\nEntire-Checkpoint:\tabc123def456\n", wantStripped: true, wantContent: "msg\n"},
+		{name: "cherry-pick -x note", msg: "msg\n\nbody\n\nEntire-Checkpoint: abc123def456\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n", wantStripped: true, wantContent: "msg\n\nbody\n\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n"},
+		{name: "skip-ci marker", msg: "msg\n\nEntire-Checkpoint: abc123def456\n[skip ci]\n", wantStripped: true, wantContent: "msg\n\n[skip ci]\n"},
 		{name: "body mention", msg: "msg\n\nEntire-Checkpoint: abc123def456 is gone, so\nthis prose stays.\n", wantContent: "msg\n\nEntire-Checkpoint: abc123def456 is gone, so\nthis prose stays.\n"},
 	}
 	for _, tt := range tests {
@@ -127,4 +129,50 @@ func TestStripDeletedCheckpointTrailers_NonCanonicalSpelling(t *testing.T) {
 			assert.Equal(t, tt.wantContent, string(content))
 		})
 	}
+}
+
+// git commit --amend of a `cherry-pick -x` commit: the deleted trailer sits
+// above git's note and must still go, or the amend keeps the dead ID.
+func TestPrepareCommitMsg_AmendStripsDeletedTrailerAboveCherryPickNote(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	recordDeleted(t, id.MustCheckpointID("abc123def456"))
+
+	s := &ManualCommitStrategy{}
+	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("subject\n\nbody\n\nEntire-Checkpoint: abc123def456\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)\n"), 0o644))
+
+	require.NoError(t, s.PrepareCommitMsg(context.Background(), commitMsgFile, "commit"))
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(content), "abc123def456")
+	assert.Contains(t, string(content), "(cherry picked from commit")
+}
+
+// An amend whose message still mentions a deleted ID in prose (not a whole
+// trailer line, so it is not stripped) must not treat that ID as the commit's
+// live trailer: the session's live checkpoint is restored as usual.
+func TestPrepareCommitMsg_AmendIgnoresDeletedIDWhenPreserving(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	dead := id.MustCheckpointID("abc123def456")
+	live := id.MustCheckpointID("bcd234ef5678")
+	recordDeleted(t, dead)
+
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.InitializeSession(context.Background(), "sess-amend-live", agent.AgentTypeClaudeCode, "", "", ""))
+	require.NoError(t, MutateSessionState(context.Background(), "sess-amend-live", func(state *SessionState) error {
+		state.LastCheckpointID = live
+		return nil
+	}))
+
+	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("subject\n\nEntire-Checkpoint: abc123def456 was dropped on purpose.\n"), 0o644))
+
+	require.NoError(t, s.PrepareCommitMsg(context.Background(), commitMsgFile, "commit"))
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.Contains(t, trailers.ParseAllCheckpoints(string(content)), live, "the live checkpoint is restored:\n%s", content)
 }

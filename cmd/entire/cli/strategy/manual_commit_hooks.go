@@ -715,13 +715,18 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 
 	message := string(content)
 
-	// If message already has a trailer, keep it unchanged
-	if existingCpID, found := trailers.ParseCheckpoint(message); found {
+	// If message already has a live trailer, keep it unchanged. A deleted ID
+	// still mentioned somewhere (not as a whole trailer line, so not stripped)
+	// does not count: preserving on it would keep the dead checkpoint linked.
+	mentioned := trailers.ParseAllCheckpoints(message)
+	if live := withoutDeletedCheckpoints(ctx, mentioned); len(live) > 0 {
 		logging.Debug(logCtx, "prepare-commit-msg: amend preserves existing trailer",
 			slog.String("strategy", "manual-commit"),
-			slog.String("checkpoint_id", existingCpID.String()),
+			slog.String("checkpoint_id", live[0].String()),
 		)
 		return nil
+	} else if len(mentioned) > 0 {
+		strippedDeleted = true
 	}
 
 	// No trailer in message — check if any session has LastCheckpointID to restore
