@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -133,6 +134,7 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, min(1024*1024, piReviewMaxScannerBuf)), piReviewMaxScannerBuf)
 		messageIDsWithTextDelta := map[string]struct{}{}
+		reportedErrors := map[string]struct{}{}
 		messageIDsWithUsage := map[string]struct{}{}
 		messageUsageByTurn := map[int]map[piReviewUsageKey]struct{}{}
 		turnNumber := 0
@@ -165,6 +167,7 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 				if env.Message.Role == "assistant" {
 					if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
 						success = false
+						emitPiReviewError(out, env, reportedErrors)
 					}
 					if env.Message.Usage != nil {
 						emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
@@ -184,6 +187,7 @@ func parsePiReviewOutput(r io.Reader) <-chan reviewtypes.Event {
 			case "turn_end":
 				if env.Message.StopReason == "error" || env.Message.StopReason == "aborted" {
 					success = false
+					emitPiReviewError(out, env, reportedErrors)
 				}
 				if env.Message.Usage != nil {
 					emitPiReviewTokens(out, env, &tokens, messageIDsWithUsage, messageUsageByTurn, turnNumber)
@@ -232,6 +236,24 @@ type piReviewMessage struct {
 	Content    json.RawMessage `json:"content"`
 	Usage      *piReviewUsage  `json:"usage"`
 	StopReason string          `json:"stopReason"`
+	// ErrorMessage explains an "error" stop, e.g. a provider rejecting the
+	// request; without it a failed review shows an empty report.
+	ErrorMessage string `json:"errorMessage"`
+}
+
+// emitPiReviewError surfaces a failed message's error once, even though Pi
+// repeats the message in message_end and turn_end.
+func emitPiReviewError(out chan<- reviewtypes.Event, env piReviewEnvelope, reported map[string]struct{}) {
+	msg := strings.TrimSpace(env.Message.ErrorMessage)
+	if msg == "" {
+		return
+	}
+	key := env.MessageID() + "\x00" + msg
+	if _, seen := reported[key]; seen {
+		return
+	}
+	reported[key] = struct{}{}
+	out <- reviewtypes.RunError{Err: fmt.Errorf("pi: %s", msg)}
 }
 
 type piAssistantMessageEvent struct {

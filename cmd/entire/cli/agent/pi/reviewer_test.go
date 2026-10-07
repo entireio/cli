@@ -277,3 +277,33 @@ func TestPiReviewer_TooOldForIsolation(t *testing.T) {
 		}
 	}
 }
+
+// A provider error (here, an exhausted API balance) used to leave the review
+// with an empty "Failed" report. It must surface once, though Pi repeats the
+// failed message in message_end and turn_end.
+func TestPiReviewer_ParseSurfacesProviderError(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"error","errorMessage":"You have no credits remaining."}`
+	input := `{"type":"agent_start"}` + "\n" +
+		`{"type":"turn_start"}` + "\n" +
+		`{"type":"message_end","message":` + failed + `}` + "\n" +
+		`{"type":"turn_end","message":` + failed + `}` + "\n" +
+		`{"type":"agent_end"}` + "\n"
+
+	var errs []string
+	var finished *reviewtypes.Finished
+	for _, ev := range collectPiReviewEvents(input) {
+		switch e := ev.(type) {
+		case reviewtypes.RunError:
+			errs = append(errs, e.Err.Error())
+		case reviewtypes.Finished:
+			finished = &e
+		}
+	}
+	if len(errs) != 1 || errs[0] != "pi: You have no credits remaining." {
+		t.Fatalf("RunErrors = %q, want the provider error once", errs)
+	}
+	if finished == nil || finished.Success {
+		t.Fatalf("Finished = %+v, want a failure", finished)
+	}
+}
