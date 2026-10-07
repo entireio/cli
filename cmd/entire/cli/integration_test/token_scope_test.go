@@ -202,3 +202,42 @@ func TestTokenScope_MidTurnCommitTailCountsInNextCheckpoint(t *testing.T) {
 	require.Equal(t, 100, u1.OutputTokens)
 	require.Equal(t, 12, u2.OutputTokens, "checkpoint 2 counts turn 1's post-commit tail (5) and turn 2 (7)")
 }
+
+// TestTokenScope_AttachIntoOwnCheckpointKeepsItsTokens: when HEAD's trailer
+// already names a checkpoint holding this session, attach rewrites that
+// session's entry. The entry's stored tokens must survive, plus the new turn.
+func TestTokenScope_AttachIntoOwnCheckpointKeepsItsTokens(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+	s := env.NewSession()
+
+	require.NoError(t, env.SimulateUserPromptSubmit(s.ID))
+	env.WriteFile("a.txt", "a")
+	appendUsageMessage(s, "msg-1", 100)
+	s.CreateTranscript("make a", []FileChange{{Path: "a.txt", Content: "a"}})
+	require.NoError(t, env.SimulateStop(s.ID, s.TranscriptPath))
+	env.GitCommitWithShadowHooks("a", "a.txt")
+	cp1 := env.TryGetLatestCheckpointID()
+	require.NotEmpty(t, cp1)
+
+	// Turn 2 (7 tokens) changes no files; turn start clears LastCheckpointID,
+	// so attach writes into cp1 instead of returning early.
+	require.NoError(t, env.SimulateUserPromptSubmit(s.ID))
+	appendUsageMessage(s, "msg-2", 7)
+	s.CreateTranscript("explain", nil)
+	require.NoError(t, env.SimulateStop(s.ID, s.TranscriptPath))
+
+	transcriptData, err := os.ReadFile(s.TranscriptPath)
+	require.NoError(t, err)
+	s.TranscriptPath = filepath.Join(env.ClaudeProjectDir, s.ID+".jsonl")
+	require.NoError(t, os.WriteFile(s.TranscriptPath, transcriptData, 0o600))
+	env.ExtraEnv = append(env.ExtraEnv,
+		"PATH="+filepath.Dir(getTestBinary())+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output := env.RunCLI("session", "attach", s.ID, "-a", agentClaudeCode, "-f")
+	require.Contains(t, output, "Attached session")
+	require.Equal(t, cp1, env.TryGetLatestCheckpointID(), "attach should write into HEAD's checkpoint")
+
+	usage := readCommittedTokenUsage(t, env, cp1)
+	require.NotNil(t, usage)
+	require.Equal(t, 107, usage.OutputTokens, "cp1 keeps its 100 tokens and adds turn 2's 7")
+}

@@ -302,25 +302,11 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return err
 	}
 
-	// Defense-in-depth guard: the earlier existingState.LastCheckpointID
-	// check only fires when the session's state file records its
-	// checkpoint. A session already stored in the HEAD checkpoint but
-	// whose state is missing/stale (state file deleted, never written,
-	// condensed without LastCheckpointID update, or pulled from a remote
-	// that wasn't reflected locally) would bypass that guard.
-	// findSessionIndex matches by SessionID — without this check, a
-	// review-attach on such a session silently overwrites the existing
-	// session's metadata in the checkpoint.
-	if opts.Review && isExistingCheckpoint {
-		exists, readErr := checkpointHasSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
-		if readErr != nil {
-			return fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, readErr)
-		}
-		if exists {
-			return fmt.Errorf(
-				"session %s is already recorded in checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
-				sessionID, checkpointID.String(),
-			)
+	var replacedUsage *agent.TokenUsage
+	if isExistingCheckpoint {
+		replacedUsage, err = attachReplacedEntryTokens(ctx, logCtx, repo, refs, checkpointID, sessionID, opts.Review)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -331,7 +317,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 
 	// The checkpoint stores only tokens no earlier checkpoint of this session
 	// counted; session state keeps the whole-transcript total.
-	tokenUsage, tokenPos := strategy.AttachTokenUsage(logCtx, ag, existingState, transcriptData)
+	tokenUsage, tokenPos := strategy.AttachTokenUsage(logCtx, ag, existingState, transcriptData, replacedUsage)
 	sessionUsage := tokenUsage
 	if existingState != nil {
 		sessionUsage = agent.CalculateTokenUsage(logCtx, ag, transcriptData, 0, "")
@@ -460,31 +446,67 @@ func attachSummaryLine(meta transcriptMetadata, tokenUsage *agent.TokenUsage) st
 	return strings.Join(parts, " · ")
 }
 
-// checkpointHasSessionMetadata reports whether sessionID has existing metadata
-// at Primary. Reads target Primary directly, not refs.Read, because this guard
-// must reflect what the next write would target.
-func checkpointHasSessionMetadata(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string) (bool, error) {
+// attachReplacedEntryTokens checks the HEAD checkpoint attach is about to write
+// into for an entry this session already has, and returns that entry's stored
+// tokens (nil when there is none).
+//
+// Defense-in-depth guard: the existingState.LastCheckpointID check only fires
+// when the session's state file records its checkpoint. A session already
+// stored in the HEAD checkpoint but whose state is missing/stale (state file
+// deleted, never written, condensed without LastCheckpointID update, or pulled
+// from a remote that wasn't reflected locally) would bypass that guard.
+// findSessionIndex matches by SessionID — without this check, a review-attach
+// on such a session silently overwrites the existing session's metadata in the
+// checkpoint.
+//
+// A plain attach overwrites that entry too, so the tokens it already stores
+// must carry over or no checkpoint would count them.
+func attachReplacedEntryTokens(ctx, logCtx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string, review bool) (*agent.TokenUsage, error) {
+	existing, found, err := checkpointSessionMetadata(ctx, repo, refs, checkpointID, sessionID)
+	switch {
+	case err != nil && review:
+		return nil, fmt.Errorf("failed to check checkpoint %s for session %s: %w", checkpointID.String(), sessionID, err)
+	case err != nil:
+		logging.Warn(logCtx, "attach: could not read the checkpoint entry it replaces; its stored tokens are not carried over",
+			slog.String("checkpoint_id", checkpointID.String()),
+			slog.String("error", err.Error()))
+		return nil, nil //nolint:nilnil // no carried-over tokens is the documented fallback
+	case found && review:
+		return nil, fmt.Errorf(
+			"session %s is already recorded in checkpoint %s; rewriting an existing checkpoint as a review is not supported yet",
+			sessionID, checkpointID.String(),
+		)
+	case found:
+		return existing.TokenUsage, nil
+	}
+	return nil, nil //nolint:nilnil // nil means the checkpoint has no entry for this session
+}
+
+// checkpointSessionMetadata returns sessionID's existing metadata at Primary.
+// Reads target Primary directly, not refs.Read, because callers must see what
+// the next write would replace.
+func checkpointSessionMetadata(ctx context.Context, repo *git.Repository, refs cpkg.PersistentRefs, checkpointID id.CheckpointID, sessionID string) (*cpkg.Metadata, bool, error) {
 	store, err := openAttachStore(ctx, repo, refs.PrimaryAsLocalRead())
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	summary, err := store.Read(ctx, checkpointID)
 	if err != nil {
-		return false, fmt.Errorf("read checkpoint summary: %w", err)
+		return nil, false, fmt.Errorf("read checkpoint summary: %w", err)
 	}
 	if summary == nil {
-		return false, nil
+		return nil, false, nil
 	}
 	for i := range summary.Sessions {
 		metadata, err := store.ReadSessionMetadata(ctx, checkpointID, i)
 		if err != nil {
-			return false, fmt.Errorf("read session %d metadata: %w", i, err)
+			return nil, false, fmt.Errorf("read session %d metadata: %w", i, err)
 		}
 		if metadata != nil && metadata.SessionID == sessionID {
-			return true, nil
+			return metadata, true, nil
 		}
 	}
-	return false, nil
+	return nil, false, nil
 }
 
 // getHeadCommit returns the HEAD commit object.

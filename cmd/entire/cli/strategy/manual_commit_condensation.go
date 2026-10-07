@@ -1249,14 +1249,27 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // (from TokenStart), falling back to the pending hook-reported usage the way
 // condensation does; without state it counts the whole transcript. The caller
 // records pos with ConsumeAttachTokenWindow once the checkpoint is written.
-func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte) (*agent.TokenUsage, int) {
+// replaced is the usage already stored in the checkpoint entry this attach
+// overwrites (same checkpoint, same session), or nil. With state, that usage
+// lies before TokenStart, so it is kept and the new tokens are added to it;
+// without state the whole transcript is counted, which already includes it.
+func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, replaced *agent.TokenUsage) (*agent.TokenUsage, int) {
 	start := 0
 	if state != nil {
 		start = state.TokenStart()
 	}
 	usage := agent.CalculateTokenUsage(ctx, ag, transcript, start, "")
-	if state != nil && !hasTokenUsageData(usage) && hasTokenUsageData(state.CheckpointTokenUsage) {
-		usage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
+	if state != nil {
+		if !hasTokenUsageData(usage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+			usage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
+		} else {
+			// The transcript recompute reads no subagent transcripts; take the
+			// pending window's subagent total, as condensation does.
+			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
+		}
+	}
+	if state != nil && hasTokenUsageData(replaced) {
+		usage = accumulateTokenUsage(accumulateTokenUsage(nil, replaced), usage)
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }
