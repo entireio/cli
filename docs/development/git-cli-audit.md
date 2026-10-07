@@ -100,15 +100,14 @@ that every existing fallback is redundant.
 
 ### Branch deletion
 
-- `strategy/common.go`: shared `DeleteBranchCLI` (legacy shadow branch deletion in `entire clean --all` and uninstall).
-- `strategy/cleanup.go`: the one-time legacy shadow cleanup uses `git update-ref -d <ref> <old>` so a branch that moved since it was listed survives.
+- `strategy/common.go`: shared `DeleteBranchCLI` (legacy shadow branch deletion in `entire clean`, `entire doctor`, and uninstall).
 
 `DeleteBranchCLI` explains the subprocess using v5 packed-ref/worktree deletion bugs. Main's
 `Storer.RemoveReference` removes loose and packed references, so that specific
 reason deserves fresh tests. However, `git branch -D` also refuses branches checked
 out in another worktree and handles branch config/reflog cleanup. A raw ref deletion
 is not a general branch-delete replacement; test packed refs, linked worktrees,
-and concurrent native Git writes before migrating either site.
+and concurrent native Git writes before migrating it.
 
 ### Checkout and hard reset
 

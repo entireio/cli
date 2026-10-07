@@ -74,7 +74,12 @@ Checks performed:
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 
-  7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
+     versions wrote at every turn. They hold full snapshots of the working
+     tree and nothing reads them anymore. Fix with 'entire clean' (or
+     --force here); a branch checked out in a worktree is left alone.
+
+  8. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -194,6 +199,12 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
+
+	// Shadow branches older versions left behind: storage only, never read.
+	if legacyErr := checkLegacyShadowBranches(cmd, force); legacyErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: legacy shadow branch check failed: %v\n", legacyErr)
+		finalErr = NewSilentError(fmt.Errorf("legacy shadow branch check failed: %w", legacyErr))
+	}
 
 	// Stuck sessions
 	// Load all session states
@@ -656,6 +667,58 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		return fmt.Errorf("failed to reinstall git hooks: %w", err)
 	}
 	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")
+	return nil
+}
+
+// checkLegacyShadowBranches reports the strict-shape entire/<7+hex>-<6hex>
+// shadow branches older versions wrote at every agent turn. Nothing reads them
+// anymore, they hold full snapshots of the working tree, and they are never
+// removed automatically: the remedy is `entire clean`. Under --force (or a
+// confirmed prompt) doctor deletes them itself through `git branch -D`, which
+// refuses a branch checked out in any worktree; such a branch is reported and
+// kept. The bare entire/<hex> form is not reported here, because a human
+// short-SHA branch looks the same; `entire clean --all` lists it for review.
+func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
+	if err != nil {
+		return fmt.Errorf("list legacy shadow branches: %w", err)
+	}
+	if len(branches) == 0 {
+		fmt.Fprintln(w, "✓ Legacy shadow branches: none")
+		return nil
+	}
+
+	fmt.Fprintf(w, "Legacy shadow branches: %d FOUND\n", len(branches))
+	fmt.Fprintln(w, "  Older versions wrote these at every turn; nothing reads them now, and they")
+	fmt.Fprintln(w, "  hold full snapshots of your working tree.")
+	printCappedList(w, branches, func(name string) string { return name })
+	fmt.Fprintln(w, "  Fix: run `entire clean` to delete them.")
+
+	if !force {
+		if !interactive.CanPromptInteractively() {
+			fmt.Fprintln(w, "  Run `entire doctor --force` to delete them here.")
+			return nil
+		}
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Delete these legacy shadow branches?")
+		if promptErr != nil {
+			return promptErr
+		}
+		if !proceed {
+			return nil
+		}
+	}
+
+	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
+	if len(deleted) > 0 {
+		fmt.Fprintf(w, "  ✓ Fixed: deleted %d legacy shadow branch(es)\n", len(deleted))
+	}
+	if len(failed) > 0 {
+		fmt.Fprintf(w, "  Kept %d branch(es) git refused to delete (checked out in a worktree?):\n", len(failed))
+		printCappedList(w, failed, func(name string) string { return name })
+	}
 	return nil
 }
 

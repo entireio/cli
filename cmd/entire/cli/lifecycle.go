@@ -303,27 +303,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// budget is untouched; see runSessionSweep for the safety contract.
 	maybeSpawnSessionSweep(ctx)
 
-	// One-time removal of the shadow branches older CLI versions left behind.
-	removeLegacyShadowBranches(ctx)
-
 	return nil
-}
-
-// removeLegacyShadowBranches runs strategy.CleanupLegacyShadowBranches, the
-// one-time, best-effort deletion of the local shadow branches older CLI
-// versions wrote. A marker in the git common dir makes every later call a
-// single stat, so session start pays for the ref scan once per repository.
-func removeLegacyShadowBranches(ctx context.Context) {
-	logCtx := logging.WithComponent(ctx, "cleanup")
-	deleted, err := strategy.CleanupLegacyShadowBranches(ctx)
-	if deleted > 0 {
-		logging.Info(logCtx, "removed legacy shadow branches",
-			slog.Int("count", deleted))
-	}
-	if err != nil {
-		logging.Warn(logCtx, "legacy shadow branch cleanup incomplete; it is retried at the next session start",
-			slog.String("error", err.Error()))
-	}
 }
 
 func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -14,8 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
-	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -78,7 +75,7 @@ type CleanupResult struct {
 // short commit SHA), and nothing here is namespace-reserved. Use this broad
 // pattern only for listing/reporting paths that a human confirms before any
 // deletion happens (ListLegacyShadowBranches, ListAllItems, `entire clean
-// --all`'s interactive picker). For unattended deletion, use
+// --all`'s interactive picker). For `entire clean` and `entire doctor`, use
 // isAutoDeletableLegacyShadowBranch instead.
 var legacyShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-F]{6})?$`)
 
@@ -87,9 +84,9 @@ var legacyShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-
 // the suffix was introduced has this shape (the worktree hash was a real 6-hex
 // value even for the main worktree), and a human branch would have to
 // coincidentally match "entire/<7+ hex>-<exactly 6 hex>" to be at risk. The
-// bare "entire/<hex>" form is deliberately excluded from unattended deletion
-// even though it is Entire's own oldest naming: a human short-SHA branch looks
-// exactly like it. Old-format branches stay listed and deletable through the
+// bare "entire/<hex>" form is deliberately excluded from `entire clean` and
+// `entire doctor` even though it is Entire's own oldest naming: a human
+// short-SHA branch looks exactly like it. Old-format branches stay listed and deletable through the
 // interactive `entire clean --all` path, where a human confirms first.
 var autoDeletableLegacyShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}-[0-9a-fA-F]{6}$`)
 
@@ -98,8 +95,8 @@ var autoDeletableLegacyShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-f
 // never shadow branches.
 //
 // This is a name-shape check, not an ownership check -- see the
-// legacyShadowBranchPattern doc comment. Do not use it to gate unattended
-// deletion; use isAutoDeletableLegacyShadowBranch for that.
+// legacyShadowBranchPattern doc comment. Do not use it to gate deletion a
+// human has not reviewed; use isAutoDeletableLegacyShadowBranch for that.
 func IsLegacyShadowBranch(branchName string) bool {
 	if branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName {
 		return false
@@ -166,111 +163,6 @@ func listLegacyShadowBranchHeads(ctx context.Context, match func(string) bool) (
 		return nil, fmt.Errorf("failed to iterate references: %w", err)
 	}
 	return heads, nil
-}
-
-// legacyShadowCleanupMarker records, in the git common dir, that the one-time
-// unattended legacy shadow branch cleanup has run for this repository.
-const legacyShadowCleanupMarker = "entire-legacy-shadow-branches-removed"
-
-// CleanupLegacyShadowBranches deletes, once per repository, the shadow
-// branches older CLIs left behind. The real protection for other people's
-// branches is the name: only the strict worktree-suffixed shape
-// `entire/<7+hex>-<6hex>` (isAutoDeletableLegacyShadowBranch) is touched.
-// Each delete is `git update-ref -d <ref> <observed hash>`, which only guards
-// against a branch moving during this pass; a branch that moved fails once,
-// leaves the marker unwritten, and is deleted at its new hash on the next
-// session start. Nothing reads or writes these branches anymore — session
-// work in progress lives in session state — so there is no session to protect.
-//
-// A branch checked out in any worktree is left alone: `git update-ref -d`,
-// unlike `git branch -D`, does not refuse one, and deleting it would leave that
-// worktree's HEAD pointing at a missing ref. Someone checked it out on purpose,
-// so it is the user's branch now; skipping it is not a failure and does not
-// hold back the marker. If the worktree list cannot be read, nothing is
-// deleted and the pass is retried next time.
-//
-// A marker in the git common dir makes the pass one-time: the first call that
-// finishes without failures records it, and every later call returns
-// immediately. Old-format bare "entire/<hex>" branches are never touched here;
-// `entire clean --all` lists them for a human to confirm.
-//
-// Best-effort: callers log the error and continue.
-func CleanupLegacyShadowBranches(ctx context.Context) (int, error) {
-	root, err := gitdir.Open(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("open git common dir: %w", err)
-	}
-	if _, statErr := root.Lstat(legacyShadowCleanupMarker); statErr == nil {
-		return 0, nil
-	}
-
-	heads, err := listLegacyShadowBranchHeads(ctx, isAutoDeletableLegacyShadowBranch)
-	if err != nil {
-		return 0, err
-	}
-	if len(heads) > 0 {
-		checkedOut, listErr := checkedOutBranches(ctx)
-		if listErr != nil {
-			return 0, listErr
-		}
-		for branch := range heads {
-			if _, held := checkedOut[branch]; held {
-				logging.Info(logging.WithComponent(ctx, "cleanup"), "leaving checked-out legacy shadow branch in place",
-					slog.String("branch", branch))
-				delete(heads, branch)
-			}
-		}
-	}
-	deleted, failed := deleteLegacyShadowBranchesIfUnchanged(ctx, heads)
-	if len(failed) > 0 {
-		return len(deleted), fmt.Errorf("%d legacy shadow branch(es) could not be deleted", len(failed))
-	}
-	if err := jsonutil.WriteFileAtomicIn(root, legacyShadowCleanupMarker, []byte{}, 0o644); err != nil {
-		return len(deleted), fmt.Errorf("record legacy shadow branch cleanup: %w", err)
-	}
-	return len(deleted), nil
-}
-
-// checkedOutBranches returns the short names of the branches checked out in
-// any worktree of the current repository, from `git worktree list
-// --porcelain`.
-func checkedOutBranches(ctx context.Context) (map[string]struct{}, error) {
-	out, err := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain").Output()
-	if err != nil {
-		return nil, fmt.Errorf("list worktrees: %w", err)
-	}
-	branches := make(map[string]struct{})
-	for _, wt := range gitrepo.ParseWorktreeBranches(string(out)) {
-		branches[wt.Branch] = struct{}{}
-	}
-	return branches, nil
-}
-
-// deleteLegacyShadowBranchesIfUnchanged deletes each branch only if it still
-// points at the hash the caller observed. That protects only against a
-// concurrent move between this pass's scan and its delete (e.g. an older CLI
-// version still writing the branch); it is not a lasting exemption, since the
-// next pass lists the branch at its new hash.
-func deleteLegacyShadowBranchesIfUnchanged(ctx context.Context, branches map[string]plumbing.Hash) (deleted []string, failed []string) {
-	for branch, expected := range branches {
-		if !isAutoDeletableLegacyShadowBranch(branch) || expected.IsZero() {
-			failed = append(failed, branch)
-			continue
-		}
-		cmd := exec.CommandContext(ctx, "git", "update-ref", "-d", "refs/heads/"+branch, expected.String())
-		if output, runErr := cmd.CombinedOutput(); runErr != nil {
-			logging.Debug(ctx, "legacy shadow branch unchanged-delete skipped",
-				slog.String("branch", branch),
-				slog.String("expected", expected.String()),
-				slog.String("output", strings.TrimSpace(string(output))),
-				slog.String("error", runErr.Error()),
-			)
-			failed = append(failed, branch)
-			continue
-		}
-		deleted = append(deleted, branch)
-	}
-	return deleted, failed
 }
 
 // DeleteLegacyShadowBranches deletes the specified branches from the repository.

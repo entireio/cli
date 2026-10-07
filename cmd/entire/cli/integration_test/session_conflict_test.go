@@ -114,12 +114,11 @@ func TestSessionIDConflict_NoConflictWithSameSession(t *testing.T) {
 	}
 }
 
-// TestSessionStart_RemovesLegacyShadowBranches verifies the one-time upgrade
-// cleanup: the first session start deletes the per-session shadow branches
-// older CLIs wrote (entire/<commit>-<worktree-hash>), leaves anything that only
-// looks similar (the bare entire/<hex> form, the metadata branch) alone, and
-// records a marker so later session starts skip the ref scan.
-func TestSessionStart_RemovesLegacyShadowBranches(t *testing.T) {
+// TestSessionStart_LeavesLegacyShadowBranches verifies that session start no
+// longer deletes the shadow branches older CLIs wrote: they are reported by
+// `entire doctor` and deleted by `entire clean`, never removed behind the
+// user's back.
+func TestSessionStart_LeavesLegacyShadowBranches(t *testing.T) {
 	t.Parallel()
 	env := NewTestEnv(t)
 	defer env.Cleanup()
@@ -142,24 +141,10 @@ func TestSessionStart_RemovesLegacyShadowBranches(t *testing.T) {
 		t.Fatalf("session-start failed: %v\n%s", out.Err, out.Stderr)
 	}
 
-	if env.BranchExists(legacy) {
-		t.Errorf("legacy shadow branch %s should be removed at session start", legacy)
-	}
-	if !env.BranchExists(bareLookalike) {
-		t.Errorf("bare-format branch %s must be left for `entire clean --all` to confirm", bareLookalike)
-	}
-	marker := filepath.Join(env.RepoDir, ".git", "entire-legacy-shadow-branches-removed")
-	if _, err := os.Stat(marker); err != nil {
-		t.Errorf("expected the one-time cleanup marker at %s: %v", marker, err)
-	}
-
-	// One-time: a branch appearing later is not touched by the next start.
-	createLegacyShadowBranch(t, env.RepoDir, legacy, "legacy-session-id")
-	if out := env.SimulateSessionStartWithOutput(session.ID); out.Err != nil {
-		t.Fatalf("second session-start failed: %v\n%s", out.Err, out.Stderr)
-	}
-	if !env.BranchExists(legacy) {
-		t.Errorf("legacy cleanup should run once; %s was deleted again", legacy)
+	for _, branch := range []string{legacy, bareLookalike} {
+		if !env.BranchExists(branch) {
+			t.Errorf("session start must not delete %s", branch)
+		}
 	}
 }
 
