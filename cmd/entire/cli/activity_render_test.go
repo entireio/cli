@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -109,6 +110,34 @@ func TestRenderSessionRow_AgentLabel(t *testing.T) {
 				t.Errorf("row = %q, want agent %q", buf.String(), tc.want)
 			}
 		})
+	}
+}
+
+// Repo bars and the legend list external agents after the built-ins and
+// before Unknown, instead of dropping them.
+func TestAgentRenderOrder_IncludesExternalAgents(t *testing.T) {
+	t.Parallel()
+	got := agentRenderOrder(map[string]int{
+		activityAgentUnknown:    1,
+		"Grok Bot":              2,
+		activityTestAgentClaude: 3,
+		"Aider":                 4,
+		activityAgentCodex:      0,
+	})
+	want := []string{activityTestAgentClaude, "Aider", "Grok Bot", activityAgentUnknown}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestRenderDotChart_LegendNamesExternalAgent(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	repos := []repoContribution{{Repo: "r", Total: 4, Agents: map[string]int{activityTestAgentClaude: 1, "Grok Bot": 3}}}
+	hourly := []hourlyPoint{{Date: "2026-04-01", Hour: 12, Value: 4, AgentID: activityTestAgentClaude}}
+	renderDotChart(&buf, activityStyles{width: 200}, hourly, repos)
+	if !strings.Contains(buf.String(), "Grok Bot 75%") {
+		t.Errorf("legend missing external agent:\n%s", buf.String())
 	}
 }
 

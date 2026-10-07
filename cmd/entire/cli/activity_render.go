@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -145,6 +146,32 @@ func agentDisplayFor(key string) agentDisplay {
 var agentOrder = []string{
 	activityAgentClaude, activityAgentCodex, activityAgentGemini, activityAgentAmp, activityAgentOpencode,
 	activityAgentCopilot, activityAgentPi, activityAgentCursor, activityAgentDroid, activityAgentKiro, activityAgentUnknown,
+}
+
+// agentRenderOrder is the keys of counts in display order: built-in agents in
+// agentOrder, then external agents by name, then Unknown.
+func agentRenderOrder(counts map[string]int) []string {
+	keys := make([]string, 0, len(counts))
+	for _, id := range agentOrder {
+		if id == activityAgentUnknown {
+			break
+		}
+		if counts[id] > 0 {
+			keys = append(keys, id)
+		}
+	}
+	var external []string
+	for id, count := range counts {
+		if count > 0 && !slices.Contains(agentOrder, id) {
+			external = append(external, id)
+		}
+	}
+	slices.Sort(external)
+	keys = append(keys, external...)
+	if counts[activityAgentUnknown] > 0 {
+		keys = append(keys, activityAgentUnknown)
+	}
+	return keys
 }
 
 // renderActivityHeader renders the stat cards, contribution heatmap, and repo
@@ -336,13 +363,9 @@ func renderDotChart(w io.Writer, sty activityStyles, hourly []hourlyPoint, repos
 	// Agent legend
 	if total > 0 {
 		var parts []string
-		for _, id := range agentOrder {
-			count, ok := agentTotals[id]
-			if !ok || count == 0 {
-				continue
-			}
-			pct := float64(count) / float64(total) * 100
-			display := agentDisplayMap[id]
+		for _, id := range agentRenderOrder(agentTotals) {
+			pct := float64(agentTotals[id]) / float64(total) * 100
+			display := agentDisplayFor(id)
 			parts = append(parts, sty.renderAgent(id, fmt.Sprintf("● %s %d%%", display.Label, int(math.Round(pct)))))
 		}
 		fmt.Fprintln(w, strings.Join(parts, sty.render(sty.dim, "  ")))
@@ -403,11 +426,8 @@ func renderAgentBar(sty activityStyles, agents map[string]int, maxCount, barWidt
 	var b strings.Builder
 
 	filled := 0
-	for _, id := range agentOrder {
-		count, ok := agents[id]
-		if !ok || count == 0 {
-			continue
-		}
+	for _, id := range agentRenderOrder(agents) {
+		count := agents[id]
 		segWidth := int(math.Round(float64(count) / float64(maxCount) * float64(barWidth)))
 		if segWidth < 1 && count > 0 {
 			segWidth = 1
@@ -419,7 +439,7 @@ func renderAgentBar(sty activityStyles, agents map[string]int, maxCount, barWidt
 			continue
 		}
 
-		display := agentDisplayMap[id]
+		display := agentDisplayFor(id)
 		seg := strings.Repeat(string(display.Char), segWidth)
 		b.WriteString(sty.renderAgent(id, seg))
 		filled += segWidth
