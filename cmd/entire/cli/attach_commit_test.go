@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -379,6 +381,13 @@ func TestAttachCommit_ExplainFindsTheLinkedCheckpoint(t *testing.T) {
 	// The linked commit has no trailer, but the checkpoint lists it.
 	if strings.Contains(got, "(none on this branch)") || !strings.Contains(got, target.Hash.String()[:7]) {
 		t.Errorf("explain should list the linked commit %s:\n%s", target.Hash.String()[:7], got)
+	}
+	// A recorded link can't be verified locally, so it is labelled as one.
+	if !strings.Contains(got, "(recorded link, unverified)") {
+		t.Errorf("the linked commit should be labelled as an unverified recorded link:\n%s", got)
+	}
+	if !strings.Contains(explainErr.String(), "can't verify who recorded the link") {
+		t.Errorf("explain <commit> should note the link is unverified:\n%s", explainErr.String())
 	}
 }
 
@@ -906,5 +915,108 @@ func TestTrackingRefRemote(t *testing.T) {
 		if got := trackingRefRemote(ref, remotes); got != want {
 			t.Errorf("trackingRefRemote(%q) = %q, want %q", ref, got, want)
 		}
+	}
+}
+
+// Blame marks a line attributed through a recorded link, which nothing
+// verified, apart from trailer-linked ones.
+func TestAttributionLineMarker_RecordedLink(t *testing.T) {
+	t.Parallel()
+	line := attributionLine{RecordedLink: true, MetadataMissing: true}
+	if got := attributionLineMarker(line); got != "!" {
+		t.Fatalf("marker = %q, want !", got)
+	}
+	var legend bytes.Buffer
+	renderAttributionMarkerLegend(&legend, newStatusStyles(&legend), []attributionLine{line})
+	if !strings.Contains(legend.String(), "recorded link") {
+		t.Fatalf("legend doesn't explain !: %q", legend.String())
+	}
+}
+
+// An agent that reports no transcript position still ends the window at the
+// transcript's line count, so the session's offset advances and a later attach
+// doesn't record the same turns again.
+func TestAttachTranscriptWindowFor_FallsBackToLineCount(t *testing.T) {
+	t.Parallel()
+	data := []byte("{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n")
+	window := attachTranscriptWindowFor(io.Discard, fakeAgent{typ: "No Position Agent"}, "", data, nil)
+	if window.end != 3 {
+		t.Fatalf("window.end = %d, want 3", window.end)
+	}
+}
+
+// Repro: the commit is pushed from another clone while the confirmation is
+// open. Attach must ask the remote again after the answer, not trust what it
+// saw before the prompt or its own stale tracking refs, and leave the commit
+// alone. Not parallel: sets ENTIRE_TEST_TTY and the confirmation seam.
+func TestAttachCommit_PushedWhileConfirmationIsOpenIsNotRewritten(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+	remote := pushToOrigin(t)
+	head := commitAt(t, "more.txt")
+	setupClaudeTranscript(t, "attach-pushed-during-prompt", attachCommitTranscript)
+
+	t.Setenv(interactive.EnvTestTTY, "1")
+	old := askAttachConfirmation
+	t.Cleanup(func() { askAttachConfirmation = old })
+	askAttachConfirmation = func() (bool, error) {
+		// Another clone pushes the commit: by URL, so none of this clone's
+		// tracking refs learn about it.
+		testutil.RunGit(t, mustGetwd(t), "push", "-q", remote, head.Hash.String()+":refs/heads/someone-else")
+		return true, nil
+	}
+
+	var out bytes.Buffer
+	err := runAttach(context.Background(), &out, &out, "attach-pushed-during-prompt", agent.AgentNameClaudeCode, attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "while attach was waiting") {
+		t.Fatalf("err = %v, want a refusal because the commit was pushed during the prompt\n%s", err, out.String())
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("a commit pushed during the prompt was rewritten: %s", got.Hash)
+	}
+	if state, loadErr := loadAttachState(t, "attach-pushed-during-prompt"); loadErr != nil || state != nil {
+		t.Fatalf("session state was written after the refusal: %+v, %v", state, loadErr)
+	}
+}
+
+// Repro: a hostile remote advertises a branch whose name is a refspec. Attach
+// fetches branches whose tips it lacks by name; the name must not become a
+// fetch destination that writes a local ref.
+func TestAttachCommit_RemoteBranchNameCannotWriteLocalRefs(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+	remote := pushToOrigin(t)
+
+	// Another clone pushes a commit this clone doesn't have.
+	other := t.TempDir()
+	testutil.RunGit(t, other, "clone", "-q", remote, ".")
+	testutil.WriteFile(t, other, "theirs.txt", "theirs")
+	testutil.GitAdd(t, other, "theirs.txt")
+	testutil.RunGit(t, other, "-c", "user.name=Other", "-c", "user.email=other@example.com", "commit", "-q", "-m", "theirs")
+	testutil.RunGit(t, other, "push", "-q", "origin", "HEAD:refs/heads/a")
+	theirs := strings.TrimSpace(testutil.RunGit(t, other, "rev-parse", "HEAD"))
+
+	// The remote advertises it under a name carrying a destination.
+	testutil.RunGit(t, remote, "pack-refs", "--all")
+	packed := filepath.Join(remote, "packed-refs")
+	data, err := os.ReadFile(packed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte(theirs+" refs/heads/a:refs/heads/victim\n")...)
+	if err := os.WriteFile(packed, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ls := testutil.RunGit(t, mustGetwd(t), "ls-remote", "--heads", "origin"); !strings.Contains(ls, "refs/heads/a:refs/heads/victim") {
+		t.Skipf("this git doesn't advertise the crafted name, so the attack can't be staged:\n%s", ls)
+	}
+
+	commitAt(t, "mine.txt")
+	out, err := attachHeadless(t, "attach-hostile-branch-name", attachOptions{})
+	if refs := testutil.RunGit(t, mustGetwd(t), "for-each-ref", "--format=%(refname)", "refs/heads/victim"); strings.TrimSpace(refs) != "" {
+		t.Fatalf("a remote's branch name wrote a local ref: %s", refs)
+	}
+	if err != nil {
+		t.Fatalf("runAttach: %v\n%s", err, out)
 	}
 }

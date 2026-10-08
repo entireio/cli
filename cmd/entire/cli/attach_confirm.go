@@ -42,6 +42,20 @@ func confirmAttach(w, errW io.Writer, warning []string, force bool) error {
 		fmt.Fprintln(errW, "\nNothing was changed. This needs the user's go-ahead: show them the above, and if they agree, rerun with --force.")
 		return NewSilentError(errors.New("session attach needs the user's confirmation; rerun with --force once they agree"))
 	}
+	proceed, err := askAttachConfirmation()
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		fmt.Fprintln(w, "Nothing was changed.")
+		return errAttachDeclined
+	}
+	return nil
+}
+
+// askAttachConfirmation asks the user whether to go ahead, default No. A
+// variable so tests can answer, and act while the question is open.
+var askAttachConfirmation = func() (bool, error) {
 	proceed := false
 	form := NewAccessibleForm(huh.NewGroup(
 		huh.NewConfirm().
@@ -51,13 +65,9 @@ func confirmAttach(w, errW io.Writer, warning []string, force bool) error {
 			Value(&proceed),
 	))
 	if err := form.Run(); err != nil {
-		return fmt.Errorf("prompt failed: %w", err)
+		return false, fmt.Errorf("prompt failed: %w", err)
 	}
-	if !proceed {
-		fmt.Fprintln(w, "Nothing was changed.")
-		return errAttachDeclined
-	}
-	return nil
+	return proceed, nil
 }
 
 // describeCommit is a commit's short hash and subject, for warnings.

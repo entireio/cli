@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -297,7 +297,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 
 	// A session can be attached to several commits. Each checkpoint holds the
 	// turns since the session's previous one, as hook-made checkpoints do.
-	window := attachTranscriptWindowFor(errW, ag, transcriptPath, existingState)
+	window := attachTranscriptWindowFor(errW, ag, transcriptPath, transcriptData, existingState)
 	meta := extractTranscriptMetadataForAgent(ag, transcriptPath, transcriptData, window.start)
 
 	refs := opts.committedRefs(ctx)
@@ -346,12 +346,18 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		}
 		return err
 	}
-	// The prompt can stay open for a while; the commit may have been pushed
-	// meanwhile (from another terminal or clone a fetch brought in). Check the
-	// tracking refs again before rewriting it.
+	// The prompt can stay open for a while, and the commit may have been
+	// pushed meanwhile, from here or another clone. Ask the remotes again,
+	// directly, before rewriting it.
 	if plan.mode == attachAddTrailer {
-		if holder, _, err := remoteHoldingCommit(ctx, target, plan.checkedRemotes); err != nil || holder != "" {
-			return fmt.Errorf("commit %s was pushed to %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], cmp.Or(holder, "a remote"))
+		holder, _, unreachable, err := remoteHoldingPushedCommit(ctx, target, plan.checkedRemotes)
+		switch {
+		case err != nil:
+			return fmt.Errorf("couldn't check again whether commit %s was pushed while attach was waiting, so it won't be rewritten; nothing was changed: %w", target.Hash.String()[:12], err)
+		case holder != "":
+			return fmt.Errorf("commit %s was pushed to %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], holder)
+		case len(unreachable) > 0:
+			return fmt.Errorf("couldn't reach %s to check again whether commit %s was pushed while attach was waiting, so it won't be rewritten; nothing was changed", strings.Join(unreachable, ", "), target.Hash.String()[:12])
 		}
 	}
 
@@ -511,8 +517,12 @@ type attachTranscriptWindow struct {
 // session with no state here (another machine, cleaned) starts from the top.
 // A start past the transcript's end (rotated or rewritten) is reset to the top
 // with a warning rather than recording nothing.
-func attachTranscriptWindowFor(errW io.Writer, ag agent.Agent, transcriptPath string, existingState *session.State) attachTranscriptWindow {
-	window := attachTranscriptWindow{end: -1}
+func attachTranscriptWindowFor(errW io.Writer, ag agent.Agent, transcriptPath string, transcriptData []byte, existingState *session.State) attachTranscriptWindow {
+	// Without the agent's own position, the end is the line count, the
+	// coordinate transcript.SliceFromLine slices the window by; an unknown end
+	// would leave the session's offset where it was, and the next attach would
+	// record these turns again.
+	window := attachTranscriptWindow{end: bytes.Count(transcriptData, []byte("\n"))}
 	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
 		if pos, err := analyzer.GetTranscriptPosition(transcriptPath); err == nil {
 			window.end = pos
@@ -537,6 +547,9 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 	switch {
 	case isExistingCheckpoint:
 		lines = append(lines, fmt.Sprintf("Adds session %s to checkpoint %s, which commit %s already has. Git history is not changed.", sessionID, checkpointID, describeCommit(target)))
+		if plan.mode == attachRecordLink {
+			lines = append(lines, "That checkpoint names the commit in a recorded link, not a trailer. The CLI can't verify who recorded it: anyone who can push checkpoints can name any commit.")
+		}
 	case plan.mode == attachRecordLink:
 		lines = append(lines,
 			fmt.Sprintf("Commit %s is already pushed to %s, so it won't be changed.", describeCommit(target), plan.holder),

@@ -705,7 +705,10 @@ A recorded link is `linked_commits` on the root `CheckpointSummary`: a list of
 `{sha, repo}` objects (`repo` is `<forge>/<owner>/<repo>` from the remote that
 holds the commit, possibly empty). Unlike the import anchor below it is an
 **attributing** link: the server credits a verified entry as it would a
-trailer. Unlike a trailer it names one exact commit, so it does not follow a
+trailer. The CLI can't verify who recorded a link (anyone who can push checkpoints
+can name any commit), so `explain` and `blame`/`why` label commits and lines
+found through one as unverified recorded links, and lookups ignore checkpoints
+dated in the future. Unlike a trailer it names one exact commit, so it does not follow a
 later rebase or amend of that commit; attach says so, and the remedy is to
 attach the session to the new commit. The server
 verifies it only when the authenticated checkpoint pusher is the commit's

@@ -215,6 +215,9 @@ type associatedCommit struct {
 	Author   string
 	Email    string
 	Date     time.Time
+	// RecordedLink: listed from the checkpoint's recorded links, not found by
+	// its trailer; unverified (see recordedLinkNote).
+	RecordedLink bool
 }
 
 func newExplainCmd() *cobra.Command {
@@ -640,6 +643,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 		if linked := checkpoint.CheckpointsLinkedToWithStubs(ctx, lookup.store, lookup.committed, hash.String(), commit.Committer.When); len(linked) > 0 {
 			cpID, hasCheckpoint = linked[0], true
 			linkVia = "a link recorded by entire session attach"
+			fmt.Fprintf(errW, "Note: commit %s has no Entire-Checkpoint trailer; checkpoint %s names it in a link recorded by entire session attach. The CLI can't verify who recorded the link: anyone who can push checkpoints can name any commit.\n", abbreviateCommitHash(lookup.repo, hash), cpID)
 		}
 	}
 	if !hasCheckpoint {
@@ -1627,6 +1631,14 @@ func (s *summaryProgressWriter) updateLine(line string) {
 	s.lastLine = line
 }
 
+// recordedLinkSuffix marks a commit listed from a recorded link.
+func recordedLinkSuffix(c associatedCommit) string {
+	if c.RecordedLink {
+		return " (recorded link, unverified)"
+	}
+	return ""
+}
+
 func newAssociatedCommit(c *object.Commit) associatedCommit {
 	fullSHA := c.Hash.String()
 	shortSHA := fullSHA
@@ -1652,7 +1664,9 @@ func withLinkedCommits(repo *git.Repository, commits []associatedCommit, links [
 			continue
 		}
 		if c, err := repo.CommitObject(plumbing.NewHash(link.SHA)); err == nil {
-			commits = append(commits, newAssociatedCommit(c))
+			linked := newAssociatedCommit(c)
+			linked.RecordedLink = true
+			commits = append(commits, linked)
 		}
 	}
 	return commits
@@ -2151,12 +2165,12 @@ func formatCheckpointHeader(
 		writeRow("commits", "(none on this branch)")
 	case len(commits) == 1:
 		c := commits[0]
-		writeRow("commits", fmt.Sprintf("%s %s", c.ShortSHA, c.Message))
+		writeRow("commits", fmt.Sprintf("%s %s%s", c.ShortSHA, c.Message, recordedLinkSuffix(c)))
 	default:
 		writeRow("commits", fmt.Sprintf("(%d)", len(commits)))
 		for _, c := range commits {
-			fmt.Fprintf(&sb, "           %s %s %s\n",
-				c.ShortSHA, c.Date.Format("2006-01-02"), c.Message)
+			fmt.Fprintf(&sb, "           %s %s %s%s\n",
+				c.ShortSHA, c.Date.Format("2006-01-02"), c.Message, recordedLinkSuffix(c))
 		}
 	}
 
