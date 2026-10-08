@@ -179,6 +179,18 @@ func linkOrCopy(root *os.Root, src, dst string) error {
 		}
 		return root.Symlink(target, dst) //nolint:wrapcheck // callers check fs.ErrExist
 	}
+	return copyHookFile(root, src, dst)
+}
+
+// writeHookCopy writes a copied hook's bytes; tests replace it to fail.
+var writeHookCopy = func(f *os.File, data []byte) error {
+	_, err := f.Write(data)
+	return err //nolint:wrapcheck // copyHookFile wraps it
+}
+
+// copyHookFile creates dst as a byte copy of src. A failed write removes dst,
+// so no partial hook is left under a name that reads as a complete version.
+func copyHookFile(root *os.Root, src, dst string) error {
 	data, err := osroot.ReadFileNoFollow(root, src)
 	if err != nil {
 		return fmt.Errorf("copy %s: %w", src, err)
@@ -187,10 +199,10 @@ func linkOrCopy(root *os.Root, src, dst string) error {
 	if err != nil {
 		return err //nolint:wrapcheck // callers check fs.ErrExist
 	}
-	_, werr := f.Write(data)
+	werr := writeHookCopy(f, data)
 	cerr := f.Close()
 	if err := errors.Join(werr, cerr, root.Chmod(dst, 0o755)); err != nil {
-		return fmt.Errorf("copy %s to %s: %w", src, dst, err)
+		return errors.Join(fmt.Errorf("copy %s to %s: %w", src, dst, err), root.Remove(dst))
 	}
 	return nil
 }

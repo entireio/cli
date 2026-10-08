@@ -899,3 +899,35 @@ fi
 		t.Errorf("ran %s, want entire,entire,tool", got)
 	}
 }
+
+// A copy whose write fails must not leave a partial hook behind: keepOlderCopy
+// writes straight to the final name, which would read as a complete version.
+func TestCopyHookFile_FailedWriteLeavesNoPartialFile(t *testing.T) { //nolint:paralleltest // replaces writeHookCopy
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pre-commit.pre-entire"), []byte(userHookV1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+
+	orig := writeHookCopy
+	t.Cleanup(func() { writeHookCopy = orig })
+	errDiskFull := errors.New("disk full")
+	writeHookCopy = func(f *os.File, data []byte) error {
+		if _, err := f.Write(data[:len(data)/2]); err != nil {
+			return err
+		}
+		return errDiskFull
+	}
+
+	dst := "pre-commit.pre-entire.20261008T000000Z"
+	if err := copyHookFile(root, "pre-commit.pre-entire", dst); !errors.Is(err, errDiskFull) {
+		t.Fatalf("copyHookFile error = %v, want %v", err, errDiskFull)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, dst)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial copy left at %s (lstat err %v)", dst, err)
+	}
+}
