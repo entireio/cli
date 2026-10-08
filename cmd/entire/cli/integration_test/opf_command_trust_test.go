@@ -39,11 +39,18 @@ func opfSettingsBlock(command string) map[string]any {
 // pass vacuously.
 func waitForOPFScanWorker(t *testing.T, env *TestEnv) {
 	t.Helper()
+	// Wait for every worker a push spawned, not just the first to finish: a
+	// later one still writing to .git would break the test's cleanup. Every
+	// worker logs "finished" on every exit.
 	logPath := filepath.Join(env.RepoDir, ".entire", "logs", "entire.log")
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "opf scan worker finished") {
-			return
+		if data, err := os.ReadFile(logPath); err == nil {
+			log := string(data)
+			finished := strings.Count(log, "opf scan worker finished")
+			if finished > 0 && finished >= strings.Count(log, "spawned background scan") {
+				return
+			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -54,7 +61,7 @@ func waitForOPFScanWorker(t *testing.T, env *TestEnv) {
 			opfLines = append(opfLines, line)
 		}
 	}
-	t.Fatalf("the background OPF scan worker never reported finishing; OPF log lines:\n%s",
+	t.Fatalf("a background OPF scan worker never reported finishing; OPF log lines:\n%s",
 		strings.Join(opfLines, "\n"))
 }
 

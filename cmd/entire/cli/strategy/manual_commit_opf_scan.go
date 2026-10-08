@@ -122,6 +122,10 @@ func maybeSpawnOPFScan(ctx context.Context, remote string) {
 // process error, because nothing watches this child's exit code.
 func RunOPFScan(ctx context.Context, remote string) error {
 	logCtx := logging.WithComponent(ctx, opfScanComponent)
+	// One line on every exit, including a worker that found another one
+	// running, so a failed or stalled background scan can be told apart from
+	// one that never started, and each spawn can be matched to its end.
+	defer logging.Info(logCtx, "opf scan worker finished")
 	// OPFEnabled reads process-global config that only EnsureRedactionConfigured
 	// sets; without it the worker would read "OPF off" and do nothing. Unlike
 	// the hook, a scanner-config error stops the worker: stamping commits with a
@@ -148,9 +152,6 @@ func RunOPFScan(ctx context.Context, remote string) error {
 		logging.Debug(logCtx, "opf scan skipped: another worker is already running")
 		return nil
 	}
-	// One line on every exit of a worker that ran, so a failed or stalled
-	// background scan can be told apart from one that never started.
-	defer logging.Info(logCtx, "opf scan worker finished")
 
 	cache, err := checkpoint.OPFSpanCacheForRepo(repo)
 	if err != nil {
