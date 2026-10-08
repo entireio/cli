@@ -75,6 +75,21 @@ func attachRewriteChain(ctx context.Context, repo *git.Repository, target, head 
 	if op := strategy.GitOperationInProgress(ctx); op != "" {
 		return nil, fmt.Errorf("can't add the Entire-Checkpoint trailer to %s while %s is in progress; finish or abort it first", target.Hash.String()[:12], op)
 	}
+	chain, err := commitsFromTargetToHead(ctx, repo, target, head)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range chain {
+		if !replayable(c) {
+			return nil, fmt.Errorf("commit %s has a non-UTF-8 encoding or extra headers that attach can't carry over when it rewrites it; push %s first, or add the trailer yourself", c.Hash.String()[:12], target.Hash.String()[:12])
+		}
+	}
+	return chain, nil
+}
+
+// commitsFromTargetToHead lists target and the commits after it up to head,
+// oldest first, refusing a target off the current branch and merges after it.
+func commitsFromTargetToHead(ctx context.Context, repo *git.Repository, target, head *object.Commit) ([]*object.Commit, error) {
 	if target.Hash.Equal(head.Hash) {
 		return []*object.Commit{target}, nil
 	}
@@ -99,11 +114,6 @@ func attachRewriteChain(ctx context.Context, repo *git.Repository, target, head 
 			return nil, fmt.Errorf("read commit %s: %w", fields[0][:12], err)
 		}
 		chain = append(chain, c)
-	}
-	for _, c := range chain {
-		if !replayable(c) {
-			return nil, fmt.Errorf("commit %s has a non-UTF-8 encoding or extra headers that attach can't carry over when it rewrites it; push %s first, or add the trailer yourself", c.Hash.String()[:12], target.Hash.String()[:12])
-		}
 	}
 	return chain, nil
 }

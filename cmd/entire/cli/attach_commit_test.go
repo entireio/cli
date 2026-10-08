@@ -699,6 +699,24 @@ func TestAttachCommit_TrackingRefOfAnotherRemoteBlocksTheRewrite(t *testing.T) {
 
 // commit-tree writes UTF-8 with no extra headers, so a commit it can't
 // reproduce is refused rather than silently changed.
+// The same holds when the commit is HEAD, the common case.
+func TestAttachCommit_RefusesToRewriteANonUTF8Head(t *testing.T) {
+	setupAttachTestRepo(t)
+	dir := mustGetwd(t)
+	testutil.WriteFile(t, dir, "work.txt", "work")
+	testutil.GitAdd(t, dir, "work.txt")
+	testutil.RunGit(t, dir, "-c", "i18n.commitEncoding=ISO-8859-1", "commit", "-q", "-m", "add work.txt")
+	head := headCommitOf(t)
+
+	out, err := attachHeadless(t, "attach-non-utf8-head", attachOptions{})
+	if err == nil || !strings.Contains(err.Error(), "non-UTF-8") {
+		t.Fatalf("err = %v, want a refusal naming the encoding\n%s", err, out)
+	}
+	if got := headCommitOf(t); got.Hash != head.Hash {
+		t.Fatalf("HEAD changed: %s", got.Hash)
+	}
+}
+
 func TestAttachCommit_RefusesToRewriteANonUTF8Commit(t *testing.T) {
 	setupAttachTestRepo(t)
 	dir := mustGetwd(t)
