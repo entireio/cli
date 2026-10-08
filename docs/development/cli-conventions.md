@@ -227,7 +227,34 @@ the commands are always runnable in every build.
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`,
   plus `grant` (`add`/`list`/`remove`): project access for a `provider:handle`
   grantee, roles reader/writer/admin; both `add` and `remove` take the grantee
-  optionally (see the grant-subtree notes below)
+  optionally (see the grant-subtree notes below). `create <name> --owner <ref>`
+  creates without prompting even in a terminal, leaving an omitted `--region`
+  to the server's jurisdiction. Without `--owner`, `--owner-type` or
+  `--region` (bare, or with just the name as the name field's starting text),
+  a terminal gets one paged wizard (owner → name → region → summary; Shift+Tab
+  goes back). Those flags always mean the flag form and never seed the wizard,
+  as `dispatch` opens its wizard only with no flags: one given with a missing
+  name or `--owner` is refused before any request, as is a missing input with
+  no terminal, and the refusal spells out both `--owner` forms (a handle needs
+  `--owner-type account`). `--json` and `--context` do not count. The success
+  line names the project by its name (what every command takes) and the
+  region it landed in, never by ULID. The personal account is listed first,
+  then only orgs whose `canCreateProject` is set; the wizard suggests the
+  owner's region (the flag form's default is the server's jurisdiction). The
+  name must have the server's create shape (`projectCreateNameRe`: 3-32
+  lowercase letters, digits or hyphens, and not ULID-shaped; not the
+  case-insensitive lookup pattern `nativeProjectRe`), checked on both paths
+  before any request. The wizard lowercases a typed name and says so on the
+  Name page and in the summary; the flag form refuses uppercase. A folder-name
+  suggestion is normalized or dropped. The wizard also checks the name against
+  the caller's visible projects, fetched once up front because huh validates
+  on the UI loop. Accessible mode runs each stage as its own form, built only when it
+  runs, since huh's accessible runner evaluates neither `OptionsFunc` nor
+  `DescriptionFunc`. The "Using context" notice is shown on the owner page
+  instead of above the form, under the same several-logins rule, and not at
+  all under `ENTIRE_TOKEN`. An owner with no `--owner` spelling but its ULID
+  (an account with no handle, an org sharing its name) gets no command in the
+  summary, which says why
 - `repo`: control-plane repository lifecycle — `create`, `list --project`,
   `view`, `edit`, `delete`, `clone`, plus the `mirror`, `remote`,
   `visibility`, `protection` and `grant` subtrees (`repo grant` mirrors
@@ -247,7 +274,34 @@ the commands are always runnable in every build.
   `entire cluster list` is now the last place a column headed CLUSTER prints a
   slug; settling that is worth doing on its own and is not this change.
   `repo create` takes no cluster at all: a repo's home cluster is the primary
-  cell of its owning project's region.
+  cell of its owning project's region. `create <name> --project <project>`
+  creates without prompting even in a terminal. With at most a name and no
+  create flags, a terminal gets the same kind of paged wizard as `project
+  create` (project → name → visibility → advanced → object format →
+  summary); only the positional name is carried in. Flags mean the flag
+  form: `--project`, `--visibility` or `--object-format` with an input
+  missing is refused before any request, even in a terminal, and so is any
+  missing input without a terminal (`--json` still prompts, as `grant add` does:
+  stdout carries only the result). Projects reporting
+  `canCreateRepository: false` are hidden (one reporting no capabilities is
+  offered and the server decides, as with `project create`'s orgs). The
+  duplicate-name check reads each project's repo
+  names, loaded in the background when the project is picked, since huh
+  validates on the UI loop; a check before they arrive passes, and a 409 at
+  create reopens the wizard on the same answers. Client-side name validation
+  stays minimal — the server owns the rules (COR-1891). The create endpoint
+  takes no visibility, so `--visibility` (and the wizard's answer, default
+  private, which is also what core gives a new repo) is a second call after
+  the create — after the readiness wait, or straight away with `--no-wait`,
+  which core accepts on a provisioning repo — skipped when the create already
+  reports it; its failure keeps the repo and prints the `repo edit` that
+  finishes the job. Output names the repo by its path, `/et/<project>/<repo>`:
+  from the server's full name or `/et/`
+  path, else the resolved project name, else (a ULID `--project` with neither)
+  one project lookup, made only then and only when the output would use it.
+  The ID is shown only when none of those names it, and in the support line. Recovery
+  `repo view` lines name the repo's path and are dropped when there is none,
+  since that verb takes no ULID.
   `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
   native repo's branch-protection rules through core's
   `/repos/{repoId}/branch-protection` resource: `add` and `remove` are one

@@ -69,6 +69,8 @@ Returns agent metadata and declared capabilities.
 
 The `capabilities` object determines which optional subcommands the CLI will call. If a capability is `false` or missing, the CLI will never invoke the corresponding subcommands.
 
+Optional: `"caller_env_vars": ["MYAGENT_SESSION_ID"]` lists environment variables the agent sets for the commands it runs (uppercase names only). `entire review` uses them to recognise the agent as the caller, so it refuses to approve reviews of someone else's code on the user's behalf and names the agent when one passes `--trust-target`. Agents that set the cross-tool `AI_AGENT` variable are recognised without declaring it.
+
 #### `detect`
 
 Checks whether the agent is present/usable in the current environment.
