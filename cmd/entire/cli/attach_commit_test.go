@@ -852,7 +852,7 @@ func TestAttachCommit_PushedCommitNeedsConfirmation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("attach without confirmation succeeded:\n%s", out.String())
 	}
-	if !strings.Contains(errOut.String(), "already pushed") || !strings.Contains(errOut.String(), "pushed to origin now") {
+	if !strings.Contains(errOut.String(), "already pushed") || !strings.Contains(errOut.String(), "are pushed to origin now") {
 		t.Errorf("expected the pushed-commit warning, got:\n%s", errOut.String())
 	}
 	if state, err := loadAttachState(t, sessionID); err != nil || state != nil {
@@ -870,5 +870,41 @@ func TestReachableFromAny_FailedWalkIsAnError(t *testing.T) {
 	reachable, err := reachableFromAny(context.Background(), head, []string{head.Hash.String()})
 	if err != nil || !reachable {
 		t.Fatalf("reachableFromAny(HEAD from HEAD) = %v, %v", reachable, err)
+	}
+}
+
+// Branch names a remote advertises become fetch refspecs, so only well-formed
+// branch refs are used: a ":" would name a local destination.
+func TestIsRemoteBranchName(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]bool{
+		"refs/heads/main":                  true,
+		"refs/heads/feature/x":             true,
+		"refs/heads/a:refs/heads/victim":   false,
+		"refs/heads/a:refs/entire/cp/x":    false,
+		"refs/heads/*":                     false,
+		"refs/heads/a^b":                   false,
+		"refs/tags/v1":                     false,
+		"refs/heads/..":                    false,
+		"+refs/heads/main:refs/heads/main": false,
+	} {
+		if got := isRemoteBranchName(name); got != want {
+			t.Errorf("isRemoteBranchName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestTrackingRefRemote(t *testing.T) {
+	t.Parallel()
+	remotes := []string{"a", "a/b", "origin"}
+	for ref, want := range map[string]string{
+		"refs/remotes/a/main":     "a",
+		"refs/remotes/a/b/main":   "a/b",
+		"refs/remotes/origin/x/y": "origin",
+		"refs/remotes/other/main": "",
+	} {
+		if got := trackingRefRemote(ref, remotes); got != want {
+			t.Errorf("trackingRefRemote(%q) = %q, want %q", ref, got, want)
+		}
 	}
 }

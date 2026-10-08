@@ -2934,8 +2934,14 @@ func CheckpointsLinkedToWithStubs(ctx context.Context, reader interface {
 	passCtx, cancel := context.WithTimeout(ctx, ListHydrationPassTimeout)
 	defer cancel()
 	since := committedAt.Add(-linkedStubSkew)
+	// A checkpoint ID dated in the future can't be a real attach; its ID is
+	// chosen by whoever pushed it, and as "most recent" it would always win.
+	latest := time.Now().Add(linkedStubSkew)
 	var ids []id.CheckpointID
 	for _, info := range infos {
+		if info.CreatedAt.After(latest) {
+			continue
+		}
 		links := info.LinkedCommits
 		if info.ListedStub && !info.CreatedAt.Before(since) && passCtx.Err() == nil {
 			readCtx, readCancel := context.WithTimeout(passCtx, ListHydrationTimeout)

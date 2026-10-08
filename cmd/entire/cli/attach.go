@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/spf13/cobra"
 )
@@ -321,7 +323,7 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		}
 		warning := []string{
 			fmt.Sprintf("Checkpoint %s, which holds session %s, isn't on %s yet.", cp.id, sessionID, plan.remote),
-			"The checkpoint, including the session transcript, is pushed to " + plan.remote + " now.",
+			"Pending checkpoints, including this one with the session transcript, are pushed to " + plan.remote + " now.",
 		}
 		if err := confirmAttach(w, errW, warning, opts.Force); err != nil {
 			if errors.Is(err, errAttachDeclined) {
@@ -343,6 +345,14 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 			return nil
 		}
 		return err
+	}
+	// The prompt can stay open for a while; the commit may have been pushed
+	// meanwhile (from another terminal or clone a fetch brought in). Check the
+	// tracking refs again before rewriting it.
+	if plan.mode == attachAddTrailer {
+		if holder, _, err := remoteHoldingCommit(ctx, target, plan.checkedRemotes); err != nil || holder != "" {
+			return fmt.Errorf("commit %s was pushed to %s while attach was waiting, so it won't be rewritten; nothing was changed, run attach again", target.Hash.String()[:12], cmp.Or(holder, "a remote"))
+		}
 	}
 
 	author, err := GetGitAuthor(ctx)
@@ -539,7 +549,7 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 		lines = append(lines, fmt.Sprintf("Session %s goes into a new checkpoint linked by that trailer.", sessionID))
 	}
 	if plan.remote != "" {
-		lines = append(lines, "The checkpoint, including the session transcript, is pushed to "+plan.remote+" now.")
+		lines = append(lines, "Pending checkpoints, including this one with the session transcript, are pushed to "+plan.remote+" now.")
 	} else {
 		lines = append(lines, "The checkpoint, including the session transcript, is pushed with your next git push.")
 	}
@@ -877,12 +887,21 @@ func remoteBranchTips(ctx context.Context, remote string) (branches, tips []stri
 		return nil, nil, fmt.Errorf("ls-remote %s: %w", remote, err)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		if fields := strings.Fields(line); len(fields) == 2 {
+		if fields := strings.Fields(line); len(fields) == 2 && isRemoteBranchName(fields[1]) {
 			tips = append(tips, fields[0])
 			branches = append(branches, fields[1])
 		}
 	}
 	return branches, tips, nil
+}
+
+// isRemoteBranchName reports whether name, as a remote advertised it, is a
+// well-formed branch ref that is safe to fetch by name. The names become
+// fetch refspecs, so a hostile remote's "refs/heads/a:refs/heads/main" would
+// otherwise write a local ref; ":" and the other refspec characters are
+// invalid in ref names, which Validate refuses.
+func isRemoteBranchName(name string) bool {
+	return strings.HasPrefix(name, "refs/heads/") && plumbing.ReferenceName(name).Validate() == nil
 }
 
 // remoteHoldingCommit returns a remote whose tracking branches contain target
@@ -897,16 +916,20 @@ func remoteHoldingCommit(ctx context.Context, target *object.Commit, remotes []s
 	if err != nil {
 		return "", "", fmt.Errorf("failed to check which remote branches contain %s: %w", target.Hash.String()[:12], err)
 	}
-	refs := strings.Fields(string(out))
-	holds := func(remote string) bool {
-		return slices.ContainsFunc(refs, func(ref string) bool { return strings.HasPrefix(ref, "refs/remotes/"+remote+"/") })
+	all := attachRemotes(ctx)
+	owners := map[string]bool{}
+	for _, ref := range strings.Fields(string(out)) {
+		if owner := trackingRefRemote(ref, all); owner != "" {
+			owners[owner] = true
+		}
 	}
+	holds := func(remote string) bool { return owners[remote] }
 	for _, remote := range remotes {
 		if holds(remote) {
 			return remote, remote, nil
 		}
 	}
-	for _, remote := range attachRemotes(ctx) {
+	for _, remote := range all {
 		if holds(remote) {
 			pushTo = remote
 			if len(remotes) > 0 {
@@ -916,6 +939,19 @@ func remoteHoldingCommit(ctx context.Context, target *object.Commit, remotes []s
 		}
 	}
 	return "", "", nil
+}
+
+// trackingRefRemote returns which of remotes a remote-tracking ref belongs to:
+// the longest name it starts with, so with remotes "a" and "a/b",
+// refs/remotes/a/b/main is a/b's main, not a's b/main. "" when none.
+func trackingRefRemote(ref string, remotes []string) string {
+	owner := ""
+	for _, remote := range remotes {
+		if strings.HasPrefix(ref, "refs/remotes/"+remote+"/") && len(remote) > len(owner) {
+			owner = remote
+		}
+	}
+	return owner
 }
 
 // reportLinkedCommit tells the user the commit was linked in the checkpoint,

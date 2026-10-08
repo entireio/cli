@@ -50,3 +50,22 @@ func TestCheckpointsLinkedToWithStubs(t *testing.T) {
 	assert.Equal(t, []id.CheckpointID{local, newStub}, got)
 	assert.Equal(t, []id.CheckpointID{newStub, unreadable}, reader.reads)
 }
+
+// A checkpoint dated in the future is ignored: its ID is the pusher's choice,
+// and as the most recent it would otherwise always win.
+func TestCheckpointsLinkedToWithStubs_IgnoresFutureDatedCheckpoints(t *testing.T) {
+	t.Parallel()
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	link := []LinkedCommit{{SHA: sha}}
+	future := id.CheckpointID("555555555555")
+	stub := id.CheckpointID("666666666666")
+	reader := &linkedSummaryReader{summaries: map[id.CheckpointID]*CheckpointSummary{stub: {LinkedCommits: link}}}
+	infos := []CheckpointInfo{
+		{CheckpointID: future, LinkedCommits: link, CreatedAt: time.Now().Add(30 * 24 * time.Hour)},
+		{CheckpointID: stub, ListedStub: true, CreatedAt: time.Now().Add(30 * 24 * time.Hour)},
+	}
+
+	got := CheckpointsLinkedToWithStubs(context.Background(), reader, infos, sha, time.Now())
+	assert.Empty(t, got)
+	assert.Empty(t, reader.reads)
+}
