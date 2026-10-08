@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -373,7 +374,7 @@ var perfLargeFileSets = func() [][]string {
 	return sets
 }()
 
-// Sample prompts for varied FirstPrompt per session.
+// Sample prompts for varied LastPrompt per session.
 var perfPrompts = []string{
 	"implement the login feature",
 	"fix the bug in checkout flow",
@@ -419,7 +420,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 	}
 	store := session.NewStateStoreWithDir(stateDir)
 
-	agentTypes := []agent.AgentType{
+	agentTypes := []types.AgentType{
 		agent.AgentTypeClaudeCode,
 		agent.AgentTypeClaudeCode,
 		agent.AgentTypeClaudeCode,
@@ -466,7 +467,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			t.Fatalf("load template state: %v", loadErr)
 		}
 		tState.AgentType = agentTypes[0]
-		tState.FirstPrompt = perfPrompts[0]
+		tState.LastPrompt = perfPrompts[0]
 		tState.FilesTouched = perfLargeFileSets[0]
 		if saveErr := s.saveSessionState(ctx, tState); saveErr != nil {
 			t.Fatalf("save template state: %v", saveErr)
@@ -504,7 +505,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 				FilesTouched:        perfLargeFileSets[i%len(perfLargeFileSets)],
 				LastInteractionTime: &now,
 				AgentType:           agentTypes[i%len(agentTypes)],
-				FirstPrompt:         perfPrompts[i%len(perfPrompts)],
+				LastPrompt:          perfPrompts[i%len(perfPrompts)],
 			}
 			if saveErr := store.Save(ctx, state); saveErr != nil {
 				t.Fatalf("save ended-shadow state %d: %v", i, saveErr)
@@ -535,7 +536,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			FilesTouched:        perfLargeFileSets[idx%len(perfLargeFileSets)],
 			LastInteractionTime: &now,
 			AgentType:           agentTypes[idx%len(agentTypes)],
-			FirstPrompt:         perfPrompts[idx%len(perfPrompts)],
+			LastPrompt:          perfPrompts[idx%len(perfPrompts)],
 		}
 		if saveErr := store.Save(ctx, state); saveErr != nil {
 			t.Fatalf("save ended-committed state %d: %v", i, saveErr)
@@ -555,7 +556,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			t.Fatalf("load idle state %d: %v", i, loadErr)
 		}
 		state.AgentType = agentTypes[i%len(agentTypes)]
-		state.FirstPrompt = perfPrompts[i%len(perfPrompts)]
+		state.LastPrompt = perfPrompts[i%len(perfPrompts)]
 		state.StepCount = (i % 3) + 1
 		if saveErr := s.saveSessionState(ctx, state); saveErr != nil {
 			t.Fatalf("save idle state %d: %v", i, saveErr)
@@ -589,7 +590,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			t.Fatalf("load active state %d: %v", i, loadErr)
 		}
 		state.AgentType = agentTypes[i%len(agentTypes)]
-		state.FirstPrompt = prompt
+		state.LastPrompt = prompt
 		state.TranscriptPath = transcriptFile
 		if saveErr := s.saveSessionState(ctx, state); saveErr != nil {
 			t.Fatalf("save active state %d: %v", i, saveErr)
