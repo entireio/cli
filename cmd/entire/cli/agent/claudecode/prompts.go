@@ -26,21 +26,36 @@ var (
 //     injected <system-reminder> blocks.
 //   - isCompactSummary: the "This session is being continued from a previous
 //     conversation" summary written after /compact or an automatic compaction.
+//   - isSidechain: a subagent's own conversation. Its user turns are the
+//     parent agent's instructions to the subagent, never the user's prompt.
+//     Current Claude Code writes sidechains to separate subagents/*.jsonl
+//     files, so the main transcript rarely carries them; older versions
+//     interleaved them, and skipping them is free either way.
 type promptLine struct {
 	Type             string          `json:"type"`
 	Role             string          `json:"role,omitempty"`
 	IsMeta           bool            `json:"isMeta,omitempty"`
 	IsCompactSummary bool            `json:"isCompactSummary,omitempty"`
+	IsSidechain      bool            `json:"isSidechain,omitempty"`
 	Message          json.RawMessage `json:"message"`
 }
 
 // injectedUserPrefixes are leading markers of user-side text Claude Code writes
-// without the isMeta flag: background-task completion notices and the marker
-// left when the user interrupts a turn. Anchored on purpose, so a prompt that
-// merely mentions one of them stays a prompt.
+// without the isMeta flag: background-task completion notices, the marker left
+// when the user interrupts a turn, and `!` bash-mode entries. Anchored on
+// purpose, so a prompt that merely mentions one of them stays a prompt.
+//
+// Bash mode writes the command as `<bash-input>cmd</bash-input>` and its output
+// as `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>`, both as plain
+// user entries. All three are dropped rather than unwrapped: a shell command
+// the user ran is not a prompt to the agent, and unwrapping `<bash-input>`
+// would publish commands like `! cat .env` as the checkpoint's intent.
 var injectedUserPrefixes = []string{
 	"<task-notification>",
 	"[Request interrupted by user",
+	"<bash-input>",
+	"<bash-stdout>",
+	"<bash-stderr>",
 }
 
 // ExtractPrompts implements agent.PromptExtractor: the user prompts in the
@@ -71,9 +86,10 @@ func (c *ClaudeCodeAgent) ExtractPromptsFromTranscript(content []byte, fromOffse
 // newline-terminated line, plus a final unterminated one.
 //
 // Dropped: tool results (user entries whose content carries no text block),
-// isMeta and isCompactSummary entries, injected task notifications and
-// interruption markers, agent-injected preambles (textutil.IsInjectedPrompt),
-// and entries left empty once system and IDE tags (<system-reminder>,
+// isMeta, isCompactSummary and isSidechain entries, injected task
+// notifications, interruption markers and `!` bash-mode entries,
+// agent-injected preambles (textutil.IsInjectedPrompt), and entries left
+// empty once system and IDE tags (<system-reminder>,
 // <command-name>, <local-command-stdout>, ...) are stripped.
 func extractPromptsFromContent(data []byte, fromOffset int) []string {
 	var prompts []string
@@ -111,7 +127,7 @@ func userPrompt(raw []byte) (string, bool) {
 	if typ == "" {
 		typ = line.Role
 	}
-	if typ != transcript.TypeUser || line.IsMeta || line.IsCompactSummary {
+	if typ != transcript.TypeUser || line.IsMeta || line.IsCompactSummary || line.IsSidechain {
 		return "", false
 	}
 	// ExtractUserContent keeps only text blocks (tool_result content is
@@ -120,8 +136,9 @@ func userPrompt(raw []byte) (string, bool) {
 	if text == "" || textutil.IsInjectedPrompt(text) {
 		return "", false
 	}
+	trimmed := strings.TrimSpace(text)
 	for _, prefix := range injectedUserPrefixes {
-		if strings.HasPrefix(text, prefix) {
+		if strings.HasPrefix(trimmed, prefix) {
 			return "", false
 		}
 	}

@@ -133,6 +133,30 @@ func TestExtractPromptsFromTranscript_DropsInjectedUserEntries(t *testing.T) {
 			line: `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"uuid":"u12"}`,
 		},
 		{
+			// `!` bash mode: the command the user ran in the shell.
+			name: "bash-mode input",
+			line: `{"type":"user","message":{"role":"user","content":"<bash-input>git status</bash-input>"},"isSidechain":false,"userType":"external","uuid":"u13"}`,
+		},
+		{
+			// `!` bash mode: the command's output, stdout and (empty) stderr.
+			name: "bash-mode stdout",
+			line: `{"type":"user","message":{"role":"user","content":"<bash-stdout>On branch main\nnothing to commit</bash-stdout><bash-stderr></bash-stderr>"},"isSidechain":false,"userType":"external","uuid":"u14"}`,
+		},
+		{
+			name: "bash-mode stderr only",
+			line: `{"type":"user","message":{"role":"user","content":"<bash-stderr>cat: missing.txt: No such file or directory</bash-stderr>"},"isSidechain":false,"userType":"external","uuid":"u15"}`,
+		},
+		{
+			// A subagent's sidechain: the parent agent's instruction, not the user's.
+			name: "sidechain user turn",
+			line: `{"type":"user","message":{"role":"user","content":"Find every caller of resolveFilesTouched."},"isSidechain":true,"agentId":"a1b2c3","userType":"external","uuid":"u16"}`,
+		},
+		{
+			name: "prompt mentioning a bash tag mid-text",
+			line: `{"type":"user","message":{"role":"user","content":"why does <bash-input> show up in my prompts?"},"uuid":"u17"}`,
+			want: []string{"why does <bash-input> show up in my prompts?"},
+		},
+		{
 			name: "assistant entry",
 			line: `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"uuid":"a1"}`,
 		},
