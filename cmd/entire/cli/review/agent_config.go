@@ -98,12 +98,22 @@ func validateMCPServer(name string, raw json.RawMessage, forbiddenRoots []string
 	}
 	switch {
 	case server.Command != "":
-		if err := validateCommand(server.Command, forbiddenRoots); err != nil {
+		// The command is one program path, not a shell line: check it whole.
+		if strings.Contains(server.Command, "CLAUDE_PROJECT_DIR") || slices.Contains(projectLaunchers, server.Command) {
+			return fmt.Errorf("MCP server %q: %q resolves from the reviewed project; use an absolute path to the tool", name, server.Command)
+		}
+		if err := validateCommandWord(server.Command, forbiddenRoots); err != nil {
 			return fmt.Errorf("MCP server %q: %w", name, err)
 		}
 		for _, arg := range server.Args {
-			if strings.Contains(arg, "CLAUDE_PROJECT_DIR") || (filepath.IsAbs(arg) && under(arg, forbiddenRoots)) {
-				return fmt.Errorf("MCP server %q: argument %q points into a checkout", name, arg)
+			if strings.Contains(arg, "CLAUDE_PROJECT_DIR") {
+				return fmt.Errorf("MCP server %q: argument %q refers to the project directory, which is the reviewed checkout", name, arg)
+			}
+			if slices.Contains(projectLaunchers, arg) {
+				return fmt.Errorf("MCP server %q: argument %q resolves tools from the reviewed project", name, arg)
+			}
+			if err := validateCommandWord(arg, forbiddenRoots); err != nil {
+				return fmt.Errorf("MCP server %q: %w", name, err)
 			}
 		}
 	case server.URL == "":
@@ -150,35 +160,115 @@ func validateClaudeSettings(raw json.RawMessage, forbiddenRoots []string) error 
 	return nil
 }
 
-// validateCommand accepts a command line whose program is an absolute path
-// outside every forbidden root, or a bare tool name found on PATH, and which
-// never refers to the project directory.
+// validateCommand accepts a shell command only if none of its words can make
+// the reviewed checkout supply code: every word is checked, including those of
+// commands chained with ;, && or |. A word that is a path must be absolute and
+// outside the forbidden roots; relative paths, $VAR paths, command
+// substitution, the project directory and project launchers are refused.
 func validateCommand(command string, forbiddenRoots []string) error {
 	if strings.Contains(command, "CLAUDE_PROJECT_DIR") {
 		return fmt.Errorf("%q refers to the project directory, which is the reviewed checkout", command)
 	}
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+	words, err := splitShellWords(command)
+	if err != nil {
+		return fmt.Errorf("%q: %w", command, err)
+	}
+	if len(words) == 0 {
 		return errors.New("empty command")
 	}
-	program := strings.Trim(fields[0], `"'`)
-	switch {
-	case filepath.IsAbs(program):
-		if under(program, forbiddenRoots) {
-			return fmt.Errorf("%q runs a program inside a checkout", command)
+	for _, word := range words {
+		if slices.Contains(projectLaunchers, word) {
+			return fmt.Errorf("%q runs %s, which resolves tools from the reviewed project; use an absolute path to the tool", command, word)
 		}
-	case strings.ContainsAny(program, `/\`):
-		return fmt.Errorf("%q uses a relative path, which resolves inside the reviewed checkout; use an absolute path", command)
-	case slices.Contains(projectLaunchers, program):
-		return fmt.Errorf("%q runs %s, which resolves tools from the reviewed project; use an absolute path to the tool", command, program)
-	}
-	for _, field := range fields[1:] {
-		arg := strings.Trim(field, `"'`)
-		if strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../") || (filepath.IsAbs(arg) && under(arg, forbiddenRoots)) {
-			return fmt.Errorf("%q passes %q, which points into a checkout", command, arg)
+		if err := validateCommandWord(word, forbiddenRoots); err != nil {
+			return fmt.Errorf("%q: %w", command, err)
 		}
 	}
 	return nil
+}
+
+func validateCommandWord(word string, forbiddenRoots []string) error {
+	values := []string{word}
+	if _, value, ok := strings.Cut(word, "="); ok && strings.HasPrefix(word, "-") {
+		values = append(values, value) // --flag=value
+	}
+	for _, v := range values {
+		switch {
+		case strings.HasPrefix(v, "$"):
+			return fmt.Errorf("%q depends on a variable; use an absolute path", v)
+		case strings.Contains(v, "://"):
+			// A URL, not a path.
+		case filepath.IsAbs(v):
+			if under(v, forbiddenRoots) {
+				return fmt.Errorf("%q is inside a checkout", v)
+			}
+		case strings.ContainsAny(v, `/\`):
+			return fmt.Errorf("%q is a relative path, which resolves inside the reviewed checkout; use an absolute path", v)
+		}
+	}
+	return nil
+}
+
+// splitShellWords splits a command line into words the way a POSIX shell
+// would for these checks: quotes and backslashes group, and control operators
+// (; & | < > ( )) separate commands. Command substitution is refused, since
+// its result can't be checked.
+func splitShellWords(s string) ([]string, error) {
+	var words []string
+	var cur strings.Builder
+	inWord := false
+	flush := func() {
+		if inWord {
+			words = append(words, cur.String())
+			cur.Reset()
+			inWord = false
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '`' || (c == '$' && i+1 < len(s) && s[i+1] == '('):
+			return nil, errors.New("command substitution isn't allowed")
+		case c == ' ' || c == '\t' || c == '\n':
+			flush()
+		case strings.IndexByte(";&|<>()", c) >= 0:
+			flush()
+		case c == '\\':
+			if i+1 < len(s) {
+				i++
+				cur.WriteByte(s[i])
+				inWord = true
+			}
+		case c == '\'':
+			end := strings.IndexByte(s[i+1:], '\'')
+			if end < 0 {
+				return nil, errors.New("unterminated single quote")
+			}
+			cur.WriteString(s[i+1 : i+1+end])
+			i += end + 1
+			inWord = true
+		case c == '"':
+			i++
+			for ; i < len(s) && s[i] != '"'; i++ {
+				if s[i] == '`' || (s[i] == '$' && i+1 < len(s) && s[i+1] == '(') {
+					return nil, errors.New("command substitution isn't allowed")
+				}
+				if s[i] == '\\' && i+1 < len(s) && strings.IndexByte(`"\$`+"`", s[i+1]) >= 0 {
+					i++
+				}
+				cur.WriteByte(s[i])
+			}
+			if i >= len(s) {
+				return nil, errors.New("unterminated double quote")
+			}
+			inWord = true
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	flush()
+	return words, nil
 }
 
 func under(path string, roots []string) bool {
