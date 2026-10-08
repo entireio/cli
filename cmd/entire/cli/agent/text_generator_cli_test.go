@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -255,5 +257,38 @@ func TestRunIsolatedTextGeneratorCLI_EnvironmentOverrides(t *testing.T) {
 	}
 	if !strings.Contains(out, "ENTIRE_GENERATION_PROBE=last") || strings.Contains(out, "ENTIRE_GENERATION_PROBE=first") || strings.Contains(out, "GIT_DIR=") {
 		t.Fatalf("overrides not applied or Git environment leaked: %q", out)
+	}
+}
+
+// The prompt carries untrusted transcript content and the agent CLIs let
+// their file tools reach the working directory without approval, so each run
+// gets a fresh empty directory, never the shared system temp dir, and the
+// directory is gone afterwards.
+func TestRunIsolatedTextGeneratorCLI_RunsInFreshEmptyDir(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsOS {
+		t.Skip("uses sh")
+	}
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", `pwd -P; ls -A`)
+	}
+	out, _, _, err := RunIsolatedTextGeneratorCLI(context.Background(), runner, "test", "test-agent", nil, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines := strings.Split(out, "\n")
+	dir := lines[0]
+	sharedTemp, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(dir) == filepath.Clean(sharedTemp) {
+		t.Fatalf("ran in the shared temp dir %q", dir)
+	}
+	if len(lines) > 1 {
+		t.Errorf("working dir %q is not empty: %q", dir, lines[1:])
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("working dir %q still exists after the run (stat err = %v)", dir, err)
 	}
 }

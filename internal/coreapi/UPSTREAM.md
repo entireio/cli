@@ -58,6 +58,13 @@ keeps its enum for outgoing requests. Locked in
 by `TestListProjectRepos_UnknownEnumValuesPassThrough`,
 `TestListOrgInvitations_UnknownEnumValuesPassThrough` and
 `TestListOrgMembers_UnknownEnumValuesPassThrough` in `client_test.go`.
+
+The detach result is the same shape: `entire repo mirror detach` displays each
+`DetachPrecondition.precondition` slug, each `DetachAccessEntry`'s `source` and
+`subjectType`, and `DetachRepoResult.status` and `RepoDetachState.status`, and the server documents both the
+precondition list and the status set as growing. Locked in by
+`TestDetachRepo_UnknownEnumValuesPassThrough` and
+`TestGetRepoDetach_UnknownStatusPassesThrough`.
 Retire the allowlist entries as upstream loosens the corresponding fields.
 
 ## 2b. New read-model fields ship as `required`
@@ -93,6 +100,22 @@ consumer: the consolidated index is what `resolveRepoCellTarget` routes with
 and what `search`, `repo mirror` and the dispatch wizard page through, so a
 decode failure there takes out cell routing and search together rather than
 one command.
+
+## 2c. Nullable objects are typed as the object alone
+
+**Symptom:** `ResourcePerson.directGrant` is a `$ref` to
+`ResourcePersonDirectGrant`, but the server sends `"directGrant": null` for
+everyone without a direct grant, which is every GitHub-synced collaborator.
+ogen's decoder then rejects the whole `GET /repos/{repoId}/people` (and
+`/projects/{projectId}/people`) response.
+
+**Fix upstream:** declare the field nullable (`anyOf: [$ref, {type: null}]`),
+or omit it instead of sending null.
+
+**Workaround:** `spec/normalize.go` (`allowReadModelNulls`, allowlist
+`readModelNullableFields`) rewrites the listed `$ref` fields into that
+`anyOf`, so ogen generates a `Nil…` wrapper. Locked in by
+`TestListRepoPeople_NullDirectGrantDecodes`.
 
 ## 3. Every operation advertises the interactive login schemes
 

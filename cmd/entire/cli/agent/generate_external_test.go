@@ -36,11 +36,19 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 		{
 			name:          "codex",
 			agent:         &codex.CodexAgent{},
-			requiredFlags: []string{"exec", "--skip-git-repo-check"},
+			requiredFlags: []string{"exec", "--skip-git-repo-check", "--ignore-user-config"},
 			extraCheck: func(t *testing.T, args []string) {
 				t.Helper()
 				if len(args) == 0 || args[len(args)-1] != "-" {
 					t.Fatalf("expected trailing %q stdin sentinel, got %v", "-", args)
+				}
+				// Every tool-bearing feature stays off: with any of them on, an
+				// injected instruction could read a file into the summary.
+				for _, feature := range []string{"shell_tool", "unified_exec", "code_mode_host", "apps", "plugins", "browser_use", "browser_use_external", "computer_use", "in_app_browser", "view_image", "multi_agent", "image_generation"} {
+					i := slices.Index(args, feature)
+					if i < 1 || args[i-1] != "--disable" {
+						t.Errorf("expected --disable %s in args, got %v", feature, args)
+					}
 				}
 			},
 		},
@@ -55,7 +63,15 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 		{
 			name:          "cursor",
 			agent:         &cursor.CursorAgent{},
-			requiredFlags: []string{"--print", "--force", "--trust", "--workspace"},
+			requiredFlags: []string{"--print", "--trust", "--workspace"},
+			extraCheck: func(t *testing.T, args []string) {
+				t.Helper()
+				// --force auto-approves shell commands; see the cursor package's
+				// TestGenerateText_DeniesEveryPermission for the workspace config.
+				if slices.Contains(args, "--force") {
+					t.Fatalf("--force must not be passed to a text-generation run: %v", args)
+				}
+			},
 		},
 		// antigravity is deliberately absent: agy 1.2.x ignores stdin in print
 		// mode, so its prompt travels in argv. That contract is pinned in the

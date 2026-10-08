@@ -8,3 +8,7 @@ type AcceptInvitationRes interface {
 type CreateOrgInvitationRes interface {
 	createOrgInvitationRes()
 }
+
+type DeleteRepoRes interface {
+	deleteRepoRes()
+}

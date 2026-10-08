@@ -475,20 +475,23 @@ func runGitOutput(ctx context.Context, repoRoot string, args ...string) (string,
 // forge-qualified slug (gh/<owner>/<repo> or et/<project>/<repo>), read from
 // the origin remote. The forge is whatever the remote points at, never
 // assumed, so an Entire-native checkout is addressed as the native repo.
+//
+// Errors name no flag: local mode refuses --repos, so the hint to pass it
+// belongs to the cloud caller alone.
 func resolveOriginRepoSlug(ctx context.Context, repo *git.Repository) (string, error) {
 	remote, err := repo.Remote("origin")
 	if err != nil {
 		logging.Warn(ctx, "dispatch repo resolution failed", "step", "origin_remote", "error", err)
-		return "", fmt.Errorf("dispatch needs an origin remote on GitHub or Entire (or pass --repos %s): %w", RepoSlugShapes, err)
+		return "", fmt.Errorf("dispatch needs an origin remote on GitHub or Entire: %w", err)
 	}
 	if len(remote.Config().URLs) == 0 {
-		return "", fmt.Errorf("dispatch needs an origin remote URL on GitHub or Entire (or pass --repos %s)", RepoSlugShapes)
+		return "", errors.New("dispatch needs an origin remote URL on GitHub or Entire")
 	}
 
 	slug, err := OriginRepoSlug(remote.Config().URLs[0])
 	if err != nil {
 		logging.Warn(ctx, "dispatch repo resolution failed", "step", "parse_origin_remote", "error", err)
-		return "", fmt.Errorf("dispatch cannot address this checkout's origin (pass --repos to name the repo): %w", err)
+		return "", fmt.Errorf("dispatch cannot address this checkout's origin: %w", err)
 	}
 	return slug, nil
 }

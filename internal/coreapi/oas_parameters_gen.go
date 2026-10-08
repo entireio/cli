@@ -11,6 +11,14 @@ type AddOrgMemberParams struct {
 	OrgId string
 }
 
+// BeginPluginInstallationDeletionParams is parameters of beginPluginInstallationDeletion operation.
+type BeginPluginInstallationDeletionParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
+}
+
 // ConnectOrgCIBuildkiteCredentialParams is parameters of connectOrgCIBuildkiteCredential operation.
 type ConnectOrgCIBuildkiteCredentialParams struct {
 	OrgId string
@@ -102,6 +110,10 @@ type DeleteProjectParams struct {
 // DeleteRepoParams is parameters of deleteRepo operation.
 type DeleteRepoParams struct {
 	RepoId string
+	// Also delete the repo's native mirrors. With mirrors present the server marks every copy for
+	// teardown, answers 202, and deletes the primary once they are gone; poll GET /repos/{repoId} until
+	// 404. Without mirrors the delete runs synchronously as usual.
+	Cascade OptBool `json:",omitempty,omitzero"`
 }
 
 // DeleteRepoCIWebhookParams is parameters of deleteRepoCIWebhook operation.
@@ -122,6 +134,11 @@ type DetachMyHandleParams struct {
 	Provider DetachMyHandleProvider
 	// The provider's stable user identifier for the handle (handles[].providerUserId from GET /me).
 	ProviderUserId string
+}
+
+// DetachRepoParams is parameters of detachRepo operation.
+type DetachRepoParams struct {
+	RepoId string
 }
 
 // DisconnectOrgCIDepotOrganizationParams is parameters of disconnectOrgCIDepotOrganization operation.
@@ -161,6 +178,18 @@ type GetOrgPersonAccessParams struct {
 	AccountId string
 }
 
+// GetPluginInstallationParams is parameters of getPluginInstallation operation.
+type GetPluginInstallationParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Installation (ins_<ULID>).
+	ID string
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Repositories per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
+}
+
 // GetProjectParams is parameters of getProject operation.
 type GetProjectParams struct {
 	ProjectId string
@@ -182,6 +211,11 @@ type GetRepoParams struct {
 type GetRepoCIDeliveryParams struct {
 	RepoId string
 	ID     string
+}
+
+// GetRepoDetachParams is parameters of getRepoDetach operation.
+type GetRepoDetachParams struct {
+	RepoId string
 }
 
 // GetRepoVisibilityParams is parameters of getRepoVisibility operation.
@@ -677,6 +711,16 @@ type ResolveProjectParams struct {
 	Project string
 }
 
+// RestorePluginInstallationRepositoryParams is parameters of restorePluginInstallationRepository operation.
+type RestorePluginInstallationRepositoryParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
+	// Public repository id.
+	RepositoryID string
+}
+
 // RevokeOrgInvitationParams is parameters of revokeOrgInvitation operation.
 type RevokeOrgInvitationParams struct {
 	OrgId string
@@ -751,4 +795,14 @@ type UpdateBranchProtectionParams struct {
 type UpdateOrgMemberRoleParams struct {
 	OrgId        string
 	MembershipId string
+}
+
+// ValidatePluginInstallRedirectParams is parameters of validatePluginInstallRedirect operation.
+type ValidatePluginInstallRedirectParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Post-install URL the link names.
+	RedirectURI string
+	// Opaque state the plugin put in the link.
+	State string
 }

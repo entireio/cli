@@ -637,7 +637,8 @@ func validateClusterHost(host string) error {
 }
 
 // newRepoMirrorCmd is the `entire repo mirror` subtree: manage EntireDB
-// GitHub-mirror placements on a cluster (add / list / remove). The
+// GitHub-mirror placements on a cluster (add / list / remove), and detach a
+// GitHub mirror into a native repo. The
 // local-clone rewrite lives at `repo remote add` (repo_remote.go) and the
 // collaborator view at `repo grant list` (repo_grant.go).
 func newRepoMirrorCmd() *cobra.Command {
@@ -648,6 +649,7 @@ func newRepoMirrorCmd() *cobra.Command {
 	cmd.AddCommand(newRepoMirrorAddCmd())
 	cmd.AddCommand(newRepoMirrorListCmd())
 	cmd.AddCommand(newRepoMirrorRemoveCmd())
+	cmd.AddCommand(newRepoMirrorDetachCmd())
 	return requireSubcommand(cmd)
 }
 

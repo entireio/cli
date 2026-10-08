@@ -259,6 +259,113 @@ func TestFormatCommitDate(t *testing.T) {
 	}
 }
 
+func TestFormatCommitDate_DST(t *testing.T) {
+	t.Parallel()
+	sydney, err := time.LoadLocation("Australia/Sydney")
+	if err != nil {
+		t.Fatalf("load Sydney timezone: %v", err)
+	}
+	tests := []struct {
+		name  string
+		now   time.Time
+		input string
+		want  string
+	}{
+		{
+			name:  "23-hour yesterday",
+			now:   time.Date(2026, time.October, 5, 7, 38, 0, 0, sydney),
+			input: "2026-10-04",
+			want:  "Sunday 4 Oct (yesterday)",
+		},
+		{
+			name:  "spring today with UTC now",
+			now:   time.Date(2026, time.October, 5, 7, 38, 0, 0, sydney).UTC(),
+			input: "2026-10-05",
+			want:  "Monday 5 Oct (today)",
+		},
+		{
+			name:  "23-hour tomorrow",
+			now:   time.Date(2026, time.October, 4, 7, 38, 0, 0, sydney),
+			input: "2026-10-05",
+			want:  "Monday 5 Oct",
+		},
+		{
+			name:  "47-hour older day",
+			now:   time.Date(2026, time.October, 6, 7, 38, 0, 0, sydney),
+			input: "2026-10-04",
+			want:  "Sunday 4 Oct",
+		},
+		{
+			name:  "25-hour yesterday",
+			now:   time.Date(2026, time.April, 6, 7, 38, 0, 0, sydney),
+			input: "2026-04-05",
+			want:  "Sunday 5 Apr (yesterday)",
+		},
+		{
+			name:  "autumn today",
+			now:   time.Date(2026, time.April, 6, 7, 38, 0, 0, sydney),
+			input: "2026-04-06",
+			want:  "Monday 6 Apr (today)",
+		},
+		{
+			name:  "invalid",
+			now:   time.Date(2026, time.October, 5, 7, 38, 0, 0, sydney),
+			input: "bad-date",
+			want:  "bad-date",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatCommitDateAt(tt.input, tt.now, sydney)
+			if got != tt.want {
+				t.Errorf("formatCommitDateAt(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatCommitDate_MidnightDST(t *testing.T) {
+	t.Parallel()
+	havana, err := time.LoadLocation("America/Havana")
+	if err != nil {
+		t.Fatalf("load Havana timezone: %v", err)
+	}
+	tests := []struct {
+		name  string
+		now   time.Time
+		input string
+		want  string
+	}{
+		{
+			name:  "today when midnight is skipped",
+			now:   time.Date(2026, time.March, 8, 12, 0, 0, 0, havana),
+			input: "2026-03-08",
+			want:  "Sunday 8 Mar (today)",
+		},
+		{
+			name:  "yesterday when today's midnight is skipped",
+			now:   time.Date(2026, time.March, 8, 12, 0, 0, 0, havana),
+			input: "2026-03-07",
+			want:  "Saturday 7 Mar (yesterday)",
+		},
+		{
+			name:  "yesterday when its midnight was skipped",
+			now:   time.Date(2026, time.March, 9, 12, 0, 0, 0, havana),
+			input: "2026-03-08",
+			want:  "Sunday 8 Mar (yesterday)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatCommitDateAt(tt.input, tt.now, havana); got != tt.want {
+				t.Errorf("formatCommitDateAt(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDetectTimezone_HonoursTZEnv(t *testing.T) {
 	t.Setenv("TZ", "Europe/Berlin")
 	if got := detectTimezone(); got != "Europe/Berlin" {

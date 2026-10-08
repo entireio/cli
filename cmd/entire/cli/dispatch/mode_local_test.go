@@ -1363,3 +1363,29 @@ func addOriginRemoteURL(t *testing.T, repoDir, remoteURL string) {
 		t.Fatal(err)
 	}
 }
+
+// TestLocalMode_UnknownOriginHostDoesNotSuggestRepos: local mode refuses
+// --repos, so an origin it cannot address must not point the user at it.
+func TestLocalMode_UnknownOriginHostDoesNotSuggestRepos(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemoteURL(t, dir, "https://gitlab.com/acme/thing.git")
+
+	t.Chdir(dir)
+
+	_, err := Run(context.Background(), Options{
+		Mode:          ModeLocal,
+		Since:         "7d",
+		Branches:      []string{"main"},
+		TextGenerator: stubGeneratedLocalDispatch(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "gitlab.com") {
+		t.Fatalf("expected an error naming the host, got %v", err)
+	}
+	if strings.Contains(err.Error(), "--repos") {
+		t.Fatalf("local mode refuses --repos, so its error must not suggest it, got %v", err)
+	}
+}

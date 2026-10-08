@@ -1779,6 +1779,46 @@ func TestRestoreResumeSessions_PreservesSafeMultiSessionNoTranscriptFallback(t *
 	}
 }
 
+// Codex moves archived rollouts to archived_sessions, beside the session
+// directory rather than inside it. Resume restores the checkpoint into the live
+// store, where `codex resume` looks, and leaves the archived rollout alone.
+func TestRestoreResumeSessions_RestoresArchivedCodexSessionIntoLiveStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	home := relocateAgentHome(t, agent.AgentTypeCodex)
+	const sessionID = "019a0000-0000-7000-8000-00000000c0de"
+	archived := filepath.Join(home, "archived_sessions", "rollout-2026-09-30T10-00-00-"+sessionID+".jsonl")
+	writeTranscriptFile(t, archived)
+
+	cpID := id.MustCheckpointID("c0dec0dec0de")
+	transcript := []byte(`{"timestamp":"2026-09-30T10:00:00.000Z","type":"session_meta","payload":{"id":"` + sessionID + `","timestamp":"2026-09-30T10:00:00.000Z"}}` + "\n")
+	writeCommittedResumeCheckpointWithTranscript(t, repo, cpID, sessionID, time.Now(), agent.AgentTypeCodex, transcript)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	info, err := readCheckpointInfoFromStore(t.Context(), store, cpID)
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, info, false)
+	if err != nil {
+		t.Fatalf("restoreResumeSessions() error = %v\nstderr: %s", err, stderr.String())
+	}
+	if len(restored) != 1 || restored[0].SessionID != sessionID {
+		t.Fatalf("restored sessions = %#v, want %q\nstderr: %s", restored, sessionID, stderr.String())
+	}
+	live := filepath.Join(home, "sessions", "2026", "09", "30", "rollout-2026-09-30T10-00-00-"+sessionID+".jsonl")
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("restored rollout: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if data, err := os.ReadFile(archived); err != nil || string(data) != `{"type":"user"}`+"\n" {
+		t.Fatalf("archived rollout = %q, %v; want it untouched", data, err)
+	}
+}
+
 // A legacy multi-session checkpoint can carry a session with no ID at all:
 // readCheckpointInfoFromStore appends every entry and guards `!= ""` on the next
 // line. The tamper scan treated that as unsafe, which accused an untouched

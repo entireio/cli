@@ -287,7 +287,43 @@ the commands are always runnable in every build.
   native-mirror routes are home-core-scoped and answer 421 for a repo in another
   jurisdiction, which `coreapi`'s transport follows and re-authenticates on its
   own, so they run on the plain active-context client with no cluster-fronting
-  detour. `remote add <remote-name> [repo]` is the whole `remote` subtree: it
+  detour. `mirror detach <repo> --into /et/<project>/<repo>` serves
+  `/gh/` refs only and is the one mirror verb that converts rather than places:
+  it turns the mirror's sole placement into the native repo `--into` names
+  (one native ref instead of `--project`/`--name`: its project is resolved
+  by name, its repo is the name the detach is asked to use). It is
+  keyed by the placement ID from `/mirrors/placements`, and with several
+  placements it sends the first so the server's `single-placement`
+  precondition explains the refusal. Every run asks for the dry-run plan first,
+  and tables show its access split into who loses and who keeps it, in the
+  grant tables' layout, accounts named by handle and display name from one
+  best-effort `GET
+  /repos/{repoId}/people` read before the write (the API names subjects by ID
+  only; `--json` keeps the IDs and skips the read);
+  an ineligible plan stops before the write with the failed precondition slugs
+  (under `--json`, after printing the plan). A real detach is confirmed through
+  `confirmPrompt` (shared with `grant remove`'s revoke prompt), which writes the
+  plan on the prompt's own writer ahead of the form; `--yes`/`-y` (`addYesFlag`)
+  skips it (there is no `--force`: nothing
+  overrides an ineligible plan), and without a terminal the command
+  refuses before any request (tests reach the prompt with `ENTIRE_TEST_TTY`).
+  `--json` prints the plan on `--dry-run` or a
+  refusal, and the result otherwise. The real call announces that it takes
+  a few minutes and runs `startUpdatableSpinner` from the call itself (which
+  catches the mirror up with GitHub) through the wait; core's internal steps
+  are not shown. An `in_progress` or `stalled` answer is
+  waited on through `GET /repos/{repoId}/detach` (`--no-wait`, `--timeout`,
+  sharing `mirrorPollInterval` with `add`): a resumable stall keeps the wait
+  going because core's sweep resumes it, a non-resumable one ends it non-zero,
+  and the final state is merged into the result so `--json` reports where it
+  ended. Once the write happened the `/gh/` ref answers "moved", so re-running
+  the command cannot reach the detach: every exit that leaves it unfinished
+  prints the `entire api` call that follows (or resumes) it — a real call
+  that got no answer, a 5xx, or an interruption included, since only a 4xx
+  proves nothing changed — and a polling
+  failure is rendered in place so the problem detail does not hide that the
+  detach ran. The precondition, access and status enums are loosened in
+  `normalize.go`, since core documents them as growing. `remote add <remote-name> [repo]` is the whole `remote` subtree: it
   writes one git remote in the *current clone* (local git config only — it
   creates nothing server-side). It serves both forges: for a native repo the
   placements are its primary plus each **ready** mirror. One URL per remote

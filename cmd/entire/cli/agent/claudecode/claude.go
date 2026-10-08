@@ -144,6 +144,19 @@ func (c *ClaudeCodeAgent) GetSessionBaseDir() (string, error) {
 	return filepath.Join(configDir, "projects"), nil
 }
 
+// SessionHome returns Claude Code's configuration directory.
+func (c *ClaudeCodeAgent) SessionHome() (string, error) {
+	return resolveClaudeConfigDir()
+}
+
+// HomeLayout reports that Claude Code keeps per-project session directories
+// under projects.
+func (c *ClaudeCodeAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"projects"}}
+}
+
+var _ agent.HomeLayoutProvider = (*ClaudeCodeAgent)(nil)
+
 // ReadSession reads a session from Claude's storage (JSONL transcript file).
 // The session data is stored in NativeData as raw JSONL bytes.
 // ModifiedFiles is computed by parsing the transcript.

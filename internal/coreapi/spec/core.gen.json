@@ -1332,6 +1332,11 @@
             "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
             "type": "string"
           },
+          "redirect_uri": {
+            "description": "Project installations: a post-install URL registered for the plugin, which redirect_to returns the receipt to",
+            "maxLength": 2048,
+            "type": "string"
+          },
           "repository_ids": {
             "description": "Public repository ids (repo_<ULID>) when repository_selection is selected",
             "items": {
@@ -1585,6 +1590,15 @@
             "description": "Public host of the cluster to pin the repo to (e.g. royalcanin.partial.to); must be in the project's processing cell. Empty takes that cell's cluster.",
             "type": "string"
           },
+          "mirrorClusterSlugs": {
+            "description": "Clusters to add native mirrors on once the repo is active. Core stores them with the create and retries each until its mirror exists.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array",
+            "uniqueItems": true
+          },
           "name": {
             "minLength": 1,
             "type": "string"
@@ -1735,7 +1749,7 @@
             "type": "string"
           },
           "repositoryCount": {
-            "description": "Published logical repositories in paginated project listings. Omitted without project-wide view permission or when unavailable.",
+            "description": "Published logical repositories in paginated project listings. Omitted without project inspect permission or when unavailable.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1780,6 +1794,10 @@
             "description": "Deprecated: read the X-Entire-Commit-Token response header instead.",
             "type": "string"
           },
+          "detachedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
           "foreign": {
             "type": "boolean"
           },
@@ -1792,6 +1810,17 @@
           "jurisdiction": {
             "type": "string"
           },
+          "lastPushedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "mirrorClusterSlugs": {
+            "description": "Native-mirror clusters core stored with this create. Their status is on GET /repos/{repoId}/native-mirrors.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "mirrorSuspended": {
             "type": "boolean"
           },
@@ -1800,6 +1829,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "nativeMirrors": {
+            "description": "Native mirrors this create queued, each pending with its reserved placementId. Their status is on GET /repos/{repoId}/native-mirrors.",
+            "items": {
+              "$ref": "#/components/schemas/NativeMirrorPlacement"
+            },
+            "type": "array"
           },
           "objectFormat": {
             "type": "string"
@@ -1833,7 +1869,7 @@
             "type": "string"
           },
           "state": {
-            "description": "Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.",
+            "description": "Provisioning lifecycle. A mirror is active from creation, before its initial clone completes. A native primary reports deleting while a cascade delete removes its native mirrors; poll until 404.",
             "type": "string"
           },
           "visibility": {
@@ -1844,6 +1880,28 @@
           "id",
           "owningProjectId",
           "name"
+        ],
+        "type": "object"
+      },
+      "DeclineInvitationInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/DeclineInvitationInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "token": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
         ],
         "type": "object"
       },
@@ -1956,6 +2014,179 @@
         "required": [
           "id",
           "name"
+        ],
+        "type": "object"
+      },
+      "DetachAccessEntry": {
+        "additionalProperties": true,
+        "properties": {
+          "coveredByTargetProject": {
+            "description": "True when the target project grants at least this role.",
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string"
+          },
+          "source": {
+            "description": "github: synced from GitHub. legacy-tuple: a placement-level or legacy grant. automation: a CI or plugin automation. project: the mirrors project.",
+            "type": "string"
+          },
+          "subjectId": {
+            "type": "string"
+          },
+          "subjectType": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subjectType",
+          "subjectId",
+          "role",
+          "source",
+          "coveredByTargetProject"
+        ],
+        "type": "object"
+      },
+      "DetachPrecondition": {
+        "additionalProperties": true,
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "precondition": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "precondition",
+          "passed"
+        ],
+        "type": "object"
+      },
+      "DetachRepoBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/DetachRepoBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "dryRun": {
+            "description": "Evaluate the preconditions and the access diff, and change nothing.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Native repository name. Defaults to the GitHub repository name.",
+            "type": "string"
+          },
+          "requestedBy": {
+            "description": "Account the checks apply to. Defaults to the caller. Only a platform admin may set another account.",
+            "type": "string"
+          },
+          "targetProject": {
+            "description": "Project ID that owns the native repository after the detach.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "targetProject",
+          "dryRun"
+        ],
+        "type": "object"
+      },
+      "DetachRepoResult": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/DetachRepoResult.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "access": {
+            "description": "Every account, team, automation, and project with access today.",
+            "items": {
+              "$ref": "#/components/schemas/DetachAccessEntry"
+            },
+            "type": "array"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "eligible": {
+            "description": "True when every precondition passes.",
+            "type": "boolean"
+          },
+          "lostAccess": {
+            "description": "Real detach only. The access sources the target project does not cover, which the detach removed. An empty list when nobody lost access. Absent on a resume, which does not know who lost access.",
+            "items": {
+              "$ref": "#/components/schemas/DetachAccessEntry"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "Native repository name the detach would use.",
+            "type": "string"
+          },
+          "nativeName": {
+            "description": "Real detach only. The repository's new address, et/<project>/<repo>.",
+            "type": "string"
+          },
+          "notices": {
+            "description": "Real detach only. Notices for the requester: the GitHub repository stays live, and the gate guarantee.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "preconditions": {
+            "items": {
+              "$ref": "#/components/schemas/DetachPrecondition"
+            },
+            "type": "array"
+          },
+          "releasedAddresses": {
+            "description": "Real detach only. The gh/<owner>/<repo> addresses that now answer moved.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "requestedBy": {
+            "description": "Account the checks applied to.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Real detach only. complete: every step finished. in_progress: the repository is native and frozen while the rewire runs on. stalled: the rewire stopped; the repository stays frozen until the core's sweep resumes it, after the lease expires, or a call resumes it.",
+            "type": "string"
+          },
+          "statusUrl": {
+            "description": "in_progress and stalled only. The path of GET /api/v1/repos/{repoId}/detach. Poll it to follow the rewire to its end.",
+            "type": "string"
+          },
+          "targetProject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dryRun",
+          "eligible",
+          "requestedBy",
+          "targetProject",
+          "name",
+          "preconditions",
+          "access"
         ],
         "type": "object"
       },
@@ -2160,6 +2391,67 @@
         "required": [
           "needsOnboarding",
           "cliLoggedIn"
+        ],
+        "type": "object"
+      },
+      "GetPluginInstallationOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/GetPluginInstallationOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "installation_id": {
+            "type": "string"
+          },
+          "next_cursor": {
+            "description": "Present when more repositories remain",
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "plugin_id": {
+            "description": "Plugin id (ULID)",
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/PluginInstallationRepository"
+            },
+            "type": "array"
+          },
+          "repository_selection": {
+            "type": "string"
+          },
+          "revision": {
+            "description": "Increases with each change; matches the installation lifecycle events",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plugin_id",
+          "revision",
+          "repositories",
+          "installation_id",
+          "account",
+          "created_at"
         ],
         "type": "object"
       },
@@ -3514,6 +3806,12 @@
           },
           "location": {
             "type": "string"
+          },
+          "providerEmails": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
           }
         },
         "type": "object"
@@ -3835,6 +4133,14 @@
               "active",
               "deleted"
             ],
+            "type": "string"
+          },
+          "failureCode": {
+            "description": "Stable code for why the region failed, when it did.",
+            "type": "string"
+          },
+          "failureMessage": {
+            "description": "Why the region failed, as a sentence that is safe to show a user.",
             "type": "string"
           },
           "lastError": {
@@ -4480,6 +4786,24 @@
         ],
         "type": "object"
       },
+      "PluginInstallationRepository": {
+        "additionalProperties": true,
+        "properties": {
+          "full_name": {
+            "description": "Repository name",
+            "type": "string"
+          },
+          "id": {
+            "description": "Public repository id (repo_<ULID>)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "full_name"
+        ],
+        "type": "object"
+      },
       "PluginInstallationView": {
         "additionalProperties": true,
         "properties": {
@@ -4591,7 +4915,7 @@
             "type": "string"
           },
           "repositoryCount": {
-            "description": "Published logical repositories in paginated project listings. Omitted without project-wide view permission or when unavailable.",
+            "description": "Published logical repositories in paginated project listings. Omitted without project inspect permission or when unavailable.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4760,6 +5084,10 @@
           "clusterSlug": {
             "type": "string"
           },
+          "detachedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
           "foreign": {
             "type": "boolean"
           },
@@ -4770,6 +5098,10 @@
             "type": "string"
           },
           "jurisdiction": {
+            "type": "string"
+          },
+          "lastPushedAt": {
+            "format": "date-time",
             "type": "string"
           },
           "mirrorSuspended": {
@@ -4813,7 +5145,7 @@
             "type": "string"
           },
           "state": {
-            "description": "Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.",
+            "description": "Provisioning lifecycle. A mirror is active from creation, before its initial clone completes. A native primary reports deleting while a cascade delete removes its native mirrors; poll until 404.",
             "type": "string"
           },
           "visibility": {
@@ -4890,6 +5222,64 @@
         "required": [
           "accountId",
           "role"
+        ],
+        "type": "object"
+      },
+      "RepoDetachState": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/RepoDetachState.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "detachedAt": {
+            "description": "When the group rewrite made the repository native.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "frozen": {
+            "description": "True when a detach froze the repository's writes, so a push answers 423. With status none it is a hint: a detach before its group rewrite holds or held the lease, and it can have set the freeze.",
+            "type": "boolean"
+          },
+          "nativeName": {
+            "description": "The repository's native address, et/<project>/<repo>.",
+            "type": "string"
+          },
+          "releasedAddresses": {
+            "description": "The gh/<owner>/<repo> addresses that answer moved.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "resumable": {
+            "description": "True when the rewire stopped and the core's sweep resumes it after the step in step. False on a stalled detach that needs a call to the detach from an admin of the repo's project or a platform admin.",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "none: no detach is recorded. in_progress: the repository is native and frozen while the rewire runs. stalled: the rewire stopped and the repository stays frozen. complete: every step finished.",
+            "type": "string"
+          },
+          "step": {
+            "description": "The last rewire step that finished, 4 to 9. Absent before the group rewrite.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "stepName": {
+            "description": "The name of the step in step, as the rewire's logs and metrics name it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "releasedAddresses",
+          "resumable",
+          "frozen"
         ],
         "type": "object"
       },
@@ -5167,6 +5557,12 @@
           "fullName": {
             "type": "string"
           },
+          "gitCommand": {
+            "type": "string"
+          },
+          "movedTo": {
+            "$ref": "#/components/schemas/RepoReference"
+          },
           "placements": {
             "items": {
               "$ref": "#/components/schemas/RepoPlacement"
@@ -5190,6 +5586,7 @@
               "ready",
               "processing",
               "no-mirror",
+              "moved",
               "unavailable"
             ],
             "type": "string"
@@ -5457,7 +5854,14 @@
             "type": "string"
           },
           "directGrant": {
-            "$ref": "#/components/schemas/ResourcePersonDirectGrant"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResourcePersonDirectGrant"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "displayName": {
             "type": "string"
@@ -5877,6 +6281,28 @@
         ],
         "type": "object"
       },
+      "ValidatePluginInstallRedirectOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ValidatePluginInstallRedirectOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "cancel_url": {
+            "description": "redirect_uri carrying error=access_denied and the state",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cancel_url"
+        ],
+        "type": "object"
+      },
       "WillDeleteStruct": {
         "additionalProperties": true,
         "properties": {
@@ -6239,6 +6665,48 @@
           }
         ],
         "summary": "Accept an organization invitation",
+        "tags": [
+          "orgs"
+        ]
+      }
+    },
+    "/invitations/decline": {
+      "post": {
+        "operationId": "declineInvitation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclineInvitationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Decline an organization invitation",
         "tags": [
           "orgs"
         ]
@@ -8647,7 +9115,7 @@
     },
     "/orgs/{orgId}/people": {
       "get": {
-        "description": "Requires organization management permission, not repository pull permission. Returns one row per account with membership metadata and recorded accessScopes, without grant details or editing capabilities. Grants retain each distinct role and origin (membership, direct, team, or github), without inherited expansion or strongest-role collapsing. Repository IDs identify published logical repo groups, not placements. Membership grants include pending and inactive memberships; membership.status describes their lifecycle. GitHub grants use the collaborator read model and can differ from live SpiceDB permissions during reconciliation. This is a roster read model, not an authorization check or complete SpiceDB audit. Management does not imply Git read permission. Snapshot readiness uses the shared GitHub discovery eligibility and 15-minute grace policy. Detached, suspended, sync-blocked, sync-banned, and wholly suspended mirror targets do not block readiness; recorded edges still serve. Overdue eligible snapshots or missing mirror mappings return 503. Filters select people by recorded grants, not inherited roles. Load /people/{accountId}/access when opening an editor; it returns that person's grants and fresh editing capabilities. The list has no full mode. Filters and totalCount apply before cursor pagination; sort and order select the order, name by default. Outstanding invitations are keyed by email and never joined to an account. They appear only on an unfiltered first page. Only the organization's home core serves this list; other cores answer 421.",
+        "description": "Requires organization management permission, not repository pull permission. Returns one row per account with membership metadata and recorded accessScopes, without grant details or editing capabilities. Grants retain each distinct role and origin (membership, direct, team, or github), without inherited expansion or strongest-role collapsing. Repository IDs identify published logical repo groups, not placements. Membership grants include pending and inactive memberships; membership.status describes their lifecycle. GitHub grants use the collaborator read model and can differ from live SpiceDB permissions during reconciliation. This is a roster read model, not an authorization check or complete SpiceDB audit. Snapshot readiness uses the shared GitHub discovery eligibility and 15-minute grace policy. Detached, suspended, sync-blocked, sync-banned, and wholly suspended mirror targets do not block readiness; recorded edges still serve. Overdue eligible snapshots or missing mirror mappings return 503. Filters select people by recorded grants, not inherited roles. Load /people/{accountId}/access when opening an editor; it returns that person's grants and fresh editing capabilities. The list has no full mode. Filters and totalCount apply before cursor pagination; sort and order select the order, name by default. Outstanding invitations are keyed by email and never joined to an account. They appear only on an unfiltered first page. Only the organization's home core serves this list; other cores answer 421.",
         "operationId": "listOrgPeople",
         "parameters": [
           {
@@ -8980,6 +9448,83 @@
         ]
       }
     },
+    "/plugins/{plugin}/install/validate": {
+      "get": {
+        "description": "Answers 404 for a plugin that registers no post-install URLs. The create route checks the link again.",
+        "operationId": "validatePluginInstallRedirect",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Post-install URL the link names",
+            "explode": false,
+            "in": "query",
+            "name": "redirect_uri",
+            "required": true,
+            "schema": {
+              "description": "Post-install URL the link names",
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque state the plugin put in the link",
+            "explode": false,
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "description": "Opaque state the plugin put in the link",
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidatePluginInstallRedirectOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Check a plugin-started install link before its consent page",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
     "/plugins/{plugin}/installations": {
       "get": {
         "description": "Requires project#manage with project_id, or org#manage with org_id.",
@@ -9116,7 +9661,7 @@
     },
     "/plugins/{plugin}/installations/{id}": {
       "delete": {
-        "description": "Requires project#manage on the installation's project.",
+        "description": "Requires project#manage or org#manage on the installation owner. Org deletion must begin first.",
         "operationId": "deletePluginInstallation",
         "parameters": [
           {
@@ -9167,11 +9712,150 @@
         "tags": [
           "plugins"
         ]
+      },
+      "get": {
+        "description": "Requires project#manage on the installation's project. Org installations are not served. A cursor from an earlier revision answers 409; restart from the first page.",
+        "operationId": "getPluginInstallation",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Installation (ins_<ULID>)",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Installation (ins_<ULID>)",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's next_cursor",
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Opaque cursor from a previous response's next_cursor",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repositories per page",
+            "explode": false,
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 30,
+              "description": "Repositories per page",
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetPluginInstallationOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a project plugin installation and a page of its repositories",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/plugins/{plugin}/installations/{id}/deletion": {
+      "post": {
+        "description": "Requires org#manage on the installation's org. New provider access is denied before the response.",
+        "operationId": "beginPluginInstallationDeletion",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plugin installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Begin uninstalling an org plugin installation",
+        "tags": [
+          "plugins"
+        ]
       }
     },
     "/plugins/{plugin}/installations/{id}/repositories/{repository_id}": {
       "delete": {
-        "description": "Requires project#manage on the installation's project.",
+        "description": "Requires project#manage or org#manage on the installation owner.",
         "operationId": "removePluginInstallationRepository",
         "parameters": [
           {
@@ -9229,6 +9913,69 @@
           }
         ],
         "summary": "Remove a repository from a plugin installation",
+        "tags": [
+          "plugins"
+        ]
+      },
+      "put": {
+        "description": "Requires org#manage on the installation's org. Revocation deleted the repository's automation and grants. Access returns only after the repository is enrolled again.",
+        "operationId": "restorePluginInstallationRepository",
+        "parameters": [
+          {
+            "description": "Plugin installation profile",
+            "in": "path",
+            "name": "plugin",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation profile",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plugin installation id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Plugin installation id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public repository id",
+            "in": "path",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "description": "Public repository id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Clear a repository's revocation from an org plugin installation",
         "tags": [
           "plugins"
         ]
@@ -10811,9 +11558,22 @@
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
+          },
+          {
+            "description": "Also delete the repo's native mirrors. With mirrors present the server marks every copy for teardown, answers 202, and deletes the primary once they are gone; poll GET /repos/{repoId} until 404. Without mirrors the delete runs synchronously as usual.",
+            "explode": false,
+            "in": "query",
+            "name": "cascade",
+            "schema": {
+              "description": "Also delete the repo's native mirrors. With mirrors present the server marks every copy for teardown, answers 202, and deletes the primary once they are gone; poll GET /repos/{repoId} until 404. Without mirrors the delete runs synchronously as usual.",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
+          "202": {
+            "description": "Accepted: cascade=true and the repo has native mirrors. Every copy is marked for teardown and the server deletes the primary once they are gone. Poll GET /repos/{repoId} until it answers 404."
+          },
           "204": {
             "description": "No Content",
             "headers": {
@@ -10896,7 +11656,7 @@
             "headers": {
               "Retry-After": {
                 "schema": {
-                  "description": "Seconds to wait before reading the repo again. Present only while state is \"provisioning\".",
+                  "description": "Seconds to wait before reading the repo again. Present while state is \"provisioning\" or \"deleting\".",
                   "type": "string"
                 }
               }
@@ -11743,6 +12503,116 @@
           }
         ],
         "summary": "List repo collaborators",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/detach": {
+      "get": {
+        "description": "Reports whether a detach of the repository is recorded, in progress, stalled, or complete, and its last finished step. Poll it after a detach answers in_progress or stalled: in_progress turns into complete when step 9 finishes. A stalled detach with resumable true reads in_progress again once the core's sweep resumes it. The sweep skips one with resumable false; a call to the detach from an admin of the repo's project or a platform admin resumes it. A requester who cannot see the repository gets 404. No other permission is needed.",
+        "operationId": "getRepoDetach",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoDetachState"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Read the state of a repository's detach",
+        "tags": [
+          "repos"
+        ]
+      },
+      "post": {
+        "description": "Converts the sole placement of a GitHub mirror into a native repository of the target project. The checks apply to the caller. Only a platform admin with an undelegated credential may set requestedBy to run them for another account. A dry run changes nothing and returns a snapshot: the detach checks every precondition again. A real detach freezes writes, waits for the mirror to match GitHub's refs, and rewires the repository. It answers complete, in_progress while the rewire runs on, or stalled when the rewire stopped; the repository stays frozen until it finishes. An in_progress or stalled answer carries statusUrl, the path of GET /repos/{repoId}/detach. Poll it until it reads complete. A stalled detach reads in_progress again once the sweep or a call resumes it. A call on a detach that stopped after its group rewrite resumes it and skips the preconditions. A requester who fails the authorization rule, or a repo whose GitHub App is not installed, gets a refusal instead of a plan, so the github-app-installed and requester-authorized results always pass in a returned plan. import-complete fails until the placement's data plane marks its initial import complete. A mirror with no completed sync since the mark was introduced needs a resync first; if the check still fails after the sync, ask support.",
+        "operationId": "detachRepo",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetachRepoBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetachRepoResult"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Detach a GitHub mirror into a native repository",
         "tags": [
           "repos"
         ]

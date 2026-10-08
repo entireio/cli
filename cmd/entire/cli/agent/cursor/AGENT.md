@@ -206,6 +206,13 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
   - `--workspace <path>`: Set working directory
   - `--model <model>`: Model override (e.g., `sonnet-4`, `gpt-5`)
   - `--output-format <fmt>`: `text` (default), `json`, `stream-json`
+- Summary text generation (`explain --generate`, auto-summarize) does **not**
+  use `--force`: it runs `agent --print --trust --workspace <fresh empty dir>`
+  with the prompt on stdin, where the workspace holds a `.cursor/cli.json`
+  denying every permission kind (`Shell`, `Read`, `Write`, `WebFetch`, `Mcp`).
+  The prompt carries untrusted transcript content, and Cursor has no
+  "no tools" flag: `--mode ask` and `--sandbox enabled` still allowed shell
+  reads and network requests when verified live. See `generate.go`.
 - Interactive mode: `agent --force` (launches TUI)
   - Prompt pattern for TUI ready: TBD (needs interactive probe)
   - `--resume [chatId]`: Resume specific session

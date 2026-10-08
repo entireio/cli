@@ -488,28 +488,6 @@ func newRepoViewCmd() *cobra.Command {
 	return cmd
 }
 
-func newRepoDeleteCmd() *cobra.Command {
-	var project string
-	cmd := &cobra.Command{
-		Use:   "delete <repo>",
-		Short: "Delete a repository by /et/<project>/<repo> path, name, or ULID",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runControlPlaneDelete(cmd, "repo", args[0],
-				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
-					return resolveRepoRefResolved(ctx, c, args[0], project)
-				},
-				func(ctx context.Context, c *coreapi.Client, id string) error {
-					_, err := c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
-					return err
-				})
-		},
-	}
-	bindRepoProjectFlag(cmd, &project)
-	addForceFlag(cmd)
-	return cmd
-}
-
 // repoVisibility is the field/JSON view shared by `visibility get` and
 // `edit --visibility`. Repo is the reference the user passed (name or ULID); Visibility is
 // the server's authoritative value after the call.

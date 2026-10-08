@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -440,54 +439,8 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 // the question on a writer the user can see, where huh's accessible mode would
 // otherwise print it to stdout, in among the `✓ Revoked` lines.
 var revokeConfirmed = func(cmd *cobra.Command, pt grantPickerTarget, picked []grantCandidate) (bool, error) {
-	if err := revocationInterrupted(cmd); err != nil {
-		return false, err
-	}
 	label, detail := revokeConfirmation(pt, picked)
-	confirmed := false
-	prompt := huh.NewConfirm().Title("Revoke " + label + "?").Value(&confirmed)
-	if detail != "" {
-		prompt = prompt.Description(detail)
-	}
-	render, err := runPromptForm(cmd, NewAccessibleForm(huh.NewGroup(prompt)))
-	// Before the form error is looked at, because handleFormCancellation treats
-	// context.Canceled as a clean abort and would report a signal as an answer.
-	if ierr := revocationInterrupted(cmd); ierr != nil {
-		return false, ierr
-	}
-	if err != nil {
-		// An abort at the prompt IS an answer: Esc or Ctrl+C inside the form is
-		// the user saying no, which is a decision rather than a failure.
-		if cerr := handleFormCancellation(render, "Revocation", err); cerr != nil {
-			return false, cerr
-		}
-		return false, nil
-	}
-	if !confirmed {
-		fmt.Fprintln(render, "Revocation cancelled.")
-		return false, nil
-	}
-	return true, nil
-}
-
-// revocationInterrupted reports a command context that has been cancelled out
-// from under the confirmation, which is an interruption and not an answer.
-//
-// (false, nil) means the user declined, and nothing else may borrow it: the
-// caller exits 0 on it. Wrapping ctx.Err() instead is what lets main.go match
-// the signal it recorded and exit the way every other Ctrl+C in this CLI does —
-// quietly, 130, breaking an enclosing shell loop. plugin_confirm.go is the
-// shape this follows, checking either side of its form for the same reason;
-// confirmControlPlaneDeletion's nilerr skip is the outlier, and carries the
-// same bug for `delete`.
-//
-// Checked before the form as well as after, because huh opens the TTY during
-// startup regardless of context state.
-func revocationInterrupted(cmd *cobra.Command) error {
-	if err := cmd.Context().Err(); err != nil {
-		return fmt.Errorf("revocation cancelled: %w", err)
-	}
-	return nil
+	return confirmPrompt(cmd, "Revocation", "Revoke "+label+"?", detail, nil)
 }
 
 // revokeConfirmation describes what is about to be revoked. A single grantee
@@ -615,7 +568,7 @@ func revokeGrant(cmd *cobra.Command, subject string, revoke func() error) error 
 // account the server sent none for; those show "-".
 var (
 	orgMemberColumns = []string{colHeaderGrantee, colHeaderName, colHeaderRole, colHeaderStatus}
-	grantColumns     = []string{colHeaderGrantee, colHeaderName, colHeaderRole, "SOURCE", "TYPE"}
+	grantColumns     = []string{colHeaderGrantee, colHeaderName, colHeaderRole, colHeaderSource, colHeaderType}
 )
 
 func orgMemberRow(m coreapi.OrgMemberListItem) []string {
