@@ -399,24 +399,27 @@ func resolveExpertsRepo(ctx context.Context, override string) (string, error) {
 // lookup takes, from either spelling the flag accepts: the bare pair, or a
 // gh/<owner>/<repo> triple.
 //
-// Only the triple names a forge, and only it may drop a trailing `.git`: the
-// suffix is decoration on a mirror and part of the name on a native repo. The
-// bare pair carries no forge token, so it goes through verbatim — which is also
-// the spelling resolveExpertsRepo derives from a native origin, so `--repo` and
-// the flagless run name one repository instead of two.
+// A trailing `.git` is dropped from either spelling (see gitDirSuffix): the
+// suffix is never part of a repo name, so dropping it here is what makes
+// `--repo` agree with the pair resolveExpertsRepo derives from origin, which
+// gitremote has already trimmed.
 func parseExpertsRepo(value string) (string, error) {
-	trimmed := strings.Trim(strings.TrimSpace(value), "/")
-	parts := strings.Split(trimmed, "/")
+	parts := strings.Split(strings.Trim(strings.TrimSpace(value), "/"), "/")
 	if len(parts) == 3 && parts[0] == gitremote.ForgeGitHub {
 		parts = parts[1:]
-		// Trimmed before the emptiness check below, so a name that was nothing
-		// but the suffix is refused rather than sent on as an empty repo.
-		parts[1] = strings.TrimSuffix(parts[1], mirrorGitDirSuffix)
 	}
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) != 2 {
 		return "", fmt.Errorf("invalid --repo %q (use owner/repo)", value)
 	}
-	return parts[0] + "/" + parts[1], nil
+	// Trimmed before the checks below, so a name the trim empties (".git") or
+	// turns dot-only ("..git" → ".") is refused here rather than forwarded to
+	// placement resolution. See dotOnlyRe.
+	owner := parts[0]
+	repo, _ := gitremote.CutGitDirSuffix(parts[1])
+	if owner == "" || repo == "" || dotOnlyRe.MatchString(owner) || dotOnlyRe.MatchString(repo) {
+		return "", fmt.Errorf("invalid --repo %q (use owner/repo)", value)
+	}
+	return owner + "/" + repo, nil
 }
 
 func expertsAPIPath(repoID string) string {

@@ -58,7 +58,7 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 		t.Fatalf("SimulateStop second session: %v", err)
 	}
 
-	env.GitCommitWithShadowHooks("Add hello and goodbye methods", "hello.rb", "goodbye.rb")
+	env.GitCommitWithHooks("Add hello and goodbye methods", "hello.rb", "goodbye.rb")
 	checkpointID := env.GetLatestCheckpointIDFromHistory()
 
 	if err := env.ClearSessionState(firstSession.ID); err != nil {

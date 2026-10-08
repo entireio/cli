@@ -22,6 +22,7 @@ var (
 	_ agent.SubagentSessionResolver = (*FactoryAIDroidAgent)(nil)
 	_ agent.HookResponseWriter      = (*FactoryAIDroidAgent)(nil)
 	_ agent.PromptExtractor         = (*FactoryAIDroidAgent)(nil)
+	_ agent.TaskTranscriptMatcher   = (*FactoryAIDroidAgent)(nil)
 )
 
 // WriteHookResponse outputs the hook response as plain text to stdout.

@@ -730,13 +730,10 @@ func TestExpertsCommandFailedPlacement(t *testing.T) {
 	}
 }
 
-// TestParseExpertsRepo pins which --repo spelling may drop a trailing `.git`.
-//
-// The suffix is decoration on a mirror and part of the name on a native repo,
-// so only the gh/ triple — the one spelling that names its forge — may trim it.
-// Trimming the bare pair too made the same command name two different
-// repositories inside a clone of a native repo called `<name>.git`; see
-// TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag.
+// TestParseExpertsRepo pins the --repo grammar and its `.git` handling: the
+// suffix is never part of a name, so both spellings the flag accepts drop it —
+// which is what keeps --repo agreeing with the pair resolveExpertsRepo derives
+// from origin; see TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag.
 func TestParseExpertsRepo(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -746,11 +743,27 @@ func TestParseExpertsRepo(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "bare pair passes through", in: "acme/widget", want: "acme/widget"},
-		{name: "bare pair keeps a .git name", in: "audit1/foo.git", want: "audit1/foo.git"},
+		{name: "bare pair drops the decoration", in: "audit1/foo.git", want: "audit1/foo"},
 		{name: "gh triple drops the forge", in: "gh/acme/widget", want: "acme/widget"},
 		{name: "gh triple drops the decoration", in: "gh/acme/widget.git", want: "acme/widget"},
 		{name: "surrounding slashes are ignored", in: "/gh/acme/widget.git/", want: "acme/widget"},
 		{name: "a gh name that is only the suffix is refused", in: "gh/acme/.git", wantErr: true},
+		{name: "a bare name that is only the suffix is refused", in: "acme/.git", wantErr: true},
+		// The trim can MANUFACTURE a dot-only name out of one that was not, and
+		// the result reaches placement resolution. Refused on both spellings.
+		{name: "a name the trim turns dot-only is refused", in: "acme/..git", wantErr: true},
+		{name: "a gh name the trim turns dot-only is refused", in: "gh/acme/..git", wantErr: true},
+		{name: "a name the trim turns double-dot is refused", in: "acme/...git", wantErr: true},
+		{name: "a dot-only name as typed is refused", in: "acme/..", wantErr: true},
+		// --repo has to agree with the pair resolveExpertsRepo derives from
+		// origin, and an origin URL is where an uppercase suffix actually
+		// comes from. A case-sensitive drop made the two spellings of the
+		// same repository disagree.
+		{name: "bare pair drops an uppercase suffix", in: "audit1/foo.GIT", want: "audit1/foo"},
+		{name: "gh triple drops a mixed-case suffix", in: "gh/acme/widget.Git", want: "acme/widget"},
+		{name: "a longer dotted extension survives", in: "acme/widget.gitignore", want: "acme/widget.gitignore"},
+		{name: "an uppercase suffix alone is refused", in: "acme/.GIT", wantErr: true},
+		{name: "an uppercase suffix the trim turns dot-only is refused", in: "acme/..GIT", wantErr: true},
 		{name: "a non-gh triple is not a pair", in: "et/audit1/foo", wantErr: true},
 		{name: "one segment is not a pair", in: "widget", wantErr: true},
 		{name: "empty is refused", in: "", wantErr: true},
@@ -774,12 +787,11 @@ func TestParseExpertsRepo(t *testing.T) {
 	}
 }
 
-// TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag is the
-// divergence the trim caused, stated as the guarantee it broke: the pair
-// `entire experts` derives from a native origin must survive being passed back
-// as --repo. A repo genuinely named "foo.git" otherwise resolved as "foo" on
-// the flag path and "foo.git" on the origin path: two repositories, one
-// command.
+// TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag states the
+// guarantee the two trims have to agree on: the pair `entire experts` derives
+// from a native origin must survive being passed back as --repo. The origin
+// here spells the `.git` alias, so the two paths only agree if both drop it —
+// one keeping it would make the same command name two repositories.
 //
 // Not parallel: t.Chdir points ResolveRemoteRepo at the fixture repo.
 func TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag(t *testing.T) {
@@ -794,8 +806,8 @@ func TestResolveExpertsRepo_NativeOriginRoundTripsThroughRepoFlag(t *testing.T) 
 	if err != nil {
 		t.Fatalf("resolveExpertsRepo from origin: %v", err)
 	}
-	if fromOrigin != "audit1/foo.git" {
-		t.Fatalf("origin resolved to %q, want %q", fromOrigin, "audit1/foo.git")
+	if fromOrigin != "audit1/foo" {
+		t.Fatalf("origin resolved to %q, want %q", fromOrigin, "audit1/foo")
 	}
 
 	fromFlag, err := resolveExpertsRepo(context.Background(), fromOrigin)

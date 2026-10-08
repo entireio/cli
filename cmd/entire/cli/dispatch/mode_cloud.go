@@ -71,13 +71,13 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		}
 		defer repo.Close()
 
-		repoFullName, err := resolveRepoFullName(ctx, repo)
+		// The slug names the origin's forge (gh/ or et/), so a same-named
+		// repo on the other forge cannot answer for this checkout.
+		repoSlug, err := resolveOriginRepoSlug(ctx, repo)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w (or pass --repos %s to name the repo)", err, RepoSlugShapes)
 		}
-		// The origin remote is GitHub by construction; name the forge so a
-		// same-named native repo cannot answer.
-		repos = []string{GitHubForge + "/" + repoFullName}
+		repos = []string{repoSlug}
 	}
 
 	cloud := NewCloudClient(CloudConfig{BaseURL: baseURL, Token: token})

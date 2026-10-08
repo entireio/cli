@@ -10,6 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -39,28 +41,63 @@ func newRepoCmd() *cobra.Command {
 	return requireSubcommand(cmd)
 }
 
-// repoColumns is the human table/field view of a repo, shared by list and
-// view. CLUSTER/STATE come from optional fields, shown as "-" when unset.
-var repoColumns = []string{"ID", colHeaderName, "PROJECT", colHeaderCluster, "STATE"}
-
-func repoRow(r coreapi.Repo) []string {
-	return []string{r.ID, r.Name, r.OwningProjectId, r.ClusterHost.Or("-"), r.State.Or("-")}
+// repoColumns is the human table for `repo list`, headed the way `repo mirror
+// list` heads the same facts so the two directories read alike.
+//
+// NAME is the /et/<project>/<repo> path, NOT the bare name: a name is unique
+// only inside its project, so the old column printed a string no verb accepts
+// on its own — and `repo view` now takes the path and nothing else, which left
+// the table with no cell a reader could act on. The ULID and project columns
+// went with it; `--json` carries both for anything that needs them.
+//
+// STATUS speaks the placement vocabulary, as `mirror list`'s does: a repo says
+// `active` where a placement says `ready`, and one column should not carry two
+// words for one fact (primaryPlacementStatus). It dashes where the listing
+// returns no state, which happens per repo rather than per project.
+//
+// ACCESS is the one column of `mirror list` left out: it is candidate-only,
+// describing a GitHub repo not yet onboarded, and nothing in a project listing
+// can ever be one — so it would dash on every row, and an always-empty column
+// costs every reader something one reader wants.
+var repoColumns = []string{
+	colName.header, colHeaderCluster, colVisibility.header, colStatus.header,
 }
 
-// repoDetailColumns / repoDetailRow extend the shared repo view with the
-// provisioning reason and entire:// clone URL for the single-repo `view` output.
-// The list view stays on the lean repoColumns — a full clone URL per row would
-// bloat the table — but a person inspecting one repo wants the URL they can
-// paste into `git clone` (COR-699). REMOTE is "-" until the repo is provisioned
-// enough to have a resolvable cluster host + path.
-var repoDetailColumns = []string{"ID", "NAME", "PROJECT", "CLUSTER", "STATE", "PROVISION REASON", "REMOTE"}
-
-func repoDetailRow(r coreapi.Repo) []string {
-	remote := repoRemoteURL(r)
-	if remote == "" {
-		remote = "-"
+// repoRow renders one row against the project the listing was scoped to. The
+// project's NAME comes from resolving the caller's ref once: the repo records
+// carry only its ULID, and a path built from a ULID is not a ref.
+func repoRow(projectName string, r coreapi.Repo) []string {
+	name := r.Name
+	if projectName != "" {
+		name = nativeRepoPath(projectName + "/" + r.Name)
 	}
-	return append(repoRow(r), r.ProvisionReason.Or("-"), remote)
+	return []string{
+		name,
+		r.ClusterHost.Or("-"),
+		visibilityDisplay(visibilityOf(r.Visibility.Or(""))),
+		orDash(primaryPlacementStatus(r.State.Or(""))),
+	}
+}
+
+// repoRowStyled colours the cells `mirror list` colours for the same facts: the
+// cluster cyan, the visibility by what it says, and the status by its lifecycle
+// (repoDirCellsStyled). One directory should not paint a private or a failed
+// repo one way and the other another.
+func repoRowStyled(st statusStyles, projectName string) func(coreapi.Repo) []string {
+	return func(r coreapi.Repo) []string {
+		cells := repoRow(projectName, r)
+		if !st.colorEnabled {
+			return cells
+		}
+		if cells[1] != "-" {
+			cells[1] = st.render(st.cyan, cells[1])
+		}
+		cells[2] = st.render(visibilityColor(st, visibilityOf(r.Visibility.Or(""))), cells[2])
+		if style, ok := repoStatusColor(st, primaryPlacementStatus(r.State.Or(""))); ok {
+			cells[3] = st.render(style, cells[3])
+		}
+		return cells
+	}
 }
 
 // repoRemoteURL synthesizes the entire:// clone/remote URL for a repo from
@@ -108,31 +145,97 @@ func parseObjectFormat(s string) (coreapi.CreateRepoInputBodyObjectFormat, error
 	}
 }
 
+// suggestRepoName returns the name worth recommending in place of one that
+// carried the `.git` suffix, and whether there is one at all. It answers only
+// the question "is this advice the user can act on?".
+//
+// Lowercased, because `repo create` is the one path where the server does NOT
+// fold case: resolution folds (which is why nativeRepoRe accepts uppercase),
+// but an uppercase name is refused outright at create time. So the answer to
+// "WEB.git" is "web". Suggesting "WEB" — the typed string minus four bytes —
+// earned the user a second refusal naming a rule the first message had not
+// mentioned.
+//
+// The shape checks are nativeRepoRe's, which already carries the server's
+// accepted name shape, plus the two rules a regexp cannot: no consecutive
+// dots (RE2 has no negative lookahead, so parseNativeCloneRef checks it
+// separately too) and no raw ULID.
+//
+// This gates only whether the CLI SPEAKS, never whether it refuses, and that
+// is the whole reason it is safe to run locally. nativeRepoRe drifts one way
+// (see its comment): if the server loosens, a local check refuses names that
+// would in fact work. A ref survives that — a ULID or a full entire:// URL
+// gets past it — but a refused `create` has no such escape hatch, so the name
+// itself stays the server's to judge. Going quiet costs a hint; guessing wrong
+// costs a name the user cannot create.
+func suggestRepoName(rest string) (string, bool) {
+	s := strings.ToLower(rest)
+	// A doubled suffix is the one case the shape checks below cannot catch,
+	// because there is nothing malformed about what it leaves. The cut runs
+	// exactly once (see gitremote.CutGitDirSuffix), so "widgets.git.git" leaves
+	// "widgets.git" — an interior dot, which nativeRepoRe rightly allows.
+	// Recommending it would send the user straight back into the guard that
+	// called this, refused a second time by the rule they had just been told.
+	if _, stillCarriesSuffix := gitremote.CutGitDirSuffix(s); stillCarriesSuffix {
+		return "", false
+	}
+	if s == "" || !nativeRepoRe.MatchString(s) || strings.Contains(s, "..") || looksLikeULID(s) {
+		return "", false
+	}
+	return s, true
+}
+
 func newRepoCreateCmd() *cobra.Command {
 	var (
-		projectID    string
+		projectRef   string
 		objectFormat string
+		visibility   string
 		noWait       bool
 		waitTimeout  time.Duration
 	)
 	cmd := &cobra.Command{
-		Use:   cmdCreateName,
+		Use:   "create [<name>]",
 		Short: "Create a repository in a project",
 		Long: `Create a repository and wait for provisioning to become active by
 default. Active means provisioning completed; later pushes or mirror
 creation can still fail for other reasons.
 
+With both a name and --project the repository is created directly.
+
+In an interactive terminal, 'entire repo create' or 'entire repo create
+<name>' opens a wizard instead. It asks for the project, name,
+visibility and advanced options, starting from the given name (or the
+current folder's), and shows a summary before creating anything. With
+--json the prompts stay off stdout, which carries only the repository
+object.
+
+--project, --visibility and --object-format are the flag form: give any
+of them and both a name and --project are required.
+
+--visibility is set once the repository is ready, or straight after
+creation with --no-wait: public grants read-only (pull) access to any
+authenticated Entire user, private restricts it to explicit grantees.
+New repositories are private, so omitting it (or the wizard's default)
+leaves the repository private. If setting it fails, the command exits
+nonzero, keeps the repository and prints the 'entire repo edit' that
+finishes the job.
+
 --wait-timeout must be positive. It bounds project resolution, creation,
 and readiness polling after client setup, including creation with
---no-wait. Use --no-wait to return without confirming readiness.
+--no-wait. The wizard's loading and create share that one budget; time
+spent answering the wizard does not count. Use --no-wait
+to return without confirming readiness.
 
 If creation succeeds but readiness cannot be confirmed, the command exits
 nonzero and preserves the repository result. Do not create again to
 recover. With --json, stdout contains one repository object; progress
 and recovery instructions go to stderr.`,
 		Example: "  entire repo create web --project acme\n" +
+			"  entire repo create web --project acme --visibility public\n" +
 			"  entire repo create web --project acme --no-wait\n" +
-			"  entire repo create web --project acme --wait-timeout=5m",
+			"  entire repo create web --project acme --wait-timeout=5m\n\n" +
+			"  # Pick the project and settings interactively\n" +
+			"  entire repo create web",
 		PreRunE: func(_ *cobra.Command, _ []string) error {
 			// Invalid flag values are usage errors, including zero/negative
 			// durations; match mirror add and Cobra's malformed-value path.
@@ -141,55 +244,81 @@ and recovery instructions go to stderr.`,
 			}
 			return nil
 		},
-		Args: cobra.ExactArgs(1),
+		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var format coreapi.CreateRepoInputBodyObjectFormat
+			req := repoCreateRequest{}
+			if len(args) == 1 {
+				// Trimmed once for both paths, as the wizard trims what is
+				// typed, so ' web ' names the same repo either way and a blank
+				// name counts as missing. The trimmed name is what gets checked
+				// AND what gets sent.
+				req.name = strings.TrimSpace(args[0])
+			}
+			if err := refuseGitSuffixRepoName(req.name); err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
 			if objectFormat != "" {
 				parsed, err := parseObjectFormat(objectFormat)
 				if err != nil {
 					cmd.SilenceUsage = true
 					return err
 				}
-				format = parsed
+				req.objectFormat = parsed
+			}
+			if visibility != "" {
+				parsed, err := parseVisibility(visibility)
+				if err != nil {
+					cmd.SilenceUsage = true
+					return err
+				}
+				req.visibility = parsed
+			}
+			opts := repoCreateOptions{noWait: noWait, waitTimeout: waitTimeout}
+			if req.name == "" || projectRef == "" {
+				// Settled from the command line alone, before any request: a
+				// run that cannot be prompted must not cost a lookup. Flags
+				// mean the flag form, so a create flag with an input missing
+				// is refused even in a terminal: the wizard takes only the
+				// positional name. --json still prompts, as `grant add` does:
+				// the form renders on stderr or the controlling terminal and
+				// stdout carries only the result.
+				// No terminal is checked first: the flag-form refusal suggests
+				// running without flags to be prompted, which nothing can do
+				// without one.
+				cmd.SilenceUsage = true
+				if !interactive.CanPromptInteractively() {
+					return repoCreateMissingInput(req.name, projectRef, errRepoCreateNeedsInput)
+				}
+				if repoCreateFlagsGiven(cmd) {
+					return repoCreateMissingInput(req.name, projectRef, errRepoCreateFlagsNeedInput)
+				}
+				return runRepoCreateWizard(cmd, req.name, opts)
 			}
 			return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
 				ctx, cancel := context.WithTimeout(ctx, waitTimeout)
 				defer cancel()
-				projID, err := resolveProjectRef(ctx, c, projectID)
+				project, err := resolveProjectRefResolved(ctx, c, projectRef)
 				if err != nil {
 					return err
 				}
-				body := &coreapi.CreateRepoInputBody{Name: args[0], ProjectId: projID}
-				if format != "" {
-					body.ObjectFormat = coreapi.NewOptCreateRepoInputBodyObjectFormat(format)
-				}
-				response, err := c.CreateRepo(ctx, body)
+				req.projectID, req.projectName = project.ID, project.Name
+				created, err := createRepo(ctx, c, req)
 				if err != nil {
 					return err
 				}
-				created, err := createdRepoAsRepo(&response.Response)
-				if err != nil {
-					return err
-				}
-				var waitErr error
-				if !noWait {
-					var finish func(bool)
-					waitErr = awaitRepoActive(ctx, c, created, func() {
-						finish = startSpinner(cmd.ErrOrStderr(), "Waiting for repository "+created.Name+" to become active")
-					})
-					if finish != nil {
-						finish(waitErr == nil)
-					}
-				}
-				return reportRepoCreation(cmd, created, noWait, waitErr)
+				return finishRepoCreate(ctx, cmd, c, req, created, opts)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return after creation without confirming provisioning readiness")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 10*time.Minute, "Time limit for project resolution, creation, and provisioning readiness")
-	cmd.Flags().StringVar(&projectID, "project", "", "Owning project (name or ULID) (required)")
-	cmd.Flags().StringVar(&objectFormat, "object-format", "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
-	markRequired(cmd, "project")
+	// "(required)" stays in the text although the flag is not cobra-required
+	// (the wizard asks for it): agents read this list and never have a
+	// terminal, so it is the only place they learn it.
+	cmd.Flags().StringVar(&projectRef, projectFlagName, "", "Owning project (by name) (required; run in a terminal without --project, --visibility or --object-format to be asked instead)")
+	cmd.Flags().StringVar(&objectFormat, repoCreateFlagObjectFormat, "", "Git object format for the repository: sha1 or sha256 (defaults to the server default)")
+	cmd.Flags().StringVar(&visibility, repoCreateFlagVisibility, "", "Visibility to set after creation: public or private (new repositories are private)")
 	addJSONFlag(cmd)
 	return cmd
 }
@@ -217,18 +346,25 @@ func newRepoListCmd() *cobra.Command {
 			return validatePageSize(cmd, pageSize)
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Decide color against the real output writer before
-			// flushThroughPager swaps stdout for a buffer that never looks
-			// like a TTY; the buffered render passes the pre-styled cells
-			// through unchanged (see preStyleTable).
-			headers, row := preStyleTable(cmd.OutOrStdout(), repoColumns, repoRow)
+			// The project's name is known only once the ref is resolved, which
+			// happens inside the core call below — but the row func has to be
+			// built out here, where the real writer decides color. The closure
+			// reads it at render time, which is always after the resolve.
+			// Styled the way `repo mirror list` styles the same table: yellow
+			// headers via styledHeaders, cells via this view's own styler. The
+			// two directories show the same facts and should not look unalike.
+			var projectName string
+			st := newStatusStyles(cmd.OutOrStdout())
+			headers := styledHeaders(st, repoColumns)
+			row := func(r coreapi.Repo) []string { return repoRowStyled(st, projectName)(r) }
 			if pageModeRequested(cmd) {
 				return flushThroughPager(cmd, noPager, func() error {
 					return runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
-						projID, err := resolveProjectRef(ctx, c, project)
+						projID, name, err := resolveProjectRefNamed(ctx, c, project)
 						if err != nil {
 							return err
 						}
+						projectName = name
 						params := coreapi.ListProjectReposParams{ProjectId: projID}
 						if pageToken != "" {
 							params.PageToken = coreapi.NewOptString(pageToken)
@@ -246,10 +382,11 @@ func newRepoListCmd() *cobra.Command {
 			}
 			return flushThroughPager(cmd, noPager, func() error {
 				return runCoreList(cmd, "No repositories found in this project.", headers, row, func(ctx context.Context, c *coreapi.Client) ([]coreapi.Repo, error) {
-					projID, err := resolveProjectRef(ctx, c, project)
+					projID, name, err := resolveProjectRefNamed(ctx, c, project)
 					if err != nil {
 						return nil, err
 					}
+					projectName = name
 					// Rows render in server order with no local filters or
 					// sort, so --limit bounds the fetch directly; without it
 					// the default budget bounds the walk instead.
@@ -291,14 +428,14 @@ func newRepoListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&project, "project", "", "Project to list (name or ULID) (required)")
-	markRequired(cmd, "project")
+	cmd.Flags().StringVar(&project, projectFlagName, "", "Project to list (name or ULID) (required)")
+	markRequired(cmd, projectFlagName)
 	cmd.Flags().IntVar(&limit, "limit", 0, "Fetch and show only the first N repositories (0 uses the default fetch budget)")
 	cmd.Flags().BoolVar(&all, "all", false, "Fetch every repository instead of the first "+strconv.Itoa(coreListFetchBudget)+" (slower on large projects)")
 	cmd.Flags().BoolVar(&noPager, "no-pager", false, "Print directly to stdout instead of a pager for long output")
 	pageModeFlags(cmd, &pageSize, &pageToken)
 	addJSONFlag(cmd)
-	setFlagGroup(cmd, flagGroupScope, "project")
+	setFlagGroup(cmd, flagGroupScope, projectFlagName)
 	setFlagGroup(cmd, flagGroupNavigation, "all", "limit", "page-size", "page-token")
 	setFlagGroup(cmd, flagGroupFormatting, "json", "no-pager")
 	useGroupedFlagHelp(cmd,
@@ -310,76 +447,72 @@ func newRepoListCmd() *cobra.Command {
 }
 
 func newRepoViewCmd() *cobra.Command {
-	var project string
 	var authoritative bool
 	cmd := &cobra.Command{
 		Use:   "view <repo>",
-		Short: "Show a repository by /et/<project>/<repo> path, name, or ULID",
-		Long: `Show repository details. Use --authoritative to also check provisioning
-status. This command does not wait: it exits successfully when it can
-read the repository, even if provisioning is still in progress or has failed.
-Use --authoritative --json and inspect state for scripting; active means
-provisioning has completed.
-
-The default read cannot confirm readiness. If the server cannot provide
-readiness information, --authoritative reports an error or a missing state;
-neither confirms readiness.`,
+		Short: "Show a repository and every cluster holding a copy of it",
+		Long: "Show a repository: its identity, visibility, and one row per cluster " +
+			"it is placed on, with that cluster's clone URL and status.\n\n" +
+			"<repo> names its forge, and nothing else addresses a repository here:\n\n" +
+			"  - /et/<project>/<repo> — an Entire-native repo, shown with its\n" +
+			"    primary cluster and each mirror of it, plus how far a seed in\n" +
+			"    progress has got\n" +
+			"  - /gh/<owner>/<repo> — a GitHub upstream, shown with its mirror on\n" +
+			"    every cluster\n" +
+			"  - an entire:// clone URL, as `git clone` takes it. A trailing .git\n" +
+			"    is decoration on either forge — pasting one from `git remote -v`\n" +
+			"    resolves the same repository as the bare URL\n\n" +
+			"A clone URL is looked up on the login server fronting its cluster, so it " +
+			"resolves even when that cluster belongs to a federation other than the " +
+			"active auth context; every other form is looked up on the active " +
+			"context's login server.\n\n" +
+			"A native repo's state is read authoritatively, so the primary's STATUS " +
+			"says whether it is usable. Pass --authoritative to fail rather than " +
+			"dash that cell when the server cannot answer.",
 		Example: "  entire repo view /et/acme/web\n" +
+			"  entire repo view /gh/octocat/hello-world\n" +
 			"  entire repo view /et/acme/web --json\n" +
-			"  entire repo view /et/acme/web --authoritative",
+			"  entire repo view entire://aws-us-east-2.entire.io/et/acme/web",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCoreObject(cmd, repoDetailColumns, repoDetailRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
-				repoID, err := resolveRepoRef(ctx, c, args[0], project)
+			cmd.SilenceUsage = true
+			ref := strings.TrimSpace(args[0])
+			// A clone URL names its own cluster, so it is looked up on the core
+			// fronting that cluster. Recognised by its scheme so a malformed one
+			// keeps the clone-URL parser's reason instead of being reported as a
+			// bad repository reference.
+			if strings.HasPrefix(strings.ToLower(ref), entireCloneURLScheme) {
+				clusterHost, target, err := parseEntireCloneURL(ref)
 				if err != nil {
-					return nil, err
+					return badRepoRefErr(err)
 				}
-				params := coreapi.GetRepoParams{RepoId: repoID}
-				if authoritative {
-					params.Authoritative = coreapi.NewOptBool(true)
+				if target.forge == nativeCloneForge {
+					return runNativeRepoView(cmd, target.qualified(), clusterHost, authoritative)
 				}
-				repo, err := c.GetRepo(ctx, params)
-				if authoritative && readinessCheckUnavailable(err) {
-					// A registry-only fallback cannot answer the readiness question.
-					// Keep that choice explicit, and print here so renderCoreError
-					// cannot strip the recovery hint with the API error wrapper.
-					// The plain read is the default, so the hint names no flag: a
-					// value the user would have to restate is not a recovery step.
-					fmt.Fprintf(cmd.ErrOrStderr(), "%v\nUse entire repo view %s to inspect repository details without a readiness check.\n", renderRepoReadError(err), repoID)
-					return nil, NewSilentError(err)
-				}
-				if err != nil {
-					return nil, err
-				}
-				return &repo.Response, nil
-			})
+				warnFlagsGitHubViewIgnores(cmd, authoritative)
+				return runRepoMirrorViewByName(cmd, target.owner+"/"+target.repo, clusterHost)
+			}
+			// A repository is named /<forge>/<a>/<b> and no other way, so a
+			// bare `acme/web` is REFUSED — with both spellings suggested, since
+			// this verb serves both forges and naming one would send the reader
+			// to a ref the other half of the time.
+			//
+			// A /gh/ ref is a GitHub upstream: Entire holds no repo record for
+			// it, only the mirrors of it, so it takes the directory lookup
+			// rather than the repo resolver the native path uses.
+			target, err := parseMirrorRepoRef(ref)
+			if err != nil {
+				return err
+			}
+			if target.forge == mirrorCloneForge {
+				warnFlagsGitHubViewIgnores(cmd, authoritative)
+				return runRepoMirrorViewByName(cmd, target.owner+"/"+target.repo, "")
+			}
+			return runNativeRepoView(cmd, target.qualified(), "", authoritative)
 		},
 	}
-	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Check repository provisioning status")
-	bindRepoProjectFlag(cmd, &project)
+	cmd.Flags().BoolVar(&authoritative, "authoritative", false, "Fail if the server cannot confirm provisioning state")
 	addJSONFlag(cmd)
-	return cmd
-}
-
-func newRepoDeleteCmd() *cobra.Command {
-	var project string
-	cmd := &cobra.Command{
-		Use:   "delete <repo>",
-		Short: "Delete a repository by /et/<project>/<repo> path, name, or ULID",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runControlPlaneDelete(cmd, "repo", args[0],
-				func(ctx context.Context, c *coreapi.Client) (resolvedRef, error) {
-					return resolveRepoRefResolved(ctx, c, args[0], project)
-				},
-				func(ctx context.Context, c *coreapi.Client, id string) error {
-					_, err := c.DeleteRepo(ctx, coreapi.DeleteRepoParams{RepoId: id})
-					return err
-				})
-		},
-	}
-	bindRepoProjectFlag(cmd, &project)
-	addForceFlag(cmd)
 	return cmd
 }
 
@@ -490,6 +623,12 @@ func newRepoEditCmd() *cobra.Command {
 	return cmd
 }
 
+// projectFlagName is the --project flag's name, in the one place the repo
+// commands register, require, group and read it. The same word is also a NOUN
+// in `entire project` and in the grant family's messages; those are a different
+// thing that happens to be spelled alike, so they keep their own literals.
+const projectFlagName = "project"
+
 // bindRepoProjectFlag wires the shared --project scope used to resolve a repo
 // addressed by a BARE NAME. That is the only form it serves: a repo name is
 // unique only within its project, and the control plane has no by-name route
@@ -504,7 +643,7 @@ func newRepoEditCmd() *cobra.Command {
 // wrong project was accepted in silence; warnRedundantProjectFlag is what ends
 // that.
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, "project", "", "Owning project (name or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
+	cmd.Flags().StringVar(project, projectFlagName, "", "Owning project (name or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
 	warnRedundantProjectFlag(cmd, project)
 }
 
@@ -515,9 +654,10 @@ func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
 // unconditional --project has been accepted since the flag shipped (ece9fb3dc,
 // June 2026) and is plausibly scripted; breaking that to report a flag that was
 // already being ignored is a poor trade. It does not VALIDATE because that
-// needs GetRepo's owningProjectId, an extra round trip on every command here
-// except `repo view` — which alone already fetches the repo and prints its
-// project.
+// needs GetRepo's owningProjectId, an extra round trip on every command that
+// binds this flag. `repo view` used to be the exemption, since it fetches the
+// repo anyway — it no longer binds the flag at all, taking the
+// /et/<project>/<repo> path that names its own project instead.
 //
 // Wired as a PreRunE because the answer needs only the flag and args[0]: no
 // resolution, no network, and every command binding this flag takes the repo
@@ -534,9 +674,33 @@ func warnRedundantProjectFlag(cmd *cobra.Command, project *string) {
 		}
 		// Changed(), not a non-empty value: an explicit --project "" is still
 		// the user saying something, and reporting it is the point.
-		if len(args) > 0 && c.Flags().Changed("project") && looksLikeULID(args[0]) {
+		if len(args) > 0 && c.Flags().Changed(projectFlagName) && looksLikeULID(args[0]) {
 			fmt.Fprintf(c.ErrOrStderr(), "Note: --project %q is ignored — %s is a repo ULID, which identifies the repo on its own.\n", *project, args[0])
 		}
 		return nil
+	}
+}
+
+// warnFlagsGitHubViewIgnores reports --authoritative reaching the GitHub half of
+// `repo view`, where it means nothing: Entire holds no repo record for an
+// upstream, so there is no provisioning state to confirm and the directory
+// lookup takes no such value.
+//
+// It matters because the flag's help promises to FAIL if the server cannot
+// confirm that state, so a script gating on the guarantee would otherwise get
+// exit 0 with no check performed. Warning rather than erroring keeps a
+// `for repo in ...` loop over mixed forges working.
+//
+// --project is not checked: `repo view` does not register it, so Changed()
+// could only ever answer false.
+//
+// The VALUE is what decides, not Changed(): --authoritative=false asks for
+// exactly what the GitHub path does, so reporting it as ignored tells the
+// caller a flag they turned off was disregarded. warnRedundantProjectFlag tests
+// Changed() alone on purpose — an explicit --project "" still states a scope —
+// but false is this flag's default and states nothing.
+func warnFlagsGitHubViewIgnores(cmd *cobra.Command, authoritative bool) {
+	if authoritative {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Note: --authoritative is ignored for a GitHub repository; Entire holds no repository record for an upstream, only the mirrors of it.")
 	}
 }

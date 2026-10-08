@@ -168,10 +168,10 @@ func reviewCommittedCheckpointContext(ctx context.Context, worktreeRoot string, 
 // Best-effort: any error path returns "" so the run continues. Sessions whose
 // prompt.txt is missing or empty are skipped silently.
 //
-// Why filesystem-not-shadow-branch: for active sessions prompts are written to
-// disk at lifecycle.go:294-310 on every turn for mid-turn commit availability,
-// before SaveStep copies them onto the shadow branch. Filesystem is canonical
-// for in-progress reads; the shadow-branch copy is only canonical post-condensation.
+// Why the filesystem: for active sessions prompts are written to disk on every
+// turn start, and nothing else holds them until condensation copies them into
+// a checkpoint. Filesystem is canonical for in-progress reads; the checkpoint
+// copy is only canonical post-condensation.
 func reviewSessionContext(ctx context.Context, worktreeRoot, headSHA string) string {
 	if worktreeRoot == "" || headSHA == "" {
 		return ""

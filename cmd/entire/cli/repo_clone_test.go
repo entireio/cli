@@ -38,10 +38,18 @@ func TestParseMirrorCloneRef(t *testing.T) {
 		{name: "missing repo", ref: "/gh/entirehq", wantErr: true},
 		{name: "extra segment", ref: "/gh/entirehq/entire-api/extra", wantErr: true},
 		{name: "dot-only repo", ref: "/gh/entirehq/..", wantErr: true},
-		// GitHub cannot hold a name ending in .git, so here the suffix is only
-		// ever decoration. Contrast the native table below.
+		// Same policy as the native side (see gitDirSuffix): the suffix is never
+		// part of a name, so it is only ever decoration.
 		{name: "git suffix is dropped", ref: "/gh/entirehq/entire-api.git", wantOwner: "entirehq", wantRepo: "entire-api"},
 		{name: "git suffix dropped from a dotted name", ref: "/gh/entirehq/trails.el.git", wantOwner: "entirehq", wantRepo: "trails.el"},
+		// This branch lowercases before it cuts, so a ".GIT" ref already
+		// worked — by ordering, not by intent. Pin it: the sibling native
+		// parser and the mirror-URL parser both got the order wrong, and
+		// nothing here said which of the two arrangements was load-bearing.
+		{name: "uppercase git suffix is dropped", ref: "/gh/entirehq/entire-api.GIT", wantOwner: "entirehq", wantRepo: "entire-api"},
+		{name: "mixed-case git suffix is dropped", ref: "/gh/EntireHQ/Entire-API.Git", wantOwner: "entirehq", wantRepo: "entire-api"},
+		{name: "uppercase suffix alone leaves no name", ref: "/gh/entirehq/.GIT", wantErr: true},
+		{name: "gitignore is not the suffix", ref: "/gh/entirehq/entire-api.gitignore", wantOwner: "entirehq", wantRepo: "entire-api.gitignore"},
 		// `..git` is not dot-only as typed; it becomes so once the suffix goes,
 		// which is why the trim has to run first.
 		{name: "dot-only once the suffix is dropped", ref: "/gh/entirehq/..git", wantErr: true},
@@ -86,13 +94,25 @@ func TestParseNativeCloneRef(t *testing.T) {
 		{name: "no leading slash", ref: "et/paul/dogbark", wantProject: "paul", wantRepo: "dogbark"},
 		{name: "uppercase folds server-side", ref: "/et/Paul/DogBark", wantProject: "Paul", wantRepo: "DogBark"},
 		{name: "dotted repo", ref: "/et/paul/entire-trails.el", wantProject: "paul", wantRepo: "entire-trails.el"},
-		// `.git` is part of a native repo name: entiredb permits an interior
-		// dot and the data plane resolves /et/ paths verbatim, so a repo can be
-		// named "dogbark.git" and trimming names a different one. Contrast the
-		// /gh/ table above.
-		{name: "git suffix is part of the name", ref: "/et/paul/dogbark.git", wantProject: "paul", wantRepo: "dogbark.git"},
-		{name: "git suffix on a dotted name", ref: "/et/paul/entire-trails.el.git", wantProject: "paul", wantRepo: "entire-trails.el.git"},
-		{name: "a doubled suffix is verbatim too", ref: "/et/paul/dogbark.git.git", wantProject: "paul", wantRepo: "dogbark.git.git"},
+		// `.git` is never part of a name on either backend (see gitDirSuffix),
+		// so it is dropped before the name is validated — same rule as the /gh/
+		// table above.
+		{name: "git suffix is dropped", ref: "/et/paul/dogbark.git", wantProject: "paul", wantRepo: "dogbark"},
+		{name: "git suffix dropped from a dotted name", ref: "/et/paul/entire-trails.el.git", wantProject: "paul", wantRepo: "entire-trails.el"},
+		{name: "only the last git suffix is dropped", ref: "/et/paul/dogbark.git.git", wantProject: "paul", wantRepo: "dogbark.git"},
+		// A repo transport path accepts this suffix whatever its case, so
+		// `git clone` resolves a ".GIT" path. A case-sensitive cut here made
+		// `entire repo clone` the one client that could not follow a URL
+		// git had just handled.
+		{name: "uppercase git suffix is dropped", ref: "/et/paul/dogbark.GIT", wantProject: "paul", wantRepo: "dogbark"},
+		{name: "mixed-case git suffix is dropped", ref: "/et/paul/dogbark.Git", wantProject: "paul", wantRepo: "dogbark"},
+		{name: "uppercase suffix dropped from a dotted name", ref: "/et/paul/entire-trails.el.GIT", wantProject: "paul", wantRepo: "entire-trails.el"},
+		{name: "only the last suffix goes, whatever its case", ref: "/et/paul/dogbark.git.GIT", wantProject: "paul", wantRepo: "dogbark.git"},
+		{name: "uppercase suffix alone leaves no name", ref: "/et/paul/.GIT", wantErr: true},
+		// A longer extension that merely starts with the suffix is a name,
+		// not decoration, and must survive in every case.
+		{name: "gitignore is not the suffix", ref: "/et/paul/dogbark.gitignore", wantProject: "paul", wantRepo: "dogbark.gitignore"},
+		{name: "GITIGNORE is not the suffix", ref: "/et/paul/dogbark.GITIGNORE", wantProject: "paul", wantRepo: "dogbark.GITIGNORE"},
 		{name: "single-char repo", ref: "/et/paul/x", wantProject: "paul", wantRepo: "x"},
 		{name: "shortest project", ref: "/et/abc/dogbark", wantProject: "abc", wantRepo: "dogbark"},
 		{name: "longest project", ref: "/et/" + maxProject + "/dogbark", wantProject: maxProject, wantRepo: "dogbark"},
@@ -139,6 +159,9 @@ func TestParseNativeCloneRef(t *testing.T) {
 		{name: "consecutive dots in repo", ref: "/et/paul/dog..bark", wantErr: true},
 		{name: "dot-only repo", ref: "/et/paul/..", wantErr: true},
 		{name: "git suffix alone leaves no name", ref: "/et/paul/.git", wantErr: true},
+		// The trim can manufacture a dot-only name here too; nativeRepoRe's
+		// leading-dot rule is what refuses it.
+		{name: "dot-only once the suffix is dropped", ref: "/et/paul/..git", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1314,4 +1337,155 @@ func TestRepoClone_GitHubWithoutTheDefaultClusterStillAsks(t *testing.T) {
 	_, err := resolveCloneURLAgainst(t, srvURL, "")
 	require.ErrorContains(t, err, "none of them is "+defaultClusterHost)
 	require.ErrorContains(t, err, clusterSelectorFlag)
+}
+
+// testDetachedDetail is the answer for a /gh/ address a detach released, in
+// the wording `repo clone` prints, which core may adopt; the parsing table
+// also pins the wording core sends today.
+const testDetachedDetail = `gh/owner/repo was detached and moved to et/acme/repo. Clone using "entire repo clone /et/acme/repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo"`
+
+// detachedMessage is what `repo clone` prints for testGitHubRef detached into
+// et/<project>/<repo> on aws-us-east-2, telling the user to clone cloneArg.
+func detachedMessage(projectRepo, cloneArg string) string {
+	return "gh/owner/repo was detached and moved to et/" + projectRepo + `. Clone using "entire repo clone ` + cloneArg +
+		`" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/` + projectRepo + `"`
+}
+
+// servePlacementsNotFound answers the placements endpoint with a 404 RFC 7807
+// problem, the shape core uses for every refusal.
+func servePlacementsNotFound(t *testing.T, detail string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/mirrors/placements", r.URL.Path)
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusNotFound)
+		assert.NoError(t, printJSON(w, &coreapi.ErrorModel{
+			Status: coreapi.NewOptInt64(http.StatusNotFound),
+			Title:  coreapi.NewOptString("Not Found"),
+			Detail: coreapi.NewOptString(detail),
+		}))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestRepoClone_DetachedAddressNamesTheNativeRepo covers a /gh/ address a
+// detach released: core answers 404 naming the et/ repo, and the user is told
+// how to clone it or repoint a clone — not offered to mirror the address again.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_DetachedAddressNamesTheNativeRepo(t *testing.T) {
+	// The wording core sends today.
+	srvURL := servePlacementsNotFound(t, "gh/owner/repo moved to et/acme/repo. Update your remote: git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo")
+
+	_, err := resolveCloneURLAgainst(t, srvURL, "")
+	require.EqualError(t, err, testDetachedDetail)
+	require.NotContains(t, err.Error(), "mirror add", "a released address must not be onboarded again")
+}
+
+// An address nothing mirrors still answers the empty list, and the user is
+// still offered to onboard it.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_UnmirroredAddressOffersOnboarding(t *testing.T) {
+	srvURL := servePlacements(t, nil)
+
+	_, err := resolveCloneURLAgainst(t, srvURL, "")
+	require.EqualError(t, err, "no mirror found for /gh/owner/repo; run 'entire repo mirror add /gh/owner/repo' to onboard it")
+}
+
+// The message is rebuilt from core's prose, so the cases that prose can take
+// are pinned: a dotted repo name keeps its dot, both wordings are answered
+// the same way, and a 404 that is not a detached
+// answer — or names a path the native grammar refuses — is rendered as core
+// sent it, with no command made up from it.
+//
+// Not parallel: swaps the package-global activeCoreClient.
+func TestRepoClone_DetachedAnswerParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name, detail, want string
+	}{
+		{
+			name:   "dotted repo name",
+			detail: `gh/owner/repo was detached and moved to et/acme/entire-trails.el. Clone using "entire repo clone /et/acme/entire-trails.el" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/entire-trails.el"`,
+			want:   detachedMessage("acme/entire-trails.el", "/et/acme/entire-trails.el"),
+		},
+		{
+			name:   "the wording core sends today",
+			detail: "gh/owner/repo moved to et/acme/repo. Update your remote: git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo",
+			want:   detachedMessage("acme/repo", "/et/acme/repo"),
+		},
+		{
+			name:   "uppercase names, as the grammar admits",
+			detail: `gh/owner/repo was detached and moved to et/Acme/Repo. Clone using "entire repo clone /et/Acme/Repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/Acme/Repo"`,
+			want:   detachedMessage("Acme/Repo", "/et/Acme/Repo"),
+		},
+		{
+			name:   "a .git suffix is not part of the name",
+			detail: "gh/owner/repo moved to et/acme/repo.git. Update your remote: git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/repo.git",
+			want:   detachedMessage("acme/repo", "/et/acme/repo"),
+		},
+		{name: "plain not found", detail: "repo not found"},
+		{name: "trailing text", detail: testDetachedDetail + " (since 2026-10-01)"},
+		{name: "control characters in the path", detail: `gh/owner/repo was detached and moved to et/acme/re` + "\x1b" + `po. Clone using "entire repo clone /et/acme/re` + "\x1b" + `po" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/re` + "\x1b" + `po"`},
+		{name: "path the grammar refuses", detail: `gh/owner/repo was detached and moved to et/a/b. Clone using "entire repo clone /et/a/b" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/a/b"`},
+		{name: "not an et/ path", detail: `gh/owner/repo was detached and moved to gh/other/repo. Clone using "entire repo clone /gh/other/repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/gh/other/repo"`},
+		{name: "remote names another repo", detail: `gh/owner/repo was detached and moved to et/acme/repo. Clone using "entire repo clone /et/acme/repo" or update your remote using "git remote set-url origin entire://aws-us-east-2.entire.io/et/acme/other"`},
+		{name: "remote host refused", detail: `gh/owner/repo was detached and moved to et/acme/repo. Clone using "entire repo clone /et/acme/repo" or update your remote using "git remote set-url origin entire://localhost:1/et/acme/repo"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srvURL := servePlacementsNotFound(t, tc.detail)
+
+			_, err := resolveCloneURLAgainst(t, srvURL, "")
+			if tc.want == "" {
+				require.EqualError(t, err, tc.detail)
+				return
+			}
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+// --cluster resolves on the core fronting that cluster, and a released address
+// there gets the same answer.
+//
+// Not parallel: swaps the package-global clusterCoreClient.
+func TestRepoClone_DetachedAddressOnAnotherCluster(t *testing.T) {
+	srvURL := servePlacementsNotFound(t, testDetachedDetail)
+	prev := clusterCoreClient
+	clusterCoreClient = func(context.Context, string) (*coreapi.Client, error) {
+		return coreapi.NewWithBearer(srvURL, "tok")
+	}
+	t.Cleanup(func() { clusterCoreClient = prev })
+
+	_, err := resolveRepoRemoteURL(cloneTestCmdWithContext(t), testGitHubRef, "aws-us-east-2.entire.io", clonePlacementPicker())
+	// The full URL, not the /et/ shorthand: a shorthand resolves on the active
+	// context, which need not be the federation that answered.
+	require.EqualError(t, err, detachedMessage("acme/repo", "entire://aws-us-east-2.entire.io/et/acme/repo"))
+}
+
+// A --cluster that does not resolve falls back to the active context, and a
+// detached answer from there is the answer: the DNS failure stays a debug detail,
+// as it does when the fallback lists placements.
+//
+// Not parallel: swaps package-global client seams.
+func TestRepoClone_DetachedAddressThroughTheUnknownClusterFallback(t *testing.T) {
+	srvURL := servePlacementsNotFound(t, testDetachedDetail)
+	unreachableCluster(t, true)
+
+	_, err := resolveCloneURLAgainst(t, srvURL, "wrongcluster")
+	require.EqualError(t, err, testDetachedDetail)
+}
+
+// The placement resolver is shared by remote, mirror remove/detach and grant
+// routing, so the message is rebuilt by `repo clone` alone: the shared
+// resolver keeps core's answer as the plain API error it always was.
+func TestResolvePullablePlacements_DetachedAnswerStaysCoreError(t *testing.T) {
+	t.Parallel()
+	c, err := coreapi.NewWithBearer(servePlacementsNotFound(t, testDetachedDetail), "tok")
+	require.NoError(t, err)
+
+	_, err = resolvePullablePlacements(t.Context(), c, "owner", "repo")
+	require.Error(t, err)
+	require.Equal(t, testDetachedDetail, coreapi.APIError(err))
 }

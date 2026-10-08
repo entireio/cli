@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func TestResume_SwitchBranchWithSession(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 
 	// Remember the feature branch name
 	featureBranch := env.GetCurrentBranch()
@@ -113,7 +114,7 @@ func TestResume_AlreadyOnBranch(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create a test script", "test.js")
+	env.GitCommitWithHooks("Create a test script", "test.js")
 
 	currentBranch := env.GetCurrentBranch()
 
@@ -242,7 +243,7 @@ func TestResume_SessionLogAlreadyExists(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -323,7 +324,7 @@ func TestResume_MultipleSessionsOnBranch(t *testing.T) {
 	}
 
 	// Commit the sessions' changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Update to version 2", "file.txt")
+	env.GitCommitWithHooks("Update to version 2", "file.txt")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -371,7 +372,7 @@ func TestResume_CheckpointWithoutMetadata(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create real file", "real.txt")
+	env.GitCommitWithHooks("Create real file", "real.txt")
 
 	// Create a new branch for the orphan checkpoint test
 	env.GitCheckoutNewBranch("feature/orphan-checkpoint")
@@ -432,7 +433,7 @@ func TestResume_AfterMergingMain(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 
 	// Remember the feature branch name
 	featureBranch := env.GetCurrentBranch()
@@ -599,7 +600,7 @@ func TestResume_ExistingLocalLog_KeptByDefault(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -662,7 +663,7 @@ func TestResume_LocalLogNewerTimestamp_ForceOverwrites(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -726,7 +727,7 @@ func TestResume_ExistingLocalLog_KeptEvenWhenCheckpointNewer(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -806,7 +807,7 @@ func TestResume_MultiSessionMixedTimestamps(t *testing.T) {
 
 	// Commit changes with hooks (this triggers prepare-commit-msg and post-commit hooks,
 	// which adds Entire-Checkpoint trailer and condenses both sessions to the same checkpoint)
-	env.GitCommitWithShadowHooks("Add hello and goodbye methods", "hello.rb", "goodbye.rb")
+	env.GitCommitWithHooks("Add hello and goodbye methods", "hello.rb", "goodbye.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -896,7 +897,7 @@ func TestResume_LocalLogNoTimestamp(t *testing.T) {
 	}
 
 	// Commit the session's changes (manual-commit requires user to commit)
-	env.GitCommitWithShadowHooks("Create hello method", "hello.rb")
+	env.GitCommitWithHooks("Create hello method", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 
@@ -962,7 +963,7 @@ func TestResume_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 
 	// Commit session 1 (triggers condensation → checkpoint 1 on entire/checkpoints/v1)
-	env.GitCommitWithShadowHooks("Create hello script", "hello.rb")
+	env.GitCommitWithHooks("Create hello script", "hello.rb")
 	checkpointID1 := env.GetLatestCheckpointID()
 	t.Logf("Session 1 checkpoint: %s", checkpointID1)
 
@@ -984,7 +985,7 @@ func TestResume_SquashMergeMultipleCheckpoints(t *testing.T) {
 	}
 
 	// Commit session 2 (triggers condensation → checkpoint 2 on entire/checkpoints/v1)
-	env.GitCommitWithShadowHooks("Create goodbye script", "goodbye.rb")
+	env.GitCommitWithHooks("Create goodbye script", "goodbye.rb")
 	checkpointID2 := env.GetLatestCheckpointID()
 	t.Logf("Session 2 checkpoint: %s", checkpointID2)
 
@@ -1068,7 +1069,7 @@ func TestResume_RelocatedRepo(t *testing.T) {
 	}
 
 	// Commit the file (manual-commit requires user to commit with hooks)
-	env.GitCommitWithShadowHooks("Create a hello script", "hello.rb")
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
 
 	featureBranch := env.GetCurrentBranch()
 	originalClaudeProjectDir := env.ClaudeProjectDir
@@ -1150,5 +1151,138 @@ func TestResume_RelocatedRepo(t *testing.T) {
 	// Verify output contains session info
 	if !strings.Contains(output, "Restored session") {
 		t.Errorf("output should contain 'Restored session', got: %s", output)
+	}
+}
+
+// TestResume_HonorsClaudeConfigDir pins the restore destination to Claude
+// Code's relocated config directory: with CLAUDE_CONFIG_DIR set, the transcript
+// lands under <dir>/projects/<encoded-repo>/, where the agent will look for it,
+// not under ~/.claude.
+func TestResume_HonorsClaudeConfigDir(t *testing.T) {
+	t.Parallel()
+	env := NewFeatureBranchEnv(t)
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	content := rubyPuts
+	env.WriteFile("hello.rb", content)
+	session.CreateTranscript(
+		"Create a hello script",
+		[]FileChange{{Path: "hello.rb", Content: content}},
+	)
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
+	featureBranch := env.GetCurrentBranch()
+	env.GitCheckoutBranch(masterBranch)
+
+	// The child gets a throwaway home as well as the config dir: with the
+	// ENTIRE_TEST override cleared it falls back to the real resolver, and a
+	// regression that ignored CLAUDE_CONFIG_DIR would otherwise write into the
+	// developer's own ~/.claude and leave the transcript behind.
+	configDir := t.TempDir()
+	fakeHome := t.TempDir()
+	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "session", "resume", featureBranch)
+	cmd.Dir = env.RepoDir
+	cmd.Env = append(testutil.GitIsolatedEnv(),
+		"ENTIRE_TEST_CLAUDE_PROJECT_DIR=", // empty so the real resolution runs
+		"CLAUDE_CONFIG_DIR="+configDir,
+		"HOME="+fakeHome,
+		"USERPROFILE="+fakeHome,
+	)
+	outputBytes, err := cmd.CombinedOutput()
+	output := string(outputBytes)
+	if err != nil {
+		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	}
+
+	if !strings.Contains(output, configDir) {
+		t.Errorf("output should name the destination under %s, got:\n%s", configDir, output)
+	}
+	restored, err := filepath.Glob(filepath.Join(configDir, "projects", "*", session.ID+".jsonl"))
+	if err != nil {
+		t.Fatalf("glob restored transcript: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("expected the transcript under %s/projects/<repo>/, got %v", configDir, restored)
+	}
+	stray, err := filepath.Glob(filepath.Join(fakeHome, ".claude", "projects", "*", session.ID+".jsonl"))
+	if err != nil {
+		t.Fatalf("glob home fallback: %v", err)
+	}
+	if len(stray) != 0 {
+		t.Errorf("transcript also landed under the home fallback: %v", stray)
+	}
+}
+
+// TestResume_AsksClaudeForItsConfigDir covers the relocation the environment
+// cannot see: a CLAUDE_CONFIG_DIR set only in Claude's settings files. Resume
+// asks claude itself (the SDK initialize reply), and a fake claude stands in
+// for it here, answering with a config home that appears nowhere in the
+// child's environment.
+func TestResume_AsksClaudeForItsConfigDir(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake claude is a shell script")
+	}
+	env := NewFeatureBranchEnv(t)
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+	content := rubyPuts
+	env.WriteFile("hello.rb", content)
+	session.CreateTranscript(
+		"Create a hello script",
+		[]FileChange{{Path: "hello.rb", Content: content}},
+	)
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+	env.GitCommitWithHooks("Create a hello script", "hello.rb")
+	featureBranch := env.GetCurrentBranch()
+	env.GitCheckoutBranch(masterBranch)
+
+	configDir := t.TempDir()
+	fakeHome := t.TempDir()
+	fakeClaude := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\nread -r _\n" +
+		`printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"entire-config-dir","response":{"user_output_styles_dir":"` +
+		filepath.Join(configDir, "output-styles") + `"}}}'` + "\nsleep 30\n"
+	if err := os.WriteFile(fakeClaude, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "session", "resume", featureBranch)
+	cmd.Dir = env.RepoDir
+	cmd.Env = append(testutil.GitIsolatedEnv(),
+		"ENTIRE_TEST_CLAUDE_PROJECT_DIR=", // empty so the real resolution runs
+		"ENTIRE_TEST_CLAUDE_CONFIG_PROBE="+fakeClaude,
+		"HOME="+fakeHome,
+		"USERPROFILE="+fakeHome,
+	)
+	outputBytes, err := cmd.CombinedOutput()
+	output := string(outputBytes)
+	if err != nil {
+		t.Fatalf("resume failed: %v\nOutput: %s", err, output)
+	}
+
+	restored, err := filepath.Glob(filepath.Join(configDir, "projects", "*", session.ID+".jsonl"))
+	if err != nil {
+		t.Fatalf("glob restored transcript: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("expected the transcript under claude's reported config home %s, got %v\nOutput: %s", configDir, restored, output)
+	}
+	stray, err := filepath.Glob(filepath.Join(fakeHome, ".claude", "projects", "*", session.ID+".jsonl"))
+	if err != nil {
+		t.Fatalf("glob home fallback: %v", err)
+	}
+	if len(stray) != 0 {
+		t.Errorf("transcript also landed under the home fallback: %v", stray)
 	}
 }

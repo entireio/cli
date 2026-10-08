@@ -123,6 +123,19 @@ func TestResolveAgentTranscriptPath(t *testing.T) {
 		}
 	})
 
+	// Claude Code keeps Workflow agents' transcripts one run directory deeper
+	// (#2685): <subagents>/workflows/<runId>/agent-<id>.jsonl.
+	t.Run("workflow run layout", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		want := filepath.Join(dir, sessionID, "subagents", "workflows", "wf_e5264e60-494", "agent-"+agentID+".jsonl")
+		writeFile(t, want)
+
+		if got := ResolveAgentTranscriptPath(dir, sessionID, agentID); got != want {
+			t.Errorf("ResolveAgentTranscriptPath() = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("neither exists", func(t *testing.T) {
 		t.Parallel()
 		if got := ResolveAgentTranscriptPath(t.TempDir(), sessionID, agentID); got != "" {

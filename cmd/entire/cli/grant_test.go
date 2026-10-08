@@ -91,7 +91,7 @@ func TestGrantRows(t *testing.T) {
 	// grantColumns and the row builders must stay in lockstep — same width,
 	// same column order — or the table header and cells misalign. No column
 	// carries an internal id: the grantee ULID stays in --json only.
-	require.Equal(t, []string{"GRANTEE", "ROLE", "SOURCE", "TYPE"}, grantColumns)
+	require.Equal(t, []string{"GRANTEE", "NAME", "ROLE", "SOURCE", "TYPE"}, grantColumns)
 
 	t.Run("project resolved name", func(t *testing.T) {
 		t.Parallel()
@@ -102,7 +102,33 @@ func TestGrantRows(t *testing.T) {
 			Role:        "writer",
 			Source:      "direct",
 		})
-		require.Equal(t, []string{"github:alice", "writer", "direct", "account"}, row)
+		require.Equal(t, []string{"github:alice", "-", "writer", "direct", "account"}, row)
+	})
+
+	t.Run("project shows the display name", func(t *testing.T) {
+		t.Parallel()
+		row := projectGrantRow(coreapi.ProjectGrant{
+			GranteeId:   ulid,
+			GranteeName: coreapi.NewOptString("google:google-1001"),
+			DisplayName: coreapi.NewOptString("  Victor Gutierrez "),
+			GranteeType: "account",
+			Role:        "writer",
+			Source:      "direct",
+		})
+		require.Equal(t, []string{"google:1001", "Victor Gutierrez", "writer", "direct", "account"}, row)
+	})
+
+	t.Run("repo shows the display name", func(t *testing.T) {
+		t.Parallel()
+		row := repoGrantRow(coreapi.RepoGrant{
+			GranteeId:   ulid,
+			GranteeName: coreapi.NewOptString("github:alice"),
+			DisplayName: coreapi.NewOptString("Alice Smith"),
+			GranteeType: "account",
+			Role:        "admin",
+			Source:      "direct",
+		})
+		require.Equal(t, []string{"github:alice", "Alice Smith", "admin", "direct", "account"}, row)
 	})
 
 	// Org membership is the same table shape at the front: the grantee's
@@ -140,6 +166,6 @@ func TestGrantRows(t *testing.T) {
 			Role:        "reader",
 			Source:      "inherited",
 		})
-		require.Equal(t, []string{ulid, "reader", "inherited", "team"}, row)
+		require.Equal(t, []string{ulid, "-", "reader", "inherited", "team"}, row)
 	})
 }

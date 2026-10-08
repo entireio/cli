@@ -54,12 +54,17 @@ var (
 	// that must not guess a forge can still recognise `github.com/owner/repo`.
 	gitHubHostedBareRe = regexp.MustCompile(`^github\.com/` + gitHubOwnerRepoPat + `(?:\.git)?$`)
 
-	// gitHubDotOnlyRe matches repo segments that are entirely dots
+	// dotOnlyRe matches repo segments that are entirely dots
 	// (".", "..", ...). The tightened owner charset already excludes
 	// dots, but gitHubRepoPat allows ".", and a dot-only repo name would
 	// embed a literal ".." in both /gh/<owner>/<repo> and the
 	// token-exchange audience. Reject at the boundary.
-	gitHubDotOnlyRe = regexp.MustCompile(`^\.+$`)
+	//
+	// Not forge-specific, despite living beside the GitHub patterns: dropping
+	// `.git` can MANUFACTURE a dot-only name out of one that was not (`..git`
+	// → `.`, `...git` → `..`), so every grammar that trims the suffix has to
+	// re-check afterwards, native ones included.
+	dotOnlyRe = regexp.MustCompile(`^\.+$`)
 )
 
 func parseGitHubURL(rawURL string) (owner, repo string, err error) {
@@ -83,7 +88,7 @@ func matchGitHubURL(rawURL string, res ...*regexp.Regexp) (owner, repo string, e
 			continue
 		}
 		owner, repo = strings.ToLower(m[1]), strings.ToLower(m[2])
-		if gitHubDotOnlyRe.MatchString(repo) {
+		if dotOnlyRe.MatchString(repo) {
 			return "", "", fmt.Errorf("invalid GitHub URL: repo cannot be dot-only: %s", rawURL)
 		}
 		return owner, repo, nil

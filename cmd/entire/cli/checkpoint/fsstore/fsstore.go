@@ -61,6 +61,14 @@ type storedSession struct {
 type storedCheckpoint struct {
 	Summary  cp.CheckpointSummary `json:"summary"`
 	Sessions []storedSession      `json:"sessions"`
+	Tasks    []storedTask         `json:"tasks,omitempty"`
+}
+
+// storedTask is one subagent task record: the git writer's task.json plus its
+// optional agent-<agent_id>.jsonl, kept inline.
+type storedTask struct {
+	Record     cp.TaskRecord `json:"record"`
+	Transcript []byte        `json:"transcript,omitempty"`
 }
 
 var (
@@ -120,8 +128,6 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 		return s.backfillTranscript(cp.UpdateOptions(r))
 	case cp.SessionSummary:
 		return s.writeSessionSummary(r)
-	case cp.CheckpointAttribution:
-		return s.writeAttribution(r)
 	default:
 		return fmt.Errorf("fsstore: unsupported write request %T", req)
 	}
@@ -143,15 +149,11 @@ func (s *Store) writeSession(opts cp.WriteOptions) error {
 		Prompts:    checkpoint.RedactedJoinedPrompts(opts.Prompts),
 	}
 	sc.Sessions = upsertSession(sc.Sessions, session)
+	sc.Tasks = upsertTasks(sc.Tasks, opts.Tasks)
 
 	// Summary-level flags accumulate across sessions and survive recompute.
 	sc.Summary.HasReview = sc.Summary.HasReview || opts.HasReview
 	sc.Summary.HasInvestigation = sc.Summary.HasInvestigation || opts.HasInvestigation
-	if opts.CombinedAttribution != nil {
-		// Migration path: an initial write may carry holistic attribution. Normal
-		// condensation sets this later via a CheckpointAttribution write instead.
-		sc.Summary.CombinedAttribution = opts.CombinedAttribution
-	}
 
 	recomputeSummary(sc)
 	return s.save(sc)
@@ -188,18 +190,6 @@ func (s *Store) writeSessionSummary(r cp.SessionSummary) error {
 		return fmt.Errorf("fsstore: cannot set summary for unknown checkpoint %s", r.CheckpointID)
 	}
 	sc.Sessions[len(sc.Sessions)-1].Metadata.Summary = checkpoint.RedactSummary(r.Summary)
-	return s.save(sc)
-}
-
-func (s *Store) writeAttribution(r cp.CheckpointAttribution) error {
-	sc, err := s.load(r.CheckpointID)
-	if err != nil {
-		return err
-	}
-	if sc == nil {
-		return fmt.Errorf("fsstore: cannot set attribution for unknown checkpoint %s", r.CheckpointID)
-	}
-	sc.Summary.CombinedAttribution = r.Attribution
 	return s.save(sc)
 }
 
@@ -293,6 +283,57 @@ func (s *Store) ReadSessionMetadataAndPrompts(_ context.Context, checkpointID id
 	return &meta, session.Prompts, nil
 }
 
+// ListTasks returns the stored task records in the TaskReader order.
+func (s *Store) ListTasks(_ context.Context, checkpointID id.CheckpointID) ([]cp.TaskEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sc, err := s.load(checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	if sc == nil {
+		return nil, cp.ErrCheckpointNotFound
+	}
+	entries := make([]cp.TaskEntry, 0, len(sc.Tasks))
+	for _, task := range sc.Tasks {
+		entries = append(entries, cp.TaskEntry{
+			ToolUseID:        task.Record.ToolUseID,
+			Record:           task.Record,
+			TranscriptStored: len(task.Transcript) > 0,
+		})
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		a, b := entries[i].Record.StartedAt, entries[j].Record.StartedAt
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return entries[i].ToolUseID < entries[j].ToolUseID
+	})
+	return entries, nil
+}
+
+func (s *Store) ReadTaskTranscript(_ context.Context, checkpointID id.CheckpointID, toolUseID string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sc, err := s.load(checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	if sc == nil {
+		return nil, cp.ErrCheckpointNotFound
+	}
+	for _, task := range sc.Tasks {
+		if task.Record.ToolUseID != toolUseID {
+			continue
+		}
+		if len(task.Transcript) == 0 {
+			return nil, fmt.Errorf("task %s: %w: %s", toolUseID, cp.ErrNoTranscript, task.Record.TranscriptUnavailableReason)
+		}
+		return task.Transcript, nil
+	}
+	return nil, fmt.Errorf("%w: %s", cp.ErrTaskNotFound, toolUseID)
+}
+
 func (s *Store) sessionAt(checkpointID id.CheckpointID, sessionIndex int) (*storedSession, error) {
 	sc, err := s.load(checkpointID)
 	if err != nil {
@@ -305,6 +346,44 @@ func (s *Store) sessionAt(checkpointID id.CheckpointID, sessionIndex int) (*stor
 		return nil, fmt.Errorf("fsstore: session index %d out of range for %s (%d sessions)", sessionIndex, checkpointID, len(sc.Sessions))
 	}
 	return &sc.Sessions[sessionIndex], nil
+}
+
+// upsertTasks merges payloads into the stored records by tool_use_id, like the
+// git writer's per-path tree entries: a later write replaces the record, and an
+// earlier transcript survives a later write that carries none.
+func upsertTasks(stored []storedTask, payloads []cp.TaskPayload) []storedTask {
+	for _, p := range payloads {
+		task := storedTask{
+			Record: cp.TaskRecord{
+				ToolUseID:                   p.ToolUseID,
+				AgentID:                     p.AgentID,
+				SubagentType:                p.SubagentType,
+				TaskDescription:             redact.String(p.TaskDescription),
+				Files:                       p.Files,
+				TokenUsage:                  p.TokenUsage,
+				StartedAt:                   p.StartedAt,
+				CompletedAt:                 p.CompletedAt,
+				TranscriptUnavailableReason: p.TranscriptUnavailableReason,
+			},
+			Transcript: p.Transcript.Bytes(),
+		}
+		replaced := false
+		for i := range stored {
+			if stored[i].Record.ToolUseID != p.ToolUseID {
+				continue
+			}
+			if len(task.Transcript) == 0 && stored[i].Record.AgentID == p.AgentID {
+				task.Transcript = stored[i].Transcript
+			}
+			stored[i] = task
+			replaced = true
+			break
+		}
+		if !replaced {
+			stored = append(stored, task)
+		}
+	}
+	return stored
 }
 
 func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
@@ -330,10 +409,8 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, //nolint:staticcheck // deliberate: git writes both so older CLIs can still read the metadata
 		TokenUsage:                  opts.TokenUsage,
 		SkillEvents:                 opts.SkillEvents,
-		PromptAttributions:          opts.PromptAttributionsJSON,
 		SessionMetrics:              opts.SessionMetrics,
 		Summary:                     checkpoint.RedactSummary(opts.Summary),
-		Attribution:                 opts.Attribution,
 		Kind:                        opts.Kind,
 		ReviewSkills:                opts.ReviewSkills,
 		ReviewPrompt:                redact.String(opts.ReviewPrompt),
@@ -344,6 +421,10 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 
 func upsertSession(sessions []storedSession, session storedSession) []storedSession {
 	if idx := sessionIndexByID(sessions, session.SessionID); idx >= 0 {
+		// Keep the opaque line attribution an older CLI recorded for this
+		// session through the overwrite, as the git store does.
+		session.Metadata.LegacyInitialAttribution = sessions[idx].Metadata.LegacyInitialAttribution
+		session.Metadata.LegacyPromptAttributions = sessions[idx].Metadata.LegacyPromptAttributions
 		sessions[idx] = session
 		return sessions
 	}

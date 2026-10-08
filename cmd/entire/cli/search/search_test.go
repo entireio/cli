@@ -12,123 +12,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
-const testOwner = "entirehq"
-const testRepo = "entire.io"
 const testCPID = "cp1"
 
 // writeTestJSON writes raw JSON to a response writer, ignoring write errors (test helper).
 func writeTestJSON(w http.ResponseWriter, jsonStr string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(jsonStr)) //nolint:errcheck // test helper
-}
-
-// -- ParseGitHubRemote tests --
-
-func TestParseGitHubRemote_SSH(t *testing.T) {
-	t.Parallel()
-	owner, repo, err := ParseGitHubRemote("git@github.com:entirehq/entire.io.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner != testOwner || repo != testRepo {
-		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
-	}
-}
-
-func TestParseGitHubRemote_HTTPS(t *testing.T) {
-	t.Parallel()
-	owner, repo, err := ParseGitHubRemote("https://github.com/entirehq/entire.io.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner != testOwner || repo != testRepo {
-		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
-	}
-}
-
-func TestParseGitHubRemote_HTTPSNoGit(t *testing.T) {
-	t.Parallel()
-	owner, repo, err := ParseGitHubRemote("https://github.com/entirehq/entire.io")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner != testOwner || repo != testRepo {
-		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
-	}
-}
-
-func TestParseGitHubRemote_Invalid(t *testing.T) {
-	t.Parallel()
-	_, _, err := ParseGitHubRemote("   ")
-	if err == nil || err.Error() != "empty remote URL" {
-		t.Errorf("expected 'empty remote URL' for blank input, got %v", err)
-	}
-
-	_, _, err = ParseGitHubRemote("not-a-url")
-	if err == nil {
-		t.Error("expected error for invalid URL")
-	}
-}
-
-func TestParseGitHubRemote_SSHProtocol(t *testing.T) {
-	t.Parallel()
-	owner, repo, err := ParseGitHubRemote("ssh://git@github.com/entirehq/entire.io.git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner != testOwner || repo != testRepo {
-		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
-	}
-}
-
-func TestParseGitHubRemote_SSHProtocolNoGit(t *testing.T) {
-	t.Parallel()
-	owner, repo, err := ParseGitHubRemote("ssh://git@github.com/entirehq/entire.io")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner != testOwner || repo != testRepo {
-		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
-	}
-}
-
-func TestParseGitHubRemote_NonGitHubSSH(t *testing.T) {
-	t.Parallel()
-	_, _, err := ParseGitHubRemote("git@gitlab.com:entirehq/entire.io.git")
-	if err == nil {
-		t.Error("expected error for non-GitHub SSH remote")
-	}
-}
-
-func TestParseGitHubRemote_NonGitHubHTTPS(t *testing.T) {
-	t.Parallel()
-	_, _, err := ParseGitHubRemote("https://gitlab.com/entirehq/entire.io.git")
-	if err == nil {
-		t.Error("expected error for non-GitHub HTTPS remote")
-	}
-}
-
-func TestParseGitHubRemote_RejectsExtraPathSegments(t *testing.T) {
-	t.Parallel()
-	for _, remoteURL := range []string{
-		"https://github.com/entirehq/entire.io/extra.git",
-		"entire://aws-us-east-2.entire.io/gh/entirehq/entire.io/extra",
-	} {
-		if _, _, err := ParseGitHubRemote(remoteURL); err == nil {
-			t.Errorf("expected error for malformed remote %q, got none", remoteURL)
-		}
-	}
-}
-
-func TestParseGitHubRemote_EntireMirror(t *testing.T) {
-	t.Parallel()
-	owner, repo, err := ParseGitHubRemote("entire://aws-us-east-2.entire.io/gh/entirehq/entire.io")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner != testOwner || repo != testRepo {
-		t.Errorf("got %s/%s, want %s/%s", owner, repo, testOwner, testRepo)
-	}
 }
 
 // -- Search() tests --

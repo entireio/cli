@@ -74,16 +74,22 @@ func handleCandidate(handle string) grantCandidate {
 }
 
 // memberCandidate is an org member's candidate: addressed by handle, and
-// labelled with the member's display name where the server sent one, so a
-// Google account reads as a person rather than a subject id. The name joins
-// the label rather than the ref, so it reaches every prompt and confirmation
-// while the grant itself still goes by handle.
+// labelled with the member's display name where the server sent one.
 func memberCandidate(handle string, m coreapi.OrgMemberListItem) grantCandidate {
 	c := handleCandidate(handle)
-	if name := memberDisplayName(m); name != "" {
-		c.label += " · " + name
-	}
+	c.label = labelWithName(c.label, granteeDisplayName(m.DisplayName))
 	return c
+}
+
+// labelWithName appends the account's display name to a grantee label where
+// the server sent one, so a Google account reads as a person rather than a
+// subject id. The name joins the label rather than the ref, so it reaches every
+// prompt and confirmation while the grant itself still goes by handle or ULID.
+func labelWithName(label, name string) string {
+	if name != "" {
+		return label + " · " + name
+	}
+	return label
 }
 
 // option is the row as a picker shows it and as a prompt names it. label is the
@@ -326,7 +332,7 @@ func projectGrantCandidates(ctx context.Context, c *coreapi.Client, projectID st
 }
 
 // grantRow is one project or repo listing row reduced to what the pools read.
-// ProjectGrant and RepoGrant carry the same five fields under two types that
+// ProjectGrant and RepoGrant carry the same six fields under two types that
 // share no interface, so each is mapped once here rather than threaded through
 // both pools as a handful of accessors apiece.
 type grantRow struct {
@@ -334,15 +340,16 @@ type grantRow struct {
 	granteeType string
 	source      string
 	name        string
+	displayName string
 	role        string
 }
 
 func projectGrantRowOf(g coreapi.ProjectGrant) grantRow {
-	return grantRow{granteeID: g.GranteeId, granteeType: g.GranteeType, source: g.Source, name: g.GranteeName.Or(""), role: g.Role}
+	return grantRow{granteeID: g.GranteeId, granteeType: g.GranteeType, source: g.Source, name: g.GranteeName.Or(""), displayName: granteeDisplayName(g.DisplayName), role: g.Role}
 }
 
 func repoGrantRowOf(g coreapi.RepoGrant) grantRow {
-	return grantRow{granteeID: g.GranteeId, granteeType: g.GranteeType, source: g.Source, name: g.GranteeName.Or(""), role: g.Role}
+	return grantRow{granteeID: g.GranteeId, granteeType: g.GranteeType, source: g.Source, name: g.GranteeName.Or(""), displayName: granteeDisplayName(g.DisplayName), role: g.Role}
 }
 
 // directHolders is the set of accounts holding a grant written on the resource
@@ -633,7 +640,8 @@ func revokeUnavailable(t grantPickerTarget, reason string) error {
 
 // grantHolders lists the account grants that can be revoked on a project or
 // repo, addressed by ULID so no handle has to resolve, labelled by the friendly
-// name the server resolved and by the role the grant carries.
+// name the server resolved (with the display name, where it sent one) and by
+// the role the grant carries.
 //
 // A row the server could not name falls back to its grantee ULID rather than
 // being dropped: that ULID is then the only identity the grant has, and a row
@@ -647,7 +655,7 @@ func grantHolders(rows []grantRow) []grantCandidate {
 		}
 		holders = append(holders, grantCandidate{
 			ref:   r.granteeID,
-			label: granteeName(coreapi.NewOptString(r.name), r.granteeID),
+			label: labelWithName(granteeNameOr(r.name, r.granteeID), r.displayName),
 			role:  r.role,
 			byID:  true,
 		})

@@ -12,6 +12,8 @@ import (
 	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/go-git/v6/x/plugin/config"
 	"github.com/zalando/go-keyring"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 func TestMain(m *testing.M) {
@@ -72,6 +74,14 @@ func TestMain(m *testing.M) {
 	// without exercising the path they exist to pin.
 	if err := os.Unsetenv(auth.EnvTokenVar); err != nil {
 		panic(fmt.Errorf("failed to unset %s: %w", auth.EnvTokenVar, err))
+	}
+
+	// Tests steer the agents' homes through HOME and ENTIRE_TEST_*_PROJECT_DIR;
+	// a developer's relocated agent home would outrank HOME in every base-dir
+	// fallback walk, in-process and in children. The list is static so a harness
+	// that links fewer agents still clears every variable.
+	for _, name := range agent.RelocationEnvVars() {
+		os.Unsetenv(name)
 	}
 
 	// Register a default ConfigSource so tests that call ConfigScoped

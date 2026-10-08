@@ -34,21 +34,30 @@ const flagDenyTool = "--deny-tool"
 //     could steer the run.
 //   - --disable-builtin-mcps: skips the GitHub MCP server, which is not
 //     needed for text generation and inflates per-call input tokens.
+//   - --available-tools=<no such tool>: tool AVAILABILITY is a separate,
+//     stricter layer than the approval flags above: deny/allow only decide
+//     whether a visible tool prompts, so read-only tools (view, glob, grep)
+//     stayed visible and unprompted, and injected transcript content could
+//     have a file read into the summary. An allowlist naming a tool that does
+//     not exist leaves the model no tools at all, and keeps doing so when a
+//     Copilot release adds one. An EMPTY list is not equivalent: verified on
+//     Copilot CLI 1.0.83, `--available-tools` with no value leaves every tool
+//     available. The allowlist also covers MCP tools: verified on Copilot CLI
+//     1.0.89 with a server in the user's mcp-config.json, which Copilot still
+//     starts and lists but whose tool the model cannot call.
+//   - -s: the allowlist makes Copilot print a "Disabled tools" notice on
+//     stdout, which is where the summary JSON comes back; silent mode keeps
+//     stdout to the model's response.
+//   - --disallow-temp-dir: Copilot grants file access to the system temp
+//     directory by default, on top of the working directory. With no tools
+//     that grant is unused; this keeps it unused if a tool ever slips through.
 //
-// Known residual, deliberately accepted: deny/allow flags control approval
-// prompts only. Tool AVAILABILITY is a separate, stricter layer
-// (--available-tools / --excluded-tools) that this policy does not touch, so
-// read-only tools remain visible and unprompted, and injected transcript
-// content can still steer file reads whose contents land in the summary. The
-// Claude generator carries the same read residual. Tightening to
-// --available-tools with an empty set is the follow-up if that residual is
-// ever closed, and it needs a live verification that an empty availability
-// list means "no tools" on the pinned CLI version.
-//
-// Flag semantics verified against Copilot CLI 1.0.81 (help text plus argv
-// acceptance). The "completes without an approval flag" claim is exercised
-// only by the opt-in smoke test below, so a CLI version that regresses it
-// would degrade summaries until that test is run.
+// Flag semantics verified against Copilot CLI 1.0.83 (help text, argv
+// acceptance, and a live run in which a read request inside the working
+// directory and the temp directory returned nothing). The "completes without
+// an approval flag" claim is exercised only by the opt-in smoke test below,
+// so a CLI version that regresses it would degrade summaries until that test
+// is run.
 // TestGenerateText_PinsMinimalToolSurface pins the argv so a future flag
 // change is a reviewed decision rather than a drive-by edit.
 var generateTextArgs = []string{
@@ -58,7 +67,14 @@ var generateTextArgs = []string{
 	"--no-ask-user",
 	"--no-custom-instructions",
 	"--disable-builtin-mcps",
+	"--available-tools=" + noSuchTool,
+	"-s",
+	"--disallow-temp-dir",
 }
+
+// noSuchTool is the one entry in the generation run's tool allowlist. It
+// names no real tool, so nothing is available (see generateTextArgs).
+const noSuchTool = "entire_text_generation_uses_no_tools"
 
 // GenerateText sends a prompt to the Copilot CLI and returns the raw text response.
 //

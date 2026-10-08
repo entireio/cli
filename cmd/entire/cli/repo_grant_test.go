@@ -38,6 +38,7 @@ func grantActiveCoreServer(t *testing.T, paths *[]string, placements ...string) 
 		case strings.HasSuffix(r.URL.Path, "/grants"):
 			payload = &coreapi.ListRepoGrantsOutputBody{Grants: []coreapi.RepoGrant{{
 				GranteeId: "01ACCT", GranteeName: coreapi.NewOptString("github:alice"),
+				DisplayName: coreapi.NewOptString("Alice Smith"),
 				GranteeType: granteeTypeAccount, Role: "writer", Source: "repo",
 			}}}
 		case strings.HasSuffix(r.URL.Path, "/repos/resolve"):
@@ -216,7 +217,8 @@ func TestRepoGrantList_PlacementLookupIsAHint(t *testing.T) {
 
 // TestRepoGrantList_JSONNamesEachValueOnce pins the machine-readable contract:
 // one verb, one answer. A mirror row reads in the grant vocabulary, carries
-// nothing twice, and keeps out the one native key it cannot honestly fill.
+// nothing twice, and keeps out the native keys it cannot honestly fill
+// (granteeType, displayName).
 //
 // Not parallel: swaps the package-level core-client seams.
 func TestRepoGrantList_JSONNamesEachValueOnce(t *testing.T) {
@@ -242,6 +244,7 @@ func TestRepoGrantList_JSONNamesEachValueOnce(t *testing.T) {
 
 	native := decode(t, "/et/acme/web")
 	require.Equal(t, map[string]any{
+		"displayName": "Alice Smith",
 		"granteeId":   "01ACCT",
 		"granteeName": "github:alice",
 		"granteeType": granteeTypeAccount,
@@ -353,13 +356,13 @@ func TestRepoGrantList_GuessedClusterSaysSo(t *testing.T) {
 		_, _, err := runCoreCmd(t, newRepoGrantCmd, invisible.URL, "list", "/gh/acme/widget")
 		require.ErrorContains(t, err, "is visible to this login")
 		require.ErrorContains(t, err, "--context acts as one",
-			"`repo mirror get` reads a narrower directory, so it cannot answer what the placements lookup could not")
-		require.NotContains(t, err.Error(), "entire repo mirror get")
+			"`repo view` reads a narrower directory, so it cannot answer what the placements lookup could not")
+		require.NotContains(t, err.Error(), "entire repo view")
 
 		var dialPaths []string
 		undialable := grantActiveCoreServer(t, &dialPaths, "https://eu.example/mirrors")
 		_, _, err = runCoreCmd(t, newRepoGrantCmd, undialable.URL, "list", "/gh/acme/widget")
-		require.ErrorContains(t, err, "entire repo mirror get /gh/acme/widget",
+		require.ErrorContains(t, err, "entire repo view /gh/acme/widget",
 			"placements resolved, so the verb that lists them can answer")
 	})
 }

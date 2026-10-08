@@ -20,7 +20,8 @@ import (
 
 // NewReviewer returns the AgentReviewer for codex.
 //
-// Argv shape: codex exec --skip-git-repo-check --json -.
+// Argv shape: codex exec --skip-git-repo-check --json
+// -c developer_instructions=<guardrail> -.
 // Prompt is piped via stdin (the trailing "-" tells codex to read from stdin).
 // Stdout is newline-delimited JSON envelopes (one event per line); no chrome
 // filter needed — each line is parsed directly into an Event.
@@ -52,7 +53,7 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 func buildCodexReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
 	promptCfg := cfg
 	promptCfg.Skills = codexNativeSkillInvocations(cfg.Skills)
-	args := []string{codexExecCommand, "--skip-git-repo-check", "--json"}
+	args := []string{codexExecCommand, "--skip-git-repo-check", "--json", "-c", review.CodexGuardrailConfig()}
 	args = review.AppendModelFlag(args, cfg.Model)
 	args = append(args, "-")
 	prompt := review.ComposeReviewPrompt(promptCfg)
@@ -193,7 +194,7 @@ func parseCodexOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 					out <- reviewtypes.ToolCall{Name: "exec", Args: env.Item.Command}
 				}
 			case "item.completed":
-				if env.Item.Type == "agent_message" && env.Item.Text != "" {
+				if env.Item.Type == itemTypeAgentMessage && env.Item.Text != "" {
 					out <- reviewtypes.AssistantText{Text: env.Item.Text}
 				}
 				// command_execution completion is intentionally swallowed —
