@@ -921,10 +921,17 @@ func (s *State) SetTokenStart(pos int) {
 }
 
 // AdvanceCheckpointWindow moves both transcript offsets to pos after a
-// condensation stored the transcript and its tokens up to pos.
+// condensation stored the transcript and its tokens up to pos. A condensation
+// that could not read the transcript reports pos 0 and stored no transcript
+// tokens, so the token offset stays put rather than moving back and letting
+// the next checkpoint count everything again.
 func (s *State) AdvanceCheckpointWindow(pos int) {
+	tokenStart := pos
+	if pos == 0 {
+		tokenStart = s.TokenStart()
+	}
 	s.CheckpointTranscriptStart = pos
-	s.SetTokenStart(pos)
+	s.SetTokenStart(tokenStart)
 }
 
 // AdvanceDisplayWindow moves only CheckpointTranscriptStart to pos, for paths

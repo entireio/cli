@@ -1312,6 +1312,21 @@ func TestState_AdvanceDisplayWindowKeepsTokenOffset(t *testing.T) {
 	assert.Equal(t, 8, set.TokenStart())
 }
 
+func TestState_AdvanceCheckpointWindowNeverMovesTokenOffsetBack(t *testing.T) {
+	t.Parallel()
+	advanced := State{}
+	advanced.AdvanceCheckpointWindow(12)
+	assert.Equal(t, 12, advanced.CheckpointTranscriptStart)
+	assert.Equal(t, 12, advanced.TokenStart())
+
+	// A condensation that could not read the transcript reports 0 lines.
+	unreadable := State{CheckpointTranscriptStart: 12}
+	unreadable.SetTokenStart(12)
+	unreadable.AdvanceCheckpointWindow(0)
+	assert.Equal(t, 0, unreadable.CheckpointTranscriptStart)
+	assert.Equal(t, 12, unreadable.TokenStart(), "tokens already counted must not be counted again")
+}
+
 func TestState_SetTokenStartDoesNotShareAcrossCopies(t *testing.T) {
 	t.Parallel()
 	source := State{}

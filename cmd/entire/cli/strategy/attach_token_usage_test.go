@@ -11,6 +11,11 @@ import (
 
 const attachTestTranscript = `{"type":"assistant","uuid":"u1","message":{"id":"m1","usage":{"input_tokens":10,"output_tokens":10}}}` + "\n"
 
+// attachTwoTurnTranscript's first line is what an earlier checkpoint counted
+// (the replaced entry's tokens); the second is new since TokenStart 1.
+const attachTwoTurnTranscript = `{"type":"assistant","uuid":"u1","message":{"id":"m1","usage":{"input_tokens":100,"output_tokens":100}}}` + "\n" +
+	`{"type":"assistant","uuid":"u2","message":{"id":"m2","usage":{"input_tokens":10,"output_tokens":10}}}` + "\n"
+
 func TestAttachTokenUsage_KeepsPendingSubagentTokens(t *testing.T) {
 	t.Parallel()
 	state := &SessionState{
@@ -33,11 +38,18 @@ func TestAttachTokenUsage_ReplacedEntry(t *testing.T) {
 	replaced := &agent.TokenUsage{InputTokens: 100, OutputTokens: 100}
 
 	withState := &SessionState{SessionID: "s", AgentType: agent.AgentTypeClaudeCode}
-	usage, _ := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, withState, []byte(attachTestTranscript), replaced)
+	withState.SetTokenStart(1)
+	usage, _ := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, withState, []byte(attachTwoTurnTranscript), replaced)
 	require.Equal(t, 110, usage.OutputTokens, "with state, the replaced entry's tokens precede TokenStart and are kept")
 
-	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, nil, []byte(attachTestTranscript), replaced)
-	require.Equal(t, 10, usage.OutputTokens, "without state the whole transcript is counted, which already covers the entry")
+	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, nil, []byte(attachTwoTurnTranscript), replaced)
+	require.Equal(t, 110, usage.OutputTokens, "without state the whole transcript is counted, which already covers the entry")
+
+	// A state recreated from scratch (cleanup, resume) has counted nothing, so
+	// the whole transcript is counted, as without state, not added to the entry.
+	fresh := &SessionState{SessionID: "s", AgentType: agent.AgentTypeClaudeCode}
+	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, fresh, []byte(attachTwoTurnTranscript), replaced)
+	require.Equal(t, 110, usage.OutputTokens, "a fresh state must not count the replaced entry twice")
 }
 
 func TestAttachTokenUsage_ReplacedEntryKeepsSubagentTokens(t *testing.T) {
@@ -50,7 +62,8 @@ func TestAttachTokenUsage_ReplacedEntryKeepsSubagentTokens(t *testing.T) {
 		AgentType:            agent.AgentTypeClaudeCode,
 		CheckpointTokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{OutputTokens: 5}},
 	}
-	usage, _ := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, state, []byte(attachTestTranscript), replaced)
+	state.SetTokenStart(1)
+	usage, _ := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, state, []byte(attachTwoTurnTranscript), replaced)
 	require.Equal(t, 110, usage.OutputTokens)
 	require.NotNil(t, usage.SubagentTokens)
 	require.Equal(t, 55, usage.SubagentTokens.OutputTokens, "the replaced entry's subagent tokens must be added, not overwritten")

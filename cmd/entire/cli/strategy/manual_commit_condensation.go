@@ -1116,7 +1116,7 @@ func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
 //  1. Session-state backfill from the freshly-extracted transcript: Copilot
 //     CLI writes session.shutdown after the hooks return, so by condensation
 //     time the authoritative full-session total is recoverable while
-//     checkpoint metadata stays scoped to CheckpointTranscriptStart.
+//     checkpoint metadata stays scoped to the token offset (TokenStart).
 //  2. Accumulated per-checkpoint usage (state.CheckpointTokenUsage, reset at
 //     every condensation). This is what carries out-of-band token counts
 //     (e.g. Antigravity, whose transcript has no token data — SaveStep
@@ -1133,7 +1133,7 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 	// Backfill session state token usage from the freshly-extracted transcript.
 	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
 	// time we can recover the authoritative full-session total from the transcript
-	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart. The
+	// while keeping checkpoint metadata scoped to the token offset (TokenStart). The
 	// recompute drops SubagentTokens (subagentsDir=""); the helper preserves the
 	// cumulative subagent total across the backfill so resetCheckpointWindow's
 	// baseline does not regress to nil (finding 019f5ebf-a57e).
@@ -1156,9 +1156,11 @@ func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *Sess
 // condensation does; without state it counts the whole transcript. The caller
 // records pos with ConsumeAttachTokenWindow once the checkpoint is written.
 // replaced is the usage already stored in the checkpoint entry this attach
-// overwrites (same checkpoint, same session), or nil. With state, that usage
-// lies before TokenStart, so it is kept and the new tokens are added to it;
-// without state the whole transcript is counted, which already includes it.
+// overwrites (same checkpoint, same session), or nil. When the state shows
+// tokens were already checkpointed (TokenStart > 0), that usage lies before
+// TokenStart, so it is kept and the new tokens are added to it. Otherwise
+// (no state, or a state recreated from scratch after cleanup or resume) the
+// whole transcript is counted, which already includes it.
 func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, replaced *agent.TokenUsage) (*agent.TokenUsage, int) {
 	start := 0
 	if state != nil {
@@ -1174,7 +1176,7 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 			usage = fillMissingSubagentTokensFrom(usage, state.CheckpointTokenUsage)
 		}
 	}
-	if state != nil && hasTokenUsageData(replaced) {
+	if state != nil && start > 0 && hasTokenUsageData(replaced) {
 		// Both sides are window deltas, so subagent totals add too.
 		usage = types.AddTokenUsage(replaced, usage)
 	}
