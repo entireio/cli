@@ -1936,6 +1936,17 @@ func subagentTranscriptAndFiles(
 	return transcriptPath, mergeUnique(modifiedFiles, files), nil
 }
 
+// taskUsageRecountable reports whether a completed task's usage was computed
+// from its transcript in a way condensation can repeat on the transcript it
+// stores (session.TaskRecord.TokenUsageFromTranscript). Not for usage the event
+// reported, nor for Codex: a Codex child's usage comes from its rollout
+// inventory, which leaves it nil on purpose for a forked child whose rollout
+// carries the parent's history, and recounting that rollout from its start
+// would add the parent's tokens.
+func taskUsageRecountable(ag agent.Agent, event *agent.Event) bool {
+	return event.TokenUsage == nil && ag.Type() != agent.AgentTypeCodex
+}
+
 // subagentTokenUsage computes a subagent's own token usage from its
 // transcript, for agents whose stop payload carries none (Claude Code). nil
 // when there is no transcript or the agent cannot compute usage from one.
@@ -2075,10 +2086,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 
 	files := mergeUnique(mergeUnique(relModifiedFiles, relNewFiles), relDeletedFiles)
 	tokenUsage := event.TokenUsage
-	usageFromTranscript := tokenUsage == nil
-	if usageFromTranscript {
+	if tokenUsage == nil {
 		tokenUsage = subagentTokenUsage(logCtx, ag, event, subagentTranscriptPath)
 	}
+	usageFromTranscript := taskUsageRecountable(ag, event)
 	rec := session.TaskRecord{
 		ToolUseID:                event.ToolUseID,
 		AgentID:                  event.SubagentID,

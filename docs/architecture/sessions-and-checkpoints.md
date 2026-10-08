@@ -374,7 +374,8 @@ is written to the shadow branch for task work; the payload is materialized at
 condensation (below).
 
 **Task token usage.** When the completing event carries no usage, completion
-computes it from the subagent's transcript and sets `TokenUsageFromTranscript`.
+computes it from the subagent's transcript and, except for Codex (whose child
+usage comes from its rollout inventory), sets `TokenUsageFromTranscript`.
 That read can be short: Claude Code fires `SubagentStop` before the agent's last
 API call is in its transcript, and a background agent woken again by a child it
 launched stops more than once while only its first stop completes the record.
