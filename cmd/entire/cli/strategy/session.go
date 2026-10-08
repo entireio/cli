@@ -6,9 +6,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
 
-// NoDescription is the default description for sessions without one.
-const NoDescription = "No description"
-
 // Session represents a Claude Code session with its checkpoints.
 // A session is created when a user runs `claude` and tracks all changes
 // made during that interaction.

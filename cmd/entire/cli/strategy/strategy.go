@@ -21,9 +21,6 @@ var ErrNoSession = errors.New("no session info available")
 // ErrNotTaskCheckpoint is returned when a pending checkpoint is not a task checkpoint.
 var ErrNotTaskCheckpoint = errors.New("not a task checkpoint")
 
-// ErrEmptyRepository is returned when the repository has no commits yet.
-var ErrEmptyRepository = errors.New("repository has no commits yet")
-
 // SessionInfo contains information about the current session state.
 // This is used to generate trailers for linking commits to their AI session.
 type SessionInfo struct {

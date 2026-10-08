@@ -434,17 +434,6 @@ func (env *TestEnv) ReadFile(path string) string {
 	return string(data)
 }
 
-// ReadFileAbsolute reads a file using an absolute path.
-func (env *TestEnv) ReadFileAbsolute(path string) string {
-	env.T.Helper()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		env.T.Fatalf("failed to read file %s: %v", path, err)
-	}
-	return string(data)
-}
-
 // FileExists checks if a file exists in the test repo.
 func (env *TestEnv) FileExists(path string) bool {
 	env.T.Helper()
@@ -1422,11 +1411,6 @@ func (env *TestEnv) TryGetLatestCheckpointID() string {
 	}
 
 	return ""
-}
-
-// GetLatestCondensationID is an alias for GetLatestCheckpointID for backwards compatibility.
-func (env *TestEnv) GetLatestCondensationID() string {
-	return env.GetLatestCheckpointID()
 }
 
 // GetCheckpointIDFromCommitMessage extracts the Entire-Checkpoint trailer from a commit message.

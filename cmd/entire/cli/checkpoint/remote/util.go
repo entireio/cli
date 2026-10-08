@@ -778,15 +778,6 @@ func getRemoteURLInDirForVote(ctx context.Context, opt FetchURLOptions, remoteNa
 	return url, nil
 }
 
-// GetRemoteURLInDir returns the URL configured for the named git remote in dir.
-func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
-	url, err := gitremote.GetRemoteURLInDir(ctx, dir, remoteName)
-	if err != nil {
-		return "", fmt.Errorf("get remote URL: %w", err)
-	}
-	return url, nil
-}
-
 // ParseURL parses a git remote URL (SSH SCP-style or HTTPS) into its components.
 func ParseURL(rawURL string) (*Info, error) {
 	info, err := gitremote.ParseURL(rawURL)

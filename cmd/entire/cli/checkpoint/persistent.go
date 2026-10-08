@@ -1661,31 +1661,6 @@ func readCommittedMetadataFromCheckpointTree(checkpointTree *object.Tree, sessio
 	return sessionMetadata, true
 }
 
-// GetTranscript retrieves the transcript for a specific checkpoint ID.
-// Returns the latest session's transcript.
-func (s *GitStore) GetTranscript(ctx context.Context, checkpointID id.CheckpointID) ([]byte, error) {
-	content, err := s.ReadLatestSessionContent(ctx, checkpointID)
-	if err != nil {
-		return nil, err
-	}
-	if len(content.Transcript) == 0 {
-		return nil, fmt.Errorf("no transcript found for checkpoint: %s", checkpointID)
-	}
-	return content.Transcript, nil
-}
-
-// GetSessionLog retrieves the session transcript and session ID for a checkpoint.
-// This is the primary method for looking up session logs by checkpoint ID.
-// Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
-// Returns ErrNoTranscript if the checkpoint exists but has no transcript.
-func (s *GitStore) GetSessionLog(ctx context.Context, cpID id.CheckpointID) ([]byte, string, error) {
-	content, err := s.ReadLatestSessionContent(ctx, cpID)
-	if err != nil {
-		return nil, "", err
-	}
-	return content.Transcript, content.Metadata.SessionID, nil
-}
-
 // backfillSummary updates the summary field in the latest session's metadata.
 // Returns ErrCheckpointNotFound if the checkpoint doesn't exist.
 func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.CheckpointID, summary *Summary) error {

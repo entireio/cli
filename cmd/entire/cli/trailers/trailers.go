@@ -22,18 +22,8 @@ const (
 	// StrategyTrailerKey indicates which strategy created the commit.
 	StrategyTrailerKey = "Entire-Strategy"
 
-	// BaseCommitTrailerKey links shadow commits to their base code commit.
-	BaseCommitTrailerKey = "Base-Commit"
-
 	// SessionTrailerKey identifies which session created a commit.
 	SessionTrailerKey = "Entire-Session"
-
-	// CondensationTrailerKey identifies the condensation ID for a commit (legacy).
-	CondensationTrailerKey = "Entire-Condensation"
-
-	// SourceRefTrailerKey links code commits to their metadata on a shadow/metadata branch.
-	// Format: "<branch>@<commit-hash>" e.g. "entire/metadata@abc123def456"
-	SourceRefTrailerKey = "Entire-Source-Ref"
 
 	// CheckpointTrailerKey links commits to their checkpoint metadata on entire/checkpoints/v1.
 	// Format: a checkpoint ID — either a legacy 12-hex ID (e.g. "a3b2c4d5e6f7")

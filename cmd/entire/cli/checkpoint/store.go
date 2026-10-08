@@ -97,11 +97,6 @@ func (s *GitStore) SetMetadataBranchFetcher(f MetadataBranchFetchFunc) {
 	s.metadataBranchFetcher = f
 }
 
-// Repository returns the underlying git repository.
-func (s *GitStore) Repository() *git.Repository {
-	return s.repo
-}
-
 // Refs returns the committed-metadata topology the store was constructed with.
 func (s *GitStore) Refs() PersistentRefs {
 	return s.refs

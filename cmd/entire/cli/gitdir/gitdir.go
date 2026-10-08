@@ -139,16 +139,6 @@ func OpenAt(commonDir string) (*os.Root, error) {
 	return osroot.Shared(abs) //nolint:wrapcheck // see comment
 }
 
-// Reset closes and forgets every cached root, and the resolved path with them.
-// Call it after deleting or replacing a common dir: a root that outlives its
-// directory is a handle to an unlinked inode, so writes through it succeed and
-// land nowhere. The root registry is shared with the other anchors, so this
-// clears those too.
-func Reset() {
-	osroot.ResetShared()
-	ClearCache()
-}
-
 // CommonDirForWorktree returns the absolute git common directory for the
 // repository at worktreeRoot, independent of the process's working directory.
 //

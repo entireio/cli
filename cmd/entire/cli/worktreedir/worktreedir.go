@@ -21,7 +21,6 @@
 package worktreedir
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -33,19 +32,10 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 )
 
-// Open returns the shared *os.Root over the current worktree root. The returned
-// root is owned by the registry and shared with every other caller; do not close
-// it.
-func Open(ctx context.Context) (*os.Root, error) {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("resolve worktree root: %w", err)
-	}
-	return OpenAt(root)
-}
-
-// OpenAt is Open for an explicit worktree root, for callers that resolved one
-// already or that act on a worktree other than the current directory.
+// OpenAt returns the shared *os.Root over an explicit worktree root, for callers
+// that resolved one already or that act on a worktree other than the current
+// directory. The returned root is owned by the registry and shared with every
+// other caller; do not close it.
 func OpenAt(worktreeRoot string) (*os.Root, error) {
 	if worktreeRoot == "" {
 		return nil, errors.New("worktreedir: worktree root is required")
