@@ -28,6 +28,17 @@ env-token-first precedence itself — see `resolveAuthStatusTarget` /
 deliberate exception: it manages a *stored* login session, which an ephemeral
 env token has none of, so it stays on the active context.
 
+### Repository discovery
+
+The dispatch wizard and `search --repo` completion use the control plane's
+`ListRepos` index, sorted by `last_activity_at` descending, through
+`listCheckpointRepoIndex`. The walk is bounded to 5,000 entries and ten seconds;
+truncation logs a warning and keeps the partial catalogue. Both omit repos with
+no checkpoints and qualify names by provider. The wizard derives READY placement
+jurisdictions from the same walk and retains its local-repo fallback; completion
+silently falls back to `*` on errors. Do not use the removed BFF
+`GET /api/v1/repositories` route. Dispatch generation still uses the BFF.
+
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)
 
 The data plane (entire-api) is deployed per jurisdiction; a repo placement

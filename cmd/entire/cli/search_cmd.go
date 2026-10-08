@@ -358,20 +358,11 @@ func resolveDefaultSearchRepo(ctx context.Context, explicitScope bool) (forge, o
 // must never pollute the user's prompt with error output.
 func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 	suggestions := []string{"*"}
-	client, err := NewAuthenticatedAPIClient(cmd.Context(), false)
+	repos, err := listCheckpointRepoIndex(cmd.Context())
 	if err != nil {
 		return suggestions, cobra.ShellCompDirectiveNoFileComp
 	}
-	repos, err := client.ListRepositories(cmd.Context(), api.RepositorySortRecent)
-	if err != nil {
-		return suggestions, cobra.ShellCompDirectiveNoFileComp
-	}
-	for _, r := range repos {
-		if r.CheckpointCount == 0 {
-			continue // searching a repo with no checkpoints would always be empty
-		}
-		suggestions = append(suggestions, r.FullName)
-	}
+	suggestions = append(suggestions, checkpointRepoSlugs(repos)...)
 	return suggestions, cobra.ShellCompDirectiveNoFileComp
 }
 
