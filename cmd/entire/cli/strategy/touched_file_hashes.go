@@ -118,7 +118,9 @@ func applyTouchedFileHashes(state *SessionState, changed []string, hashes map[st
 }
 
 // stagedOnlyDeletions returns the step's deleted paths that are absent from
-// HEAD but still have an index entry. git status reports a file the user staged
+// HEAD but whose blob is still staged as a new file (gitrepo.PathsStagedAsNew).
+// An intent-to-add entry (`git add -N`) is in the index but holds no blob and is
+// never committed, so its deletion is recorded. git status reports a file the user staged
 // (`git add`) and that then left the worktree as "AD", so it reaches the step as
 // a deletion; but the next commit adds the staged blob, which is the content the
 // agent wrote. Such a path keeps its recorded hash instead of being recorded as
@@ -151,18 +153,18 @@ func stagedOnlyDeletions(ctx context.Context, worktreeRoot string, deleted []str
 			notInHead = append(notInHead, path)
 		}
 	}
-	inIndex, err := gitrepo.PathsInIndex(ctx, worktreeRoot, notInHead)
+	stagedNew, err := gitrepo.PathsStagedAsNew(ctx, worktreeRoot, notInHead)
 	if err != nil {
-		logging.Debug(logCtx, "could not check the index for deleted files; recording them as deletions",
+		logging.Debug(logCtx, "could not check staged blobs for deleted files; recording them as deletions",
 			slog.String("error", err.Error()))
 		return nil
 	}
-	if len(inIndex) == 0 {
+	if len(stagedNew) == 0 {
 		return nil
 	}
-	staged := make(map[string]struct{}, len(inIndex))
+	staged := make(map[string]struct{}, len(stagedNew))
 	for _, path := range notInHead {
-		if _, ok := inIndex[path]; ok {
+		if _, ok := stagedNew[path]; ok {
 			staged[path] = struct{}{}
 		}
 	}
@@ -271,10 +273,9 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 }
 
 // untrackedDeletionCandidates returns the paths this session recorded a hash
-// for in an earlier turn that are now absent from the worktree, from HEAD, and
-// from the index. Such a path was an untracked file the agent created and later
-// removed: git
-// status reports no deletion for an untracked file, so no turn-end step
+// for in an earlier turn that are now absent from the worktree and from HEAD,
+// and have no staged blob. Such a path was an untracked file the agent created
+// and later removed: git status reports no deletion for an untracked file, so no turn-end step
 // recorded one, and left alone the hashed path would stay pending forever and
 // let a later, unrelated file the user creates at that path link the session
 // by name. recordUntrackedDeletions records them as deletions instead, which
@@ -287,7 +288,7 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 // The alternative, keeping every vanished hashed path, is the unbounded
 // mis-linking window this closes.
 //
-// The index check matters: a file the user staged (`git add`) and that then
+// The staged-blob check matters: a file the user staged (`git add`) and that then
 // left the worktree is not untracked, and the next commit adds the staged blob
 // as a new file. Recording it as a deletion would stop that commit linking the
 // session even though it holds the agent's exact content, so such a path keeps
@@ -340,15 +341,15 @@ func (s *ManualCommitStrategy) untrackedDeletionCandidates(ctx context.Context, 
 			notInHead = append(notInHead, path)
 		}
 	}
-	inIndex, err := gitrepo.PathsInIndex(ctx, worktreeRoot, notInHead)
+	stagedNew, err := gitrepo.PathsStagedAsNew(ctx, worktreeRoot, notInHead)
 	if err != nil {
-		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not check the index for vanished touched files; leaving them",
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not check staged blobs for vanished touched files; leaving them",
 			slog.String("error", err.Error()))
 		return nil
 	}
 	candidates := notInHead[:0]
 	for _, path := range notInHead {
-		if _, staged := inIndex[path]; !staged {
+		if _, staged := stagedNew[path]; !staged {
 			candidates = append(candidates, path)
 		}
 	}

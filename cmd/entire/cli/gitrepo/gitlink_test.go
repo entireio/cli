@@ -81,24 +81,36 @@ func TestGitlinkPaths(t *testing.T) {
 	assert.Empty(t, empty)
 }
 
-func TestPathsInIndex(t *testing.T) {
+func TestPathsStagedAsNew(t *testing.T) {
 	// Not parallel: isolateGitConfig uses t.Setenv.
 	isolateGitConfig(t)
 	dir := initGitlinkRepo(t)
 
-	// Unborn HEAD: a staged file is in the index; a removed-from-worktree
-	// staged file still is; an untracked file and a glob-named pathspec are not.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.go"), []byte("a\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "gone.go"), []byte("b\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.go"), []byte("c\n"), 0o644))
+	// Unborn HEAD: a staged file is staged as new, and so is one removed from
+	// the worktree after staging; an untracked file, an intent-to-add entry
+	// (no blob), and a glob-named pathspec are not.
+	for _, name := range []string{"staged.go", "gone.go", "untracked.go", "intent.go"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(name+"\n"), 0o644))
+	}
 	gitIn(t, dir, "add", "staged.go", "gone.go")
+	gitIn(t, dir, "add", "-N", "intent.go")
 	require.NoError(t, os.Remove(filepath.Join(dir, "gone.go")))
 
-	found, err := PathsInIndex(context.Background(), dir, []string{"staged.go", "gone.go", "untracked.go", "missing", "*.go"})
+	query := []string{"staged.go", "gone.go", "untracked.go", "intent.go", "missing", "*.go"}
+	found, err := PathsStagedAsNew(context.Background(), dir, query)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]struct{}{"staged.go": {}, "gone.go": {}}, found)
 
-	empty, err := PathsInIndex(context.Background(), dir, nil)
+	// Once committed, a file is no longer new; a modified tracked file is not
+	// either.
+	gitIn(t, dir, "commit", "-q", "-m", "base")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.go"), []byte("changed\n"), 0o644))
+	gitIn(t, dir, "add", "staged.go")
+	found, err = PathsStagedAsNew(context.Background(), dir, query)
+	require.NoError(t, err)
+	assert.Empty(t, found)
+
+	empty, err := PathsStagedAsNew(context.Background(), dir, nil)
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }
@@ -113,6 +125,8 @@ func TestLiteralPathspecCommand_IgnoresConflictingPathspecEnv(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644))
 	gitIn(t, dir, "add", "a.txt")
 	gitIn(t, dir, "commit", "-q", "-m", "a")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b\n"), 0o644))
+	gitIn(t, dir, "add", "b.txt")
 
 	for _, name := range []string{"GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"} {
 		t.Run(name, func(t *testing.T) {
@@ -120,9 +134,9 @@ func TestLiteralPathspecCommand_IgnoresConflictingPathspecEnv(t *testing.T) {
 			inHead, err := PathsInHEAD(context.Background(), dir, []string{"a.txt"})
 			require.NoError(t, err)
 			assert.Contains(t, inHead, "a.txt")
-			inIndex, err := PathsInIndex(context.Background(), dir, []string{"a.txt"})
+			staged, err := PathsStagedAsNew(context.Background(), dir, []string{"b.txt"})
 			require.NoError(t, err)
-			assert.Contains(t, inIndex, "a.txt")
+			assert.Contains(t, staged, "b.txt")
 		})
 	}
 }

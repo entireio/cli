@@ -94,6 +94,19 @@ func GitlinkPaths(ctx context.Context, repoRoot string, paths []string) (map[str
 	return found, nil
 }
 
+// indexDiffBase returns the tree an index diff compares against: HEAD, or the
+// empty tree when HEAD is unborn.
+func indexDiffBase(ctx context.Context, repoRoot string) (string, error) {
+	unborn, err := headIsUnborn(ctx, repoRoot)
+	if err != nil {
+		return "", err
+	}
+	if unborn {
+		return emptyTreeID(ctx, repoRoot)
+	}
+	return "HEAD", nil
+}
+
 // emptyTreeID returns the object ID of the empty tree in the repository's
 // object format (sha1 or sha256), as git computes it.
 func emptyTreeID(ctx context.Context, repoRoot string) (string, error) {
@@ -182,11 +195,20 @@ func headIsUnborn(ctx context.Context, repoRoot string) (bool, error) {
 	return false, fmt.Errorf("git rev-parse HEAD: %w", err)
 }
 
-// PathsInIndex returns the subset of paths (relative to repoRoot) that the
-// index has an entry for, staged or merely tracked, from pathspec-limited `git
-// ls-files -z --cached` calls with literal pathspecs. Bounded by
+// PathsStagedAsNew returns the subset of paths (relative to repoRoot) whose
+// blob is staged as a new file: in the index with content and absent from HEAD
+// (the empty tree when HEAD is unborn), so the next commit adds it. It comes
+// from pathspec-limited `git diff-index --cached --name-only -z
+// --diff-filter=A --no-renames --ita-invisible-in-index <base>` calls with
+// literal pathspecs; diff-index, unlike `git diff`, never refreshes the index.
+//
+// Index membership alone (`ls-files --cached`) is not enough: an intent-to-add
+// entry (`git add -N`) is listed there but holds no blob and is never
+// committed. diff-index would report it as added (with the empty blob, which a
+// genuinely staged empty file shares), so --ita-invisible-in-index hides it, as
+// `git diff --cached` and `git commit` do. Bounded by
 // PathClassificationBudget on top of the caller's context.
-func PathsInIndex(ctx context.Context, repoRoot string, paths []string) (map[string]struct{}, error) {
+func PathsStagedAsNew(ctx context.Context, repoRoot string, paths []string) (map[string]struct{}, error) {
 	found := make(map[string]struct{})
 	if len(paths) == 0 {
 		return found, nil
@@ -194,11 +216,15 @@ func PathsInIndex(ctx context.Context, repoRoot string, paths []string) (map[str
 	ctx, cancel := context.WithTimeout(ctx, PathClassificationBudget)
 	defer cancel()
 
+	base, err := indexDiffBase(ctx, repoRoot)
+	if err != nil {
+		return found, err
+	}
 	for start := 0; start < len(paths); start += pathClassificationChunk {
 		chunk := paths[start:min(start+pathClassificationChunk, len(paths))]
-		out, err := literalPathspecCommand(ctx, repoRoot, chunk, "ls-files", "-z", "--cached").Output()
+		out, err := literalPathspecCommand(ctx, repoRoot, chunk, "diff-index", "--cached", "--name-only", "-z", "--diff-filter=A", "--no-renames", "--ita-invisible-in-index", base).Output()
 		if err != nil {
-			return found, fmt.Errorf("git ls-files: %w", err)
+			return found, fmt.Errorf("git diff-index --cached: %w", err)
 		}
 		for _, name := range bytes.Split(out, []byte{0}) {
 			if len(name) > 0 {

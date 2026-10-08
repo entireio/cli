@@ -56,3 +56,30 @@ func TestCarryForward_KeepsStagedFileThatLeftTheWorktree(t *testing.T) {
 	assert.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, headCommit(t, dir), state.FilesTouched),
 		"the second commit holds the agent's b.go and should link the session")
 }
+
+// The carry-forward twin of TestSaveStep_IntentToAddThenRemovedIsADeletion: a
+// file marked intent-to-add (`git add -N`) and then removed from the worktree
+// has no staged blob, so no commit can add it. A partial commit's
+// carry-forward must drop it rather than keep it pending after every commit.
+// Uses t.Chdir — do NOT add t.Parallel().
+func TestCarryForward_DropsIntentToAddFileThatLeftTheWorktree(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-intent-to-add-carry-forward"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "a.go", "package a\n")
+	testutil.WriteFile(t, dir, "b.go", "package b\n")
+	saveTestStep(t, s, dir, sid, "a.go", "b.go")
+	testutil.GitAdd(t, dir, "a.go")
+	testutil.RunGit(t, dir, "add", "-N", "b.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "b.go")))
+
+	commitPathsWithTrailer(t, dir, "b2b2b2b2b2b2", "a.go")
+	require.NoError(t, s.PostCommit(ctx))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	assert.NotContains(t, state.FilesTouched, "b.go", "an intent-to-add entry is not a staged blob any commit will add")
+}

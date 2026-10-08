@@ -457,3 +457,32 @@ func TestSaveStep_TrackedDeletionsStillRecorded(t *testing.T) {
 		assert.Equal(t, touchedFileDeleted, hash, "%s: a deletion of a file in HEAD is recorded", path)
 	}
 }
+
+// An intent-to-add entry (`git add -N`) is in `ls-files --cached` but a
+// commit never includes it. When its file is then deleted, git status reports
+// " D" and the step sees a deletion, which must be recorded: there is no staged
+// blob for a commit to add. Uses t.Chdir — do NOT add t.Parallel().
+func TestSaveStep_IntentToAddThenRemovedIsADeletion(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-intent-to-add"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "n.go", "package main\n")
+	saveTestStep(t, s, dir, sid, "n.go")
+	testutil.RunGit(t, dir, "add", "-N", "n.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "n.go")))
+
+	metadataDir := ".entire/metadata/" + sid
+	require.NoError(t, os.WriteFile(filepath.Join(dir, metadataDir, paths.TranscriptFileName), []byte(testTranscriptPromptResponse), 0o644))
+	require.NoError(t, s.SaveStep(ctx, StepContext{
+		SessionID: sid, DeletedFiles: []string{"n.go"}, MetadataDir: metadataDir,
+		CommitMessage: "turn end", AuthorName: "Test", AuthorEmail: "test@test.com",
+	}))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	assert.Equal(t, touchedFileDeleted, state.TouchedFileHashes["n.go"],
+		"an intent-to-add entry holds no staged blob; treating it as staged keeps n.go pending forever")
+}

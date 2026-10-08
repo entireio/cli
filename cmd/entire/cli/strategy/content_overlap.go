@@ -402,8 +402,10 @@ func filesWithRemainingAgentChanges(
 }
 
 // keepStagedVanished keeps, among the vanished paths (hashed, uncommitted, and
-// absent from both the worktree and the commit tree), those the index still
-// has an entry for. The user staged such a file before it left the worktree,
+// absent from both the worktree and the commit tree), those whose blob is still
+// staged as a new file (gitrepo.PathsStagedAsNew; an intent-to-add entry holds
+// no blob and does not count). The user staged such a file before it left the
+// worktree,
 // so the next commit adds the staged blob, which is the agent's content;
 // dropping it would stop that commit linking the session. The rest were
 // untracked files the agent removed and drop. When the index cannot be read,
@@ -416,16 +418,16 @@ func keepStagedVanished(ctx, logCtx context.Context, worktreeRoot string, filesT
 	for _, i := range vanished {
 		paths = append(paths, filesTouched[i])
 	}
-	var inIndex map[string]struct{}
+	var stagedNew map[string]struct{}
 	var err error
 	if worktreeRoot == "" {
 		err = errors.New("no worktree root")
 	} else {
-		inIndex, err = gitrepo.PathsInIndex(ctx, worktreeRoot, paths)
+		stagedNew, err = gitrepo.PathsStagedAsNew(ctx, worktreeRoot, paths)
 	}
 	for _, i := range vanished {
 		filePath := filesTouched[i]
-		_, staged := inIndex[filePath]
+		_, staged := stagedNew[filePath]
 		switch {
 		case err != nil:
 			keep[i] = true
