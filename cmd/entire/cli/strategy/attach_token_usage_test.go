@@ -39,3 +39,19 @@ func TestAttachTokenUsage_ReplacedEntry(t *testing.T) {
 	usage, _ = AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, nil, []byte(attachTestTranscript), replaced)
 	require.Equal(t, 10, usage.OutputTokens, "without state the whole transcript is counted, which already covers the entry")
 }
+
+func TestAttachTokenUsage_ReplacedEntryKeepsSubagentTokens(t *testing.T) {
+	t.Parallel()
+	// Both subagent totals are window deltas: the replaced entry's is what that
+	// checkpoint stored, the pending one is what the session added since.
+	replaced := &agent.TokenUsage{OutputTokens: 100, SubagentTokens: &agent.TokenUsage{OutputTokens: 50}}
+	state := &SessionState{
+		SessionID:            "s",
+		AgentType:            agent.AgentTypeClaudeCode,
+		CheckpointTokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{OutputTokens: 5}},
+	}
+	usage, _ := AttachTokenUsage(context.Background(), &claudecode.ClaudeCodeAgent{}, state, []byte(attachTestTranscript), replaced)
+	require.Equal(t, 110, usage.OutputTokens)
+	require.NotNil(t, usage.SubagentTokens)
+	require.Equal(t, 55, usage.SubagentTokens.OutputTokens, "the replaced entry's subagent tokens must be added, not overwritten")
+}

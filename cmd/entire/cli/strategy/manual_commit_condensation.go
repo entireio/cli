@@ -1269,7 +1269,8 @@ func AttachTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, 
 		}
 	}
 	if state != nil && hasTokenUsageData(replaced) {
-		usage = accumulateTokenUsage(accumulateTokenUsage(nil, replaced), usage)
+		// Both sides are window deltas, so subagent totals add too.
+		usage = types.AddTokenUsage(replaced, usage)
 	}
 	return usage, countTranscriptItems(ag.Type(), string(transcript))
 }
