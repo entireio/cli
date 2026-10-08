@@ -385,7 +385,9 @@ func RedactURL(rawURL string) string {
 }
 
 // credentialInURL matches the scheme and userinfo of a URL embedded in text.
-var credentialInURL = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@`)
+// Greedy up to the last "@" before the path, so an unencoded "@" in a password
+// cannot leave part of it behind.
+var credentialInURL = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s]*@`)
 
 // RedactCredentialsInText removes userinfo from any URL appearing in free text,
 // for git's output where we do not know which URL was echoed.

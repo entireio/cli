@@ -83,7 +83,7 @@ type chunkPushResult struct {
 	unreachable string
 }
 
-// pushRefChunks batch-pushes refs a chunk at a time (see
+// pushRefChunks batch-pushes refs size at a time (see
 // checkpointRefPushChunkSize), calling onLanded with each chunk that lands so
 // the caller can dequeue it before a later chunk is cut. A failed chunk does not
 // stop the phase — a rejection fails only its own chunk — but an SSH auth
@@ -91,10 +91,10 @@ type chunkPushResult struct {
 // row does, and so does an unreachable remote before any chunk landed: per-ref
 // retries cannot reach it either, and each would wait out its own connect
 // timeout. The first chunk is always attempted, matching the per-ref fallback.
-func pushRefChunks(ctx context.Context, target string, refs []plumbing.ReferenceName, onLanded func([]plumbing.ReferenceName)) chunkPushResult {
+func pushRefChunks(ctx context.Context, target string, refs []plumbing.ReferenceName, size int, onLanded func([]plumbing.ReferenceName)) chunkPushResult {
 	var res chunkPushResult
 	consecutive := 0
-	for start := 0; start < len(refs); start += checkpointRefPushChunkSize {
+	for start := 0; start < len(refs); start += size {
 		if start > 0 {
 			if reason := chunkStopReason(ctx, consecutive); reason != "" {
 				res.untried = refs[start:]
@@ -104,7 +104,7 @@ func pushRefChunks(ctx context.Context, target string, refs []plumbing.Reference
 				return res
 			}
 		}
-		chunk := refs[start:min(start+checkpointRefPushChunkSize, len(refs))]
+		chunk := refs[start:min(start+size, len(refs))]
 		err := batchPushRefs(ctx, target, chunk)
 		if err == nil {
 			consecutive = 0
@@ -290,8 +290,9 @@ var checkpointPushBudget = 2 * time.Minute
 // checkpointPushBudget cannot: that one caps a single ref, and the fallback walks
 // the queue serially, so a backlog multiplies it. The batch needs the bound too:
 // it carries the whole backlog, so a slow uplink or a stalled connection would
-// otherwise hold the user's git push for as long as the upload takes. A healthy push costs roughly one SSH round-trip per ref, so a
-// few hundred queued refs is already tens of minutes of a `git push` that looks
+// otherwise hold the user's git push for as long as the upload takes. A
+// healthy push costs roughly one SSH round-trip per ref, so a few hundred
+// queued refs is already tens of minutes of a `git push` that looks
 // hung; when the destination is unreachable every ref instead pays the full
 // per-ref budget and the same queue runs for hours. Refs that do not fit stay
 // queued and go out on the next push, so this bounds progress, never data.
@@ -309,7 +310,11 @@ var checkpointPushBudget = 2 * time.Minute
 // Declared as a var so tests can shrink it.
 var checkpointFlushBudget = 2 * time.Minute
 
-// checkpointRefPushChunkSize is how many queued refs one batch push carries.
+// checkpointRefPushChunkSize is the most queued refs one batch push carries.
+// A link too slow to finish that many within the flush budget would otherwise
+// never land the chunk at the head of the queue, on any push, so the size
+// actually used adapts (see PushQueue.ChunkSizeHint): a chunk cut by the budget
+// halves it, down to one ref, and a flush that lands everything doubles it back.
 // Chunks are what make the flush budget bound progress rather than discard it:
 // each chunk that lands leaves the queue at once, so a backlog too large for one
 // budget drains over several pushes instead of being cut at the same point by

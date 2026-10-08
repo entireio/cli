@@ -117,10 +117,12 @@ var unreachableRemoteNeedles = []string{
 	"ssh: could not resolve hostname",
 	"could not resolve host:",
 	"could not resolve proxy:",
-	"failed to connect to ",
+	curlFailedToConnect, // only in curl's "<host> port <n>" form, not a helper's
 	"couldn't connect to server",
 	"resolving timed out",
 }
+
+const curlFailedToConnect = "failed to connect to "
 
 // maxUnreachableLineRunes caps the cause line printed inside the user's push.
 const maxUnreachableLineRunes = 200
@@ -146,7 +148,7 @@ func UnreachableRemoteLine(err error) (string, bool) {
 		}
 		lower := strings.ToLower(line)
 		for _, n := range unreachableRemoteNeedles {
-			if strings.Contains(lower, n) {
+			if strings.Contains(lower, n) && (n != curlFailedToConnect || strings.Contains(lower, " port ")) {
 				return displayGitLine(line), true
 			}
 		}
@@ -160,7 +162,9 @@ func displayGitLine(line string) string {
 	line = strings.TrimPrefix(line, "fatal: ")
 	line = gitremote.RedactCredentialsInText(line)
 	line = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		// Cc: terminal escapes and newlines; Cf: bidi overrides that could
+		// make the line read as something else.
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
@@ -193,8 +197,10 @@ var plinkBatchArgRe = regexp.MustCompile(`(?i)(^|\s)-batch(\s|$)`)
 
 // nonInteractiveSSHConnectTimeout bounds the TCP connect to an unreachable host,
 // whose kernel default (~75-130s) would otherwise spend most of the pre-push
-// checkpoint budget on one attempt. Generous for any reachable host.
-const nonInteractiveSSHConnectTimeout = "30"
+// checkpoint budget on one attempt. Generous for any reachable host, including
+// one behind a slow-starting ProxyCommand (SSM, cloudflared, Teleport), whose
+// banner wait ssh's ConnectTimeout also bounds.
+const nonInteractiveSSHConnectTimeout = "60"
 
 // sshVariant is the kind of ssh client git will run, which decides the options
 // it accepts. Mirrors git's own variants (connect.c, determine_ssh_variant).
@@ -292,13 +298,16 @@ func envLookup(env []string, key string) (string, bool) {
 
 // gitConfigSSH looks up core.sshCommand and ssh.variant in one `git config`
 // call, run with env so the lookup honors any HOME/GIT_CONFIG_* overrides
-// present in env (e.g. in tests). Unset values, or a failed lookup, are "".
-func gitConfigSSH(ctx context.Context, env []string) (sshCommand, variant string, hasVariant bool) {
+// present in env (e.g. in tests). Unset values are "". ok is false when the
+// lookup itself failed, as opposed to finding nothing (git's exit status 1):
+// the caller must not then guess at the command git will run.
+func gitConfigSSH(ctx context.Context, env []string) (sshCommand, variant string, hasVariant, ok bool) {
 	cmd := exec.CommandContext(ctx, "git", "config", "--get-regexp", `^(core\.sshcommand|ssh\.variant)$`)
 	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", false
+		var exitErr *exec.ExitError
+		return "", "", false, errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 	}
 	// Last value wins, as for git's own single-valued lookups.
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -310,7 +319,7 @@ func gitConfigSSH(ctx context.Context, env []string) (sshCommand, variant string
 			variant, hasVariant = value, true
 		}
 	}
-	return sshCommand, variant, hasVariant
+	return sshCommand, variant, hasVariant, true
 }
 
 // resolvedSSH is the ssh client git itself would run for a remote operation.
@@ -324,36 +333,43 @@ type resolvedSSH struct {
 // precedence order: the GIT_SSH_COMMAND environment variable, then the
 // core.sshCommand git config value, then the GIT_SSH environment variable,
 // falling back to plain "ssh" when none are set. The variant comes from
-// GIT_SSH_VARIANT or ssh.variant when set, else from the program's name.
-func resolveSSH(ctx context.Context, env []string) resolvedSSH {
-	configCmd, configVariant, hasConfigVariant := gitConfigSSH(ctx, env)
+// GIT_SSH_VARIANT or ssh.variant when set, else from the program's name. ok is
+// false when the command would come from git config that could not be read:
+// the caller then cannot know what git will run, and must not replace it.
+func resolveSSH(ctx context.Context, env []string) (resolvedSSH, bool) {
+	configCmd, configVariant, hasConfigVariant, configOK := gitConfigSSH(ctx, env)
 	res := resolvedSSH{command: "ssh", cmdline: true}
 	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok && strings.TrimSpace(v) != "" {
 		res.command = strings.TrimSpace(v)
+	} else if !configOK {
+		return res, false
 	} else if configCmd != "" {
 		res.command = configCmd
 	} else if v, ok := envLookup(env, "GIT_SSH"); ok && strings.TrimSpace(v) != "" {
 		res.command, res.cmdline = strings.TrimSpace(v), false
 	}
 
+	// An explicit variant decides, except "auto", which (as in git) means
+	// detect from the program name below.
 	if v, ok := envLookup(env, "GIT_SSH_VARIANT"); ok {
-		res.variant = overrideSSHVariant(v)
-		return res
-	}
-	if hasConfigVariant {
-		res.variant = overrideSSHVariant(configVariant)
-		return res
+		if res.variant = overrideSSHVariant(v); res.variant != sshVariantAuto {
+			return res, true
+		}
+	} else if hasConfigVariant {
+		if res.variant = overrideSSHVariant(configVariant); res.variant != sshVariantAuto {
+			return res, true
+		}
 	}
 	prog := res.command
 	if res.cmdline {
 		word, ok := firstCmdlineWord(res.command)
 		if !ok {
-			return res // sshVariantAuto
+			return res, true // sshVariantAuto
 		}
 		prog = word
 	}
 	res.variant = sshVariantForProgram(prog)
-	return res
+	return res, true
 }
 
 // withBatchModeSSH returns env with GIT_SSH_COMMAND set so the ssh client git
@@ -367,7 +383,10 @@ func resolveSSH(ctx context.Context, env []string) resolvedSSH {
 // result is idempotent. env is returned unchanged when nothing needs adding.
 func withBatchModeSSH(ctx context.Context, env []string) []string {
 	const key = "GIT_SSH_COMMAND="
-	ssh := resolveSSH(ctx, env)
+	ssh, ok := resolveSSH(ctx, env)
+	if !ok {
+		return env
+	}
 	var opts string
 	switch ssh.variant {
 	case sshVariantOpenSSH, sshVariantAuto:

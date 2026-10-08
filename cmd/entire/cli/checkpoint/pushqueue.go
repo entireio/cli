@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -25,6 +27,9 @@ import (
 const (
 	pushQueueFileName = "entire-checkpoint-push-queue.jsonl"
 	pushQueueLockName = "entire-checkpoint-push-queue.lock"
+	// pushChunkSizeFileName remembers how many refs one batch push can carry
+	// within the flush budget on this machine's link (see ChunkSizeHint).
+	pushChunkSizeFileName = "entire-checkpoint-push-chunk-size"
 )
 
 // lock opens the common dir's root and takes the queue lock inside it,
@@ -311,6 +316,37 @@ func writeQueueAtomic(root *os.Root, data []byte) error {
 	}
 	if err := root.Rename(tmpName, pushQueueFileName); err != nil {
 		return fmt.Errorf("rename temp push queue: %w", err)
+	}
+	return nil
+}
+
+// ChunkSizeHint returns the remembered batch-push chunk size, clamped to
+// [1, maxSize], or maxSize when none is remembered or it cannot be read.
+func (q *PushQueue) ChunkSizeHint(maxSize int) int {
+	root, err := q.root()
+	if err != nil {
+		return maxSize
+	}
+	data, err := root.ReadFile(pushChunkSizeFileName)
+	if err != nil {
+		return maxSize
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || n < 1 || n > maxSize {
+		return maxSize
+	}
+	return n
+}
+
+// SetChunkSizeHint remembers n as the batch-push chunk size. Best-effort: a
+// failure only means the next flush starts from the default again.
+func (q *PushQueue) SetChunkSizeHint(n int) error {
+	root, err := q.root()
+	if err != nil {
+		return fmt.Errorf("open git common dir: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, pushChunkSizeFileName, []byte(strconv.Itoa(n)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write push chunk size: %w", err)
 	}
 	return nil
 }

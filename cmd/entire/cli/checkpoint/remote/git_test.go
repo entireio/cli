@@ -1119,35 +1119,35 @@ func TestWithBatchModeSSH(t *testing.T) {
 		{
 			name: "no existing GIT_SSH_COMMAND or config defaults to ssh",
 			in:   func(t *testing.T) []string { return isolatedSSHEnv(t) },
-			want: "ssh -o BatchMode=yes -o ConnectTimeout=30",
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "preserves and extends a custom ssh command",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/id")
 			},
-			want: "ssh -i /home/me/.ssh/id -o BatchMode=yes -o ConnectTimeout=30",
+			want: "ssh -i /home/me/.ssh/id -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "GIT_SSH_COMMAND with explicit BatchMode=yes is left untouched",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
 			},
-			want: "ssh -o BatchMode=yes -o ConnectTimeout=30",
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "GIT_SSH_COMMAND with explicit BatchMode=no is respected, not overridden",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=no")
 			},
-			want: "ssh -o BatchMode=no -o ConnectTimeout=30",
+			want: "ssh -o BatchMode=no -o ConnectTimeout=60",
 		},
 		{
 			name: "blank GIT_SSH_COMMAND falls back to ssh",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=   ")
 			},
-			want: "ssh -o BatchMode=yes -o ConnectTimeout=30",
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "core.sshCommand git config is used as the base when env is unset",
@@ -1155,7 +1155,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
 				return isolatedSSHEnv(t, cfg)
 			},
-			want: "ssh -i /home/me/.ssh/work_key -o BatchMode=yes -o ConnectTimeout=30",
+			want: "ssh -i /home/me/.ssh/work_key -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "GIT_SSH_COMMAND env takes precedence over core.sshCommand config",
@@ -1163,7 +1163,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
 				return isolatedSSHEnv(t, cfg, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/personal_key")
 			},
-			want: "ssh -i /home/me/.ssh/personal_key -o BatchMode=yes -o ConnectTimeout=30",
+			want: "ssh -i /home/me/.ssh/personal_key -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "GIT_SSH is used only when neither env GIT_SSH_COMMAND nor config are set",
@@ -1177,7 +1177,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, `GIT_SSH_COMMAND=ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither"`)
 			},
-			want: `ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither" -o BatchMode=yes -o ConnectTimeout=30`,
+			want: `ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither" -o BatchMode=yes -o ConnectTimeout=60`,
 		},
 		{
 			name: "explicit ConnectTimeout is left untouched",
@@ -1191,7 +1191,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=/usr/bin/ssh -i key")
 			},
-			want: "/usr/bin/ssh -i key -o BatchMode=yes -o ConnectTimeout=30",
+			want: "/usr/bin/ssh -i key -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "plink that already runs -batch is left untouched",
@@ -1240,7 +1240,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", "GIT_SSH_VARIANT=ssh")
 			},
-			want: "my-wrapper -o BatchMode=yes -o ConnectTimeout=30",
+			want: "my-wrapper -o BatchMode=yes -o ConnectTimeout=60",
 		},
 		{
 			name: "ssh.variant=simple config takes no options",
@@ -1248,6 +1248,27 @@ func TestWithBatchModeSSH(t *testing.T) {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", rawGitConfigFile(t, "[ssh]\n\tvariant = simple\n"))
 			},
 			want: "my-wrapper",
+		},
+		{
+			name: "variant auto still detects plink from the program name",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH=C:\\PuTTY\\plink.exe`, rawGitConfigFile(t, "[ssh]\n\tvariant = auto\n"))
+			},
+			want: `'C:\\PuTTY\\plink.exe' -batch`,
+		},
+		{
+			name: "GIT_SSH_VARIANT=auto still gives OpenSSH its timeout",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh", "GIT_SSH_VARIANT=auto")
+			},
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=60",
+		},
+		{
+			name: "unreadable git config leaves the user's ssh command alone",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, rawGitConfigFile(t, "[core\n\tsshCommand = my-ssh\n"))
+			},
+			want: "",
 		},
 		{
 			name: "GIT_SSH_VARIANT env beats ssh.variant config",
@@ -1367,6 +1388,16 @@ func TestUnreachableRemoteLine(t *testing.T) {
 			name: "non-fast-forward rejection",
 			err:  pushErr(" ! [rejected]        refs/x -> refs/x (non-fast-forward)\nerror: failed to push some refs"),
 		},
+		{
+			name: "bidi overrides are stripped from the printed line",
+			err:  pushErr("ssh: connect to host gith\u202eub.com port 22: Connection refused"),
+			want: "ssh: connect to host github.com port 22: Connection refused",
+			ok:   true,
+		},
+		{
+			name: "a helper's own connect failure is not curl's",
+			err:  pushErr("failed to connect to keyring: no such service\nfatal: Authentication failed"),
+		},
 		{name: "nil", err: nil},
 	}
 	for _, tt := range tests {
@@ -1396,7 +1427,7 @@ func TestWithBatchModeSSH_PreservesOtherVarsWithoutDuplicating(t *testing.T) {
 
 	m := envToMap(out)
 	assert.Equal(t, "value", m["SOME_OTHER_VAR"])
-	assert.Equal(t, "ssh -o BatchMode=yes -o ConnectTimeout=30", m["GIT_SSH_COMMAND"])
+	assert.Equal(t, "ssh -o BatchMode=yes -o ConnectTimeout=60", m["GIT_SSH_COMMAND"])
 }
 
 // TestNewCommand_NonInteractiveSSH verifies that a checkpoint git command built
