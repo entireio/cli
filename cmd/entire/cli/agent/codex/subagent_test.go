@@ -95,6 +95,18 @@ func TestTerminalTurnIDs_OnlyAcceptsUnambiguousBoundaries(t *testing.T) {
 	withUnknownEvent := append(append([]json.RawMessage(nil), valid...), json.RawMessage(`{"type":"event_msg","payload":{"type":"future_event","turn_id":7}}`))
 	require.Equal(t, []string{"one", "two"}, analyzeRollout(rolloutData(t, "child", withUnknownEvent)).TerminalTurnIDs)
 
+	// An aborted turn has ended too: a user interrupt, or a Codex daemon
+	// restart that aborts the turn and resumes in a new one. It must close
+	// the turn, or every later start reads as overlapping and the child is
+	// never seen complete.
+	interrupted := []json.RawMessage{
+		taskEvent("task_started", stringPointer("one")), taskEvent("turn_aborted", stringPointer("one")),
+		taskEvent("task_started", stringPointer("two")), taskEvent("task_complete", stringPointer("two")),
+	}
+	require.Equal(t, []string{"one", "two"}, analyzeRollout(rolloutData(t, "child", interrupted)).TerminalTurnIDs)
+	abortedWithoutID := []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("turn_aborted", nil)}
+	require.Equal(t, []string{"one"}, analyzeRollout(rolloutData(t, "child", abortedWithoutID)).TerminalTurnIDs)
+
 	tests := []struct {
 		name   string
 		events []json.RawMessage
@@ -106,6 +118,8 @@ func TestTerminalTurnIDs_OnlyAcceptsUnambiguousBoundaries(t *testing.T) {
 		{"mismatched completion", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("two"))}},
 		{"duplicate turn", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one")), taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one"))}},
 		{"duplicate completion", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", nil), taskEvent("task_complete", nil)}},
+		{"abort without start", []json.RawMessage{taskEvent("turn_aborted", stringPointer("one"))}},
+		{"mismatched abort", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("turn_aborted", stringPointer("two"))}},
 		{"invalid id type", []json.RawMessage{json.RawMessage(`{"type":"event_msg","payload":{"type":"task_started","turn_id":7}}`)}},
 		{"malformed tail", append(valid, json.RawMessage(`{"type":"event_msg","payload":{"type":"task_started","turn_id":`))},
 	}

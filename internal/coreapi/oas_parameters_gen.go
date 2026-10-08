@@ -11,6 +11,14 @@ type AddOrgMemberParams struct {
 	OrgId string
 }
 
+// BeginPluginInstallationDeletionParams is parameters of beginPluginInstallationDeletion operation.
+type BeginPluginInstallationDeletionParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
+}
+
 // ConnectOrgCIBuildkiteCredentialParams is parameters of connectOrgCIBuildkiteCredential operation.
 type ConnectOrgCIBuildkiteCredentialParams struct {
 	OrgId string
@@ -34,6 +42,12 @@ type CreateNativeMirrorParams struct {
 // CreateOrgInvitationParams is parameters of createOrgInvitation operation.
 type CreateOrgInvitationParams struct {
 	OrgId string
+}
+
+// CreatePluginInstallationParams is parameters of createPluginInstallation operation.
+type CreatePluginInstallationParams struct {
+	// Plugin installation profile.
+	Plugin string
 }
 
 // CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
@@ -80,6 +94,14 @@ type DeleteOrgCIBuildkiteCredentialParams struct {
 	BkOrg string
 }
 
+// DeletePluginInstallationParams is parameters of deletePluginInstallation operation.
+type DeletePluginInstallationParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
+}
+
 // DeleteProjectParams is parameters of deleteProject operation.
 type DeleteProjectParams struct {
 	ProjectId string
@@ -88,6 +110,10 @@ type DeleteProjectParams struct {
 // DeleteRepoParams is parameters of deleteRepo operation.
 type DeleteRepoParams struct {
 	RepoId string
+	// Also delete the repo's native mirrors. With mirrors present the server marks every copy for
+	// teardown, answers 202, and deletes the primary once they are gone; poll GET /repos/{repoId} until
+	// 404. Without mirrors the delete runs synchronously as usual.
+	Cascade OptBool `json:",omitempty,omitzero"`
 }
 
 // DeleteRepoCIWebhookParams is parameters of deleteRepoCIWebhook operation.
@@ -108,6 +134,11 @@ type DetachMyHandleParams struct {
 	Provider DetachMyHandleProvider
 	// The provider's stable user identifier for the handle (handles[].providerUserId from GET /me).
 	ProviderUserId string
+}
+
+// DetachRepoParams is parameters of detachRepo operation.
+type DetachRepoParams struct {
+	RepoId string
 }
 
 // DisconnectOrgCIDepotOrganizationParams is parameters of disconnectOrgCIDepotOrganization operation.
@@ -147,6 +178,18 @@ type GetOrgPersonAccessParams struct {
 	AccountId string
 }
 
+// GetPluginInstallationParams is parameters of getPluginInstallation operation.
+type GetPluginInstallationParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Installation (ins_<ULID>).
+	ID string
+	// Opaque cursor from a previous response's next_cursor.
+	Cursor OptString `json:",omitempty,omitzero"`
+	// Repositories per page.
+	PerPage OptInt64 `json:",omitempty,omitzero"`
+}
+
 // GetProjectParams is parameters of getProject operation.
 type GetProjectParams struct {
 	ProjectId string
@@ -159,12 +202,20 @@ type GetRepoParams struct {
 	// jurisdiction redirects with 421. This core reports 503 when it cannot route the read. Provisioning
 	// and failed states still return 200.
 	Authoritative OptBool `json:",omitempty,omitzero"`
+	// Optional: opaque commit token from this repo's create, to read at a snapshot that contains that
+	// write. The lifecycle state, the placements, and a provisioning failure are always read fresh.
+	CommitToken OptString `json:",omitempty,omitzero"`
 }
 
 // GetRepoCIDeliveryParams is parameters of getRepoCIDelivery operation.
 type GetRepoCIDeliveryParams struct {
 	RepoId string
 	ID     string
+}
+
+// GetRepoDetachParams is parameters of getRepoDetach operation.
+type GetRepoDetachParams struct {
+	RepoId string
 }
 
 // GetRepoVisibilityParams is parameters of getRepoVisibility operation.
@@ -341,12 +392,23 @@ type ListOrgsParams struct {
 	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
-	// Optional: exact-match org name (case-insensitive).
+	// Deprecated: exact org name among the caller's own orgs, case-insensitive. List orgs and match
+	// client-side instead.
 	Name        OptString `json:",omitempty,omitzero"`
 	IfNoneMatch OptString `json:",omitempty,omitzero"`
 	// Optional: opaque commit token from an org create or delete, to read at a snapshot that contains
 	// that write. Applies to both the name lookup and the page.
 	CommitToken OptString `json:",omitempty,omitzero"`
+}
+
+// ListPluginInstallationsParams is parameters of listPluginInstallations operation.
+type ListPluginInstallationsParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Entire org.
+	OrgID OptString `json:",omitempty,omitzero"`
+	// Entire project.
+	ProjectID OptString `json:",omitempty,omitzero"`
 }
 
 // ListProjectCollaboratorsParams is parameters of listProjectCollaborators operation.
@@ -401,6 +463,10 @@ type ListProjectReposParams struct {
 	ProjectId string
 	// Optional: exact-match repo name (case-insensitive).
 	Name OptString `json:",omitempty,omitzero"`
+	// Onboarded (default): the project's repos in Entire. all: also lists the GitHub owner's unmirrored
+	// repos that the caller can access on GitHub, after all published repos. Only a GitHub mirrors
+	// project has such repos. Ignored when name is set.
+	Scope OptListProjectReposScope `json:",omitempty,omitzero"`
 	// Optional: opaque commit token from a create, to read a snapshot that contains that write.
 	CommitToken OptString `json:",omitempty,omitzero"`
 }
@@ -612,6 +678,16 @@ type RemoveOrgMemberByMembershipIDParams struct {
 	MembershipId string
 }
 
+// RemovePluginInstallationRepositoryParams is parameters of removePluginInstallationRepository operation.
+type RemovePluginInstallationRepositoryParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
+	// Public repository id.
+	RepositoryID string
+}
+
 // ResolveHandleParams is parameters of resolveHandle operation.
 type ResolveHandleParams struct {
 	// IdP slug (e.g. "github").
@@ -633,6 +709,16 @@ type ResolveMirrorPlacementsParams struct {
 type ResolveProjectParams struct {
 	Host    ResolveProjectHost
 	Project string
+}
+
+// RestorePluginInstallationRepositoryParams is parameters of restorePluginInstallationRepository operation.
+type RestorePluginInstallationRepositoryParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Plugin installation id.
+	ID string
+	// Public repository id.
+	RepositoryID string
 }
 
 // RevokeOrgInvitationParams is parameters of revokeOrgInvitation operation.
@@ -687,6 +773,14 @@ type SetBranchProtectionParams struct {
 	RepoId string
 }
 
+// SetPluginInstallationRepositoriesParams is parameters of setPluginInstallationRepositories operation.
+type SetPluginInstallationRepositoriesParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Installation (ins_<ULID>).
+	ID string
+}
+
 // SetRepoVisibilityParams is parameters of setRepoVisibility operation.
 type SetRepoVisibilityParams struct {
 	RepoId string
@@ -701,4 +795,14 @@ type UpdateBranchProtectionParams struct {
 type UpdateOrgMemberRoleParams struct {
 	OrgId        string
 	MembershipId string
+}
+
+// ValidatePluginInstallRedirectParams is parameters of validatePluginInstallRedirect operation.
+type ValidatePluginInstallRedirectParams struct {
+	// Plugin installation profile.
+	Plugin string
+	// Post-install URL the link names.
+	RedirectURI string
+	// Opaque state the plugin put in the link.
+	State string
 }

@@ -17,7 +17,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -182,10 +181,11 @@ func enumerateRepoCandidates(ctx context.Context, repoRoot string, opts Options,
 	}
 	defer repo.Close()
 
-	repoFullName, err := resolveRepoFullName(ctx, repo)
+	repoSlug, err := resolveOriginRepoSlug(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("resolve repo name for %s: %w", repoRoot, err)
 	}
+	repoFullName := localRepoDisplayName(repoSlug)
 
 	branches := opts.Branches
 	switch {
@@ -471,22 +471,40 @@ func runGitOutput(ctx context.Context, repoRoot string, args ...string) (string,
 	return string(out), true
 }
 
-func resolveRepoFullName(ctx context.Context, repo *git.Repository) (string, error) {
+// resolveOriginRepoSlug names the repo a checkout belongs to by its
+// forge-qualified slug (gh/<owner>/<repo> or et/<project>/<repo>), read from
+// the origin remote. The forge is whatever the remote points at, never
+// assumed, so an Entire-native checkout is addressed as the native repo.
+//
+// Errors name no flag: local mode refuses --repos, so the hint to pass it
+// belongs to the cloud caller alone.
+func resolveOriginRepoSlug(ctx context.Context, repo *git.Repository) (string, error) {
 	remote, err := repo.Remote("origin")
 	if err != nil {
 		logging.Warn(ctx, "dispatch repo resolution failed", "step", "origin_remote", "error", err)
-		return "", fmt.Errorf("dispatch currently supports GitHub repositories with an origin remote: %w", err)
+		return "", fmt.Errorf("dispatch needs an origin remote on GitHub or Entire: %w", err)
 	}
 	if len(remote.Config().URLs) == 0 {
-		return "", errors.New("dispatch currently supports GitHub repositories with an origin remote URL")
+		return "", errors.New("dispatch needs an origin remote URL on GitHub or Entire")
 	}
 
-	owner, repoName, err := search.ParseGitHubRemote(remote.Config().URLs[0])
+	slug, err := OriginRepoSlug(remote.Config().URLs[0])
 	if err != nil {
 		logging.Warn(ctx, "dispatch repo resolution failed", "step", "parse_origin_remote", "error", err)
-		return "", fmt.Errorf("dispatch currently supports GitHub origin remotes only: %w", err)
+		return "", fmt.Errorf("dispatch cannot address this checkout's origin: %w", err)
 	}
-	return owner + "/" + repoName, nil
+	return slug, nil
+}
+
+// localRepoDisplayName is how a local dispatch labels a repo group. A GitHub
+// repo keeps the bare owner/repo it has always shown, which githubRepoURL
+// links; any other forge keeps its qualified slug, which names the forge and
+// gets no github.com link.
+func localRepoDisplayName(slug string) string {
+	if name, ok := GitHubRepoName(slug); ok {
+		return name
+	}
+	return slug
 }
 
 func currentBranchName(repo *git.Repository) (string, error) {
@@ -512,7 +530,7 @@ func localBranchNames(repo *git.Repository) ([]string, error) {
 	var names []string
 	if err := iter.ForEach(func(ref *plumbing.Reference) error {
 		name := ref.Name().Short()
-		if strings.HasPrefix(name, checkpoint.ShadowBranchPrefix) {
+		if strings.HasPrefix(name, checkpoint.InternalBranchPrefix) {
 			return nil
 		}
 		names = append(names, name)

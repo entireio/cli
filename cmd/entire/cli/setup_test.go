@@ -5228,10 +5228,11 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		rawURL  string
-		want    string
-		wantErr bool
+		name     string
+		rawURL   string
+		want     string
+		wantSkip bool // the remote names no upstream forge, so nothing is reported
+		wantErr  bool
 	}{
 		{
 			name:   "https without credentials is normalized",
@@ -5274,6 +5275,37 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 			want:   "https://ghe.corp.example.com/entireio/cli.git",
 		},
 		{
+			// A native repo mirrors nothing, so CanonicalHost falls back to the
+			// Entire cluster and no forge clone URL exists to report. Reporting
+			// a synthesized one would name a URL that addresses nothing.
+			name:     "native origin reports nothing",
+			rawURL:   "entire://aws-us-east-2.entire.io/et/widgets/web",
+			wantSkip: true,
+		},
+		{
+			name:     "native origin spelled with the .git alias reports nothing",
+			rawURL:   "entire://aws-us-east-2.entire.io/et/widgets/web.git",
+			wantSkip: true,
+		},
+		{
+			// ParseURL preserves ANY non-empty forge token, so an unrecognized
+			// one reaches here looking like a mirror. It maps to no upstream
+			// host either, so it is the same fiction as the native case and is
+			// skipped for the same reason -- `et` is not a special case, "no
+			// known upstream host" is the rule.
+			name:     "entire:// origin with an unrecognized forge reports nothing",
+			rawURL:   "entire://aws-us-east-2.entire.io/jk/myproject/repo",
+			wantSkip: true,
+		},
+		{
+			// The skip is scoped to entire:// remotes. A direct remote is
+			// reached over a git transport, so its Host IS a git host even when
+			// the forge is unmapped -- see the enterprise case above.
+			name:   "direct remote with an unmapped forge is still reportable",
+			rawURL: "https://git.corp.example.com/team/app",
+			want:   "https://git.corp.example.com/team/app.git",
+		},
+		{
 			name:    "unparseable single-segment path errors",
 			rawURL:  "https://github.com/onlyowner.git",
 			wantErr: true,
@@ -5294,7 +5326,13 @@ func TestCleanRemoteURLForReport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error parsing %q: %v", tt.rawURL, err)
 			}
-			got := cleanRemoteURLForReport(info)
+			got, ok := cleanRemoteURLForReport(info)
+			if ok == tt.wantSkip {
+				t.Fatalf("cleanRemoteURLForReport(%q) ok = %v, want %v", tt.rawURL, ok, !tt.wantSkip)
+			}
+			if !ok && got != "" {
+				t.Errorf("cleanRemoteURLForReport(%q) returned %q alongside ok=false", tt.rawURL, got)
+			}
 			if got != tt.want {
 				t.Errorf("cleanRemoteURLForReport(%q) = %q, want %q", tt.rawURL, got, tt.want)
 			}

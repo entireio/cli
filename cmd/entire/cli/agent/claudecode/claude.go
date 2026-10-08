@@ -86,8 +86,36 @@ func (c *ClaudeCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) 
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
+// TaskTranscriptMatches reports whether path is agent-<agentID>.jsonl in the
+// session's subagents directory or, for older Claude versions, beside the
+// session transcript.
+func (c *ClaudeCodeAgent) TaskTranscriptMatches(parentPath, sessionID, agentID, path string) bool {
+	return agentID != "" &&
+		filepath.Base(path) == paths.AgentTranscriptFileName(agentID) &&
+		agent.TaskTranscriptBesideParent(parentPath, sessionID, path)
+}
+
 // ProtectedDirs returns directories that Claude uses for config/state.
 func (c *ClaudeCodeAgent) ProtectedDirs() []string { return []string{".claude"} }
+
+// claudeConfigDirEnvVar relocates Claude Code's configuration directory
+// (~/.claude by default). Claude Code documents that every ~/.claude path lives
+// under it when set, so transcripts, settings, skills and plugins move together;
+// resolving it in one place keeps Entire looking where Claude actually wrote.
+const claudeConfigDirEnvVar = "CLAUDE_CONFIG_DIR"
+
+// resolveClaudeConfigDir returns Claude Code's configuration directory. Where
+// home probes are enabled (commands run from the user's shell, see
+// agent.EnableHomeProbes) that is claude's own answer, which also covers a
+// CLAUDE_CONFIG_DIR set in its settings files; otherwise, and whenever the
+// probe fails, it is $CLAUDE_CONFIG_DIR when set, else ~/.claude. See
+// agent.ResolveHome for the override policy.
+func resolveClaudeConfigDir() (string, error) {
+	if dir := probedConfigDir(); dir != "" {
+		return dir, nil
+	}
+	return agent.ResolveHome(claudeConfigDirEnvVar, ".claude") //nolint:wrapcheck // the error already names the override and its value
+}
 
 // GetSessionDir returns the directory where Claude stores session transcripts.
 func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
@@ -96,25 +124,38 @@ func (c *ClaudeCodeAgent) GetSessionDir(repoPath string) (string, error) {
 		return override, nil
 	}
 
-	homeDir, err := os.UserHomeDir()
+	configDir, err := resolveClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
 
 	projectDir := SanitizePathForClaude(repoPath)
-	return filepath.Join(homeDir, ".claude", "projects", projectDir), nil
+	return filepath.Join(configDir, "projects", projectDir), nil
 }
 
 // GetSessionBaseDir returns the base directory containing per-project session subdirectories.
 // Unlike GetSessionDir, this does NOT use ENTIRE_TEST_CLAUDE_PROJECT_DIR because the
 // test override points to a specific project dir, not the base containing all projects.
 func (c *ClaudeCodeAgent) GetSessionBaseDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	configDir, err := resolveClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
-	return filepath.Join(homeDir, ".claude", "projects"), nil
+	return filepath.Join(configDir, "projects"), nil
 }
+
+// SessionHome returns Claude Code's configuration directory.
+func (c *ClaudeCodeAgent) SessionHome() (string, error) {
+	return resolveClaudeConfigDir()
+}
+
+// HomeLayout reports that Claude Code keeps per-project session directories
+// under projects.
+func (c *ClaudeCodeAgent) HomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"projects"}}
+}
+
+var _ agent.HomeLayoutProvider = (*ClaudeCodeAgent)(nil)
 
 // ReadSession reads a session from Claude's storage (JSONL transcript file).
 // The session data is stored in NativeData as raw JSONL bytes.

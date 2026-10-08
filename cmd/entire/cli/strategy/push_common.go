@@ -132,11 +132,17 @@ func pushCheckpointRefWithRecovery(
 		// commits (including their committer timestamps) on every push.
 		return checkpointRefPush{}, pushErr
 	}
-	recovered, err := recoverCheckpointRef(ctx, repo, target, candidate)
+	recovered, onRemote, err := recoverCheckpointRef(ctx, repo, target, candidate)
 	if err != nil {
 		// Recovery is speculative: a missing remote ref may mean the push was
 		// blocked, not that it diverged. Keep the push failure primary.
 		return checkpointRefPush{}, &checkpointRefRecoveryError{pushErr: pushErr, recoveryErr: err}
+	}
+	if onRemote {
+		// The remote already holds everything the candidate carried, so nothing
+		// of ours is left to ship. The tip is now the remote's own commit, which
+		// the trailer check must not judge: its history was published elsewhere.
+		return recovered, nil
 	}
 	if requireOPFTrailer {
 		commit, commitErr := repo.CommitObject(recovered.hash)
@@ -156,23 +162,25 @@ func pushCheckpointRefWithRecovery(
 // recoverCheckpointRef replays exactly candidate.hash onto the fetched remote
 // tip and installs the result only if the local ref still names that same
 // generation. A concurrent checkpoint write therefore wins the CAS and remains
-// both locally reachable and queued for a later delivery attempt.
+// both locally reachable and queued for a later delivery attempt. onRemote
+// reports that the replay added nothing: the remote tip already contains the
+// candidate, and the local ref now names that tip.
 func recoverCheckpointRef(
 	ctx context.Context,
 	repo *git.Repository,
 	target string,
 	candidate checkpointRefPush,
-) (checkpointRefPush, error) {
+) (recovered checkpointRefPush, onRemote bool, err error) {
 	fetchTarget, err := remote.ResolveFetchTarget(ctx, target)
 	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("resolve fetch target: %w", err)
+		return checkpointRefPush{}, false, fmt.Errorf("resolve fetch target: %w", err)
 	}
 	fetchedRefName := plumbing.ReferenceName(
 		"refs/entire-fetch-tmp/" + strings.TrimPrefix(candidate.name.String(), "refs/"),
 	)
 	refSpec := fmt.Sprintf("+%s:%s", candidate.name, fetchedRefName)
 	_, fetchSpan := perf.Start(ctx, "git_fetch")
-	fetchOutput, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
+	_, fetchErr := remote.Fetch(ctx, remote.FetchOptions{
 		Remote:   fetchTarget,
 		RefSpecs: []string{refSpec},
 		NoTags:   true,
@@ -180,7 +188,7 @@ func recoverCheckpointRef(
 	fetchSpan.RecordError(fetchErr)
 	fetchSpan.End()
 	if fetchErr != nil {
-		return checkpointRefPush{}, fmt.Errorf("fetch failed: %s", fetchOutput)
+		return checkpointRefPush{}, false, fmt.Errorf("fetch failed: %w", fetchErr)
 	}
 	defer func() {
 		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
@@ -188,11 +196,11 @@ func recoverCheckpointRef(
 
 	remoteRef, err := repo.Reference(fetchedRefName, true)
 	if err != nil {
-		return checkpointRefPush{}, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
+		return checkpointRefPush{}, false, fmt.Errorf("resolve fetched checkpoint ref: %w", err)
 	}
 	newTip, err := replayCheckpointCandidate(ctx, repo, candidate.hash, remoteRef.Hash())
 	if err != nil {
-		return checkpointRefPush{}, err
+		return checkpointRefPush{}, false, err
 	}
 	if err := checkpointRefRecoveryCAS(ctx, repo, candidate.name, newTip, candidate.hash); err != nil {
 		// newTip has no unique writer data: it is derived entirely from the
@@ -201,10 +209,10 @@ func recoverCheckpointRef(
 		// remains untouched. A later delivery recomputes the replay from that
 		// winner; retaining this losing intermediate under another ref would
 		// create a second source of truth for the checkpoint.
-		return checkpointRefPush{}, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
+		return checkpointRefPush{}, false, fmt.Errorf("install recovered checkpoint ref %s: %w", candidate.name, err)
 	}
 	candidate.hash = newTip
-	return candidate, nil
+	return candidate, newTip.Equal(remoteRef.Hash()), nil
 }
 
 func replayCheckpointCandidate(

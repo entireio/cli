@@ -47,9 +47,9 @@ Key files: `gitrepo/repository.go` (open entry points) and
 
 #### Local ref and commit reads
 
-HEAD checkpoint messages, metadata tracking-tip checks, and shadow-branch existence checks use go-git for files-backed worktrees without explicit Git store selectors. Pre-push tracking-ref detection stays native: go-git enumerates every ref before a prefix filter can apply, which is tens of times slower with many loose refs, and one empty loose ref file aborts that enumeration. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git. Detect reftable before opening its CLI-backed storer and keep these reads as single native commands, rather than expanding one read into multiple adapter subprocesses. Git exports `GIT_DIR` to hooks in linked worktrees; when it names the discovered Git directory (compared by file identity), the reads stay on go-git. A `GIT_DIR` naming any other directory, or any other selector including `GIT_WORK_TREE`, keeps native reads.
+HEAD checkpoint messages and metadata tracking-tip checks use go-git for files-backed worktrees without explicit Git store selectors. Pre-push tracking-ref detection stays native: go-git enumerates every ref before a prefix filter can apply, which is tens of times slower with many loose refs, and one empty loose ref file aborts that enumeration. Open through `gitrepo` and close each owned repository/iterator. Root discovery still uses native Git. Detect reftable before opening its CLI-backed storer and keep these reads as single native commands, rather than expanding one read into multiple adapter subprocesses. Git exports `GIT_DIR` to hooks in linked worktrees; when it names the discovered Git directory (compared by file identity), the reads stay on go-git. A `GIT_DIR` naming any other directory, or any other selector including `GIT_WORK_TREE`, keeps native reads.
 
-`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence. Shadow-branch existence verification reuses the repository already held by `ResetSession`: the pinned go-git version rereads `packed-refs` on lookup, so native deletion is visible through the same handle. Branch deletion and its native pre-check remain unchanged.
+`gitrepo.CommitAtReference` reads an exact ref, resolves symbolic refs, and peels nested annotated tags to a commit. It does not parse revision expressions. Missing refs, missing objects, non-commit targets, and context errors are distinct errors; the existing best-effort consumers decide when to treat them as absence.
 
 Keep the native compatibility paths: explicit repository/object-store selectors and reftable storage (`gitrepo.ReadsNeedNativeGit`), repositories the worktree opener cannot handle (including bare repositories), and HEAD/commit reads requiring replace-ref interpretation or promisor-object backfill. Do not replace these with a guessed CWD repository. No migrated read uses status, refreshes the index, or mutates worktree files.
 
@@ -69,8 +69,7 @@ expensive git read on the hook paths. Avoid calling it more than once per hook.
 Do not memoize it either: a context-scoped cache was tried and removed, because
 the write-free window it required cost more to maintain than the walk saved (see
 `git log` on `gitrepo/status.go` for the measurements). The turn-start hook
-currently walks twice — `CapturePrePromptState` and the strategy's prompt
-attribution each read their own status.
+walks once, in `CapturePrePromptState`.
 
 Agent-hook capture paths must use `gitrepo.StatusWithBudget` instead: it bounds
 the walk with a wall-clock budget (`gitrepo.StatusWalkBudget`) because go-git's walk is
@@ -252,14 +251,25 @@ caller, so it also covers the exported `New`.
 implementation of that rule: `userdirs.RequireAbsoluteOverride`. A relative
 value resolves against the working directory, so the same environment names a
 different directory in every process — usually one inside whatever repository
-the command ran from. It covers all three trees an override can redirect:
-`pluginParentDir` (`ENTIRE_PLUGIN_DIR`, `XDG_DATA_HOME`, `LOCALAPPDATA` — a
-tree whose `bin` subdirectory `main.go` prepends to `$PATH`), and the config and
-cache directories (`ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`), which hold the login
-tokens and the discovery caches. Leaving it to `osroot` (which refuses a
-relative root open) and to `main.go`'s `PATH` restore was not wrong, but each
-backstop answers a question of its own, two layers from where this one is
-decided.
+the command ran from. For Entire's own directories it covers all three trees an
+override can redirect: `pluginParentDir` (`ENTIRE_PLUGIN_DIR`, `XDG_DATA_HOME`,
+`LOCALAPPDATA` — a tree whose `bin` subdirectory `main.go` prepends to `$PATH`),
+and the config and cache directories (`ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`),
+which hold the login tokens and the discovery caches. Leaving it to `osroot`
+(which refuses a relative root open) and to `main.go`'s `PATH` restore was not
+wrong, but each backstop answers a question of its own, two layers from where
+this one is decided.
+
+The same rule reaches the agents' own relocation variables through
+`agent.ResolveHome` (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
+`FACTORY_HOME_OVERRIDE`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`),
+for a different reason: nothing of Entire's is protected there, but Entire has
+to agree with where the agent wrote, and a relative value resolves against the
+repo root inside a hook and against the user's cwd in `session resume`. The
+list is static and `ResolveHome` refuses a name missing from it, so the test
+harnesses that scrub it through `agent.RelocationEnvVars()` cannot fall behind
+an agent that starts honoring a new one. Several callers fail open on a refused
+value, so `entire status` names each one (`agent.RefusedRelocationEnvVars`).
 
 Rejecting beats falling through to the platform default: for the config
 directory that default is the developer's REAL `~/.config/entire`, so quietly

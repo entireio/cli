@@ -67,7 +67,7 @@ IDs are minted by `checkpoint.GenerateCheckpointID`, which picks the format from
 
 The git-refs store (`gitRefsStore`, `checkpoint/refs_store.go`) shares the checkpoint-subtree machinery with the git-branch store via an embedded `*treeWriter`. Both build the exact same checkpoint subtree; they differ only in the **base path** they write it at and in **where the result is committed**. The git-branch store writes each checkpoint under its shard prefix `<id[:2]>/<id[2:]>/` inside the single `v1` tree, so many checkpoints share one tree. The git-refs store writes with **no prefix** (an empty base path), so the checkpoint subtree *is* the root of that checkpoint's own commit tree, and the commit is the tip of a per-checkpoint ref rather than a subtree of the v1 branch.
 
-Every persistent write (`WriteSession`, and the `Backfill*` operations for transcript / summary / attribution) follows the same shape:
+Every persistent write (`WriteSession`, and the `Backfill*` operations for transcript / summary) follows the same shape:
 
 1. **Resolve the ref's current tip.** Creates (`WriteSession`) use the local-only `refBase`: a missing ref → `(ZeroHash, nil)`, so the first write to a checkpoint becomes an **orphan commit**. The `Backfill*` operations use `refBaseForBackfill`, which first on-demand fetches a locally-missing ref (when a ref fetcher is configured — the checkpoint may have been written or migrated on another machine); a ref still absent after the fetch surfaces as `ErrCheckpointNotFound` rather than orphaning, and a fetch failure surfaces as a real error, never as absence. A real lookup failure (IO/corruption) is surfaced, never silently treated as "new checkpoint".
 2. **Build the updated checkpoint subtree** from the existing tree plus the new content (shared `treeWriter` logic).
@@ -102,7 +102,7 @@ Rewrites are atomic (temp file + rename under the lock) so a concurrent reader n
 1. **Drains** the queue.
 2. **Partitions** the drained refs into those that still exist locally and stale ones (dropped from the queue).
 3. **Batch-pushes** the existing refs in one network round-trip (`batchPushRefs`, `strategy/push_common.go`).
-4. On success, **removes** the pushed refs from the queue and runs shadow-branch cleanup.
+4. On success, **removes** the pushed refs from the queue.
 5. On a batch failure (typically a non-fast-forward rejection), **falls back to per-ref recovery** (`pushCheckpointRefWithRecovery`) and removes from the queue only the refs that land.
 
 Confirmed remote policy/hook rejections skip fetch/replay: replay cannot fix a
@@ -130,6 +130,47 @@ Two diagnostics make a wholesale failure readable. The batch error is logged bef
 All checkpoint-ref pushes are **fast-forward-only — never a force push.** There is no server-side ref protection, so a force push risks silently clobbering a checkpoint written elsewhere. Per-checkpoint refs normally advance by fast-forward (append-only per-checkpoint history), so this is the common case.
 
 When a push *is* rejected as non-fast-forward — genuine divergence, e.g. the same checkpoint was written on two machines — recovery **fetches the remote ref and replays the local-only commits on top** (`fetchAndRebaseRefCommon`), then retries. After the replay the local ref is a fast-forward over the remote, so the retry is *still* non-force and the remote commit is preserved as an ancestor rather than overwritten. A genuine cherry-pick conflict (both sides rewrote the same file, e.g. root `metadata.json`) leaves the ref queued — degrading to the safe state, never forcing.
+
+**The deliberate exception: `entire checkpoint delete`.** Deleting a checkpoint
+pushes `:<ref>` with `--force-with-lease=<ref>:<oid>`, where `<oid>` is what
+`ls-remote` reported moments earlier. That is a non-fast-forward update by
+definition, so it is confined to the one ref, runs only on an explicit user
+command (agents are told never to run it unprompted), and is leased so a copy
+another clone pushed since the probe is never removed unseen. Each remote is
+resolved to one concrete URL first (push destination, `checkpoint_remote` push
+and fetch URLs, and every read candidate's fetch and first push URL), so the
+probe, the lease, and the push address the same repository.
+
+The local ref is deleted (compare-and-swap) and dropped from the push queue
+before any remote: pre-push drains the queue and pushes refs that exist locally,
+so remote-first ordering would let a concurrent push put it back. Each remote's
+per-checkpoint ref (not its `v1` branch) is then re-checked once with
+`ls-remote` and its delete retried if a push had already re-landed it. A lease
+that fails as stale is re-probed: when the ref is already gone (the same
+repository reached through a second URL spelling, say) the outcome is
+"absent", not a failure. A remote that refuses is reported with an
+`entire checkpoint delete <id> --remote <name>` retry command; the local copy is
+not restored, and a remote-only delete (no local copy) is allowed. The ID is
+also recorded in the git common dir's deleted-checkpoints list
+(`entire-deleted-checkpoints.json`), which `prepare-commit-msg` uses to drop the
+ID's trailer on an amend and which migration skips. Other clones still holding
+the ref can push it back; remote tombstones are deferred.
+
+A checkpoint on the `v1` branch is deleted per remote by fetching that
+remote's branch tip into a temporary ref, committing the subtree's removal on
+it, and pushing with a lease on the fetched tip (a fast-forward). Local `v1`
+commits are never pushed by a delete, so unpushed (for example not yet
+OPF-redacted) data stays local. The remote-tracking `v1` ref of each named
+remote whose fetch URL is the target is advanced to the pushed tip (or to the
+fetched tip when the checkpoint was already gone there) so read fallbacks and
+migration stop seeing the checkpoint. The content remains in the branch's
+history. The local `v1` removal is a commit the next pre-push sends to every
+`v1` push destination, so on the git-branch primary a delete that leaves one
+out is refused before any write if it holds a copy or cannot be reached. After
+pushing the removal to a destination, local `v1` is rebuilt on the pushed
+commit (unpushed local commits replayed) so the branches do not diverge, but
+only when the two removal commits are the whole divergence, and only for the
+first destination reached.
 
 ### On-demand fetch (reads and backfill writes)
 
@@ -166,9 +207,9 @@ To close that gap `List` supports **opt-in remote discovery**:
 - The `firstResolved` helper tries stores in priority order; a non-final store that reports absent *or* errors falls through to the next, so a transient git-refs fetch error cannot hide a checkpoint that resolves on the branch. The final store's result (hit, absent, or error) is returned verbatim.
 - The optional `AuthorReader` capability (`explain` relies on it) is preserved and routed by the same rules when both read stores provide it.
 - **Creates (`Session`) are not kind-routed.** They target the configured primary (+ mirrors); the minted ID already matches the primary's format.
-- **Backfills (`SessionSummary`, `SessionTranscript`, `CheckpointAttribution`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
+- **Backfills (`SessionSummary`, `SessionTranscript`) are kind-routed.** They update an *existing* checkpoint, which may live in either backend, so they follow the read order above, falling through to the next store only on `ErrCheckpointNotFound` (stricter than reads — a hard error aborts rather than risking a forked write). A backfill landing on the primary still fans out to mirrors; one landing on a fallback store skips mirrors (mirrors follow the primary) and logs the routing decision.
 
-All general read paths — resume, explain, attribution, blame, tokens, attach — inherit this routing for free through `checkpoint.Open`; there is no per-command config knob.
+All general read paths — resume, explain, blame, why, tokens, attach — inherit this routing for free through `checkpoint.Open`; there is no per-command config knob.
 
 ## Configuration and rollout
 
@@ -230,6 +271,8 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 | `settings/checkpoints.go` | `checkpoints` block parsing + env override |
 | `strategy/manual_commit_push.go` | Pre-push: drain queue, batch push, per-ref recovery |
 | `strategy/push_common.go` | `batchPushRefs`, `pushCheckpointRefWithRecovery`, fetch+replay |
+| `strategy/checkpoint_delete*.go` | `entire checkpoint delete`: read-only plan, leased per-remote deletes |
+| `checkpoint/deleted_list.go` | Local deleted-checkpoints list in the git common dir |
 
 ## Known limitations and deferred work
 

@@ -2,7 +2,7 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // crossRepoReader is the read surface cross-repo explain needs: the two
@@ -20,8 +21,10 @@ import (
 type crossRepoReader interface {
 	checkpoint.CheckpointReader
 	checkpoint.SessionReader
+	checkpoint.TaskReader
 	GetCheckpointAuthor(ctx context.Context, checkpointID id.CheckpointID) (checkpoint.Author, error)
 	checkpointCommit(ctx context.Context, checkpointID id.CheckpointID) ([]associatedCommit, error)
+	resolveCommitCheckpoint(ctx context.Context, sha string) (id.CheckpointID, error)
 }
 
 // newCrossRepoReader builds the API-backed reader for a forge-qualified repo.
@@ -68,12 +71,17 @@ func crossRepoReadSource(ctx context.Context) (string, bool) {
 // foreign repo's checkpoint.
 type crossRepoExplainOptions struct {
 	repoFlag string
-	// target is the checkpoint the user asked for, before ID validation.
-	target string
+	// target is the positional argument; checkpointID and commitSHA are the
+	// explicit flags. Exactly one is set; see classifyCrossRepoTarget.
+	target       string
+	checkpointID string
+	commitSHA    string
 
 	json          bool
 	transcript    bool
 	rawTranscript bool
+	// task selects a subagent task record's transcript (with transcript).
+	task string
 	// sessionIndex is -1 for "latest session".
 	sessionIndex int
 
@@ -85,6 +93,11 @@ type crossRepoExplainOptions struct {
 }
 
 const explainRepoFlagShapes = "gh/owner/name, et/project/repo, entire://<host>/gh/<owner>/<repo>, or entire://<host>/et/<project>/<repo>"
+
+// explainRepoTargetShapes is shared by the help and the error so they cannot
+// drift. Prefixes are excluded: resolving one means listing the foreign repo's
+// checkpoints or commits, which is `entire search`'s job.
+const explainRepoTargetShapes = "a full checkpoint ID (12-char hex or 26-char ULID) or a full commit SHA"
 
 // parseExplainRepoFlag parses `--repo`. Every accepted form states its forge:
 // gh/owner/repo or et/project/repo, including as the path of a full entire://
@@ -190,12 +203,10 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	}
 	repoRef := explainRepoRef(forge, owner, repoName)
 
-	// A prefix can't be resolved without listing the foreign repo's
-	// checkpoints, which is `entire search`'s job, so cross-repo needs the
-	// whole ID.
-	cid, err := id.NewCheckpointID(opts.target)
+	// Shape is checked before any network call so a typo fails instantly.
+	cid, sha, err := classifyCrossRepoTarget(opts)
 	if err != nil {
-		return fmt.Errorf("--repo requires a full checkpoint ID (12-char hex or 26-char ULID); a prefix cannot be resolved in another repo: %w", err)
+		return err
 	}
 
 	reader, err := newCrossRepoReader(ctx, opts.insecureHTTP, forge, owner, repoName)
@@ -204,6 +215,15 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 			return rendered
 		}
 		return err
+	}
+	if sha != "" {
+		stop := startSpinner(errW, fmt.Sprintf("Resolving commit %s in %s", abbreviateSHA(sha), repoRef))
+		cid, err = reader.resolveCommitCheckpoint(ctx, sha)
+		if err != nil {
+			stop(false)
+			return err
+		}
+		stop(true)
 	}
 	// Marked for the renderers: a foreign checkpoint cannot be written to, so
 	// they must not offer actions that only work in the owning repo.
@@ -225,6 +245,11 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	}
 
 	switch {
+	case opts.task != "":
+		// The task records are not served over the API; the reader says so.
+		stop(false)
+		return streamTaskTranscript(ctx, w, reader, cid, opts.task)
+
 	case opts.transcript || opts.rawTranscript:
 		content, contentErr := readCrossRepoSessionContent(ctx, reader, cid, summary, opts.sessionIndex)
 		if contentErr != nil {
@@ -247,19 +272,9 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	case opts.json:
 		envelope, failed := buildCheckpointJSONEnvelope(ctx, reader, summary, cid)
 		stop(!envelope.Partial)
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(envelope); err != nil {
-			return fmt.Errorf("failed to encode checkpoint json: %w", err)
-		}
-		// Parity with the local --json path: fail hard so automation can't
-		// mistake incomplete metadata for a clean export. The envelope, with
-		// its per-session error fields, is already on stdout.
-		if envelope.Partial {
-			fmt.Fprintf(errW, "checkpoint %s: failed to read metadata for %d session(s) (indexes %v)\n", cid, len(failed), failed)
-			return NewSilentError(fmt.Errorf("checkpoint %s export incomplete: %d session(s) unreadable", cid, len(failed)))
-		}
-		return nil
+		// Parity with the local --json path, including failing hard on a
+		// partial envelope.
+		return writeCheckpointJSONEnvelope(w, errW, cid, envelope, failed)
 
 	default:
 		content, contentErr := readCrossRepoSessionContent(ctx, reader, cid, summary, opts.sessionIndex)
@@ -275,6 +290,36 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 		output := formatCheckpointOutput(ctx, summary, content, cid, commits, author, opts.verbose, opts.full, w)
 		outputExplainContent(w, output, opts.noPager)
 		return nil
+	}
+}
+
+// classifyCrossRepoTarget yields either a checkpoint ID or a commit SHA. The
+// explicit flags are strict; the positional is classified by shape, which is
+// safe because the full forms are disjoint (12 or 26 chars vs 40 or 64).
+func classifyCrossRepoTarget(opts crossRepoExplainOptions) (id.CheckpointID, string, error) {
+	switch {
+	case opts.commitSHA != "" && opts.checkpointID != "":
+		return id.EmptyCheckpointID, "", errors.New("cannot combine --commit with --checkpoint")
+	case opts.commitSHA != "":
+		if !plumbing.IsHash(opts.commitSHA) {
+			return id.EmptyCheckpointID, "", fmt.Errorf("--commit with --repo requires a full commit SHA; %q cannot be resolved in another repo", opts.commitSHA)
+		}
+		return id.EmptyCheckpointID, opts.commitSHA, nil
+	case opts.checkpointID != "":
+		cid, err := id.NewCheckpointID(opts.checkpointID)
+		if err != nil {
+			return id.EmptyCheckpointID, "", fmt.Errorf("--checkpoint with --repo requires a full checkpoint ID; a prefix cannot be resolved in another repo: %w", err)
+		}
+		return cid, "", nil
+	default:
+		if plumbing.IsHash(opts.target) {
+			return id.EmptyCheckpointID, opts.target, nil
+		}
+		cid, err := id.NewCheckpointID(opts.target)
+		if err != nil {
+			return id.EmptyCheckpointID, "", fmt.Errorf("--repo requires %s; a prefix cannot be resolved in another repo: %w", explainRepoTargetShapes, err)
+		}
+		return cid, "", nil
 	}
 }
 

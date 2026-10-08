@@ -10,7 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// TestShadowStrategy_OneCheckpointPerCommit tests the 1:1 checkpoint model:
+// TestManualCommit_OneCheckpointPerCommit tests the 1:1 checkpoint model:
 // each commit gets its own unique checkpoint ID. When a session touches multiple
 // files and the user splits them across commits (IDLE session), only the first
 // commit gets a checkpoint trailer (via condensation). The second commit has no
@@ -20,7 +20,7 @@ import (
 // 1. Claude session edits files A and B, then stops (IDLE)
 // 2. User commits file A → condensation → unique checkpoint ID #1
 // 3. User commits file B → no session content to condense → no trailer
-func TestShadowStrategy_OneCheckpointPerCommit(t *testing.T) {
+func TestManualCommit_OneCheckpointPerCommit(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -46,7 +46,7 @@ func TestShadowStrategy_OneCheckpointPerCommit(t *testing.T) {
 	headBefore := env.GetHeadHash()
 
 	// First commit: file A (triggers condensation)
-	env.GitCommitWithShadowHooks("Add file A from Claude session", "fileA.txt")
+	env.GitCommitWithHooks("Add file A from Claude session", "fileA.txt")
 
 	firstCommitHash := env.GetHeadHash()
 	if firstCommitHash == headBefore {
@@ -66,7 +66,7 @@ func TestShadowStrategy_OneCheckpointPerCommit(t *testing.T) {
 	}
 
 	// Second commit: file B (IDLE session, no carry-forward → no trailer)
-	env.GitCommitWithShadowHooks("Add file B from Claude session", "fileB.txt")
+	env.GitCommitWithHooks("Add file B from Claude session", "fileB.txt")
 
 	secondCommitHash := env.GetHeadHash()
 	if secondCommitHash == firstCommitHash {
@@ -86,10 +86,10 @@ func TestShadowStrategy_OneCheckpointPerCommit(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_LastCheckpointID_ClearedOnNewPrompt tests that when a user
+// TestManualCommit_LastCheckpointID_ClearedOnNewPrompt tests that when a user
 // enters a new prompt after committing, the LastCheckpointID is cleared and a
 // fresh checkpoint ID is generated for subsequent commits.
-func TestShadowStrategy_LastCheckpointID_ClearedOnNewPrompt(t *testing.T) {
+func TestManualCommit_LastCheckpointID_ClearedOnNewPrompt(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -111,7 +111,7 @@ func TestShadowStrategy_LastCheckpointID_ClearedOnNewPrompt(t *testing.T) {
 	}
 
 	// Commit first file
-	env.GitCommitWithShadowHooks("First commit", "first.txt")
+	env.GitCommitWithHooks("First commit", "first.txt")
 	firstCommitHash := env.GetHeadHash()
 	firstCheckpointID := env.GetCheckpointIDFromCommitMessage(firstCommitHash)
 	t.Logf("First checkpoint ID: %s", firstCheckpointID)
@@ -160,7 +160,7 @@ func TestShadowStrategy_LastCheckpointID_ClearedOnNewPrompt(t *testing.T) {
 	}
 
 	// Commit second file
-	env.GitCommitWithShadowHooks("Second commit", "second.txt")
+	env.GitCommitWithHooks("Second commit", "second.txt")
 	secondCommitHash := env.GetHeadHash()
 	secondCheckpointID := env.GetCheckpointIDFromCommitMessage(secondCommitHash)
 	t.Logf("Second checkpoint ID: %s", secondCheckpointID)
@@ -172,9 +172,9 @@ func TestShadowStrategy_LastCheckpointID_ClearedOnNewPrompt(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_LastCheckpointID_NotSetWithoutCondensation tests that
+// TestManualCommit_LastCheckpointID_NotSetWithoutCondensation tests that
 // LastCheckpointID is not set when committing without session activity.
-func TestShadowStrategy_LastCheckpointID_NotSetWithoutCondensation(t *testing.T) {
+func TestManualCommit_LastCheckpointID_NotSetWithoutCondensation(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -182,8 +182,8 @@ func TestShadowStrategy_LastCheckpointID_NotSetWithoutCondensation(t *testing.T)
 	// Create a file directly (not through a Claude session)
 	env.WriteFile("manual.txt", "manual content")
 
-	// Commit with shadow hooks - should not add trailer since no session exists
-	env.GitCommitWithShadowHooks("Manual commit without session", "manual.txt")
+	// Commit with hooks - should not add trailer since no session exists
+	env.GitCommitWithHooks("Manual commit without session", "manual.txt")
 
 	commitHash := env.GetHeadHash()
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -194,10 +194,10 @@ func TestShadowStrategy_LastCheckpointID_NotSetWithoutCondensation(t *testing.T)
 	}
 }
 
-// TestShadowStrategy_NewSessionIgnoresOldCheckpointIDs tests that when multiple
+// TestManualCommit_NewSessionIgnoresOldCheckpointIDs tests that when multiple
 // sessions exist in the worktree, each session's commits get their own unique
 // checkpoint IDs. Old session checkpoint IDs are never reused by new sessions.
-func TestShadowStrategy_NewSessionIgnoresOldCheckpointIDs(t *testing.T) {
+func TestManualCommit_NewSessionIgnoresOldCheckpointIDs(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -218,7 +218,7 @@ func TestShadowStrategy_NewSessionIgnoresOldCheckpointIDs(t *testing.T) {
 	}
 
 	// Commit from old session
-	env.GitCommitWithShadowHooks("Old session commit", "old.txt")
+	env.GitCommitWithHooks("Old session commit", "old.txt")
 	oldCheckpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if oldCheckpointID == "" {
 		t.Fatal("Old session commit should have checkpoint ID")
@@ -246,7 +246,7 @@ func TestShadowStrategy_NewSessionIgnoresOldCheckpointIDs(t *testing.T) {
 	}
 
 	// Commit from new session
-	env.GitCommitWithShadowHooks("Add file A from new session", "fileA.txt")
+	env.GitCommitWithHooks("Add file A from new session", "fileA.txt")
 	newCheckpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if newCheckpointID == "" {
 		t.Fatal("New session commit should have checkpoint ID")
@@ -260,9 +260,10 @@ func TestShadowStrategy_NewSessionIgnoresOldCheckpointIDs(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation verifies that the
-// shadow branch is deleted after successful condensation.
-func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
+// TestManualCommit_PendingWorkClearedAfterCondensation verifies that
+// successful condensation clears the session's pending files and recorded
+// hashes, and that no shadow branch is ever written.
+func TestManualCommit_PendingWorkClearedAfterCondensation(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -273,14 +274,6 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
 
-	// Get the base commit to determine shadow branch name
-	state, err := env.GetSessionState(session.ID)
-	if err != nil {
-		t.Fatalf("Failed to get session state: %v", err)
-	}
-	// Shadow branch uses worktree-specific naming
-	shadowBranchName := env.GetShadowBranchNameForCommit(state.BaseCommit)
-
 	env.WriteFile("test.txt", "test content")
 	session.CreateTranscript("Create test file", []FileChange{
 		{Path: "test.txt", Content: "test content"},
@@ -290,18 +283,21 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	// Verify shadow branch exists before commit
-	if !env.BranchExists(shadowBranchName) {
-		t.Fatalf("Shadow branch %s should exist before commit", shadowBranchName)
-	}
+	// Verify the turn end left pending work in session state before commit
+	env.AssertTurnEndRecorded(session.ID, "test.txt")
 
-	// Commit with hooks (triggers condensation and cleanup)
-	env.GitCommitWithShadowHooks("Test commit", "test.txt")
+	// Commit with hooks (triggers condensation)
+	env.GitCommitWithHooks("Test commit", "test.txt")
 
-	// Verify shadow branch was cleaned up
-	if env.BranchExists(shadowBranchName) {
-		t.Errorf("Shadow branch %s should be deleted after condensation", shadowBranchName)
+	// Verify condensation consumed the pending work
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("Failed to get session state: %v", err)
 	}
+	if state != nil && (len(state.FilesTouched) != 0 || len(state.TouchedFileHashes) != 0) {
+		t.Errorf("condensation should clear pending files, got FilesTouched=%v TouchedFileHashes=%v", state.FilesTouched, state.TouchedFileHashes)
+	}
+	env.AssertNoShadowBranches()
 
 	// Verify data exists on entire/checkpoints/v1
 	checkpointID := env.GetLatestCheckpointID()
@@ -311,10 +307,10 @@ func TestShadowStrategy_ShadowBranchCleanedUpAfterCondensation(t *testing.T) {
 	}
 }
 
-// TestShadowStrategy_BaseCommitUpdatedAfterCondensation tests that BaseCommit
+// TestManualCommit_BaseCommitUpdatedAfterCondensation tests that BaseCommit
 // is updated to the new HEAD after condensation. This is essential for the 1:1
 // checkpoint model where each commit gets its own unique checkpoint.
-func TestShadowStrategy_BaseCommitUpdatedAfterCondensation(t *testing.T) {
+func TestManualCommit_BaseCommitUpdatedAfterCondensation(t *testing.T) {
 	t.Parallel()
 
 	env := NewFeatureBranchEnv(t)
@@ -343,7 +339,7 @@ func TestShadowStrategy_BaseCommitUpdatedAfterCondensation(t *testing.T) {
 	baseCommitBefore := stateBefore.BaseCommit
 
 	// Commit with hooks (triggers condensation)
-	env.GitCommitWithShadowHooks("Add feature", "feature.go")
+	env.GitCommitWithHooks("Add feature", "feature.go")
 	commitHash := env.GetHeadHash()
 
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)

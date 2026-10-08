@@ -65,6 +65,9 @@ const (
 	rolloutLineTypeSessionMeta  = "session_meta"
 	rolloutLineTypeEventMsg     = "event_msg"
 	eventMsgTypeTokenCount      = "token_count"
+	// itemTypeAgentMessage is the type of a multi-agent message item, both as a
+	// rollout response_item payload and as a `codex exec --json` event item.
+	itemTypeAgentMessage = "agent_message"
 )
 
 // rolloutClassification identifies whether a rollout belongs to a root thread
@@ -201,7 +204,7 @@ type contentItem struct {
 
 // eventMsgPayload is the payload for type="event_msg" lines.
 type eventMsgPayload struct {
-	Type   string          `json:"type"` // "token_count", "task_started", "user_message", "agent_message", "task_complete"
+	Type   string          `json:"type"` // "token_count", "task_started", "user_message", "agent_message", "task_complete", "turn_aborted"
 	TurnID *string         `json:"turn_id,omitempty"`
 	Info   json.RawMessage `json:"info,omitempty"`
 	Item   json.RawMessage `json:"item,omitempty"`
@@ -567,7 +570,7 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 			terminalValid = false
 			continue
 		}
-		if header.Type != eventMsgTypeTokenCount && header.Type != "task_started" && header.Type != "task_complete" {
+		if header.Type != eventMsgTypeTokenCount && header.Type != "task_started" && header.Type != "task_complete" && header.Type != "turn_aborted" {
 			continue
 		}
 		var event eventMsgPayload
@@ -602,7 +605,9 @@ func analyzeRolloutForTurns(ctx context.Context, data []byte, observedTurns []st
 				continue
 			}
 			openTurn = *event.TurnID
-		case "task_complete":
+		case "task_complete", "turn_aborted":
+			// An aborted turn (a user interrupt, or a daemon restart that
+			// resumes in a new turn) has ended as surely as a completed one.
 			if openTurn == "" || (event.TurnID != nil && (*event.TurnID == "" || *event.TurnID != openTurn)) {
 				terminalValid = false
 				continue
@@ -698,6 +703,18 @@ func exactUsageFromSnapshot(usage *exactTokenUsageData) *agent.TokenUsage {
 	}
 	return &agent.TokenUsage{InputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output}
 }
+
+// ExtractWithSubagentInventoryUnderHome is ExtractWithSubagentInventory with
+// child rollouts looked up in the live and archived session stores beneath
+// home, replacing any RolloutRoots override. home must have passed
+// agent.ResolveTrustedHome.
+func (c *CodexAgent) ExtractWithSubagentInventoryUnderHome(ctx context.Context, parent []byte, fromOffset int, refs []agent.SubagentReference, home string) (agent.InventoryExtraction, error) {
+	scoped := *c // a shallow copy: CodexAgent holds no locks
+	scoped.RolloutRoots = codexHomeLayout().StoresUnder(home)
+	return scoped.ExtractWithSubagentInventory(ctx, parent, fromOffset, refs)
+}
+
+var _ agent.HomeScopedInventoryExtractor = (*CodexAgent)(nil)
 
 // ExtractWithSubagentInventory gathers evidence only for refs supplied by the
 // caller's authoritative ledger. It never discovers children from transcript
@@ -853,9 +870,10 @@ func SanitizePortableTranscript(data []byte) []byte {
 
 // sanitizeMarkers are the substrings that gate every transformation
 // sanitizeRolloutLine performs: dropping "compaction"/"compaction_summary" items,
-// rewriting "compacted" lines, and deleting "encrypted_content" from "reasoning"
-// items. A transcript containing none of them cannot be altered, so one scan lets
-// us skip unmarshalling every line.
+// rewriting "compacted" lines, deleting "encrypted_content" from "reasoning"
+// items, and dropping "encrypted_content" parts from "agent_message" items. A
+// transcript containing none of them cannot be altered, so one scan lets us skip
+// unmarshalling every line.
 //
 // Deliberately over-broad ("compact" covers compacted/compaction/
 // compaction_summary): a false positive just falls through to the full pass, while
@@ -917,6 +935,14 @@ func sanitizeRolloutLine(lineData []byte) ([]byte, bool) {
 		// are still removed outright (see sanitizeHistoryItems): those are array
 		// elements within a single line, so removing them cannot shift line numbers.
 		delete(payload, "encrypted_content")
+	case itemTypeAgentMessage:
+		// Multi-agent messages carry their plaintext as input_text parts and a
+		// session-bound Fernet ciphertext as an "encrypted_content" part. Drop
+		// only that part; the line and its readable parts stay, so line numbering
+		// is unchanged. Untouched lines keep their original bytes.
+		if !stripEncryptedContentParts(payload) {
+			return lineData, true
+		}
 	default:
 		return lineData, true
 	}
@@ -974,6 +1000,8 @@ func sanitizeHistoryItems(items []any) []any {
 		switch itemType {
 		case "reasoning":
 			delete(itemMap, "encrypted_content")
+		case itemTypeAgentMessage:
+			stripEncryptedContentParts(itemMap)
 		case "compaction", "compaction_summary":
 			continue
 		}
@@ -981,6 +1009,27 @@ func sanitizeHistoryItems(items []any) []any {
 		sanitized = append(sanitized, itemMap)
 	}
 	return sanitized
+}
+
+// stripEncryptedContentParts removes every {"type":"encrypted_content"} element
+// from item's "content" array and reports whether it removed any.
+func stripEncryptedContentParts(item map[string]any) bool {
+	parts, ok := item["content"].([]any)
+	if !ok {
+		return false
+	}
+	kept := make([]any, 0, len(parts))
+	for _, part := range parts {
+		if partMap, ok := part.(map[string]any); ok && partMap["type"] == "encrypted_content" {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) == len(parts) {
+		return false
+	}
+	item["content"] = kept
+	return true
 }
 
 func mustMarshalRolloutLine(line rolloutLine) []byte {

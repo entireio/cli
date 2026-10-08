@@ -32,7 +32,7 @@ func TestPiReviewer_BuildCmd(t *testing.T) {
 	if cmd.Args[0] != "pi" {
 		t.Fatalf("Args[0] = %q, want pi; args=%v", cmd.Args[0], cmd.Args)
 	}
-	wantPrefix := []string{"pi", "--mode", "json", "--print", "--model", "anthropic/claude-sonnet-4-5:high"}
+	wantPrefix := []string{"pi", "--mode", "json", "--print", "--append-system-prompt", review.ReviewerGuardrail, "--model", "anthropic/claude-sonnet-4-5:high"}
 	if len(cmd.Args) != len(wantPrefix)+1 {
 		t.Fatalf("args len = %d, want %d: %v", len(cmd.Args), len(wantPrefix)+1, cmd.Args)
 	}
@@ -213,4 +213,82 @@ func envMap(env []string) map[string]string {
 		out[kv[:idx]] = kv[idx+1:]
 	}
 	return out
+}
+
+// A provider error (here, an exhausted API balance) used to leave the review
+// with an empty "Failed" report. It must surface once, though Pi repeats the
+// failed message in message_end and turn_end.
+func TestPiReviewer_ParseSurfacesProviderError(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"error","errorMessage":"You have no credits remaining."}`
+	input := `{"type":"agent_start"}` + "\n" +
+		`{"type":"turn_start"}` + "\n" +
+		`{"type":"message_end","message":` + failed + `}` + "\n" +
+		`{"type":"turn_end","message":` + failed + `}` + "\n" +
+		`{"type":"agent_end"}` + "\n"
+
+	var errs []string
+	var finished *reviewtypes.Finished
+	for _, ev := range collectPiReviewEvents(input) {
+		switch e := ev.(type) {
+		case reviewtypes.RunError:
+			errs = append(errs, e.Err.Error())
+		case reviewtypes.Finished:
+			finished = &e
+		}
+	}
+	if len(errs) != 1 || errs[0] != "pi: You have no credits remaining." {
+		t.Fatalf("RunErrors = %q, want the provider error once", errs)
+	}
+	if finished == nil || finished.Success {
+		t.Fatalf("Finished = %+v, want a failure", finished)
+	}
+}
+
+// Pi auto-retries errors such as "overloaded". A run that recovers must not
+// report the attempt that failed.
+func TestPiReviewer_ParseRecoveredRetryIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"error","errorMessage":"overloaded"}`
+	const ok = `{"role":"assistant","content":[{"type":"text","text":"approve"}],"stopReason":"stop"}`
+	input := `{"type":"agent_start"}` + "\n" +
+		`{"type":"message_end","message":` + failed + `}` + "\n" +
+		`{"type":"turn_end","message":` + failed + `}` + "\n" +
+		`{"type":"agent_end","willRetry":true}` + "\n" +
+		`{"type":"auto_retry_start"}` + "\n" +
+		`{"type":"message_end","message":` + ok + `}` + "\n" +
+		`{"type":"turn_end","message":` + ok + `}` + "\n" +
+		`{"type":"agent_end"}` + "\n"
+
+	finishes := 0
+	for _, ev := range collectPiReviewEvents(input) {
+		switch e := ev.(type) {
+		case reviewtypes.RunError:
+			t.Fatalf("recovered retry reported an error: %v", e.Err)
+		case reviewtypes.Finished:
+			finishes++
+			if !e.Success {
+				t.Fatal("recovered retry reported as failed")
+			}
+		}
+	}
+	if finishes != 1 {
+		t.Fatalf("Finished emitted %d times, want once", finishes)
+	}
+}
+
+// A failure without an errorMessage still says why the review failed.
+func TestPiReviewer_ParseErrorWithoutMessage(t *testing.T) {
+	t.Parallel()
+	const failed = `{"role":"assistant","content":[],"stopReason":"aborted"}`
+	input := `{"type":"message_end","message":` + failed + `}` + "\n" + `{"type":"agent_end"}` + "\n"
+	var errs []string
+	for _, ev := range collectPiReviewEvents(input) {
+		if e, ok := ev.(reviewtypes.RunError); ok {
+			errs = append(errs, e.Err.Error())
+		}
+	}
+	if len(errs) != 1 || errs[0] != "pi: stopped with aborted" {
+		t.Fatalf("RunErrors = %q, want the stop reason", errs)
+	}
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 var (
@@ -116,7 +118,15 @@ func AgentForTranscriptPath(transcriptPath, repoPath string) (Agent, bool) {
 			continue
 		}
 		dir, err := ag.GetSessionDir(repoPath)
-		if err != nil || dir == "" {
+		if err != nil {
+			// A refused relocation variable lands here on every hook, so say
+			// so: without this line the agent silently stops owning any
+			// transcript path and the only symptom is a misattributed session.
+			logging.Debug(context.Background(), "agent session dir unresolved; skipping it for transcript ownership",
+				slog.String("agent", string(name)), slog.String("error", err.Error()))
+			continue
+		}
+		if dir == "" {
 			continue
 		}
 		dirAbs, err := filepath.Abs(dir)

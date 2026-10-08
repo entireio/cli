@@ -111,7 +111,7 @@ func TestAttach_ExistingCheckpoint_AddSession(t *testing.T) {
 	}
 
 	// Commit with hooks to trigger condensation and get checkpoint trailer.
-	env.GitCommitWithShadowHooks("add login endpoint", "src/login.go")
+	env.GitCommitWithHooks("add login endpoint", "src/login.go")
 
 	// Verify first checkpoint exists
 	firstCpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
@@ -225,7 +225,7 @@ func TestAttach_AlreadyTracked_HasCheckpoint(t *testing.T) {
 	}
 
 	// Commit with hooks to get checkpoint trailer.
-	env.GitCommitWithShadowHooks("add config parser", "config.go")
+	env.GitCommitWithHooks("add config parser", "config.go")
 
 	firstCpID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 	if firstCpID == "" {

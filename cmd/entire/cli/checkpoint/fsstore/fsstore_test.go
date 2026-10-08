@@ -81,7 +81,7 @@ func TestStore_BackfillTranscriptReplacesWithoutClobbering(t *testing.T) {
 	assert.Equal(t, []string{"a.go"}, summary.FilesTouched)
 }
 
-func TestStore_SessionSummaryAndAttribution(t *testing.T) {
+func TestStore_SessionSummary(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := New(t.TempDir())
@@ -94,19 +94,10 @@ func TestStore_SessionSummaryAndAttribution(t *testing.T) {
 	require.NoError(t, store.Write(ctx, cp.SessionSummary{
 		CheckpointID: cid, Summary: &cp.Summary{Intent: "do a thing", Outcome: "did it"},
 	}))
-	require.NoError(t, store.Write(ctx, cp.CheckpointAttribution{
-		CheckpointID: cid, Attribution: &cp.Attribution{AgentLines: 10, AgentPercentage: 80},
-	}))
-
 	meta, err := store.ReadSessionMetadata(ctx, cid, 0)
 	require.NoError(t, err)
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "do a thing", meta.Summary.Intent)
-
-	summary, err := store.Read(ctx, cid)
-	require.NoError(t, err)
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 10, summary.CombinedAttribution.AgentLines)
 }
 
 func TestStore_ListReturnsCheckpoints(t *testing.T) {
@@ -146,7 +137,7 @@ func TestStore_DefaultsCreatedAtWhenZero(t *testing.T) {
 	assert.False(t, meta.CreatedAt.IsZero(), "zero CreatedAt should default to the current time")
 }
 
-func TestStore_PersistsReviewFlagAndCombinedAttribution(t *testing.T) {
+func TestStore_PersistsReviewFlag(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := New(t.TempDir())
@@ -154,15 +145,12 @@ func TestStore_PersistsReviewFlagAndCombinedAttribution(t *testing.T) {
 
 	require.NoError(t, store.Write(ctx, cp.Session{
 		CheckpointID: cid, SessionID: "s1", Transcript: redact.AlreadyRedacted([]byte("t")),
-		HasReview:           true,
-		CombinedAttribution: &cp.Attribution{AgentLines: 3},
+		HasReview: true,
 	}))
 
 	summary, err := store.Read(ctx, cid)
 	require.NoError(t, err)
 	assert.True(t, summary.HasReview)
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 3, summary.CombinedAttribution.AgentLines)
 }
 
 func TestStore_FactoryRequiresPath(t *testing.T) {
@@ -170,4 +158,43 @@ func TestStore_FactoryRequiresPath(t *testing.T) {
 	_, err := factory(context.Background(), checkpoint.OpenEnv{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "config.path is required")
+}
+
+func TestStore_TaskRecordsRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := New(t.TempDir())
+	cid := id.MustCheckpointID("a1b2c3d4e5f7")
+	started := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+
+	require.NoError(t, store.Write(ctx, cp.Session{
+		CheckpointID: cid,
+		SessionID:    "sess-tasks",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte("parent")),
+		Tasks: []cp.TaskPayload{
+			{ToolUseID: "toolu_b", AgentID: "agentb", StartedAt: started.Add(time.Minute), Transcript: redact.AlreadyRedacted([]byte("child-b"))},
+			{ToolUseID: "toolu_a", AgentID: "agenta", StartedAt: started, TranscriptUnavailableReason: "transcript empty"},
+		},
+	}))
+
+	entries, err := store.ListTasks(ctx, cid)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "toolu_a", entries[0].ToolUseID)
+	assert.False(t, entries[0].TranscriptStored)
+	assert.Equal(t, "toolu_b", entries[1].ToolUseID)
+	assert.True(t, entries[1].TranscriptStored)
+	assert.Equal(t, "agentb", entries[1].Record.AgentID)
+
+	transcript, err := store.ReadTaskTranscript(ctx, cid, "toolu_b")
+	require.NoError(t, err)
+	assert.Equal(t, "child-b", string(transcript))
+
+	_, err = store.ReadTaskTranscript(ctx, cid, "toolu_a")
+	require.ErrorIs(t, err, cp.ErrNoTranscript)
+	_, err = store.ReadTaskTranscript(ctx, cid, "toolu_c")
+	require.ErrorIs(t, err, cp.ErrTaskNotFound)
+	_, err = store.ListTasks(ctx, id.MustCheckpointID("ffffffffffff"))
+	require.ErrorIs(t, err, cp.ErrCheckpointNotFound)
 }

@@ -18,7 +18,6 @@ var nativeReadGateCallers = map[string]string{
 	"cmd/entire/cli/gitrepo/read.go":          "the gate itself",
 	"cmd/entire/cli/head_checkpoint_flags.go": "HEAD commit message",
 	"cmd/entire/cli/git_operations.go":        "metadata tracking-ref tip",
-	"cmd/entire/cli/strategy/common.go":       "shadow-branch existence",
 }
 
 func TestReadsNeedNativeGit_CallersAreListed(t *testing.T) {

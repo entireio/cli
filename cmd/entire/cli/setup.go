@@ -184,6 +184,11 @@ func updateStrategyOptions(ctx context.Context, w io.Writer, opts EnableOptions)
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	if opts.CheckpointRemote != "" && targetFile == settings.EntireSettingsLocalFile {
+		if rejection := settings.CheckpointRemoteLocalClaimRejection(ctx); rejection != "" {
+			return fmt.Errorf("cannot confirm checkpoint destination: %s", rejection)
+		}
+	}
 
 	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
 	if err != nil {
@@ -921,6 +926,9 @@ func newEnableCmdWithIdentityResolverFactory(identityFactory identityResolverFac
 If Entire is not yet configured, this runs the full configuration flow.
 If Entire is already configured but disabled, this re-enables it.
 
+Existing git hooks are kept: each is moved to <hook>.pre-entire and runs after
+Entire's hook.
+
 If the current directory is not a git repository, Entire can initialize one
 for you and create an initial commit. It never creates or pushes to a remote —
 publish the repository yourself when you're ready.`,
@@ -1198,6 +1206,14 @@ const (
 // and independent of the trails probe: a failure here (not logged in, network
 // error, backend rejects the URL) must not block that probe.
 func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *gitremote.Info) {
+	// Checked before the client is built, so a repo this report has nothing to
+	// say about costs no auth round trip.
+	reportURL, ok := cleanRemoteURLForReport(info)
+	if !ok {
+		logging.Debug(ctx, "skipping enable report: remote has no upstream forge URL", "forge", info.Forge)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, enableReportBudget)
 	defer cancel()
 
@@ -1207,7 +1223,7 @@ func reportEnableToBackend(ctx context.Context, insecureHTTPAuth bool, info *git
 		logging.Debug(ctx, "skipping enable report", "error", err)
 		return
 	}
-	if _, err := client.ReportEnable(ctx, cleanRemoteURLForReport(info)); err != nil {
+	if _, err := client.ReportEnable(ctx, reportURL); err != nil {
 		logging.Debug(ctx, "enable report failed", "error", err)
 	}
 }
@@ -1245,14 +1261,40 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 }
 
 // cleanRemoteURLForReport turns a parsed git remote into a clean,
-// credential-free HTTPS URL safe to send to the backend. The raw remote can
-// carry embedded credentials (https://token@host/...) or query params, so we
-// never forward it verbatim: rebuild from host/owner/repo alone.
-func cleanRemoteURLForReport(info *gitremote.Info) string {
+// credential-free HTTPS clone URL on the repo's UPSTREAM forge host, safe to
+// send to the backend. The raw remote can carry embedded credentials
+// (https://token@host/...) or query params, so we never forward it verbatim:
+// rebuild from host/owner/repo alone.
+//
+// ok is false when no upstream forge host is known, which is decided by
+// transport. A direct remote is reached over a git transport, so its Host IS a
+// git host and it is always reportable — a self-hosted GitHub Enterprise
+// included, which is why this does not simply require a mapped forge.
+//
+// An entire:// remote is the opposite: its Host is a cluster, so a forge clone
+// URL exists only when the forge maps back to an upstream host. Two kinds do
+// not. A native repo mirrors nothing. An unrecognized token does not either —
+// ParseURL preserves ANY non-empty forge it finds in the path, so a
+// `entire://<cluster>/jk/<owner>/<repo>` origin arrives looking just like a
+// mirror. Both would be reported as `https://<cluster>/<owner>/<repo>.git`: a
+// URL that addresses nothing, on a host that serves no such thing, wearing a
+// suffix Entire paths never carry. The report drives the web onboarding's
+// GitHub-App nudge, which has nothing to say about either, so the caller skips
+// it rather than reporting a synthesized URL.
+//
+// Because ok is false in those cases, the host returned here is always a real
+// git host, and the `.git` suffix is always that host's clone convention rather
+// than part of a name (see gitDirSuffix).
+func cleanRemoteURLForReport(info *gitremote.Info) (string, bool) {
+	if info.Protocol == gitremote.ProtocolEntire {
+		if _, known := info.UpstreamHost(); !known {
+			return "", false
+		}
+	}
 	// Use CanonicalHost, not Host: an entire://cluster/gh/owner/repo origin (an
 	// already-mirrored repo) carries the Entire cluster as Host, so reporting
 	// Host verbatim would point the backend at the cluster instead of github.com.
-	return fmt.Sprintf("https://%s/%s/%s.git", info.CanonicalHost(), info.Owner, info.Repo)
+	return fmt.Sprintf("https://%s/%s/%s%s", info.CanonicalHost(), info.Owner, info.Repo, gitDirSuffix), true
 }
 
 func newDisableCmd() *cobra.Command {
@@ -1271,9 +1313,12 @@ show a disabled message.
 
 To completely remove Entire integrations from this repository, use --uninstall:
   - .entire/ directory (settings, logs, metadata)
-  - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)
+  - Git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push),
+    restoring any hooks Entire backed up
   - Session state files (.git/entire-sessions/)
-  - Shadow branches (entire/<hash>)
+  - Shadow branches older versions left behind (entire/<commit>-<worktree>);
+    bare entire/<commit> branches are listed and kept, since a branch of
+    yours named after a short SHA looks the same (entire clean --all)
   - Agent hooks
 
 An external agent's hooks live inside its plugin, so removing them means asking the
@@ -1450,8 +1495,12 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		_, pruned, err := installAgentHooks(ctx, ag, opts.ForceHooks)
+		if err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
+		}
+		if pruned {
+			reportPrunedStaleHooks(w, ag)
 		}
 		warnCodexHooksAfterSetup(ctx, w, ag)
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
@@ -1942,13 +1991,40 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	return count, nil
 }
 
+// installAgentHooks installs ag's hooks (setupAgentHooks) and reports whether
+// the install also pruned Entire hooks this version no longer writes (for
+// Claude Code, the retired post-todo hook). The stale check runs before the
+// install, because afterwards there is nothing left to detect. Every enable
+// path reports a prune, so a rewritten config is never called "already
+// installed" or left unmentioned.
+func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (installed int, prunedStale bool, err error) {
+	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
+		prunedStale = reporter.HasStaleManagedHooks(ctx)
+	}
+	installed, err = setupAgentHooks(ctx, ag, forceHooks)
+	if err != nil {
+		return 0, false, err
+	}
+	return installed, prunedStale, nil
+}
+
+// reportPrunedStaleHooks tells the user an install removed outdated Entire
+// hooks from ag's config.
+func reportPrunedStaleHooks(w io.Writer, ag agent.Agent) {
+	fmt.Fprintf(w, "  Removed outdated Entire hooks for %s (hooks no longer used by this version)\n", ag.Description())
+}
+
 func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
 	var successful []agent.Agent
 	var errs []error
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, forceHooks); err != nil {
+		_, pruned, err := installAgentHooks(ctx, ag, forceHooks)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 			continue
+		}
+		if pruned {
+			reportPrunedStaleHooks(w, ag)
 		}
 		warnCodexHooksAfterSetup(ctx, w, ag)
 		successful = append(successful, ag)
@@ -2194,8 +2270,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
-	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+	// Install agent hooks (agent hooks don't depend on settings). The install
+	// reports whether it also pruned stale Entire hooks, so the message below
+	// does not call a changed config "already installed".
+	installedHooks, prunedStaleHooks, err := installAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
@@ -2301,9 +2379,14 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
 
-	if installedHooks == 0 {
+	switch {
+	case installedHooks == 0 && prunedStaleHooks:
+		reportPrunedStaleHooks(w, ag)
+	case installedHooks == 0:
 		fmt.Fprintf(w, "  Hooks for %s already installed\n", ag.Description())
-	} else {
+	case prunedStaleHooks:
+		fmt.Fprintf(w, "  Installed %d hooks for %s and removed outdated ones\n", installedHooks, ag.Description())
+	default:
 		fmt.Fprintf(w, "  Installed %d hooks for %s\n", installedHooks, ag.Description())
 	}
 	fmt.Fprintln(w, "  ✓ Configured project")
@@ -2862,16 +2945,19 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 // Failures render in the same shape as a failed agent-hook removal: a red ✗
 // headline naming the step, with the reason nested beneath it.
 func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
-	removed, err := strategy.RemoveGitHook(ctx)
+	res, err := strategy.RemoveGitHookDetailed(ctx)
 	if err != nil {
 		p.stepFailed("Failed to remove git hooks")
 		p.warnUnder("failed to remove git hooks: %v", err)
 		return false
 	}
-	if removed > 0 {
-		p.step("Removed git hooks (%d)", removed)
+	if res.Removed > 0 {
+		p.step("Removed git hooks (%d)", res.Removed)
 	} else {
 		p.noop("No git hooks to remove")
+	}
+	for _, hook := range res.Restored {
+		p.step("Restored your original %s hook", hook)
 	}
 	return true
 }
@@ -2911,18 +2997,40 @@ func uninstallEntireDir(ctx context.Context, p *uninstallPrinter, dirExists bool
 	return true
 }
 
-// uninstallShadowBranches removes all shadow branches and reports what it did.
+// uninstallShadowBranches removes the legacy shadow branches older versions
+// left behind in the strict entire/<commit>-<worktree> form, exactly like
+// `entire doctor --force`. The deletion is `git branch -D`, which
+// force-deletes, so the bare entire/<hex> form is never deleted here: a user's
+// own branch named like a short SHA under entire/ matches it. Bare-form
+// branches are listed by name as kept, with a pointer to `entire clean --all`,
+// which removes them behind its own confirmation. A strict-form branch git
+// refuses to delete (checked out in a worktree) is reported and kept too.
+// Neither fails the uninstall, and the deleted count is still shown.
 func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
-	branchesRemoved, err := removeAllShadowBranches(ctx)
+	deleted, kept, bare, err := removeAllShadowBranches(ctx)
 	if err != nil {
-		p.stepFailed("Failed to remove shadow branches")
-		p.warnUnder("failed to remove shadow branches: %v", err)
+		p.stepFailed("Failed to remove legacy shadow branches")
+		p.warnUnder("failed to remove legacy shadow branches: %v", err)
 		return false
 	}
-	if branchesRemoved > 0 {
-		p.step("Removed %d shadow branches", branchesRemoved)
-	} else {
-		p.noop("No shadow branches to remove")
+	switch {
+	case deleted > 0:
+		p.step("Removed %s", pluralCount(deleted, "legacy shadow branch", "legacy shadow branches"))
+	case len(kept) == 0 && len(bare) == 0:
+		p.noop("No legacy shadow branches to remove")
+	}
+	if len(kept) > 0 {
+		p.warn("Kept %d legacy shadow branch(es) git refused to delete (checked out in a worktree?):", len(kept))
+		for _, branch := range kept {
+			p.warnDetail("%s", branch)
+		}
+	}
+	if len(bare) > 0 {
+		p.warn("Kept %s in the oldest entire/<commit> form; it may be yours (a branch named after a short SHA looks the same):", pluralCount(len(bare), "branch", "branches"))
+		for _, branch := range bare {
+			p.warnDetail("%s", branch)
+		}
+		p.warnDetail("Review with `entire clean --all --dry-run`; `entire clean --all` removes them after confirming.")
 	}
 	return true
 }
@@ -2965,13 +3073,13 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 		rows = append(rows, explainRow{Label: "retired hooks", Value: "Gemini CLI"})
 	}
 	if summary.gitHooksInstalled {
-		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, pre-push"})
+		rows = append(rows, explainRow{Label: "git hooks", Value: "prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push"})
 	}
 	if summary.sessionStateCount > 0 {
 		rows = append(rows, explainRow{Label: "session states", Value: strconv.Itoa(summary.sessionStateCount)})
 	}
 	if summary.shadowBranchCount > 0 {
-		rows = append(rows, explainRow{Label: "shadow branches", Value: strconv.Itoa(summary.shadowBranchCount)})
+		rows = append(rows, explainRow{Label: "legacy shadow branches", Value: strconv.Itoa(summary.shadowBranchCount)})
 	}
 	if summary.entireDirExists {
 		rows = append(rows, explainRow{Label: ".entire/", Value: "settings, logs, metadata"})
@@ -3019,9 +3127,11 @@ func countSessionStates(ctx context.Context) int {
 	return len(states)
 }
 
-// countShadowBranches returns the number of shadow branches.
+// countShadowBranches returns the number of legacy shadow branches older CLI
+// versions left behind that uninstall deletes: the strict
+// entire/<commit>-<worktree> form only (see uninstallShadowBranches).
 func countShadowBranches(ctx context.Context) int {
-	branches, err := strategy.ListShadowBranches(ctx)
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
 		return 0
 	}
@@ -3298,15 +3408,32 @@ func removeEntireDirectory(ctx context.Context) error {
 	return root.RemoveAll(paths.EntireDir) //nolint:wrapcheck // caller names the directory; os error carries operation
 }
 
-// removeAllShadowBranches removes all shadow branches.
-func removeAllShadowBranches(ctx context.Context) (int, error) {
-	branches, err := strategy.ListShadowBranches(ctx)
+// removeAllShadowBranches removes the strict entire/<commit>-<worktree>
+// legacy shadow branches older CLI versions left behind, returning how many
+// were deleted, which ones git refused to delete, and the bare entire/<hex>
+// branches it leaves alone (see uninstallShadowBranches). Only a failure to
+// list them is an error.
+func removeAllShadowBranches(ctx context.Context) (deleted int, refused, bare []string, err error) {
+	strict, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to list shadow branches: %w", err)
+		return 0, nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
-	if len(branches) == 0 {
-		return 0, nil
+	all, err := strategy.ListLegacyShadowBranches(ctx)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
-	deleted, _, err := strategy.DeleteShadowBranches(ctx, branches)
-	return len(deleted), err
+	removable := make(map[string]struct{}, len(strict))
+	for _, branch := range strict {
+		removable[branch] = struct{}{}
+	}
+	for _, branch := range all {
+		if _, ok := removable[branch]; !ok {
+			bare = append(bare, branch)
+		}
+	}
+	if len(strict) == 0 {
+		return 0, nil, bare, nil
+	}
+	deletedBranches, failed := strategy.DeleteLegacyShadowBranches(ctx, strict)
+	return len(deletedBranches), failed, bare, nil
 }

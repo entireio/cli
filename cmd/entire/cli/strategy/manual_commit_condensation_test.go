@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -1103,7 +1105,7 @@ func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testi
 const taskTranscriptSecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
 
 // setupCondensableSessionWithTranscript creates a git repo, writes a session
-// transcript, and runs SaveStep so the session has a shadow branch and passes
+// transcript, and runs SaveStep so the session has a turn-end step and passes
 // CondenseSession's existing no-transcript-no-files skip gate — the fixture
 // shared by the task-record materializer tests below.
 func setupCondensableSessionWithTranscript(t *testing.T, sessionID string) (*git.Repository, *SessionState) {
@@ -1254,6 +1256,117 @@ func TestCondenseSession_TranscriptUnavailableDoesNotProbeGenericLayout(t *testi
 	taskJSON, found := checkpointTaskFile(t, repo, checkpointID, "tasks/"+toolUseID+"/task.json")
 	require.True(t, found)
 	require.Contains(t, taskJSON, taskTranscriptReasonUnresolvable)
+}
+
+// TestMaterializeTaskRecords_CodexRecordWithoutPathResolvesThroughInventory
+// covers a Codex parent that commits mid-turn, after its child finished but
+// before the parent's Stop refreshed the inventory: the task record has no
+// declared path, and the Claude-layout fallback cannot find a Codex rollout.
+// Condensation must resolve the rollout by session_meta.id through the
+// inventory instead of storing a reason-only task.json, and must still refuse
+// a rollout whose session_meta.id names a different agent.
+func TestMaterializeTaskRecords_CodexRecordWithoutPathResolvesThroughInventory(t *testing.T) {
+	const agentID = "01a1024d-83c0-78f2-9d06-1d122de7dab4"
+	tests := []struct {
+		name           string
+		rolloutID      string
+		wantTranscript bool
+	}{
+		{name: "matching session_meta id", rolloutID: agentID, wantTranscript: true},
+		{name: "mismatched session_meta id", rolloutID: "01a1024d-0000-0000-0000-000000000000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, state := setupCondensableSessionWithTranscript(t, "2026-10-03-codex-mid-turn-"+tt.rolloutID)
+
+			sessions := t.TempDir()
+			rollout := filepath.Join(sessions, "2026", "10", "03", "rollout-2026-10-03T17-06-36-"+tt.rolloutID+".jsonl")
+			writeCodexRolloutFixture(t, rollout, tt.rolloutID)
+
+			// The shape RecordSubagentStop leaves behind before any refresh:
+			// an inventory entry and an in-flight record, neither with a path.
+			state.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: agentID, ObservedTurnIDs: []string{"turn-1"}}}
+			state.TaskRecords = []session.TaskRecord{{ToolUseID: agentID, AgentID: agentID}}
+
+			ag := &codex.CodexAgent{RolloutRoots: []string{sessions}}
+			payloads, _ := (&ManualCommitStrategy{}).materializeTaskRecords(context.Background(), context.Background(), ag, state, nil)
+			require.Len(t, payloads, 1)
+			if !tt.wantTranscript {
+				require.Equal(t, taskTranscriptReasonUnresolvable, payloads[0].TranscriptUnavailableReason)
+				require.Empty(t, payloads[0].Transcript.Bytes())
+				return
+			}
+			require.Empty(t, payloads[0].TranscriptUnavailableReason)
+			require.Contains(t, string(payloads[0].Transcript.Bytes()), "added count")
+		})
+	}
+}
+
+// TestMaterializeTaskRecords_CodexRelocatedRolloutResolvesThroughInventory
+// covers a declared path that went stale: Codex archived the rollout after the
+// turn-end refresh recorded its path on the task record. The declared path no
+// longer exists and the Claude-layout fallback cannot find a Codex rollout, so
+// condensation must re-resolve it by session_meta.id through the inventory.
+func TestMaterializeTaskRecords_CodexRelocatedRolloutResolvesThroughInventory(t *testing.T) {
+	const agentID = "01a1024d-83c0-78f2-9d06-1d122de7dab4"
+	_, state := setupCondensableSessionWithTranscript(t, "2026-10-03-codex-relocated-rollout")
+
+	root := t.TempDir()
+	name := filepath.Join("2026", "10", "03", "rollout-2026-10-03T17-06-36-"+agentID+".jsonl")
+	stale := filepath.Join(root, "sessions", name)
+	archived := filepath.Join(root, "archived_sessions", name)
+	writeCodexRolloutFixture(t, archived, agentID)
+
+	state.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: agentID, ObservedTurnIDs: []string{"turn-1"}, ResolvedTranscriptPath: stale}}
+	state.TaskRecords = []session.TaskRecord{{ToolUseID: agentID, AgentID: agentID, DeclaredTranscriptPath: stale, CompletedAt: time.Now()}}
+
+	ag := &codex.CodexAgent{RolloutRoots: []string{filepath.Join(root, "sessions"), filepath.Join(root, "archived_sessions")}}
+	payloads, _ := (&ManualCommitStrategy{}).materializeTaskRecords(context.Background(), context.Background(), ag, state, nil)
+	require.Len(t, payloads, 1)
+	require.Empty(t, payloads[0].TranscriptUnavailableReason)
+	require.Contains(t, string(payloads[0].Transcript.Bytes()), "added count")
+}
+
+// TestMaterializeTaskRecords_CodexUnreadableDeclaredPathResolvesThroughInventory
+// covers a declared path that exists but cannot be opened: an existence check
+// alone would keep it off the inventory resolver, and reading it then fails.
+// The declared file sits outside the rollout roots, because an unreadable file
+// inside them makes the Codex scan fail closed by design.
+func TestMaterializeTaskRecords_CodexUnreadableDeclaredPathResolvesThroughInventory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test removes")
+	}
+	if runtime.GOOS == goosWindows {
+		t.Skip("unix permission bits")
+	}
+	const agentID = "01a1024d-83c0-78f2-9d06-1d122de7dab4"
+	_, state := setupCondensableSessionWithTranscript(t, "2026-10-03-codex-unreadable-declared")
+
+	root := t.TempDir()
+	declared := filepath.Join(root, "declared", "rollout.jsonl")
+	writeCodexRolloutFixture(t, declared, agentID)
+	require.NoError(t, os.Chmod(declared, 0o000))
+	sessions := filepath.Join(root, "sessions")
+	writeCodexRolloutFixture(t, filepath.Join(sessions, "2026", "10", "03", "rollout-"+agentID+".jsonl"), agentID)
+
+	state.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: agentID, ObservedTurnIDs: []string{"turn-1"}, DeclaredTranscriptPath: declared}}
+	state.TaskRecords = []session.TaskRecord{{ToolUseID: agentID, AgentID: agentID, DeclaredTranscriptPath: declared, CompletedAt: time.Now()}}
+
+	ag := &codex.CodexAgent{RolloutRoots: []string{sessions}}
+	payloads, _ := (&ManualCommitStrategy{}).materializeTaskRecords(context.Background(), context.Background(), ag, state, nil)
+	require.Len(t, payloads, 1)
+	require.Empty(t, payloads[0].TranscriptUnavailableReason)
+	require.Contains(t, string(payloads[0].Transcript.Bytes()), "added count")
+}
+
+// writeCodexRolloutFixture writes a minimal Codex rollout whose session_meta.id
+// is id, with one assistant message reading "added count".
+func writeCodexRolloutFixture(t *testing.T, path, id string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"type":"session_meta","payload":{"id":"`+id+`"}}`+"\n"+
+			`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"added count"}]}}`+"\n"), 0o600))
 }
 
 // TestCondenseSession_InFlightTaskRecord_TranscriptSoFarStoredRecordSurvives
@@ -1471,7 +1584,7 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 
 // TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes is the
 // trigger half of invariant 7: a records-only session (read-only background
-// subagent; no SaveStep, no shadow branch, no files, no parent transcript)
+// subagent; no SaveStep, no files, no parent transcript)
 // must condense into a real checkpoint carrying tasks/<id>/. FullyCondensed is
 // already true here because the task may complete after SessionEnd condensed
 // the earlier state; the new task content must make the session eligible again.
@@ -1596,7 +1709,7 @@ func TestClearFilesystemStagedFiles_ReleasesAllStagedFiles(t *testing.T) {
 		require.NoError(t, os.WriteFile(p, []byte(`{"x":1}`+"\n"), 0o600))
 	}
 
-	clearFilesystemStagedFiles(context.Background(), sessionID)
+	releaseStoredCopyForTest(context.Background(), sessionID)
 
 	for _, p := range staged {
 		assert.NoFileExists(t, p, "%s should be released after condensation", filepath.Base(p))
@@ -1618,10 +1731,71 @@ func TestClearFilesystemStagedFiles_MissingFilesAreNotAnError(t *testing.T) {
 	t.Chdir(repoDir)
 
 	// No metadata directory at all, then an empty one.
-	clearFilesystemStagedFiles(context.Background(), "session-never-staged")
+	releaseStoredCopyForTest(context.Background(), "session-never-staged")
 
 	metaDir := filepath.Join(repoDir, paths.SessionMetadataDirFromSessionID("session-empty"))
 	require.NoError(t, os.MkdirAll(metaDir, 0o750))
-	clearFilesystemStagedFiles(context.Background(), "session-empty")
+	releaseStoredCopyForTest(context.Background(), "session-empty")
 	assert.DirExists(t, metaDir)
+}
+
+// A commit-less condense (doctor, the sweep) writes a checkpoint no commit
+// will carry, so the files it recorded can never be linked by a later commit.
+// It must leave nothing pending: no files, no hashes, no next-checkpoint
+// preview for the session.
+func TestCondenseSessionByID_ClearsPendingFiles(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "commitless-condense-clears-files"
+	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
+	testutil.WriteFile(t, dir, filepath.Join(metadataDir, paths.TranscriptFileName), testTranscriptPromptResponse)
+	testutil.WriteFile(t, dir, "test.txt", "agent content")
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+	}))
+
+	previews, err := s.PreviewNextCheckpoint(t.Context())
+	require.NoError(t, err)
+	require.Len(t, previews, 1, "fixture: the session is pending before the condense")
+
+	require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+
+	state, err := s.loadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Empty(t, state.FilesTouched)
+	require.Empty(t, state.TouchedFileHashes)
+	require.False(t, state.HasPendingWork())
+
+	previews, err = s.PreviewNextCheckpoint(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, previews, "checkpoint list --pending must no longer preview a condensed session")
+}
+
+// TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript: a Workflow agent's
+// task record whose declared path was lost still resolves to its transcript
+// under <subagents>/workflows/<runId>/ (#2685), the layout
+// cli.ResolveAgentTranscriptPath also probes.
+func TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const sessionID = "parent-sess"
+	want := filepath.Join(paths.SubagentsDir(dir, sessionID), "workflows", "wf_1", "agent-ae3d7b8f2930c8787.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(want), 0o750))
+	require.NoError(t, os.WriteFile(want, []byte("{}\n"), 0o600))
+	state := &SessionState{SessionID: sessionID, TranscriptPath: filepath.Join(dir, sessionID+".jsonl")}
+
+	assert.Equal(t, want, resolveTaskTranscriptPath(state, "ae3d7b8f2930c8787"))
+	assert.Empty(t, resolveTaskTranscriptPath(state, "other"))
 }

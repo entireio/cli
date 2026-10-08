@@ -7,13 +7,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // Compile-time interface assertions for new interfaces.
@@ -27,6 +30,7 @@ var (
 	_ agent.ToolInvocationScanner  = (*ClaudeCodeAgent)(nil)
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
 	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
+	_ agent.TaskTranscriptMatcher  = (*ClaudeCodeAgent)(nil)
 )
 
 // WriteHookResponse outputs a JSON hook response to stdout.
@@ -62,10 +66,12 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 		HookNameSessionStart,
 		HookNameSessionEnd,
 		HookNameStop,
+		HookNameStopFailure,
 		HookNameUserPromptSubmit,
 		HookNamePreTask,
 		HookNamePostTask,
 		HookNamePostTodo,
+		HookNameSubagentStart,
 		HookNameSubagentStop,
 	}
 }
@@ -80,12 +86,20 @@ func (c *ClaudeCodeAgent) ParseHookEvent(ctx context.Context, hookName string, s
 		return c.parseTurnStart(stdin)
 	case HookNameStop:
 		return c.parseSessionInfoEvent(stdin, agent.TurnEnd)
+	case HookNameStopFailure:
+		// StopFailure fires instead of Stop when a turn ends on an API error
+		// (rate limit, overload, auth, max output tokens, ...). The turn is over
+		// and Claude Code waits for the next prompt, so it ends the turn like
+		// Stop; without it the session stays ACTIVE until the next prompt.
+		return c.parseSessionInfoEvent(stdin, agent.TurnEnd)
 	case HookNameSessionEnd:
 		return c.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNamePreTask:
 		return c.parseSubagentStart(stdin)
 	case HookNamePostTask:
 		return c.parseSubagentEnd(stdin)
+	case HookNameSubagentStart:
+		return c.parseWorkflowAgentStart(stdin)
 	case HookNameSubagentStop:
 		return c.parseSubagentStop(ctx, stdin)
 	case HookNamePostTodo:
@@ -120,7 +134,7 @@ func (c *ClaudeCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset 
 // --- Internal hook parsing functions ---
 
 // parseSessionInfoEvent parses the hooks whose payload is sessionInfoRaw —
-// SessionStart, Stop, and SessionEnd differ only in the resulting event type.
+// SessionStart, Stop, StopFailure, and SessionEnd differ only in the resulting event type.
 func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.EventType) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[sessionInfoRaw](stdin)
 	if err != nil {
@@ -172,6 +186,9 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 	if err != nil {
 		return nil, err
 	}
+	if raw.ToolName == skillToolName {
+		return forkedSkillEnd(raw), nil
+	}
 	event := &agent.Event{
 		Type:       agent.SubagentEnd,
 		SessionID:  raw.SessionID,
@@ -182,12 +199,106 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 		// Final stays false: PostToolUse fires at the background launch stub,
 		// seconds after launch, not at true completion. SubagentStop
 		// (parseSubagentStop) is the true-completion signal.
-		Final: false,
+		Final:          false,
+		SubagentLaunch: subagentLaunchMode(raw.ToolResponse.Status, raw.ToolResponse.IsAsync),
 	}
 	if raw.ToolResponse.AgentID != "" {
 		event.SubagentID = raw.ToolResponse.AgentID
 	}
 	return event, nil
+}
+
+// forkedSkillEnd turns a Skill call's PostToolUse into the launch of the
+// agent a `context: fork` skill runs in; Claude Code reports that agent only
+// in the Skill result ({"status": "forked", "agentId": ...}), and its
+// SubagentStart carries the agent's ordinary type, not the skill. A skill
+// that ran inline launched no agent and produces no event.
+//
+// The agent is in the background unless the result says background:false: a
+// background launch waits for SubagentStop (or the SessionEnd sweep), while
+// completing a still-running agent at launch would lose its work. A finished
+// fork completes now, with files from its transcript alone, since no
+// PreToolUse ran for the Skill call to record a worktree baseline. The skill
+// name, never its args, describes the task; the agent's type comes from its
+// SubagentStop, as the Skill result does not report it.
+func forkedSkillEnd(raw *postToolHookInputRaw) *agent.Event {
+	if raw.ToolResponse.Status != skillToolStatusForked || raw.ToolResponse.AgentID == "" {
+		return nil
+	}
+	var input struct {
+		Skill string `json:"skill"`
+	}
+	_ = json.Unmarshal(raw.ToolInput, &input) //nolint:errcheck // a missing name only leaves the description empty
+	launch := agent.SubagentLaunchBackground
+	if bg := raw.ToolResponse.Background; bg != nil && !*bg {
+		launch = agent.SubagentLaunchForeground
+	}
+	event := &agent.Event{
+		Type:                        agent.SubagentEnd,
+		SessionID:                   raw.SessionID,
+		SessionRef:                  raw.TranscriptPath,
+		ToolUseID:                   raw.ToolUseID,
+		SubagentID:                  raw.ToolResponse.AgentID,
+		SubagentLaunch:              launch,
+		SubagentFilesFromTranscript: launch == agent.SubagentLaunchForeground,
+		Timestamp:                   time.Now(),
+	}
+	if input.Skill != "" {
+		event.TaskDescription = "/" + input.Skill
+	}
+	return event
+}
+
+// parseWorkflowAgentStart parses Claude Code's SubagentStart hook into the
+// background-launch event a Workflow agent otherwise never gets (#2685): a
+// Workflow call returns at launch with a run ID and no agent IDs, so
+// PostToolUse has nothing per agent to record. The event records an in-flight
+// task record that the agent's SubagentStop later completes by agent ID.
+//
+// No per-agent tool_use_id exists — the Workflow's own is shared by every
+// agent in the run — so the agent ID keys the record. A record keyed this way
+// can see its launch signal again, so the launch is idempotent. A resumed run
+// reuses its agents' IDs, so its launch can find the earlier run's completed
+// record and add none; the stop tells the runs apart by the run its
+// transcript lives in (SubagentRunID) and completes a record of its own.
+//
+// Only Workflow agents produce an event. Direct Agent launches fire
+// SubagentStart too, but PreToolUse/PostToolUse[Agent] already record them
+// under their tool_use_id, and a second record here would duplicate the task.
+// The installed matcher filters them out; this check covers a widened one.
+func (c *ClaudeCodeAgent) parseWorkflowAgentStart(stdin io.Reader) (*agent.Event, error) {
+	raw, err := agent.ReadAndParseHookInput[subagentStartHookInputRaw](stdin)
+	if err != nil {
+		return nil, err
+	}
+	if raw.AgentType != workflowAgentType || raw.AgentID == "" {
+		return nil, nil //nolint:nilnil // nil event = no lifecycle action
+	}
+	return &agent.Event{
+		Type:                     agent.SubagentEnd,
+		SessionID:                raw.SessionID,
+		SessionRef:               raw.TranscriptPath,
+		ToolUseID:                raw.AgentID,
+		SubagentID:               raw.AgentID,
+		SubagentType:             raw.AgentType,
+		SubagentLaunch:           agent.SubagentLaunchBackground,
+		SubagentLaunchIdempotent: true,
+		Timestamp:                time.Now(),
+	}, nil
+}
+
+// subagentLaunchMode classifies an Agent call from its tool_response. Claude
+// Code decides whether a subagent runs in the background, often without the
+// model passing run_in_background at all, so the response is authoritative.
+func subagentLaunchMode(status string, isAsync bool) agent.SubagentLaunchMode {
+	switch {
+	case isAsync || status == agentToolStatusAsyncLaunched:
+		return agent.SubagentLaunchBackground
+	case status == agentToolStatusCompleted:
+		return agent.SubagentLaunchForeground
+	default:
+		return agent.SubagentLaunchUnknown
+	}
 }
 
 // parseSubagentStop parses Claude Code's SubagentStop hook, the true
@@ -226,15 +337,23 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 		return nil, fmt.Errorf("failed to parse hook input: %w", err)
 	}
 
-	// Tripwire for the defensive-parse assumption: a well-formed SubagentStop
-	// payload always carries these two fields, so an empty value here means
-	// the payload shape diverged from what this parse expects (e.g. an
-	// alternate key spelling — see the key-name log above).
-	if raw.ToolUseID == "" || raw.SessionID == "" {
+	// Tripwire: a well-formed SubagentStop payload always carries session_id.
+	// tool_use_id is not checked: Claude Code's SubagentStop does not send it
+	// (observed through 2.1.288), so the lifecycle correlates on agent_id.
+	if raw.SessionID == "" {
 		logging.Warn(logging.WithComponent(ctx, "agent.claudecode"),
-			"subagent-stop payload missing tool_use_id or session_id — structurally impossible for a well-formed payload",
-			slog.Bool("has_tool_use_id", raw.ToolUseID != ""),
-			slog.Bool("has_session_id", raw.SessionID != ""))
+			"subagent-stop payload missing session_id")
+	}
+
+	transcriptPath, runID := raw.AgentTranscriptPath, ""
+	if raw.AgentType == workflowAgentType && transcriptPath != "" {
+		var ok bool
+		transcriptPath, runID, ok = c.workflowAgentTranscript(raw.TranscriptPath, raw.SessionID, raw.AgentID, transcriptPath)
+		if !ok {
+			logging.Warn(logging.WithComponent(ctx, "agent.claudecode"),
+				"ignoring workflow agent transcript path that is not this agent's run transcript in this session",
+				slog.String("agent_id", raw.AgentID))
+		}
 	}
 
 	return &agent.Event{
@@ -243,16 +362,54 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 		SessionRef:             raw.TranscriptPath,
 		ToolUseID:              raw.ToolUseID,
 		SubagentID:             raw.AgentID,
-		SubagentTranscriptPath: raw.AgentTranscriptPath,
+		SubagentType:           raw.AgentType,
+		SubagentTranscriptPath: transcriptPath,
+		SubagentRunID:          runID,
 		Final:                  true,
 		Timestamp:              time.Now(),
 	}, nil
+}
+
+// workflowAgentTranscript checks a Workflow agent's declared transcript path,
+// which arrives in the hook payload and is read into the parent's checkpoint.
+// It is accepted only as the regular file
+// <sessionID>/subagents/workflows/<runID>/agent-<agentID>.jsonl inside the
+// parent's session directory (the directory of transcriptPath), with no link
+// at any component below it: another session's transcript, another agent's,
+// or a path that leaves the directory is not this agent's. It returns the
+// transcript's path and its run ID, which tells one run's execution of the
+// agent from a resumed run's; ok is false and both are empty otherwise.
+func (c *ClaudeCodeAgent) workflowAgentTranscript(transcriptPath, sessionID, agentID, declared string) (path, runID string, ok bool) {
+	if transcriptPath == "" || agentID == "" || validation.ValidateAgentID(agentID) != nil ||
+		validation.ValidateSessionID(sessionID) != nil {
+		return "", "", false
+	}
+	store, err := agent.OpenSessionStoreAt(c, filepath.Dir(transcriptPath))
+	if err != nil {
+		return "", "", false
+	}
+	name, err := store.Name(declared)
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.Split(name, "/")
+	if len(parts) != 5 || parts[0] != sessionID || parts[1] != "subagents" ||
+		parts[2] != paths.SubagentWorkflowsDirName || validation.ValidateWorkflowRunID(parts[3]) != nil ||
+		parts[4] != paths.AgentTranscriptFileName(agentID) {
+		return "", "", false
+	}
+	if info, err := store.Lstat(name); err != nil || !info.Mode().IsRegular() {
+		return "", "", false
+	}
+	return filepath.Join(store.Dir(), filepath.FromSlash(name)), parts[3], true
 }
 
 // --- Transcript flush sentinel ---
 
 // stopHookSentinel is the string that appears in Claude Code's hook_progress
 // entry when the stop hook has been invoked, indicating the transcript is fully flushed.
+// It is a prefix of "hooks claude-code stop-failure" on purpose: a turn ending
+// on an API error flushes the same way, so both turn-end verbs must match.
 const stopHookSentinel = "hooks claude-code stop"
 
 // waitForTranscriptFlush waits until Claude Code's async transcript writes have

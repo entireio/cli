@@ -197,6 +197,7 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			defer g.span.End()
 			g.logInvoked()
 
+			strategy.SetBeforeCondense(refreshCodexInventoriesBeforeCondense)
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
 

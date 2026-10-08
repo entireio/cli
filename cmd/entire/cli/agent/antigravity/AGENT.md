@@ -155,6 +155,28 @@ worktree than the install still cleans up, including the legacy local-dev
 - Global `settings.json`: only the `title` key is touched; user title commands
   are wrapped, restored on uninstall, and anything unrecognized is left alone.
 
+## Summary Generation Isolation
+
+Summary runs use an empty working directory and a separate temporary HOME/XDG
+home so agy's global title commands, hooks, MCP servers, skills, and workspace
+trust settings are not loaded. Only authentication is carried over: the macOS
+login keychain file, a regular OAuth file token, ADC credentials, and the
+allowlisted `modelProvider: "gemini"` setting for API-key mode. This is
+configuration isolation, not a filesystem sandbox; agy still has tools and its
+own approval behavior.
+
+`resolveTextGenerationAuth` is the only generation-side discovery of ambient
+home/config/ADC sources. Home preparation takes those sources explicitly.
+When no ADC file is selected, preparation explicitly clears
+`GOOGLE_APPLICATION_CREDENTIALS` in the child environment so ambient inheritance
+cannot bypass the selected sources; Windows default ADC still uses APPDATA.
+Generation unit tests use `newTestTextGenerator` with temporary authentication
+fixtures; replacing `CommandRunner` alone does **not** isolate credential
+preparation. Tests of the production resolver must override HOME/USERPROFILE,
+agy's config directory, and the ADC credential variable before calling it.
+Credential-carryover tests inspect prepared homes directly rather than launching
+agy or touching the developer's keychain.
+
 ## Gaps & Limitations (Preview)
 
 - **Silent tracking** in the agy UI (no SessionStart surface); `entire status`

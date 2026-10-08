@@ -498,3 +498,75 @@ func TestCheckDispatchJurisdiction(t *testing.T) {
 		t.Fatalf("a wrong-region result must fail, got %v", err)
 	}
 }
+
+// TestServerMode_NativeOriginNamesItsForge pins the fix for `entire dispatch`
+// in an Entire-native checkout: with no --repos, the origin remote
+// entire://<cell>/et/<project>/<repo> must become the et/ slug the server
+// already accepts, not an error claiming dispatch supports GitHub only.
+func TestServerMode_NativeOriginNamesItsForge(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemoteURL(t, dir, "entire://aws-us-east-2.entire.io/et/entirehq/entire-api")
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testDispatchEndpoint {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		repos, ok := body["repos"].([]any)
+		if !ok || len(repos) != 1 || repos[0] != "et/entirehq/entire-api" {
+			t.Fatalf("expected the native origin to dispatch as its et/ slug, got repos payload: %v", body["repos"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"window":             map[string]any{"normalized_since": "2026-04-09T00:00:00Z", "normalized_until": "2026-04-16T00:00:00Z"},
+			"covered_repos":      []string{"entirehq/entire-api"},
+			"repos":              []any{},
+			"generated_markdown": testDispatchGeneratedHello,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer mock.Close()
+
+	stubCloudDispatchAuth(t)
+	t.Setenv("ENTIRE_API_BASE_URL", mock.URL)
+	t.Chdir(dir)
+
+	got, err := Run(context.Background(), Options{Mode: ModeServer, Since: "7d"})
+	if err != nil {
+		t.Fatalf("native checkout should dispatch via its et/ slug, got %v", err)
+	}
+	if got.GeneratedText != testDispatchGeneratedHello {
+		t.Fatalf("unexpected generated text: %q", got.GeneratedText)
+	}
+}
+
+// TestServerMode_UnknownOriginHostIsAnError: an origin on a forge Entire does
+// not host is still refused, and the error names both shapes --repos takes so
+// the user can address the repo explicitly.
+func TestServerMode_UnknownOriginHostIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "a.txt", "x")
+	testutil.GitAdd(t, dir, "a.txt")
+	testutil.GitCommit(t, dir, "initial")
+	addOriginRemoteURL(t, dir, "https://gitlab.com/acme/thing.git")
+
+	stubCloudDispatchAuth(t)
+	t.Setenv("ENTIRE_API_BASE_URL", "http://127.0.0.1:9") // must never be dialed
+	t.Chdir(dir)
+
+	_, err := Run(context.Background(), Options{Mode: ModeServer, Since: "7d"})
+	if err == nil || !strings.Contains(err.Error(), "gitlab.com") || !strings.Contains(err.Error(), "--repos") {
+		t.Fatalf("expected an error naming the host and the --repos escape hatch, got %v", err)
+	}
+}

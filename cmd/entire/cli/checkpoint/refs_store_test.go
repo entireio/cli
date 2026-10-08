@@ -160,19 +160,6 @@ func TestGitRefsStore_BackfillFetchesMissingRef(t *testing.T) {
 				assert.Equal(t, []byte("finalized"), content.Transcript)
 			},
 		},
-		"attribution": {
-			makeReq: func(cid id.CheckpointID) WriteRequest {
-				return CheckpointAttribution{CheckpointID: cid, Attribution: &Attribution{AgentLines: 3}}
-			},
-			verify: func(t *testing.T, store *gitRefsStore, cid id.CheckpointID) {
-				t.Helper()
-				summary, err := store.Read(context.Background(), cid)
-				require.NoError(t, err)
-				require.NotNil(t, summary)
-				require.NotNil(t, summary.CombinedAttribution)
-				assert.Equal(t, 3, summary.CombinedAttribution.AgentLines)
-			},
-		},
 	}
 
 	for name, tc := range backfills {
@@ -586,9 +573,6 @@ func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	require.NoError(t, store.Write(ctx, SessionSummary{
 		CheckpointID: cid, Summary: &Summary{Intent: "intent-x", Outcome: "outcome-y"},
 	}))
-	require.NoError(t, store.Write(ctx, CheckpointAttribution{
-		CheckpointID: cid, Attribution: &Attribution{AgentLines: 7, AgentPercentage: 70},
-	}))
 
 	// The per-checkpoint ref exists at the sharded name.
 	_, err := store.repo.Reference(mustRefName(t, cid), true)
@@ -598,8 +582,6 @@ func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, summary)
 	require.Len(t, summary.Sessions, 1)
-	require.NotNil(t, summary.CombinedAttribution)
-	assert.Equal(t, 7, summary.CombinedAttribution.AgentLines)
 
 	content, err := store.ReadSessionContent(ctx, cid, 0)
 	require.NoError(t, err)
@@ -727,9 +709,6 @@ func TestGitRefsStore_BackfillUnknownCheckpointNotFound(t *testing.T) {
 	require.ErrorIs(t, err, ErrCheckpointNotFound)
 
 	err = store.Write(ctx, SessionSummary{CheckpointID: cid, Summary: &Summary{Intent: "x"}})
-	require.ErrorIs(t, err, ErrCheckpointNotFound)
-
-	err = store.Write(ctx, CheckpointAttribution{CheckpointID: cid, Attribution: &Attribution{AgentLines: 1}})
 	require.ErrorIs(t, err, ErrCheckpointNotFound)
 
 	// Read of an absent checkpoint is (nil, nil) per the contract.

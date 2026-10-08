@@ -34,10 +34,10 @@ func TestParseExplainRepoFlag(t *testing.T) {
 		{name: "native leading slash", in: "/et/acme/widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "native clone url", in: "entire://aws-us-east-2.entire.io/et/Acme/Widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "mirror clone url", in: "entire://aws-us-east-2.entire.io/gh/Acme/Widgets", forge: "gh", owner: "acme", repo: "widgets"},
-		// `.git` is part of a native repo's name, not decoration, so it must
-		// survive parsing on both the bare-ref and clone-URL spellings.
-		{name: "native git suffix", in: "et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets.git"},
-		{name: "native clone url git suffix", in: "entire://aws-us-east-2.entire.io/et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets.git"},
+		// `.git` is decoration on either spelling, so both forms of the native
+		// ref name the suffix-free repo.
+		{name: "native git suffix", in: "et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets"},
+		{name: "native clone url git suffix", in: "entire://aws-us-east-2.entire.io/et/acme/widgets.git", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "empty", in: "", wantErr: "--repo requires a value"},
 		{name: "missing forge", in: "acme/widgets", wantErr: "forge prefix is required"},
 		{name: "bare word", in: "widgets", wantErr: "forge prefix is required"},
@@ -111,12 +111,10 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"))
 	assert.False(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"), "same-named GitHub repo is distinct")
 
-	// `.git` is part of a native repo's name, not decoration: an origin named
-	// "widgets.git" must not match a --repo naming "widgets", and must match one
-	// that spells the suffix out.
+	// `.git` is decoration on a native origin too, so it is dropped on the way
+	// in and the origin is the repo named "widgets".
 	setOrigin(t, "entire://aws-us-east-2.entire.io/et/acme/widgets.git")
-	assert.False(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"), "the suffix is part of the name, not decoration to strip")
-	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets.git"))
+	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"))
 
 	// A non-GitHub origin with a coincidentally matching owner/name must not
 	// count as the current GitHub repo.
@@ -129,9 +127,11 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 // stubCrossRepoReader serves a fixed checkpoint so the render paths can be
 // exercised without a cell.
 type stubCrossRepoReader struct {
-	transcript []byte
-	metaErr    error
-	sessions   int
+	transcript  []byte
+	metaErr     error
+	sessions    int
+	resolvedSHA string
+	resolveErr  error
 }
 
 func (s *stubCrossRepoReader) Read(context.Context, id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
@@ -186,12 +186,30 @@ func (s *stubCrossRepoReader) ReadSessionContent(ctx context.Context, cid id.Che
 	return &checkpoint.SessionContent{Metadata: *meta, Transcript: s.transcript, Prompts: prompts}, nil
 }
 
+// The task tier answers like the real API reader: the cell does not serve
+// task records.
+func (s *stubCrossRepoReader) ListTasks(ctx context.Context, cid id.CheckpointID) ([]checkpoint.TaskEntry, error) {
+	return (&apiCheckpointReader{ownerRepo: "gh/acme/widgets"}).ListTasks(ctx, cid)
+}
+
+func (s *stubCrossRepoReader) ReadTaskTranscript(ctx context.Context, cid id.CheckpointID, toolUseID string) ([]byte, error) {
+	return (&apiCheckpointReader{ownerRepo: "gh/acme/widgets"}).ReadTaskTranscript(ctx, cid, toolUseID)
+}
+
 func (s *stubCrossRepoReader) GetCheckpointAuthor(context.Context, id.CheckpointID) (checkpoint.Author, error) {
 	return checkpoint.Author{Name: "Foreign Author"}, nil
 }
 
 func (s *stubCrossRepoReader) checkpointCommit(context.Context, id.CheckpointID) ([]associatedCommit, error) {
 	return []associatedCommit{{SHA: "13e379e4b", ShortSHA: "13e379e", Message: "foreign commit"}}, nil
+}
+
+func (s *stubCrossRepoReader) resolveCommitCheckpoint(_ context.Context, sha string) (id.CheckpointID, error) {
+	s.resolvedSHA = sha
+	if s.resolveErr != nil {
+		return id.EmptyCheckpointID, s.resolveErr
+	}
+	return testAPICheckpointID, nil
 }
 
 // withStubCrossRepoReader points the cross-repo path at stub and records the
@@ -253,6 +271,29 @@ func TestRunCrossRepoExplain_JSON(t *testing.T) {
 	assert.Equal(t, testAPICheckpointID.String(), envelope.CheckpointID)
 	assert.Equal(t, 2, envelope.SessionCount)
 	assert.False(t, envelope.Partial, "a complete read must not be flagged partial")
+
+	// The API does not serve subagent task records: the key is omitted rather
+	// than reported as an empty list, and that is not a partial export.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &raw))
+	assert.NotContains(t, raw, "tasks")
+	assert.NotContains(t, raw, "tasks_error")
+}
+
+func TestRunCrossRepoExplain_TaskTranscriptIsUnsupported(t *testing.T) {
+	withStubCrossRepoReader(t, &stubCrossRepoReader{})
+
+	var out, errOut bytes.Buffer
+	err := runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
+		repoFlag:     "gh/acme/widgets",
+		target:       testAPICheckpointID.String(),
+		sessionIndex: -1,
+		transcript:   true,
+		task:         "toolu_x",
+	})
+	require.ErrorIs(t, err, checkpoint.ErrTaskRecordsUnsupported)
+	assert.Contains(t, err.Error(), "gh/acme/widgets")
+	assert.Empty(t, out.String())
 }
 
 func TestRunCrossRepoExplain_NativeRepoThreadsForge(t *testing.T) {
@@ -320,14 +361,89 @@ func TestRunCrossRepoExplain_EmptyTranscriptIsAnError(t *testing.T) {
 }
 
 func TestRunCrossRepoExplain_RejectsPrefix(t *testing.T) {
-	withStubCrossRepoReader(t, &stubCrossRepoReader{})
+	for name, target := range map[string]string{
+		"ulid prefix":       "01KXGT",
+		"short commit hash": "13e379e",
+		"39-hex":            strings.Repeat("a", 39),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &stubCrossRepoReader{}
+			withStubCrossRepoReader(t, stub)
 
-	err := runCrossRepoExplain(context.Background(), io.Discard, io.Discard, crossRepoExplainOptions{
+			err := runCrossRepoExplain(context.Background(), io.Discard, io.Discard, crossRepoExplainOptions{
+				repoFlag:     "gh/acme/widgets",
+				target:       target,
+				sessionIndex: -1,
+			})
+			require.ErrorContains(t, err, "requires a full checkpoint ID")
+			// The message has to name the other accepted form, or an agent that
+			// pasted a short SHA from a search hit learns only half the rule.
+			assert.Contains(t, err.Error(), "commit SHA")
+			assert.Empty(t, stub.resolvedSHA, "a non-SHA target must never reach the cell as a commit")
+		})
+	}
+}
+
+// ENT-2102: a search hit's commit SHA is what agents paste into explain --repo.
+func TestRunCrossRepoExplain_CommitSHAResolvesToCheckpoint(t *testing.T) {
+	stub := &stubCrossRepoReader{transcript: []byte(`{"type":"user","message":{"role":"user","content":"do the foreign thing"}}` + "\n")}
+	asked := withStubCrossRepoReader(t, stub)
+
+	sha := "13E379E4B0000000000000000000000000000000"
+	var out bytes.Buffer
+	require.NoError(t, runCrossRepoExplain(context.Background(), &out, io.Discard, crossRepoExplainOptions{
 		repoFlag:     "gh/acme/widgets",
-		target:       "01KXGT",
+		target:       sha,
+		sessionIndex: -1,
+		noPager:      true,
+		verbose:      true,
+	}))
+	assert.Equal(t, "gh/acme/widgets", *asked)
+	assert.Equal(t, sha, stub.resolvedSHA, "the SHA reaches the reader as given; the reader owns normalization")
+	assert.Contains(t, out.String(), testAPICheckpointID.String(), "the resolved checkpoint is what gets rendered")
+	assert.Contains(t, out.String(), "do the foreign thing")
+}
+
+func TestRunCrossRepoExplain_CommitFlagResolvesToCheckpoint(t *testing.T) {
+	stub := &stubCrossRepoReader{}
+	withStubCrossRepoReader(t, stub)
+
+	sha := "13e379e4b0000000000000000000000000000000"
+	var out bytes.Buffer
+	require.NoError(t, runCrossRepoExplain(context.Background(), &out, io.Discard, crossRepoExplainOptions{
+		repoFlag:     "gh/acme/widgets",
+		commitSHA:    sha,
+		sessionIndex: -1,
+		noPager:      true,
+	}))
+	assert.Equal(t, sha, stub.resolvedSHA)
+	assert.Contains(t, out.String(), testAPICheckpointID.String())
+}
+
+// The flag layer rejects the pair first; this pins the classifier's own
+// refusal so a new caller cannot reach the reader with two targets.
+func TestClassifyCrossRepoTarget_RejectsTwoTargets(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := classifyCrossRepoTarget(crossRepoExplainOptions{
+		commitSHA:    strings.Repeat("a", 40),
+		checkpointID: testAPICheckpointID.String(),
+	})
+	require.ErrorContains(t, err, "cannot combine --commit with --checkpoint")
+}
+
+func TestRunCrossRepoExplain_CommitSHAResolutionErrorSurfaces(t *testing.T) {
+	stub := &stubCrossRepoReader{resolveErr: errors.New("commit 13e379e in gh/acme/widgets has no linked Entire checkpoint")}
+	withStubCrossRepoReader(t, stub)
+
+	var errOut bytes.Buffer
+	err := runCrossRepoExplain(context.Background(), io.Discard, &errOut, crossRepoExplainOptions{
+		repoFlag:     "gh/acme/widgets",
+		target:       "13e379e4b0000000000000000000000000000000",
 		sessionIndex: -1,
 	})
-	require.ErrorContains(t, err, "requires a full checkpoint ID")
+	require.ErrorContains(t, err, "no linked Entire checkpoint")
+	assert.NotContains(t, errOut.String(), "✓", "a failed resolution must not report success first")
 }
 
 func TestCrossRepoExplainSessionIndex(t *testing.T) {
@@ -359,9 +475,31 @@ func TestExplainCmd_RepoFlagValidation(t *testing.T) {
 			wantErr: "forge prefix is required",
 		},
 		{
-			name:    "repo with commit",
+			name:    "repo with a commit ref instead of a full SHA",
 			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", "HEAD"},
-			wantErr: "[repo commit]",
+			wantErr: "--commit with --repo requires a full commit SHA",
+		},
+		{
+			// Codex adversarial review: without this the classifier picked the
+			// SHA and silently explained a different checkpoint than --checkpoint named.
+			name:    "repo with both --commit and --checkpoint",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", strings.Repeat("a", 40), "--checkpoint", testAPICheckpointID.String()},
+			wantErr: "[commit checkpoint]",
+		},
+		{
+			name:    "repo with both targets under --json",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", strings.Repeat("a", 40), "--checkpoint", testAPICheckpointID.String(), "--json"},
+			wantErr: "[commit checkpoint]",
+		},
+		{
+			name:    "repo with both targets under --transcript",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", strings.Repeat("a", 40), "--checkpoint", testAPICheckpointID.String(), "--transcript"},
+			wantErr: "[commit checkpoint]",
+		},
+		{
+			name:    "repo with a SHA under --checkpoint",
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--checkpoint", strings.Repeat("a", 40)},
+			wantErr: "--checkpoint with --repo requires a full checkpoint ID",
 		},
 		{
 			name:    "repo with generate",

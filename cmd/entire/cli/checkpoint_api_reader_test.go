@@ -517,3 +517,110 @@ func TestParseAPITime(t *testing.T) {
 	assert.True(t, parseAPITime("", "nonsense").IsZero(),
 		"an unparseable timestamp must stay zero rather than becoming a wrong date")
 }
+
+// --- commit → checkpoint resolution ------------------------------------
+
+const testAPICommitSHA = "13e379e4b0000000000000000000000000000000"
+
+// commitCheckpointsHandler serves body as the commit→checkpoints listing.
+func commitCheckpointsHandler(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	reader, paths := newTestAPIReader(t, commitCheckpointsHandler(
+		`{"repo_full_name":"acme/widgets","checkpoints":[{"checkpointId":"`+testAPICheckpointID.String()+`","commitSha":"`+testAPICommitSHA+`"}]}`))
+
+	// Uppercase input: the route is not case-blind, so the request must lowercase.
+	cid, err := reader.resolveCommitCheckpoint(context.Background(), strings.ToUpper(testAPICommitSHA))
+	require.NoError(t, err)
+	assert.Equal(t, testAPICheckpointID, cid)
+	require.Len(t, *paths, 1)
+	assert.Equal(t, "/api/v1/repos/"+testAPIRepoID+"/commits/"+testAPICommitSHA+"/checkpoints", (*paths)[0],
+		"commit resolution must hit the cell's per-commit checkpoints route, keyed by repo ID and lowercase SHA")
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint_NoCheckpoints(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"empty": `{"repo_full_name":"acme/widgets","checkpoints":[]}`,
+		"null":  `{"repo_full_name":"acme/widgets","checkpoints":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			reader, _ := newTestAPIReader(t, commitCheckpointsHandler(body))
+			_, err := reader.resolveCommitCheckpoint(context.Background(), testAPICommitSHA)
+			require.ErrorContains(t, err, "no linked Entire checkpoint")
+			assert.Contains(t, err.Error(), testAPIOwnerRep)
+		})
+	}
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint_Ambiguous(t *testing.T) {
+	t.Parallel()
+
+	reader, _ := newTestAPIReader(t, commitCheckpointsHandler(
+		`{"repo_full_name":"acme/widgets","checkpoints":[{"checkpointId":"`+testAPICheckpointID.String()+`"},{"checkpointId":"abcdef123456"}]}`))
+	_, err := reader.resolveCommitCheckpoint(context.Background(), testAPICommitSHA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2 checkpoints")
+	assert.Contains(t, err.Error(), testAPICheckpointID.String())
+	assert.Contains(t, err.Error(), "abcdef123456")
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint_RepoMismatchIsRejected(t *testing.T) {
+	t.Parallel()
+
+	reader, _ := newTestAPIReader(t, commitCheckpointsHandler(
+		`{"repo_full_name":"totally-different/other-repo","checkpoints":[{"checkpointId":"`+testAPICheckpointID.String()+`"}]}`))
+	_, err := reader.resolveCommitCheckpoint(context.Background(), testAPICommitSHA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity mismatch")
+	assert.Contains(t, err.Error(), "other-repo")
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint_MissingRepoFullNameIsRejected(t *testing.T) {
+	t.Parallel()
+
+	reader, _ := newTestAPIReader(t, commitCheckpointsHandler(
+		`{"checkpoints":[{"checkpointId":"`+testAPICheckpointID.String()+`"}]}`))
+	_, err := reader.resolveCommitCheckpoint(context.Background(), testAPICommitSHA)
+	require.ErrorContains(t, err, "identity unverifiable")
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint_InvalidIDIsRejected(t *testing.T) {
+	t.Parallel()
+
+	reader, _ := newTestAPIReader(t, commitCheckpointsHandler(
+		`{"repo_full_name":"acme/widgets","checkpoints":[{"checkpointId":"not-a-checkpoint-id"}]}`))
+	_, err := reader.resolveCommitCheckpoint(context.Background(), testAPICommitSHA)
+	require.ErrorContains(t, err, "invalid checkpoint ID")
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint_NotFoundExplainsUnpushed(t *testing.T) {
+	t.Parallel()
+
+	reader, _ := newTestAPIReader(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"detail":"commit not found"}`)
+	})
+	_, err := reader.resolveCommitCheckpoint(context.Background(), testAPICommitSHA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may not have been pushed")
+	assert.Contains(t, err.Error(), testAPIOwnerRep)
+}
+
+func TestAPICheckpointReader_ResolveCommitCheckpoint_ForbiddenNamesAccess(t *testing.T) {
+	t.Parallel()
+
+	reader, _ := newTestAPIReader(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	_, err := reader.resolveCommitCheckpoint(context.Background(), testAPICommitSHA)
+	require.ErrorContains(t, err, "cannot read checkpoints in gh/acme/widgets")
+}

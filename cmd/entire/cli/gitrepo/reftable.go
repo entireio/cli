@@ -163,8 +163,7 @@ func (s *reftableStorer) execGit(args ...string) (string, []byte, error) {
 // matching translated text would silently misclassify CAS conflicts and delete
 // failures. GIT_TERMINAL_PROMPT=0 keeps git non-interactive. The forced values
 // are appended last so they override anything the caller's environment set
-// (os/exec keeps the last value for a duplicate key). Mirrors the sibling
-// shell-out in checkpoint/shadow_ref.go.
+// (os/exec keeps the last value for a duplicate key).
 func gitPlumbingEnv() []string {
 	return append(EnvWithoutRepoOverrides(),
 		"GIT_TERMINAL_PROMPT=0",

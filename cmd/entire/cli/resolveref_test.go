@@ -380,11 +380,41 @@ func TestResolveRepoInProject_GitSuffixMissCarriesHint(t *testing.T) {
 			t.Errorf("encode empty: %v", err)
 		}
 	})
-	_, err := resolveRepoRef(context.Background(), c, "web.git", ulidProjectWidgets)
-	require.Error(t, err)
-	require.ErrorIs(t, err, errNamedRefNotFound)
-	require.Contains(t, err.Error(), `no repo named "web.git"`)
-	require.Contains(t, err.Error(), "drop the suffix")
+	// Every case of the suffix earns the hint. A user who typed ".GIT" has
+	// exactly the misconception the hint exists to correct, and used to be
+	// the one person it stayed silent for.
+	for _, name := range []string{"web.git", "web.GIT", "web.Git", "web.gIt"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := resolveRepoRef(context.Background(), c, name, ulidProjectWidgets)
+			require.Error(t, err)
+			require.ErrorIs(t, err, errNamedRefNotFound)
+			require.Contains(t, err.Error(), `no repo named "`+name+`"`)
+			require.Contains(t, err.Error(), "drop the suffix")
+			require.Contains(t, err.Error(), `"web"`)
+		})
+	}
+}
+
+// TestResolveRepoByProjectName_GitSuffixMissCarriesHint pins the same hint on
+// the other bare-name route. With --project given by name the lookup goes to
+// repos/resolve, not the project listing, and its miss used to be the one
+// `.git` miss that never said why.
+func TestResolveRepoByProjectName_GitSuffixMissCarriesHint(t *testing.T) {
+	t.Parallel()
+	c, _ := resolveTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		if err := printJSON(w, &coreapi.ResolveReposResponse{}); err != nil {
+			t.Errorf("encode empty: %v", err)
+		}
+	})
+	for _, name := range []string{"web.git", "web.GIT", "web.Git", "web.gIt"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := resolveRepoRef(context.Background(), c, name, "widgets")
+			require.ErrorIs(t, err, errNamedRefNotFound)
+			require.EqualError(t, err, `repo /et/widgets/`+name+` not found or not shared with you; ".git" is never part of a repo name, so if you meant "web", drop the suffix`)
+		})
+	}
 }
 
 // TestResolveRepoInProject_PlainMissHasNoHint pins that the hint is scoped to
@@ -444,20 +474,19 @@ func nativePathHandler(t *testing.T, gotFullName *string) http.HandlerFunc {
 	}
 }
 
-// TestResolveRepoRef_NativePathKeepsGitSuffix pins that a native ref carries a
-// trailing `.git` into the lookup. The handler answers any name with the "web"
-// row; what matters is the name the server was asked for. Trimming the suffix
-// asked for "widgets/web", so a repo named web.git resolved to a different
-// repo's ULID.
-func TestResolveRepoRef_NativePathKeepsGitSuffix(t *testing.T) {
+// TestResolveRepoRef_NativePathDropsGitSuffix pins that a trailing `.git` on a
+// native ref is an alias, not a name: it never reaches the lookup. The handler
+// answers any name with the "web" row; what matters is the name the server was
+// asked for.
+func TestResolveRepoRef_NativePathDropsGitSuffix(t *testing.T) {
 	t.Parallel()
 	var gotFullName string
 	c, _ := resolveTestClient(t, nativePathHandler(t, &gotFullName))
 	if _, err := resolveRepoRef(context.Background(), c, "/et/widgets/web.git", ""); err != nil {
 		t.Fatalf("resolveRepoRef: %v", err)
 	}
-	if gotFullName != "widgets/web.git" {
-		t.Errorf("server received fullName=%q, want %q", gotFullName, "widgets/web.git")
+	if gotFullName != "widgets/web" {
+		t.Errorf("server received fullName=%q, want %q", gotFullName, "widgets/web")
 	}
 }
 
@@ -471,6 +500,8 @@ func TestResolveRepoRef_NativePathKeepsGitSuffix(t *testing.T) {
 // so these two are the only cases that can tell the sources apart.
 func TestResolveRepoRef_NativePathEchoesOnlyTheServersName(t *testing.T) {
 	t.Parallel()
+	// The typed ref carries the `.git` alias; the resolver drops it, so the
+	// requested name below is the suffix-free spelling.
 	const ref = "/et/audit1/victim.git"
 
 	// resolutionHandler answers the one POST /repos/resolve a native path ref
@@ -484,7 +515,7 @@ func TestResolveRepoRef_NativePathEchoesOnlyTheServersName(t *testing.T) {
 			}
 			if err := printJSON(w, &coreapi.ResolveReposResponse{Resolutions: []coreapi.RepoResolution{{
 				Provider:          repoProviderEntire,
-				RequestedFullName: "audit1/victim.git",
+				RequestedFullName: "audit1/victim",
 				FullName:          fullName,
 				Status:            coreapi.RepoResolutionStatusReady,
 				RepoId:            coreapi.NewOptString(ulidRepoWeb),
@@ -496,12 +527,12 @@ func TestResolveRepoRef_NativePathEchoesOnlyTheServersName(t *testing.T) {
 
 	t.Run("a differing server name is the one echoed", func(t *testing.T) {
 		t.Parallel()
-		c, _ := resolveTestClient(t, resolutionHandler(coreapi.NewOptString("audit1/victim")))
+		c, _ := resolveTestClient(t, resolutionHandler(coreapi.NewOptString("audit1/renamed")))
 		got, err := resolveRepoRefResolved(context.Background(), c, ref, "")
 		require.NoError(t, err)
 		require.Equal(t, ulidRepoWeb, got.ID)
-		require.Equal(t, "/et/audit1/victim", got.Name, "the label must carry the name the server matched")
-		require.Equal(t, "/et/audit1/victim ("+ulidRepoWeb+")", resolvedRefLabel(ref, got))
+		require.Equal(t, "/et/audit1/renamed", got.Name, "the label must carry the name the server matched")
+		require.Equal(t, "/et/audit1/renamed ("+ulidRepoWeb+")", resolvedRefLabel(ref, got))
 	})
 
 	t.Run("no server name leaves the label to the typed ref", func(t *testing.T) {
@@ -703,7 +734,7 @@ func TestResolveRepoPath(t *testing.T) {
 
 	t.Run("a native path resolves in one call", func(t *testing.T) {
 		t.Parallel()
-		for _, ref := range []string{"/et/widgets/web", "et/widgets/web"} {
+		for _, ref := range []string{"/et/widgets/web", "et/widgets/web", "/et/widgets/web.git"} {
 			t.Run(ref, func(t *testing.T) {
 				t.Parallel()
 				var gotFullName string
@@ -715,15 +746,6 @@ func TestResolveRepoPath(t *testing.T) {
 				require.EqualValues(t, 1, calls.Load(), "repos/resolve")
 			})
 		}
-	})
-
-	t.Run("a native path keeps a .git suffix", func(t *testing.T) {
-		t.Parallel()
-		var gotFullName string
-		c, _ := resolveTestClient(t, nativePathHandler(t, &gotFullName))
-		_, err := resolveRepoPath(context.Background(), c, "/et/widgets/web.git")
-		require.NoError(t, err)
-		require.Equal(t, "widgets/web.git", gotFullName)
 	})
 
 	t.Run("a ULID-shaped segment is still a name", func(t *testing.T) {

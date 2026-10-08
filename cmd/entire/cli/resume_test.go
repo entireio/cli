@@ -1779,6 +1779,46 @@ func TestRestoreResumeSessions_PreservesSafeMultiSessionNoTranscriptFallback(t *
 	}
 }
 
+// Codex moves archived rollouts to archived_sessions, beside the session
+// directory rather than inside it. Resume restores the checkpoint into the live
+// store, where `codex resume` looks, and leaves the archived rollout alone.
+func TestRestoreResumeSessions_RestoresArchivedCodexSessionIntoLiveStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	repo, _, _ := setupResumeTestRepo(t, tmpDir, false)
+	cleanupResumeTestRepo(t, repo, tmpDir)
+	home := relocateAgentHome(t, agent.AgentTypeCodex)
+	const sessionID = "019a0000-0000-7000-8000-00000000c0de"
+	archived := filepath.Join(home, "archived_sessions", "rollout-2026-09-30T10-00-00-"+sessionID+".jsonl")
+	writeTranscriptFile(t, archived)
+
+	cpID := id.MustCheckpointID("c0dec0dec0de")
+	transcript := []byte(`{"timestamp":"2026-09-30T10:00:00.000Z","type":"session_meta","payload":{"id":"` + sessionID + `","timestamp":"2026-09-30T10:00:00.000Z"}}` + "\n")
+	writeCommittedResumeCheckpointWithTranscript(t, repo, cpID, sessionID, time.Now(), agent.AgentTypeCodex, transcript)
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	info, err := readCheckpointInfoFromStore(t.Context(), store, cpID)
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	restored, err := restoreResumeSessions(t.Context(), &stdout, &stderr, info, false)
+	if err != nil {
+		t.Fatalf("restoreResumeSessions() error = %v\nstderr: %s", err, stderr.String())
+	}
+	if len(restored) != 1 || restored[0].SessionID != sessionID {
+		t.Fatalf("restored sessions = %#v, want %q\nstderr: %s", restored, sessionID, stderr.String())
+	}
+	live := filepath.Join(home, "sessions", "2026", "09", "30", "rollout-2026-09-30T10-00-00-"+sessionID+".jsonl")
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("restored rollout: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if data, err := os.ReadFile(archived); err != nil || string(data) != `{"type":"user"}`+"\n" {
+		t.Fatalf("archived rollout = %q, %v; want it untouched", data, err)
+	}
+}
+
 // A legacy multi-session checkpoint can carry a session with no ID at all:
 // readCheckpointInfoFromStore appends every entry and guards `!= ""` on the next
 // line. The tamper scan treated that as unsafe, which accused an untouched
@@ -1818,5 +1858,74 @@ func TestRestoreResumeSessions_EmptyStoredSessionIDIsNotTampering(t *testing.T) 
 	}
 	if !strings.Contains(stdout.String(), "session log not available") {
 		t.Fatalf("stdout = %q, want the fallback's missing-log message", stdout.String())
+	}
+}
+
+// The unavailable-checkpoint message must name where the checkpoint actually
+// lives. A git-refs checkpoint is its own ref, so blaming (and suggesting a
+// fetch of) the v1 branch is wrong — the branch may well exist.
+func TestCheckRemoteMetadata_MessageNamesCheckpointStorage(t *testing.T) {
+	const ulid = "01M3PWG7BKWYH0XJKS810J0XEX"
+	const ulidRef = "refs/entire/checkpoints/EX/" + ulid
+	const hexRef = "refs/entire/checkpoints/22/aaa111bbb222"
+	tests := []struct {
+		name        string
+		refsPrimary bool
+		checkpoint  string
+		wantPhrase  string
+		wantRefs    []string
+	}{
+		{
+			name:       "ulid under branch primary is its own ref",
+			checkpoint: ulid,
+			wantPhrase: "its metadata is not in the local or remote checkpoint ref " + ulidRef + ".",
+			wantRefs:   []string{ulidRef},
+		},
+		{
+			// Read order is the ref, then the pre-migration v1 branch.
+			name:        "hex under refs primary is its ref or the v1 branch",
+			refsPrimary: true,
+			checkpoint:  "aaa111bbb222",
+			wantPhrase:  "its metadata is not in the local or remote checkpoint ref " + hexRef + " or " + paths.MetadataBranchName + " branch.",
+			wantRefs:    []string{hexRef, paths.MetadataBranchName},
+		},
+		{
+			name:       "hex under branch primary is the v1 branch",
+			checkpoint: "aaa111bbb222",
+			wantPhrase: "its metadata is not in the local or remote " + paths.MetadataBranchName + " branch.",
+			wantRefs:   []string{paths.MetadataBranchName},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.refsPrimary {
+				t.Setenv("ENTIRE_CHECKPOINTS_PRIMARY", "git-refs")
+			}
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			setupResumeTestRepo(t, tmpDir, false)
+			bare := t.TempDir()
+			runGitInDir(t, bare, "init", "--bare")
+			runGitInDir(t, tmpDir, "remote", "add", "origin", bare)
+
+			var errW bytes.Buffer
+			_, err := checkRemoteMetadata(context.Background(), io.Discard, &errW, id.MustCheckpointID(tt.checkpoint), checkpoint.DefaultV1Refs())
+			if err != nil {
+				t.Fatalf("checkRemoteMetadata() error = %v", err)
+			}
+			out := errW.String()
+			if !strings.Contains(out, tt.wantPhrase) {
+				t.Errorf("message should contain %q; got:\n%s", tt.wantPhrase, out)
+			}
+			if got := strings.Count(out, "git fetch "); got != len(tt.wantRefs) {
+				t.Errorf("message should suggest %d fetch(es), got %d:\n%s", len(tt.wantRefs), got, out)
+			}
+			for _, ref := range tt.wantRefs {
+				wantFetch := "git fetch origin " + ref + ":" + ref
+				if !strings.Contains(out, wantFetch) {
+					t.Errorf("message should suggest %q; got:\n%s", wantFetch, out)
+				}
+			}
+		})
 	}
 }

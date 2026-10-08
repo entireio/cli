@@ -261,9 +261,9 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) (bool, error) 
 }
 
 // stopHookTimeoutSeconds is the explicit timeout installed on the Stop
-// handler. Stop runs PrepareTranscript (short bounded wait) plus SaveStep — a
-// shadow-branch checkpoint write that can exceed agy's 30s default timeout on
-// large repos, in which case agy kills the hook mid-checkpoint with no trace.
+// handler. Stop runs PrepareTranscript (short bounded wait) plus turn-end file
+// detection and SaveStep, which can exceed agy's 30s default timeout on large
+// repos, in which case agy kills the hook mid-turn-end with no trace.
 const stopHookTimeoutSeconds = 300
 
 // buildEntireHookConfig constructs the HookConfig for the "entire" entry for

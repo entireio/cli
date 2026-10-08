@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -314,4 +316,22 @@ func TestPushQueue_RotateLeavesNewerGenerationInPlace(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []PushQueueEntry{a2, b1}, entries,
 		"the newer generation keeps the ref's first-seen place")
+}
+
+// A ref that misses the queue is never pushed, so a ref EnqueueRef cannot
+// resolve is still queued, in the generation-less form delivery re-resolves.
+func TestPushQueue_EnqueueRefQueuesAnUnresolvableRef(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	q := NewPushQueue(t.TempDir())
+	missing := mustRefName(t, "a1b2c3d4e5f6")
+
+	require.NoError(t, q.EnqueueRef(repo, missing))
+
+	entries, err := q.PeekEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{{Ref: missing}}, entries)
 }

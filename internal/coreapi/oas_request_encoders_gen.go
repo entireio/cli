@@ -136,6 +136,20 @@ func encodeCreateOrgInvitationRequest(
 	return nil
 }
 
+func encodeCreatePluginInstallationRequest(
+	req *CreatePluginInstallationInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
 func encodeCreateProjectRequest(
 	req *CreateProjectInputBody,
 	r *http.Request,
@@ -180,6 +194,34 @@ func encodeCreateRepoCIWebhookRequest(
 
 func encodeCreateServiceAccountRequest(
 	req *CreateServiceAccountInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeDeclineInvitationRequest(
+	req *DeclineInvitationInputBody,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeDetachRepoRequest(
+	req *DetachRepoBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"
@@ -320,6 +362,20 @@ func encodeResolveReposRequest(
 
 func encodeSetBranchProtectionRequest(
 	req *BranchProtection,
+	r *http.Request,
+) error {
+	const contentType = "application/json"
+	e := new(jx.Encoder)
+	{
+		req.Encode(e)
+	}
+	encoded := e.Bytes()
+	ht.SetBody(r, bytes.NewReader(encoded), contentType)
+	return nil
+}
+
+func encodeSetPluginInstallationRepositoriesRequest(
+	req *SetPluginInstallationRepositoriesInputBody,
 	r *http.Request,
 ) error {
 	const contentType = "application/json"

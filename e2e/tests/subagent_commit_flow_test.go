@@ -55,7 +55,5 @@ func TestSubagentCommitFlow(t *testing.T) {
 		// previously passed on file existence alone and could not see that.
 		assert.Contains(t, meta.FilesTouched, "docs/red.md",
 			"the file the subagent created must be attributed to the checkpoint")
-
-		testutil.WaitForNoShadowBranches(t, s.Dir, 10*time.Second)
 	})
 }

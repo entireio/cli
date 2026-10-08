@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -440,54 +439,8 @@ func newGrantRemoveCmd[Row any](t grantTarget[Row]) *cobra.Command {
 // the question on a writer the user can see, where huh's accessible mode would
 // otherwise print it to stdout, in among the `✓ Revoked` lines.
 var revokeConfirmed = func(cmd *cobra.Command, pt grantPickerTarget, picked []grantCandidate) (bool, error) {
-	if err := revocationInterrupted(cmd); err != nil {
-		return false, err
-	}
 	label, detail := revokeConfirmation(pt, picked)
-	confirmed := false
-	prompt := huh.NewConfirm().Title("Revoke " + label + "?").Value(&confirmed)
-	if detail != "" {
-		prompt = prompt.Description(detail)
-	}
-	render, err := runPromptForm(cmd, NewAccessibleForm(huh.NewGroup(prompt)))
-	// Before the form error is looked at, because handleFormCancellation treats
-	// context.Canceled as a clean abort and would report a signal as an answer.
-	if ierr := revocationInterrupted(cmd); ierr != nil {
-		return false, ierr
-	}
-	if err != nil {
-		// An abort at the prompt IS an answer: Esc or Ctrl+C inside the form is
-		// the user saying no, which is a decision rather than a failure.
-		if cerr := handleFormCancellation(render, "Revocation", err); cerr != nil {
-			return false, cerr
-		}
-		return false, nil
-	}
-	if !confirmed {
-		fmt.Fprintln(render, "Revocation cancelled.")
-		return false, nil
-	}
-	return true, nil
-}
-
-// revocationInterrupted reports a command context that has been cancelled out
-// from under the confirmation, which is an interruption and not an answer.
-//
-// (false, nil) means the user declined, and nothing else may borrow it: the
-// caller exits 0 on it. Wrapping ctx.Err() instead is what lets main.go match
-// the signal it recorded and exit the way every other Ctrl+C in this CLI does —
-// quietly, 130, breaking an enclosing shell loop. plugin_confirm.go is the
-// shape this follows, checking either side of its form for the same reason;
-// confirmControlPlaneDeletion's nilerr skip is the outlier, and carries the
-// same bug for `delete`.
-//
-// Checked before the form as well as after, because huh opens the TTY during
-// startup regardless of context state.
-func revocationInterrupted(cmd *cobra.Command) error {
-	if err := cmd.Context().Err(); err != nil {
-		return fmt.Errorf("revocation cancelled: %w", err)
-	}
-	return nil
+	return confirmPrompt(cmd, "Revocation", "Revoke "+label+"?", detail, nil)
 }
 
 // revokeConfirmation describes what is about to be revoked. A single grantee
@@ -609,41 +562,47 @@ func revokeGrant(cmd *cobra.Command, subject string, revoke func() error) error 
 // so they add SOURCE and TYPE. No table prints an internal id: the grantee
 // ULID is in the --json output for anyone who needs it.
 //
-// Org members also carry NAME, the account's display name, because the server
-// returns one there: a Google account's handle is only a subject id, so the
-// name is what tells two of them apart. Project and repo grants do not carry
-// a name on the wire yet, so their tables stay as they are.
+// Both also carry NAME, the account's display name where the server sent one:
+// a Google account's handle is only a subject id, so the name is what tells two
+// of them apart. Org and team grantees never have one, and neither does an
+// account the server sent none for; those show "-".
 var (
 	orgMemberColumns = []string{colHeaderGrantee, colHeaderName, colHeaderRole, colHeaderStatus}
-	grantColumns     = []string{colHeaderGrantee, colHeaderRole, "SOURCE", "TYPE"}
+	grantColumns     = []string{colHeaderGrantee, colHeaderName, colHeaderRole, colHeaderSource, colHeaderType}
 )
 
 func orgMemberRow(m coreapi.OrgMemberListItem) []string {
-	return []string{granteeName(m.Handle, m.AccountId), orDash(memberDisplayName(m)), m.Role, m.Status}
+	return []string{granteeName(m.Handle, m.AccountId), orDash(granteeDisplayName(m.DisplayName)), m.Role, m.Status}
 }
 
-// memberDisplayName is the member's display name, or "" when the server sent
-// none.
-func memberDisplayName(m coreapi.OrgMemberListItem) string {
-	return strings.TrimSpace(m.DisplayName.Or(""))
+// granteeDisplayName is the account's display name, or "" when the server sent
+// none. The grant listings fill it best-effort, so its absence never means more
+// than "no name to show".
+func granteeDisplayName(name coreapi.OptString) string {
+	return strings.TrimSpace(name.Or(""))
 }
 
 func projectGrantRow(g coreapi.ProjectGrant) []string {
-	return []string{granteeName(g.GranteeName, g.GranteeId), g.Role, g.Source, g.GranteeType}
+	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
 }
 
 // repoGrantRow mirrors projectGrantRow; RepoGrant and ProjectGrant share the
-// grantee/role/source shape, so both reuse grantColumns.
+// grantee/name/role/source shape, so both reuse grantColumns.
 func repoGrantRow(g coreapi.RepoGrant) []string {
-	return []string{granteeName(g.GranteeName, g.GranteeId), g.Role, g.Source, g.GranteeType}
+	return []string{granteeName(g.GranteeName, g.GranteeId), orDash(granteeDisplayName(g.DisplayName)), g.Role, g.Source, g.GranteeType}
 }
 
 // granteeName returns the friendly name when the server resolved one, in the
 // spelling users type (see displayGranteeName), falling back to the ULID for
 // grantees it couldn't label (e.g. teams).
 func granteeName(name coreapi.OptString, granteeID string) string {
-	if n := name.Or(""); n != "" {
-		return displayGranteeName(n)
+	return granteeNameOr(name.Or(""), granteeID)
+}
+
+// granteeNameOr is granteeName for a name already unwrapped from the wire.
+func granteeNameOr(name, granteeID string) string {
+	if name != "" {
+		return displayGranteeName(name)
 	}
 	return granteeID
 }
