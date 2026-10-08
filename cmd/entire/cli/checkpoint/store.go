@@ -11,13 +11,12 @@ var (
 	_ PersistentStore = (*GitStore)(nil)
 	_ AuthorReader    = (*GitStore)(nil)
 	_ Writer          = (*GitStore)(nil)
-	_ EphemeralStore  = (*ephemeralStore)(nil)
 )
 
 // treeWriter holds the repo-only machinery for building a single checkpoint's
 // subtree from write requests: entry builders, transcript/session writers, and
 // the per-request appliers (applySessionWrite / applyTranscriptBackfill /
-// applySummaryBackfill / applyAttributionBackfill). It is independent of where
+// applySummaryBackfill). It is independent of where
 // the resulting subtree is committed, so both the git-branch store (which nests
 // the subtree under <shard>/<id>/ on the v1 branch) and the git-refs store
 // (which keeps it at the root of a per-checkpoint ref) embed it and share this
@@ -27,9 +26,8 @@ type treeWriter struct {
 }
 
 // GitStore is the committed (persistent) checkpoint store. Writes target
-// refs.Primary; committed reads resolve against refs.Read. The temporary
-// shadow-branch surface lives in ephemeralStore. It embeds *treeWriter for the
-// shared subtree-building machinery.
+// refs.Primary; committed reads resolve against refs.Read. It embeds
+// *treeWriter for the shared subtree-building machinery.
 type GitStore struct {
 	*treeWriter
 
@@ -43,28 +41,6 @@ type GitStore struct {
 	// committed reads after the local tree; see OpenOptions.ReadRemotes. nil
 	// means the legacy origin-only fallback.
 	readRemotes []string
-}
-
-// ephemeralStore is the git shadow-branch (temporary) checkpoint store. It is
-// an independent type from GitStore; the two share only package-level helpers.
-type ephemeralStore struct {
-	repo *git.Repository
-	refs PersistentRefs
-}
-
-// newEphemeralStore creates the shadow-branch store for the given repository
-// and committed-metadata topology (it consults refs.Primary to recognize the
-// committed branch when listing shadow branches).
-func newEphemeralStore(repo *git.Repository, refs PersistentRefs) *ephemeralStore {
-	return &ephemeralStore{repo: repo, refs: refs}
-}
-
-// NewEphemeralStore constructs the git shadow-branch (temporary) checkpoint
-// store. Most callers reach it via Open(...).Ephemeral(); this direct
-// constructor exists for benchmarks and tests that exercise the shadow-branch
-// surface without the full facade.
-func NewEphemeralStore(repo *git.Repository, refs PersistentRefs) EphemeralStore {
-	return newEphemeralStore(repo, refs)
 }
 
 // NewGitStore creates a checkpoint store backed by the given git repository

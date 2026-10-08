@@ -1105,7 +1105,7 @@ func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testi
 const taskTranscriptSecret = "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
 
 // setupCondensableSessionWithTranscript creates a git repo, writes a session
-// transcript, and runs SaveStep so the session has a shadow branch and passes
+// transcript, and runs SaveStep so the session has a turn-end step and passes
 // CondenseSession's existing no-transcript-no-files skip gate — the fixture
 // shared by the task-record materializer tests below.
 func setupCondensableSessionWithTranscript(t *testing.T, sessionID string) (*git.Repository, *SessionState) {
@@ -1584,7 +1584,7 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 
 // TestCondenseAndMarkFullyCondensed_RecordsOnlySessionMaterializes is the
 // trigger half of invariant 7: a records-only session (read-only background
-// subagent; no SaveStep, no shadow branch, no files, no parent transcript)
+// subagent; no SaveStep, no files, no parent transcript)
 // must condense into a real checkpoint carrying tasks/<id>/. FullyCondensed is
 // already true here because the task may complete after SessionEnd condensed
 // the earlier state; the new task content must make the session eligible again.
@@ -1709,7 +1709,7 @@ func TestClearFilesystemStagedFiles_ReleasesAllStagedFiles(t *testing.T) {
 		require.NoError(t, os.WriteFile(p, []byte(`{"x":1}`+"\n"), 0o600))
 	}
 
-	clearFilesystemStagedFiles(context.Background(), sessionID)
+	releaseStoredCopyForTest(context.Background(), sessionID)
 
 	for _, p := range staged {
 		assert.NoFileExists(t, p, "%s should be released after condensation", filepath.Base(p))
@@ -1731,12 +1731,55 @@ func TestClearFilesystemStagedFiles_MissingFilesAreNotAnError(t *testing.T) {
 	t.Chdir(repoDir)
 
 	// No metadata directory at all, then an empty one.
-	clearFilesystemStagedFiles(context.Background(), "session-never-staged")
+	releaseStoredCopyForTest(context.Background(), "session-never-staged")
 
 	metaDir := filepath.Join(repoDir, paths.SessionMetadataDirFromSessionID("session-empty"))
 	require.NoError(t, os.MkdirAll(metaDir, 0o750))
-	clearFilesystemStagedFiles(context.Background(), "session-empty")
+	releaseStoredCopyForTest(context.Background(), "session-empty")
 	assert.DirExists(t, metaDir)
+}
+
+// A commit-less condense (doctor, the sweep) writes a checkpoint no commit
+// will carry, so the files it recorded can never be linked by a later commit.
+// It must leave nothing pending: no files, no hashes, no next-checkpoint
+// preview for the session.
+func TestCondenseSessionByID_ClearsPendingFiles(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "commitless-condense-clears-files"
+	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
+	testutil.WriteFile(t, dir, filepath.Join(metadataDir, paths.TranscriptFileName), testTranscriptPromptResponse)
+	testutil.WriteFile(t, dir, "test.txt", "agent content")
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+	}))
+
+	previews, err := s.PreviewNextCheckpoint(t.Context())
+	require.NoError(t, err)
+	require.Len(t, previews, 1, "fixture: the session is pending before the condense")
+
+	require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+
+	state, err := s.loadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Empty(t, state.FilesTouched)
+	require.Empty(t, state.TouchedFileHashes)
+	require.False(t, state.HasPendingWork())
+
+	previews, err = s.PreviewNextCheckpoint(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, previews, "checkpoint list --pending must no longer preview a condensed session")
 }
 
 // TestResolveTaskTranscriptPath_FindsWorkflowRunTranscript: a Workflow agent's

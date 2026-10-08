@@ -11,7 +11,7 @@ catalogs, implementation histories, or subsystem specifications.
   use `<noun>_group.go` and `<noun>_<verb>.go`.
 - `cmd/entire/cli/agent/`: built-in agent integrations and external-agent protocol.
 - `cmd/entire/cli/strategy/`: manual-commit strategy and lifecycle/git hooks.
-- `cmd/entire/cli/checkpoint/`: ephemeral and persistent checkpoint storage.
+- `cmd/entire/cli/checkpoint/`: persistent checkpoint storage (written at commit).
 - `cmd/entire/cli/session/`: session state shared across worktrees.
 - `cmd/entire/cli/integration_test/`: simulated-hook integration tests.
 - `e2e/`: real-agent tests and deterministic Vogon canary.
@@ -172,8 +172,8 @@ I/O beneath it.** Read the filesystem reference before adding or changing I/O.
 ## Session, checkpoint, and API contracts
 
 - `*strategy.ManualCommitStrategy` is the only strategy; there is no interface or
-  worktree restore path. Checkpoints use shadow/metadata refs, not working-branch
-  commits. Log resume is distinct from restoring worktree files.
+  worktree restore path. Turn ends write session state only; checkpoints are
+  metadata refs written at commit, never working-branch commits. Log resume is distinct from restoring worktree files.
 - Caller identity comes from `strategy.ResolveCallerSession`, not newest state.
   Preserve resolution provenance; do not narrate worktree fallback or ambiguous
   matches as identified callers. `IsCaller()` excludes those guesses; consult

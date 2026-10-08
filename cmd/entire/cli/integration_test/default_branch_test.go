@@ -31,13 +31,7 @@ func TestDefaultBranch_WorksOnMain(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after checkpoint on main branch", shadowBranch)
-	}
-	if content, found := env.ReadFileFromBranch(shadowBranch, "file.txt"); !found || content != "content on main" {
-		t.Errorf("file.txt on shadow branch = %q (found=%v), want %q", content, found, "content on main")
-	}
+	env.AssertTurnEndRecorded(session.ID, "file.txt")
 }
 
 // TestDefaultBranch_WorksOnFeatureBranch tests that Entire tracking works on feature branches.
@@ -64,13 +58,7 @@ func TestDefaultBranch_WorksOnFeatureBranch(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after checkpoint on feature branch", shadowBranch)
-	}
-	if content, found := env.ReadFileFromBranch(shadowBranch, "feature.txt"); !found || content != "content on feature branch" {
-		t.Errorf("feature.txt on shadow branch = %q (found=%v), want %q", content, found, "content on feature branch")
-	}
+	env.AssertTurnEndRecorded(session.ID, "feature.txt")
 }
 
 // TestDefaultBranch_PostTaskWorksOnMain tests that task checkpoints work on main.

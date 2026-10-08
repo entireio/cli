@@ -39,7 +39,7 @@ func TestAdversarial_Guard_RedoDeclinedDoesNotCondenseIntoOwnEarlierCheckpoint(t
 		require.NoError(t, env.SimulateStop(sess.ID, sess.TranscriptPath))
 	}
 	turn("part one", "f1.txt", "one\n")
-	env.GitCommitWithShadowHooks("part one", "f1.txt")
+	env.GitCommitWithHooks("part one", "f1.txt")
 	t1 := env.LatestCheckpointID()
 	state, err := env.GetSessionState(sess.ID)
 	require.NoError(t, err)

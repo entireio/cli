@@ -80,7 +80,7 @@ func TestSubagentTaskTokens_CountCallsWrittenAfterStop(t *testing.T) {
 				require.NoError(t, env.SimulateSubagentStop(stop))
 			}
 
-			env.GitCommitWithShadowHooksAsAgent("Add tokens file", "tokens.txt")
+			env.GitCommitWithHooksAsAgent("Add tokens file", "tokens.txt")
 			checkpointID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 			require.NotEmpty(t, checkpointID)
 

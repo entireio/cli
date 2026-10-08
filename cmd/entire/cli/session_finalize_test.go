@@ -11,7 +11,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -186,9 +185,7 @@ func TestFinalizeExitedSessions_CompletesLiveTaskRecords(t *testing.T) {
 	assert.Empty(t, got.TaskRecords, "completed record must materialize and be removed")
 	_, found := readCheckpointTaskFile(ctx, t, repoDir, sessionID, "tasks/toolu_sweep1/agent-sweeprec1.jsonl")
 	assert.True(t, found, "swept record's transcript-so-far must materialize under tasks/")
-	repo, err := git.PlainOpen(repoDir)
-	require.NoError(t, err)
-	assert.Nil(t, classifySession(got, repo, time.Now()), "doctor must classify the swept session healthy")
+	assert.Nil(t, classifySession(got, time.Now()), "doctor must classify the swept session healthy")
 }
 
 // TestEndSessionNow_SpentBudgetStillMarksEnded pins the split that makes the

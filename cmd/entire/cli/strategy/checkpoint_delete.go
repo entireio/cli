@@ -690,7 +690,6 @@ func clearDeletedCheckpointFromState(st *SessionState, cid id.CheckpointID) bool
 	changed := false
 	if st.LastCheckpointID == cid {
 		st.LastCheckpointID = id.EmptyCheckpointID
-		st.LastCheckpointCommitHash = ""
 		changed = true
 	}
 	if st.PendingCondensationID() == cid {

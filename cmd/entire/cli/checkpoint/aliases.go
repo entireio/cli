@@ -11,8 +11,8 @@ import (
 // reader/writer interfaces, and the Write request union) lives in the
 // api/checkpoint package so storage backends can depend on it without the CLI's
 // agent/git machinery. These aliases re-export it under this package so existing
-// CLI call sites are unaffected; the git implementation (GitStore, Open, the
-// facade, and the ephemeral shadow-branch surface) stays here.
+// CLI call sites are unaffected; the git implementation (GitStore, Open, and
+// the facade) stays here.
 type (
 	// Persisted document types.
 	Metadata = apicheckpoint.Metadata
@@ -30,7 +30,6 @@ type (
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary
 	CodeLearning     = apicheckpoint.CodeLearning
-	Attribution      = apicheckpoint.Attribution
 
 	// Operation option types.
 	WriteOptions               = apicheckpoint.WriteOptions
@@ -47,14 +46,12 @@ type (
 	PersistentStore  = apicheckpoint.PersistentStore
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
-	// Write request union: session-level (Session, ReservedSession, SessionTranscript,
-	// SessionSummary) and checkpoint-level (CheckpointAttribution).
+	// Write request union: all session-level (Session, ReservedSession,
+	// SessionTranscript, SessionSummary).
 	Session           = apicheckpoint.Session
 	ReservedSession   = apicheckpoint.ReservedSession
 	SessionTranscript = apicheckpoint.SessionTranscript
 	SessionSummary    = apicheckpoint.SessionSummary
-	//nolint:revive // CheckpointAttribution stutter is accepted — makes the checkpoint (vs session) tier explicit.
-	CheckpointAttribution = apicheckpoint.CheckpointAttribution
 )
 
 // Sentinel errors (re-exported so errors.Is keeps working across packages).

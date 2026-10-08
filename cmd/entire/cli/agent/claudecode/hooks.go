@@ -40,10 +40,9 @@ const (
 // Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
 //
 // The subagent dispatch tool is "Agent" (Claude Code never exposed a tool named
-// "Task"), and the "TodoWrite" tool was disabled by default in v2.1.142 in favor
-// of the Task* tools. "TaskCreate|TaskUpdate" is a matcher list of exact tool
-// names (Claude Code treats a matcher containing only letters/digits/_/-/spaces/
-// ,/| as exact strings, not a regex). See:
+// "Task"). Older CLIs also installed a post-todo hook under "TodoWrite" and later
+// "TaskCreate|TaskUpdate"; it is no longer installed (the handler records
+// nothing) and installs prune it as a stale managed hook. See:
 //   - https://code.claude.com/docs/en/tools-reference.md (Agent, TodoWrite entries)
 //   - https://code.claude.com/docs/en/hooks.md (matcher evaluation rules)
 //
@@ -52,7 +51,6 @@ const (
 // place on a normal `entire enable`; run with --force to strip and reinstall.
 const (
 	subagentToolMatcher = "Agent"
-	taskToolMatcher     = "TaskCreate|TaskUpdate"
 	// skillToolMatcher routes Skill calls to post-task, which records the agent
 	// a `context: fork` skill runs in and ignores inline skills. PostToolUse
 	// only: a forked skill has no launch-time marker to write, and a
@@ -111,6 +109,23 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	}
 
 	return count, nil
+}
+
+// HasStaleManagedHooks implements agent.StaleHookReporter: whether a plain
+// install would drop Entire hooks this CLI no longer writes (the retired
+// post-todo hook, or a hook left by an older command shape). Read-only: it
+// runs the install's hook merge on a freshly loaded copy and discards it.
+func (c *ClaudeCodeAgent) HasStaleManagedHooks(ctx context.Context) bool {
+	cfg, err := claudeHookConfig(ctx)
+	if err != nil {
+		return false
+	}
+	_, rawHooks, _, err := loadRawClaudeSettingsForInstall(cfg)
+	if err != nil {
+		return false
+	}
+	_, staleDropped := installHookEntries(rawHooks, false)
+	return staleDropped
 }
 
 // claudeHookConfig returns .claude/settings.json for the current worktree,
@@ -197,23 +212,33 @@ func entireSimpleHooks() []entireSimpleHook {
 	}
 }
 
-// entireToolUseHookCommands returns Entire's pre-task, post-task, and post-todo commands.
-func entireToolUseHookCommands() (preTask, postTask, postTodo string) {
+// entireToolUseHookCommands returns Entire's pre-task and post-task commands.
+func entireToolUseHookCommands() (preTask, postTask string) {
 	return agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"),
-		agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task"),
-		agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+		agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
 }
 
-// EntireHookCommands returns the exact commands Entire installs, by event.
-// Callers must match whole commands: a prefix would accept "entire hooks ...; curl".
+// retiredPostTodoHookCommand is the post-todo command older CLIs installed.
+// It is no longer installed, and an install prunes it, but its subcommand stays
+// registered and records nothing, so a checkout that still carries it runs
+// only Entire.
+func retiredPostTodoHookCommand() string {
+	return agent.WrapProductionSilentHookCommand("entire hooks claude-code " + HookNamePostTodo)
+}
+
+// EntireHookCommands returns the exact commands Entire installs, by event,
+// plus the retired post-todo command older CLIs installed, so review still
+// recognizes a teammate's config that has not been re-enabled yet as Entire's
+// own. Callers must match whole commands: a prefix would accept
+// "entire hooks ...; curl".
 func EntireHookCommands() map[string][]string {
 	out := make(map[string][]string)
 	for _, h := range entireSimpleHooks() {
 		out[h.hookType] = append(out[h.hookType], h.command)
 	}
-	preTask, postTask, postTodo := entireToolUseHookCommands()
+	preTask, postTask := entireToolUseHookCommands()
 	out["PreToolUse"] = append(out["PreToolUse"], preTask)
-	out["PostToolUse"] = append(out["PostToolUse"], postTask, postTodo)
+	out["PostToolUse"] = append(out["PostToolUse"], postTask, retiredPostTodoHookCommand())
 	return out
 }
 
@@ -251,7 +276,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 
 	// Define tool-use hook commands (the simple hooks' commands live in
 	// simpleHooks above).
-	preTaskCmd, postTaskCmd, postTodoCmd := entireToolUseHookCommands()
+	preTaskCmd, postTaskCmd := entireToolUseHookCommands()
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher, which ran a
@@ -268,7 +293,10 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 		simpleMatchers[h.hookType] = drop(simpleMatchers[h.hookType], h.command)
 	}
 	preToolUse = drop(preToolUse, preTaskCmd)
-	postToolUse = drop(postToolUse, postTaskCmd, postTodoCmd)
+	// post-todo is no longer installed: the handler records nothing, so the
+	// stale-hook drop above prunes it from configs older CLIs wrote (its
+	// subcommand stays registered so those configs keep working until then).
+	postToolUse = drop(postToolUse, postTaskCmd)
 
 	// Add hooks if they don't exist
 	for _, h := range simpleHooks {
@@ -292,10 +320,6 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	}
 	if !hookCommandExistsWithMatcher(postToolUse, skillToolMatcher, postTaskCmd) {
 		postToolUse = addHookToMatcher(postToolUse, skillToolMatcher, postTaskCmd)
-		count++
-	}
-	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
 		count++
 	}
 
@@ -552,7 +576,7 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // current, or outdated. It is a read-only diagnostic used by `entire status`
 // and `entire doctor`; it never modifies settings. Outdated is detected on the
 // positive spec: Entire is installed (Stop hook present) yet one of the current
-// tool-use matchers (Agent, Skill, the Task* tools), SubagentStart (for
+// tool-use matchers (Agent, Skill), SubagentStart (for
 // Workflow agents), SubagentStop, or StopFailure does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, err := loadClaudeSettings(ctx)
@@ -566,10 +590,8 @@ func CheckHookConfig(ctx context.Context) HookConfigState {
 		return HooksAbsent
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)
-	taskTools := splitMatcherTools(taskToolMatcher)
 	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
-		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, []string{skillToolMatcher}) ||
 		!hasEntireHookCoveringTools(settings.Hooks.SubagentStart, []string{workflowAgentMatcher}) ||
 		!hasEntireHook(settings.Hooks.SubagentStop) ||
@@ -704,8 +726,7 @@ func isEntireHook(command string) bool {
 
 // dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
 // want, per matcher, pruning matchers left with no hooks. want is a set because
-// one hook list can hold several Entire commands (PostToolUse carries both
-// post-task and post-todo). See agent.DropStaleManagedHooks for why this runs on
+// one hook list can hold several Entire commands. See agent.DropStaleManagedHooks for why this runs on
 // every install and why the dropped flag matters.
 func dropStaleEntireHooks(matchers []ClaudeHookMatcher, want ...string) ([]ClaudeHookMatcher, bool) {
 	result := make([]ClaudeHookMatcher, 0, len(matchers))

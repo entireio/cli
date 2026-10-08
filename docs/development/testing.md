@@ -116,7 +116,7 @@ unsafe in parallel tests. Prefer the `t.*` helpers for enforcement and cleanup.
 
 **Tests that touch git state must use an isolated temp repo — never the real repo CWD.**
 
-Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, shadow branches, or other artifacts in the real `.git/` directory.
+Many handlers (lifecycle, strategy, hooks) resolve the git repo from CWD via `OpenRepository`, `GetGitCommonDir`, `DetectFileChanges`, etc. Without isolation, tests can create session state files, checkpoint refs, or other artifacts in the real `.git/` directory.
 
 Use the `testutil` helpers:
 

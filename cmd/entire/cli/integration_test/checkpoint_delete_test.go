@@ -125,7 +125,7 @@ func TestCheckpointDelete_DeletesEverywhereAndStaysDeleted(t *testing.T) {
 		// the deleted trailer is dropped and no session restores it.
 		headMsg := env.GetCommitMessage(env.GetHeadHash())
 		require.Contains(t, headMsg, cpID)
-		env.GitCommitAmendWithShadowHooks(headMsg)
+		env.GitCommitAmendWithHooks(headMsg)
 		assert.Empty(t, env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()), "the amend must not carry the deleted trailer")
 		env.GitPushWithHooks("origin", "+HEAD")
 		assert.False(t, env.checkpointExistsLocally(cpID))
@@ -151,7 +151,7 @@ func TestCheckpointDelete_AmendWithPendingWorkGetsFreshCheckpoint(t *testing.T) 
 		env.WriteFile("beta2.go", "package beta\n")
 		require.NoError(t, env.SimulateStop(sess.ID, transcript))
 
-		env.GitCommitAmendWithShadowHooks(env.GetCommitMessage(env.GetHeadHash()), "beta2.go")
+		env.GitCommitAmendWithHooks(env.GetCommitMessage(env.GetHeadHash()), "beta2.go")
 
 		newID := env.GetCheckpointIDFromCommitMessage(env.GetHeadHash())
 		require.NotEmpty(t, newID, "new agent work in the amend is linked to a checkpoint")
@@ -467,7 +467,7 @@ func TestCheckpointDelete_LeftoverDeletedIDNeverReceivesNewWork(t *testing.T) {
 					require.NoError(t, env.SimulateStop(sess.ID, sess.TranscriptPath))
 				}
 				turn("part one", "f1.txt", "one\n")
-				env.GitCommitWithShadowHooks("part one", "f1.txt")
+				env.GitCommitWithHooks("part one", "f1.txt")
 				deletedID := env.LatestCheckpointID()
 				env.RunCLI("checkpoint", "delete", deletedID, "--force")
 				require.False(t, env.checkpointExistsLocally(deletedID))
@@ -475,7 +475,7 @@ func TestCheckpointDelete_LeftoverDeletedIDNeverReceivesNewWork(t *testing.T) {
 				turn("part two", "f2.txt", "two\n") // pending when the next commit is made
 				env.GitCheckoutBranch(masterBranch)
 				message := tc.message(env, deletedID)
-				env.GitCommitWithShadowHooks(message, "f2.txt")
+				env.GitCommitWithHooks(message, "f2.txt")
 
 				ids := trailers.ParseAllCheckpoints(testutil.RunGit(t, env.RepoDir, "log", "-1", "--format=%B"))
 				var fresh []string

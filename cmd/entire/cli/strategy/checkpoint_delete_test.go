@@ -98,7 +98,6 @@ func TestClearDeletedCheckpointFromState_LeavesTokenFieldsUntouched(t *testing.T
 	state := &SessionState{
 		SessionID:                      "s1",
 		LastCheckpointID:               cid,
-		LastCheckpointCommitHash:       "abc123",
 		TurnCheckpointIDs:              []string{"ffffffffffff", cid.String()},
 		CheckpointTranscriptStart:      42,
 		TokenUsage:                     &types.TokenUsage{InputTokens: 10, OutputTokens: 20},
@@ -113,12 +112,11 @@ func TestClearDeletedCheckpointFromState_LeavesTokenFieldsUntouched(t *testing.T
 	require.True(t, clearDeletedCheckpointFromState(state, cid))
 
 	assert.Empty(t, state.LastCheckpointID)
-	assert.Empty(t, state.LastCheckpointCommitHash)
 	assert.Nil(t, state.CondensationAttempt)
 	assert.Equal(t, []string{"ffffffffffff"}, state.TurnCheckpointIDs)
 
 	after := snapshotState(t, state)
-	for _, cleared := range []string{"last_checkpoint_id", "last_checkpoint_commit_hash", "condensation_attempt", "turn_checkpoint_ids"} {
+	for _, cleared := range []string{"last_checkpoint_id", "condensation_attempt", "turn_checkpoint_ids"} {
 		delete(before, cleared)
 		delete(after, cleared)
 	}
@@ -204,7 +202,7 @@ func TestCheckpointDelete_RefsBackend_PlanThenExecute(t *testing.T) {
 	ref, err := checkpoint.RefName(cid)
 	require.NoError(t, err)
 	testutil.RunGit(t, f.workDir, "push", "--no-verify", "origin", ref.String()+":"+ref.String())
-	saveDeleteState(t, &SessionState{SessionID: "sess-1", Phase: session.PhaseEnded, LastCheckpointID: cid, LastCheckpointCommitHash: "deadbeef"})
+	saveDeleteState(t, &SessionState{SessionID: "sess-1", Phase: session.PhaseEnded, LastCheckpointID: cid})
 
 	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})
 	require.NoError(t, err)

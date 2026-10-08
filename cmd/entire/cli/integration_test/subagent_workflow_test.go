@@ -100,7 +100,7 @@ func TestClaudeWorkflowAgents_GetTaskRecordsAndSubagentTokens(t *testing.T) {
 	for _, a := range agents {
 		files = append(files, a.file)
 	}
-	env.GitCommitWithShadowHooksAsAgent("Append workflow lines", files...)
+	env.GitCommitWithHooksAsAgent("Append workflow lines", files...)
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID, "expected a condensed checkpoint after committing the workflow agents' work")
 
@@ -171,7 +171,7 @@ func TestClaudeWorkflowAgent_CommitWhileRunning_MaterializesRunTranscript(t *tes
 	require.NotNil(t, state)
 	require.True(t, hasLiveTaskRecord(state, a.id), "the agent is still running at commit time")
 
-	env.GitCommitWithShadowHooksAsAgent("Append while the workflow runs", a.file)
+	env.GitCommitWithHooksAsAgent("Append while the workflow runs", a.file)
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID)
 

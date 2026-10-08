@@ -116,46 +116,6 @@ func TestParseMetadata(t *testing.T) {
 	}
 }
 
-func TestParseTaskMetadata(t *testing.T) {
-	tests := []struct {
-		name      string
-		message   string
-		wantDir   string
-		wantFound bool
-	}{
-		{
-			name:      "task commit message",
-			message:   "Task: Feature\n\nEntire-Metadata-Task: .entire/metadata/2025-01-28-abc/tasks/toolu_123\n",
-			wantDir:   ".entire/metadata/2025-01-28-abc/tasks/toolu_123",
-			wantFound: true,
-		},
-		{
-			name:      "no task trailer",
-			message:   "Simple commit message",
-			wantDir:   "",
-			wantFound: false,
-		},
-		{
-			name:      "regular metadata trailer not matched",
-			message:   "Message\n\nEntire-Metadata: .entire/metadata/xyz\n",
-			wantDir:   "",
-			wantFound: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotDir, gotFound := ParseTaskMetadata(tt.message)
-			if gotFound != tt.wantFound {
-				t.Errorf("ParseTaskMetadata() found = %v, want %v", gotFound, tt.wantFound)
-			}
-			if gotDir != tt.wantDir {
-				t.Errorf("ParseTaskMetadata() dir = %v, want %v", gotDir, tt.wantDir)
-			}
-		})
-	}
-}
-
 func TestParseSession(t *testing.T) {
 	tests := []struct {
 		name      string

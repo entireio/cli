@@ -55,7 +55,7 @@ func TestClaudeForkedSkillAgent_GetsTaskRecordAndSubagentTokens(t *testing.T) {
 	require.Len(t, state.TaskRecords, 1, "a repeated stop must not add a record")
 	require.Empty(t, state.LiveTaskRecords(), "the agent's SubagentStop must complete its record")
 
-	env.GitCommitWithShadowHooksAsAgent("Write from forked skill", "c.txt")
+	env.GitCommitWithHooksAsAgent("Write from forked skill", "c.txt")
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID)
 
@@ -110,7 +110,7 @@ func TestClaudeForkedSkillAgent_FinishedAtLaunch_TakesFilesFromItsTranscript(t *
 	require.Empty(t, state.LiveTaskRecords(), "a finished fork completes at its PostToolUse")
 
 	require.NoError(t, env.SimulateStop(session.ID, session.TranscriptPath))
-	env.GitCommitWithShadowHooksAsAgent("Write from forked skill", "c.txt")
+	env.GitCommitWithHooksAsAgent("Write from forked skill", "c.txt")
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID)
 	require.Equal(t, []string{"c.txt"}, readForkedSkillTask(t, env, checkpointID).Files)
