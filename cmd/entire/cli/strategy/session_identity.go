@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 )
@@ -171,4 +172,80 @@ func interactedAfter(a, b *SessionState) bool {
 		return true
 	}
 	return a.LastInteractionTime.After(*b.LastInteractionTime)
+}
+
+// commitProvenance records which sessions' agents provably did not make the
+// commit a hook is running for. Built once per hook from the same listing the
+// hook links against.
+//
+// Commit linking trusts recency where content detection cannot help: with no
+// TTY, prepare-commit-msg stamps any ACTIVE session without checking what the
+// commit contains, and post-commit condenses ACTIVE sessions without an
+// overlap check. That trust is meant for the agent's own commit. A commit from
+// a process outside the agent (a hookless agent, a script or queue job, a GUI
+// client) would otherwise carry a mid-turn session that never touched it.
+// Linking treats a foreign session like a human commit treats any session: it
+// links only on file overlap.
+type commitProvenance struct {
+	foreign map[string]bool
+}
+
+// newCommitProvenance marks a session foreign only on positive evidence: its
+// recorded owner is alive and absent from a process ancestry walked all the
+// way to init, and no agent's caller-session variable names it. Everything
+// else (no owner, a dead or unverifiable owner, a truncated walk, a platform
+// that cannot introspect processes) keeps today's linking.
+func newCommitProvenance(ctx context.Context, states []*SessionState) commitProvenance {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok || !ancestry.Complete() {
+		return commitProvenance{}
+	}
+	// An agent's shell tool exports its session ID, so a claim is positive
+	// evidence the commit runs under that agent even when its recorded owner
+	// is not in the walk (hooks spawned by a different long-lived process
+	// than the one running commands).
+	claimed := make(map[string]bool)
+	for _, c := range agent.CallerSessionCandidates() {
+		claimed[c.SessionID] = true
+	}
+	var foreign map[string]bool
+	for _, state := range states {
+		if state.Owner == nil || claimed[state.SessionID] || !ancestry.Excludes(*state.Owner) {
+			continue
+		}
+		if proclive.Check(*state.Owner) != proclive.LivenessAlive {
+			continue
+		}
+		if foreign == nil {
+			foreign = make(map[string]bool)
+		}
+		foreign[state.SessionID] = true
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+			"commit is not from this session's agent; linking needs file overlap",
+			slog.String("session_id", state.SessionID),
+			slog.Int("owner_pid", state.Owner.PID),
+			slog.String("owner_name", state.Owner.Name),
+		)
+	}
+	return commitProvenance{foreign: foreign}
+}
+
+// isForeign reports whether the session's agent provably did not make the
+// commit.
+func (p commitProvenance) isForeign(sessionID string) bool {
+	return p.foreign[sessionID]
+}
+
+// withoutForeign returns sessions minus the foreign ones, preserving order.
+func (p commitProvenance) withoutForeign(sessions []*SessionState) []*SessionState {
+	if len(p.foreign) == 0 {
+		return sessions
+	}
+	kept := make([]*SessionState, 0, len(sessions))
+	for _, state := range sessions {
+		if !p.isForeign(state.SessionID) {
+			kept = append(kept, state)
+		}
+	}
+	return kept
 }

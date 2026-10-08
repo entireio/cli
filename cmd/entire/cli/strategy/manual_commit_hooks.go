@@ -409,14 +409,17 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 
 	s.warnIfAttributionDiverged(ctx, sessions)
 
-	// Fast path: skip content detection for mid-turn agent commits.
-	if s.tryAgentCommitFastPath(ctx, commitMsgFile, sessions, source, inherited) {
+	// Fast path: skip content detection for mid-turn agent commits. A session
+	// whose agent provably did not make this commit is left to content
+	// detection below.
+	provenance := newCommitProvenance(ctx, sessions)
+	if s.tryAgentCommitFastPath(ctx, commitMsgFile, provenance.withoutForeign(sessions), source, inherited) {
 		return nil
 	}
 
 	// Check if any session has new content to condense
 	_, filterSessionsSpan := perf.Start(ctx, "filter_sessions_with_content")
-	sessionsWithContent := s.filterSessionsWithNewContent(ctx, repo, sessions)
+	sessionsWithContent := s.filterSessionsWithNewContent(ctx, repo, sessions, provenance)
 	filterSessionsSpan.End()
 
 	if len(sessionsWithContent) == 0 {
@@ -815,6 +818,9 @@ type postCommitActionHandler struct {
 	// modified a committed file. Evaluated lazily: only the read-only gate
 	// needs it, and only for a session it would otherwise drop.
 	liveTaskClaimsCommit func() bool
+	// foreign marks a session whose agent provably did not make this commit
+	// (see commitProvenance); it condenses only on committed-file overlap.
+	foreign bool
 
 	// Cached git objects — resolved once per PostCommit invocation to avoid
 	// redundant reads across filesOverlapWithContent, filesWithRemainingAgentChanges,
@@ -931,7 +937,7 @@ func (h *postCommitActionHandler) HandleCondenseIfFilesTouched(state *session.St
 // another session claims the committed files is somebody else's commit. Every
 // other session (a stale ACTIVE one, an IDLE one with no fresh in-flight
 // record, an ENDED one) must show file-overlap evidence between its tracked files and the
-// committed files.
+// committed files, and so must a session whose agent provably did not make the commit.
 func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, lastInteraction *time.Time, hasLiveTask bool) bool {
 	if !h.hasNew {
 		return false
@@ -940,7 +946,7 @@ func (h *postCommitActionHandler) shouldCondenseWithOverlapCheck(isActive bool, 
 	// in-flight record has no files yet, so overlap is unsatisfiable for it.
 	// LastInteractionTime keeps a stale ACTIVE session (agent killed without a
 	// Stop hook) from condensing into every subsequent commit.
-	if (isActive && isRecentInteraction(lastInteraction)) || hasLiveTask {
+	if !h.foreign && ((isActive && isRecentInteraction(lastInteraction)) || hasLiveTask) {
 		if h.sessionsWithCommittedFiles > 0 && len(h.filesTouchedBefore) == 0 && !h.liveTaskCoauthored(hasLiveTask) {
 			logging.Debug(logging.WithComponent(h.ctx, "checkpoint"), "post-commit: skipping read-only session (no tracked files, other sessions claim committed files)",
 				slog.Bool("is_active", isActive),
@@ -1169,6 +1175,8 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 		}
 	}
 
+	provenance := newCommitProvenance(ctx, sessions)
+
 	// Build transition context
 	isRebase := isGitSequenceOperation(ctx)
 	transitionCtx := session.TransitionContext{
@@ -1234,7 +1242,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			newSkillEvents, condensedSignal, condensed = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
 				committedFileSet, shadowBranchesToDelete, uncondensedActiveOnBranch, allAgentFiles,
-				sessionsWithCommittedFiles, condensedTelemetry)
+				sessionsWithCommittedFiles, condensedTelemetry, provenance.isForeign(sessionID))
 			trailerOwned = trailerOwned || condensed
 			return nil
 		}, func() {
@@ -1620,6 +1628,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	allAgentFiles map[string]struct{},
 	sessionsWithCommittedFiles int,
 	condensedTelemetry *commitCondensedEmitter,
+	foreign bool,
 ) (newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal, condensed bool) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	shadowBranchName := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
@@ -1711,6 +1720,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 			return s.liveTaskFilesInCommit(ctx, state, committedFileSet)
 		},
 		condensedTelemetry: condensedTelemetry,
+		foreign:            foreign,
 	}
 
 	if err := TransitionAndLog(ctx, state, session.EventGitCommit, *transitionCtx, handler); err != nil {
@@ -2039,7 +2049,11 @@ func truncateHash(h string) string {
 // no-trailer early exit before reaching any session.
 // Computes the staged files list once and reuses it across all sessions to avoid
 // redundant `git diff --cached` calls (previously called up to 3 times per session).
-func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState) []*SessionState {
+//
+// A session in provenance's foreign set must show staged-file overlap: its
+// task records and transcript growth are not evidence about a commit its
+// agent did not make.
+func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState, provenance commitProvenance) []*SessionState {
 	logCtx := logging.WithComponent(ctx, "manual-commit")
 	var result []*SessionState
 
@@ -2063,7 +2077,16 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 			)
 			continue
 		}
-		hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{stagedFiles: stagedFiles})
+		checked := state
+		if provenance.isForeign(state.SessionID) {
+			if len(stagedFiles) == 0 {
+				continue
+			}
+			withoutRecords := *state
+			withoutRecords.TaskRecords = nil
+			checked = &withoutRecords
+		}
+		hasNew, err := s.sessionHasNewContent(ctx, repo, checked, contentCheckOpts{stagedFiles: stagedFiles})
 		if err != nil {
 			logging.Debug(logCtx, "filterSessionsWithNewContent: error checking session, skipping it",
 				slog.String("session_id", state.SessionID),
