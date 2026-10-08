@@ -1870,6 +1870,14 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = result.CheckpointID
+		// No commit carries this checkpoint, so the files it recorded will
+		// never be linked by one either. Clearing them (rather than marking the
+		// session FullyCondensed, which would also park it from a resumed turn)
+		// leaves an IDLE session with nothing pending: the sweep and doctor
+		// stop nominating it, `checkpoint list --pending` stops previewing it,
+		// and a resumed turn starts a fresh window.
+		state.FilesTouched = nil
+		state.TouchedFileHashes = nil
 		return nil
 	}, func() {
 		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT

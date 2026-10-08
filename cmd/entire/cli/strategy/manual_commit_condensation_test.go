@@ -1738,3 +1738,46 @@ func TestClearFilesystemStagedFiles_MissingFilesAreNotAnError(t *testing.T) {
 	clearFilesystemStagedFiles(context.Background(), "session-empty")
 	assert.DirExists(t, metaDir)
 }
+
+// A commit-less condense (doctor, the sweep) writes a checkpoint no commit
+// will carry, so the files it recorded can never be linked by a later commit.
+// It must leave nothing pending: no files, no hashes, no next-checkpoint
+// preview for the session.
+func TestCondenseSessionByID_ClearsPendingFiles(t *testing.T) { //nolint:paralleltest // uses t.Chdir
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "commitless-condense-clears-files"
+	metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
+	testutil.WriteFile(t, dir, filepath.Join(metadataDir, paths.TranscriptFileName), testTranscriptPromptResponse)
+	testutil.WriteFile(t, dir, "test.txt", "agent content")
+	require.NoError(t, s.SaveStep(t.Context(), StepContext{
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
+	}))
+
+	previews, err := s.PreviewNextCheckpoint(t.Context())
+	require.NoError(t, err)
+	require.Len(t, previews, 1, "fixture: the session is pending before the condense")
+
+	require.NoError(t, s.CondenseSessionByID(t.Context(), sessionID))
+
+	state, err := s.loadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Empty(t, state.FilesTouched)
+	require.Empty(t, state.TouchedFileHashes)
+	require.False(t, state.HasPendingWork())
+
+	previews, err = s.PreviewNextCheckpoint(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, previews, "checkpoint list --pending must no longer preview a condensed session")
+}
