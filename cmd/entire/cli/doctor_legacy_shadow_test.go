@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,4 +83,55 @@ func TestCheckLegacyShadowBranches_None(t *testing.T) {
 	setupStopTestRepo(t)
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	assert.Contains(t, runLegacyShadowCheck(t, false), "✓ Legacy shadow branches: none")
+}
+
+// With only bare entire/<hex> branches, doctor does not delete anything but
+// must not claim there are none: it points at `entire clean --all --dry-run`.
+// Not parallel: t.Chdir.
+func TestCheckLegacyShadowBranches_BareFormOnly(t *testing.T) {
+	setupStopTestRepo(t)
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	testutil.RunGit(t, dir, "branch", "entire/fedcba9")
+
+	out := runLegacyShadowCheck(t, true)
+	assert.NotContains(t, out, "none")
+	assert.Contains(t, out, "entire clean --all --dry-run")
+	assert.Contains(t, localBranchList(t, dir), "entire/fedcba9", "doctor never deletes the bare form")
+}
+
+// Deleting refs frees nothing until git prunes their objects; doctor says so.
+// Not parallel: t.Chdir.
+func TestCheckLegacyShadowBranches_MentionsGitGC(t *testing.T) {
+	setupStopTestRepo(t)
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	testutil.RunGit(t, dir, "branch", "entire/1234567-abcdef")
+
+	assert.Contains(t, runLegacyShadowCheck(t, false), "git gc")
+	assert.Contains(t, runLegacyShadowCheck(t, true), "git gc")
+}
+
+// `entire status` shows a warning row (and --json a count) for legacy shadow
+// branches, so they are visible without running doctor. Not parallel: t.Chdir.
+func TestRunStatus_WarnsAboutLegacyShadowBranches(t *testing.T) {
+	setupStopTestRepo(t)
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	writeSettings(t, testSettingsEnabled)
+	testutil.RunGit(t, dir, "branch", "entire/1234567-abcdef")
+
+	var stdout bytes.Buffer
+	require.NoError(t, runStatus(context.Background(), &stdout, false, false))
+	assert.Contains(t, stdout.String(), "1 legacy shadow branches")
+	assert.Contains(t, stdout.String(), "run 'entire doctor'")
+
+	stdout.Reset()
+	require.NoError(t, runStatus(context.Background(), &stdout, false, true))
+	var got statusJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+	assert.Equal(t, 1, got.LegacyShadowBranches)
 }
