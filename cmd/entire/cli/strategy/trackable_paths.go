@@ -249,8 +249,50 @@ func (c *trackablePathCache) store(cache *map[trackablePathKey]bool, repoRoot st
 }
 
 // filterTrackableFiles is FilterTrackableChanges for one list of changed
-// (modified or created) paths, such as transcript-extracted files.
+// paths extracted from a transcript, the files a commit hook uses before a
+// session's first turn end.
+//
+// A transcript cannot tell a deletion from an edit, so a path HEAD tracks is
+// exempt from the ignore check, exactly as a git-status deletion is at turn
+// end: once the deletion of a tracked, ignore-matching file is staged, the path
+// has left the index and `git check-ignore` reports it ignored, which would
+// drop the only path of a commit that deletes it. A path in HEAD is
+// committable by definition. The gitlink drop still applies. If HEAD cannot be
+// read, every path is ignore-checked as before.
 func filterTrackableFiles(ctx context.Context, repoRoot string, files []string) []string {
-	kept, _, _ := FilterTrackableChanges(ctx, repoRoot, files, nil, nil)
+	if len(files) == 0 {
+		return files
+	}
+	inHead, err := gitrepo.PathsInHEAD(ctx, repoRoot, files)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not check HEAD for transcript files; ignore-checking all of them",
+			slog.String("error", err.Error()))
+		inHead = nil
+	}
+	tracked := make([]string, 0, len(inHead))
+	untracked := make([]string, 0, len(files))
+	for _, path := range files {
+		if _, ok := inHead[path]; ok {
+			tracked = append(tracked, path)
+		} else {
+			untracked = append(untracked, path)
+		}
+	}
+	// Tracked paths go through the deletion list: gitlink-checked, never
+	// ignore-checked.
+	keptUntracked, _, keptTracked := FilterTrackableChanges(ctx, repoRoot, untracked, nil, tracked)
+	keep := make(map[string]struct{}, len(keptUntracked)+len(keptTracked))
+	for _, path := range keptUntracked {
+		keep[path] = struct{}{}
+	}
+	for _, path := range keptTracked {
+		keep[path] = struct{}{}
+	}
+	kept := make([]string, 0, len(keep))
+	for _, path := range files {
+		if _, ok := keep[path]; ok {
+			kept = append(kept, path)
+		}
+	}
 	return kept
 }

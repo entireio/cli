@@ -215,3 +215,58 @@ func TestFilterTrackableChanges_DropsPathsInsideStagedSubmodule(t *testing.T) {
 	kept, _, _ := FilterTrackableChanges(context.Background(), dir, []string{"agent.txt", "sub/lib.txt"}, nil, nil)
 	assert.Equal(t, []string{"agent.txt"}, kept)
 }
+
+// setupTrackedIgnoredLogRepo creates a repository that ignores *.log but
+// tracks testdata/legacy.log, and chdirs into it.
+func setupTrackedIgnoredLogRepo(t *testing.T) (dir, worktreePath string) {
+	t.Helper()
+	dir = setupGitRepo(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	testutil.WriteFile(t, dir, ".gitignore", "*.log\n")
+	testutil.WriteFile(t, dir, "testdata/legacy.log", "legacy\n")
+	testutil.GitAdd(t, dir, ".gitignore")
+	testutil.GitAddForce(t, dir, "testdata/legacy.log")
+	testutil.GitCommit(t, dir, "track a log")
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	return dir, worktreePath
+}
+
+// Before a session's first turn end its files come from the live transcript,
+// which cannot tell a deletion from an edit. Once the deletion of a tracked,
+// ignore-matching file is staged, the path has left the index and
+// check-ignore reports it ignored; the commit of that deletion must still get
+// the session's trailer. A commit from a terminal (ENTIRE_TEST_TTY=1) takes the
+// content-detection path; a no-TTY agent commit takes the fast path, which
+// stamps without consulting files. Uses t.Chdir and t.Setenv — do NOT add
+// t.Parallel().
+func TestPrepareCommitMsg_StagedDeletionOfTrackedIgnoredFileLinks(t *testing.T) {
+	dir, worktreePath := setupTrackedIgnoredLogRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	s := &ManualCommitStrategy{}
+	sessionID := "test-midturn-tracked-ignored-deletion"
+	testutil.WriteFile(t, dir, "testdata/legacy.log", "edited by the agent\n")
+	saveMidTurnSession(t, s, dir, worktreePath, sessionID, "testdata/legacy.log")
+
+	testutil.RunGit(t, dir, "rm", "-q", "-f", "testdata/legacy.log")
+	msgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(msgFile, []byte("Remove the legacy log\n"), 0o600))
+	require.NoError(t, s.PrepareCommitMsg(context.Background(), msgFile, "message"))
+
+	got, err := os.ReadFile(msgFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), trailers.CheckpointTrailerKey+":", "the staged deletion is the session's work")
+}
+
+// The HEAD exemption only covers paths HEAD tracks: an untracked ignored path
+// the transcript names is still dropped, and an ordinary one kept. Uses
+// t.Chdir — do NOT add t.Parallel().
+func TestFilterTrackableFiles_ExemptsOnlyPathsInHEAD(t *testing.T) {
+	dir, _ := setupTrackedIgnoredLogRepo(t)
+	testutil.RunGit(t, dir, "rm", "-q", "testdata/legacy.log")
+
+	kept := filterTrackableFiles(context.Background(), dir, []string{"debug.log", "testdata/legacy.log", "src.go"})
+	assert.Equal(t, []string{"testdata/legacy.log", "src.go"}, kept)
+}
