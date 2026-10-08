@@ -527,9 +527,17 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	// nothing un-OPF'd ships, those refs stay queued, and the user's push
 	// proceeds.
 	opfDecision, opfErr := opfDecisionForCheckpointRefs(ctx)
+	// Withholding Entire's own push is not enough when the user's push sends
+	// checkpoint refs itself (`--all`, `--mirror`, an explicit refspec). Unlike
+	// a checkpoint-ref failure, that must abort the user's push. Only an
+	// explicit OPF skip for this push lets it through.
+	var outerErr error
+	if redact.OPFEnabled() && opfDecision != OPFSkip {
+		outerErr = checkOuterPushCheckpointRefs(ctx, repo)
+	}
 	if opfCancelledCheckpointRefs(opfErr) {
 		warnOPFCheckpointRefsWithheld(ctx, opfErr, queuedCheckpointRefCount(ctx, repo))
-		return nil
+		return outerErr
 	}
 	if opfDecision == OPFRun && opfErr == nil {
 		// Each queued ref is rewritten from the OPF span cache on its own; a
@@ -564,7 +572,7 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 	}
 
 	cleanupPushedShadowBranches(ctx)
-	return nil
+	return outerErr
 }
 
 // PushQueuedCheckpointRefs pushes any queued checkpoint refs to the configured

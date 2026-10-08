@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v6"
@@ -167,6 +168,35 @@ func TestRunOPFScan_SkipsRefsOverTheBootstrapLimit(t *testing.T) {
 
 	require.NoError(t, RunOPFScan(t.Context(), "origin"))
 	require.Zero(t, fake.batchCallCount(), "an over-limit ref must not reach the model")
+}
+
+// On git-refs a user push that sends checkpoint refs itself (`--mirror`, an
+// explicit refspec) is refused while their commits lack the OPF trailer, since
+// withholding Entire's own push cannot stop it. A ref with the trailer goes
+// through, and so does everything after an explicit opt-out for this push.
+func TestPrePushCheckpointRefs_RefusesOuterPushOfUnverifiedRefs(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	swapOPFScanSpawn(t)
+	outer := func() context.Context {
+		tip := refHashes(t, repo, refs)[0].String()
+		return WithPrePushRefs(t.Context(), []PrePushRef{{
+			LocalRef: refs[0].String(), LocalSHA: tip, RemoteRef: refs[0].String(), RemoteSHA: strings.Repeat("0", 40),
+		}})
+	}
+
+	err := NewManualCommitStrategy().PrePushFromGitHook(outer(), "origin")
+	require.ErrorIs(t, err, ErrOuterPushCarriesUnverifiedCheckpoints)
+
+	t.Setenv("ENTIRE_OPF", "no")
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(outer(), "origin"),
+		"an explicit opt-out for this push lets it through")
+	t.Setenv("ENTIRE_OPF", "")
+
+	_, repo, refs = setupGitRefsOPFRepo(t, "b2c3d4e5f6a1")
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(outer(), "origin"),
+		"a ref that carries the trailer may be pushed")
 }
 
 // A worker already running owns the work: a second one must leave it alone

@@ -8,9 +8,12 @@ import (
 	"io"
 	"strings"
 
+	git "github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 // PrePushRef is one line of the ref list git writes to a pre-push hook's
@@ -19,6 +22,14 @@ type PrePushRef struct {
 	LocalRef  string
 	LocalSHA  string
 	RemoteRef string
+	RemoteSHA string
+}
+
+// sends reports whether the line sends content: not a deletion, and not a ref
+// the remote already has at that commit.
+func (r PrePushRef) sends() bool {
+	local := plumbing.NewHash(r.LocalSHA)
+	return !local.IsZero() && local != plumbing.NewHash(r.RemoteSHA)
 }
 
 // maxPrePushRefsInput bounds how much of the hook's stdin is read. A ref line
@@ -36,7 +47,7 @@ func ParsePrePushRefs(r io.Reader) ([]PrePushRef, error) {
 		if len(fields) != 4 {
 			continue
 		}
-		refs = append(refs, PrePushRef{LocalRef: fields[0], LocalSHA: fields[1], RemoteRef: fields[2]})
+		refs = append(refs, PrePushRef{LocalRef: fields[0], LocalSHA: fields[1], RemoteRef: fields[2], RemoteSHA: fields[3]})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read pre-push refs: %w", err)
@@ -78,22 +89,49 @@ func WithPrePushRefs(ctx context.Context, refs []PrePushRef) context.Context {
 }
 
 // outerPushV1SHA returns the commit the user's own push is sending to
-// entire/checkpoints/v1, if it sends one. A deletion is not a send.
+// entire/checkpoints/v1, if it sends one (see PrePushRef.sends).
 func outerPushV1SHA(ctx context.Context) (plumbing.Hash, bool) {
 	refs, _ := ctx.Value(prePushRefsKey{}).([]PrePushRef) //nolint:errcheck // absent means "not known"
 	v1 := plumbing.NewBranchReferenceName(paths.MetadataBranchName).String()
 	for _, r := range refs {
-		if r.LocalRef != v1 && r.RemoteRef != v1 {
-			continue
+		if (r.LocalRef == v1 || r.RemoteRef == v1) && r.sends() {
+			return plumbing.NewHash(r.LocalSHA), true
 		}
-		h := plumbing.NewHash(r.LocalSHA)
-		if h.IsZero() {
-			continue
-		}
-		return h, true
 	}
 	return plumbing.ZeroHash, false
 }
+
+// isCheckpointRefName reports whether name holds checkpoint content: the v1
+// branch or a per-checkpoint ref.
+func isCheckpointRefName(name string) bool {
+	return name == plumbing.NewBranchReferenceName(paths.MetadataBranchName).String() ||
+		strings.HasPrefix(name, checkpoint.CheckpointRefPrefix)
+}
+
+// checkOuterPushCheckpointRefs is the git-refs counterpart of checkOuterPushV1:
+// it refuses the user's push when it sends checkpoint content (a per-checkpoint
+// ref, or a v1 branch left from before a migration) whose commit does not carry
+// the OPF trailer. The trailer is the same proof Entire's own delivery requires.
+func checkOuterPushCheckpointRefs(ctx context.Context, repo *git.Repository) error {
+	refs, _ := ctx.Value(prePushRefsKey{}).([]PrePushRef) //nolint:errcheck // absent means "not known"
+	for _, r := range refs {
+		if !r.sends() || (!isCheckpointRefName(r.LocalRef) && !isCheckpointRefName(r.RemoteRef)) {
+			continue
+		}
+		commit, err := repo.CommitObject(plumbing.NewHash(r.LocalSHA))
+		if err == nil && trailers.HasOPFApplied(commit.Message) {
+			continue
+		}
+		return fmt.Errorf("%w: this push includes %s, which the OpenAI Privacy Filter has not verified. "+
+			"Leave it out of this push (avoid --all/--mirror for checkpoint refs); Entire pushes checkpoints itself once they are scanned",
+			ErrOuterPushCarriesUnverifiedCheckpoints, r.LocalRef)
+	}
+	return nil
+}
+
+// ErrOuterPushCarriesUnverifiedCheckpoints aborts a user push that sends
+// checkpoint refs OPF has not verified, on the git-refs backend.
+var ErrOuterPushCarriesUnverifiedCheckpoints = errors.New("refusing to push unverified checkpoint content")
 
 // ErrOuterPushCarriesUnverifiedV1 aborts a user push that includes
 // entire/checkpoints/v1 at a commit OPF has not verified. Entire's own push of

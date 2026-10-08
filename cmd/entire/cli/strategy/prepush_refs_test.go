@@ -24,8 +24,8 @@ func TestParsePrePushRefs(t *testing.T) {
 			"(delete) " + zeroSHA + " refs/heads/old " + testSHA2 + "\n"))
 	require.NoError(t, err)
 	require.Equal(t, []PrePushRef{
-		{LocalRef: "refs/heads/main", LocalSHA: testSHA1, RemoteRef: "refs/heads/main"},
-		{LocalRef: "(delete)", LocalSHA: zeroSHA, RemoteRef: "refs/heads/old"},
+		{LocalRef: "refs/heads/main", LocalSHA: testSHA1, RemoteRef: "refs/heads/main", RemoteSHA: testSHA2},
+		{LocalRef: "(delete)", LocalSHA: zeroSHA, RemoteRef: "refs/heads/old", RemoteSHA: testSHA2},
 	}, refs)
 }
 
@@ -40,13 +40,14 @@ func TestCheckOuterPushV1(t *testing.T) {
 		wantErr  bool
 	}{
 		{name: "no ref list (old hook script)", refs: nil, verified: plumbing.ZeroHash},
-		{name: "push without v1", refs: []PrePushRef{{"refs/heads/main", testSHA2, "refs/heads/main"}}, verified: plumbing.ZeroHash},
-		{name: "v1 at the verified tip", refs: []PrePushRef{{v1, testSHA1, v1}}, verified: verified},
-		{name: "v1 at a pre-rewrite commit", refs: []PrePushRef{{v1, testSHA2, v1}}, verified: verified, wantErr: true},
-		{name: "v1 while held for the scan", refs: []PrePushRef{{v1, testSHA1, v1}}, verified: plumbing.ZeroHash, wantErr: true},
-		{name: "v1 pushed under another name", refs: []PrePushRef{{v1, testSHA2, "refs/heads/backup"}}, verified: verified, wantErr: true},
-		{name: "another branch pushed onto v1", refs: []PrePushRef{{"refs/heads/main", testSHA2, v1}}, verified: verified, wantErr: true},
-		{name: "deleting remote v1", refs: []PrePushRef{{"(delete)", zeroSHA, v1}}, verified: plumbing.ZeroHash},
+		{name: "push without v1", refs: []PrePushRef{{"refs/heads/main", testSHA2, "refs/heads/main", zeroSHA}}, verified: plumbing.ZeroHash},
+		{name: "v1 at the verified tip", refs: []PrePushRef{{v1, testSHA1, v1, zeroSHA}}, verified: verified},
+		{name: "v1 at a pre-rewrite commit", refs: []PrePushRef{{v1, testSHA2, v1, zeroSHA}}, verified: verified, wantErr: true},
+		{name: "v1 while held for the scan", refs: []PrePushRef{{v1, testSHA1, v1, zeroSHA}}, verified: plumbing.ZeroHash, wantErr: true},
+		{name: "v1 pushed under another name", refs: []PrePushRef{{v1, testSHA2, "refs/heads/backup", zeroSHA}}, verified: verified, wantErr: true},
+		{name: "another branch pushed onto v1", refs: []PrePushRef{{"refs/heads/main", testSHA2, v1, zeroSHA}}, verified: verified, wantErr: true},
+		{name: "v1 the remote already has", refs: []PrePushRef{{v1, testSHA2, v1, testSHA2}}, verified: verified},
+		{name: "deleting remote v1", refs: []PrePushRef{{"(delete)", zeroSHA, v1, zeroSHA}}, verified: plumbing.ZeroHash},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
