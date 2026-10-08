@@ -827,12 +827,7 @@ func isDirectGitTransport(protocol string) bool {
 // git URL on a host that serves none and sends the token there; file:// names
 // no host at all.
 func isTokenRewritableTransport(protocol string) bool {
-	switch protocol {
-	case ProtocolSSH, ProtocolHTTPS, ProtocolHTTP, ProtocolGit:
-		return true
-	default:
-		return false
-	}
+	return gitremote.NamesGitHost(protocol)
 }
 
 func deriveCheckpointURLFromInfo(info *Info, config *settings.CheckpointRemoteConfig) (string, error) {

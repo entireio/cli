@@ -19,9 +19,12 @@ import (
 // redirected per test. Callers should also isolate git config
 // (IsolateGitConfigEnv) so a core.sshCommand cannot leak in.
 //
+// It returns a function listing the hosts `ssh -G` was asked about since
+// installation, in call order, for tests that assert ssh was or was not run.
+//
 // Changes process-global state (PATH): the calling test must not be parallel.
 // Skipped on Windows, which cannot run the shell script.
-func InstallFakeSSH(t *testing.T, aliases map[string]string) {
+func InstallFakeSSH(t *testing.T, aliases map[string]string) (calls func() []string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake ssh is a shell script")
@@ -35,14 +38,16 @@ func InstallFakeSSH(t *testing.T, aliases map[string]string) {
 	for _, host := range hosts {
 		cases.WriteString("  " + host + ") echo \"hostname " + aliases[host] + "\" ;;\n")
 	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls.log")
 	script := "#!/bin/sh\n" +
 		"[ \"$1\" = \"-G\" ] || exit 255\n" +
+		"echo \"$2\" >> '" + logPath + "'\n" +
 		"echo \"user git\"\n" +
 		"case \"$2\" in\n" + cases.String() +
 		"  *) echo \"hostname $2\" ;;\n" +
 		"esac\n" +
 		"echo \"port 22\"\n"
-	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil { //nolint:gosec // test helper must be executable
 		t.Fatalf("write fake ssh: %v", err)
 	}
@@ -55,4 +60,14 @@ func InstallFakeSSH(t *testing.T, aliases map[string]string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_SSH_COMMAND", "")
 	t.Setenv("GIT_SSH", "")
+	if err := os.Remove(logPath); err != nil {
+		t.Fatalf("reset fake ssh call log: %v", err)
+	}
+	return func() []string {
+		data, err := os.ReadFile(logPath) //nolint:gosec // the log lives in this test's own TempDir
+		if err != nil {
+			return nil
+		}
+		return strings.Fields(string(data))
+	}
 }

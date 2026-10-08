@@ -157,11 +157,12 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote, pendingCapt
 	return false
 }
 
-// pushesToSameForgeRepository reports whether pushes to remote a and remote b
-// land in the same forge repository — e.g. `git@github.com:o/r` and its Entire
-// mirror `entire://<cluster>/gh/o/r`. Mirrors push through to the forge and
-// sync every ref back from it, so checkpoints pushed via either remote end up
-// in the same place, and the single-remote gate has no audience to protect.
+// pushesToSameForgeRepository reports whether pushes to pushRemote and the
+// elected remote land in the same forge repository — e.g. `git@github.com:o/r`
+// and its Entire mirror `entire://<cluster>/gh/o/r`. Mirrors push through to
+// the forge and sync every ref back from it, so checkpoints pushed via either
+// remote end up in the same place, and the single-remote gate has no audience
+// to protect.
 //
 // Push-through covering checkpoint refs is a verified external contract, not
 // an assumption: the mirror forwards every pushed ref to the forge, including
@@ -173,17 +174,26 @@ func checkpointSyncAllowedForRemote(ctx context.Context, pushRemote, pendingCapt
 //
 // Conservative by construction: both must be configured remotes with a fetch
 // URL (raw-URL pushes never match), and every push URL of both must resolve to
-// one known-forge repository (gitremote.ResolveRepository, which also follows
-// SSH host aliases when git runs plain ssh). Unknown hosts, file:// paths,
+// one known-forge repository over a direct or entire:// transport
+// (gitremote.ResolveRepository, which also follows SSH host aliases when git
+// runs plain ssh). Unknown hosts, remote-helper schemes, file:// paths,
 // Entire-native repos, and multi-URL remotes that fan out to different
 // repositories all fail the match, leaving the gate as strict as before.
-func pushesToSameForgeRepository(ctx context.Context, a, b string) bool {
-	if !isCheckpointSyncRemoteEligible(ctx, a) || !isCheckpointSyncRemoteEligible(ctx, b) {
+func pushesToSameForgeRepository(ctx context.Context, pushRemote, elected string) bool {
+	if !isCheckpointSyncRemoteEligible(ctx, pushRemote) || !isCheckpointSyncRemoteEligible(ctx, elected) {
 		return false
 	}
-	repoA, okA := remotePushForgeRepository(ctx, a)
-	repoB, okB := remotePushForgeRepository(ctx, b)
-	return okA && okB && repoA == repoB
+	// The elected remote first, and stop when it resolves to nothing: it is
+	// usually a plain GitHub URL that resolves without a subprocess, while
+	// pushRemote may be any remote the user pushes to. Resolving pushRemote
+	// unconditionally would run `ssh -G` inside every pre-push to a self-hosted
+	// or deploy SSH remote even when no match is possible.
+	electedRepo, ok := remotePushForgeRepository(ctx, elected)
+	if !ok {
+		return false
+	}
+	pushRepo, ok := remotePushForgeRepository(ctx, pushRemote)
+	return ok && pushRepo == electedRepo
 }
 
 // remotePushForgeRepository resolves the single forge repository every push

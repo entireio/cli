@@ -27,6 +27,8 @@ func TestInfo_Repository(t *testing.T) {
 		{"unknown host", "https://git.example.com/acme/widgets.git", Repository{}, false},
 		{"entire-native", "entire://aws-eu-central-1.entire.io/et/acme/widgets", Repository{}, false},
 		{"ssh host alias", "git@github-work:acme/widgets.git", Repository{}, false},
+		{"git+ssh spelling", "git+ssh://git@github.com/acme/widgets.git", widgets, true},
+		{"remote helper scheme on github.com", "bogus+ssh://github.com/acme/widgets", Repository{}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

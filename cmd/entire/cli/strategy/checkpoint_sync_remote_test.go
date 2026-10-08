@@ -497,6 +497,7 @@ func TestCheckpointSyncAllowedForRemote_SameForgeRepository(t *testing.T) {
 		{"mirror of a different repo", "entire://aws-eu-central-1.entire.io/gh/acme/gadgets"},
 		{"Entire-native repository", "entire://aws-eu-central-1.entire.io/et/acme/widgets"},
 		{"unknown host with the same path", "https://git.example.com/acme/widgets.git"},
+		{"remote helper scheme naming github.com", "bogus+ssh://github.com/acme/widgets"},
 	}
 	for _, tc := range rejected {
 		t.Run("rejected: "+tc.name, func(t *testing.T) {
@@ -563,11 +564,26 @@ func TestCheckpointSyncAllowedForRemote_SameForgeRepository(t *testing.T) {
 // Not parallel: uses t.Chdir() and InstallFakeSSH.
 func TestCheckpointSyncAllowedForRemote_SSHHostAlias(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
-	testutil.InstallFakeSSH(t, map[string]string{
+	sshCalls := testutil.InstallFakeSSH(t, map[string]string{
 		"github-work": "github.com",
 		"gitlab-work": "gitlab.example.com",
 	})
 	ctx := context.Background()
+
+	// The elected remote is resolved first: when it names no known-forge
+	// repository, no match is possible and the push remote's alias must not
+	// cost an `ssh -G` inside the user's pre-push.
+	t.Run("unmatchable elected remote skips alias resolution", func(t *testing.T) {
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		testutil.AddRemote(t, dir, "github", "https://git.example.com/acme/widgets.git")
+		testutil.AddRemote(t, dir, "origin", "git@gitlab-work:acme/widgets.git")
+		testutil.WriteCheckpointPushRemoteSetting(t, dir, "github")
+		t.Chdir(dir)
+		before := len(sshCalls())
+		assert.False(t, checkpointSyncAllowedForRemote(ctx, "origin", ""))
+		assert.Len(t, sshCalls(), before, "ssh -G ran although the elected remote cannot match")
+	})
 
 	tests := []struct {
 		name, elected, push string

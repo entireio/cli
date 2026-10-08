@@ -19,12 +19,34 @@ type Repository struct {
 
 // Repository returns the known-forge repository this URL names. ok is false
 // when the forge is unknown — an unrecognized host, an Entire-native repo, or
-// an SSH host alias (see ResolveRepository for the alias case).
+// an SSH host alias (see ResolveRepository for the alias case) — and when the
+// transport is neither a direct one (NamesGitHost) nor entire://. A remote
+// helper scheme such as `bogus+ssh://github.com/o/r` parses with github.com as
+// its host, but git hands the push to git-remote-bogus, which can send it
+// anywhere; the host proves nothing about where the data goes.
 func (i *Info) Repository() (Repository, bool) {
+	if i.Protocol != ProtocolEntire && !NamesGitHost(i.Protocol) {
+		return Repository{}, false
+	}
 	if _, known := i.UpstreamHost(); !known {
 		return Repository{}, false
 	}
 	return Repository{Forge: i.Forge, Owner: strings.ToLower(i.Owner), Repo: strings.ToLower(i.Repo)}, true
+}
+
+// NamesGitHost reports whether a URL on this protocol is served by its host
+// directly, so the host is where git sends the data: ssh, https, http, and
+// git. Every other scheme fails closed — entire:// names a cluster rather than
+// a git host, file:// names no host, and any other scheme is a remote helper
+// git runs instead of connecting. git's git+ssh:// and ssh+git:// spellings
+// arrive here as ProtocolSSH (see normalizeProtocol).
+func NamesGitHost(protocol string) bool {
+	switch protocol {
+	case ProtocolSSH, ProtocolHTTPS, ProtocolHTTP, ProtocolGit:
+		return true
+	default:
+		return false
+	}
 }
 
 // sshConfigTimeout bounds `ssh -G`, which reads config and never connects, so
