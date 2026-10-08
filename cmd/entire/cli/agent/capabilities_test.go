@@ -70,7 +70,6 @@ func (m *mockFullAgent) ExtractModifiedFilesFromOffset(context.Context, string, 
 	return nil, 0, nil
 }
 func (m *mockFullAgent) ExtractPrompts(string, int) ([]string, error) { return nil, nil }
-func (m *mockFullAgent) ExtractSummary(string) (string, error)        { return "", nil }
 
 // TranscriptPreparer
 func (m *mockFullAgent) PrepareTranscript(context.Context, string) error { return nil }

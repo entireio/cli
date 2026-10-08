@@ -4,38 +4,12 @@ package strategy
 
 import (
 	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
-
-// ErrNoMetadata is returned when a commit does not have an Entire metadata trailer.
-var ErrNoMetadata = errors.New("commit has no entire metadata")
-
-// ErrNoSession is returned when no session info is available.
-var ErrNoSession = errors.New("no session info available")
-
-// ErrNotTaskCheckpoint is returned when a pending checkpoint is not a task checkpoint.
-var ErrNotTaskCheckpoint = errors.New("not a task checkpoint")
-
-// SessionInfo contains information about the current session state.
-// This is used to generate trailers for linking commits to their AI session.
-type SessionInfo struct {
-	// SessionID is the session identifier extracted from the latest commit's metadata
-	SessionID string
-
-	// Reference is a strategy-specific reference string.
-	// For manual-commit strategy: "entire/abc1234" (the shadow branch name)
-	// Empty for commit strategy (metadata is in the same commit).
-	Reference string
-
-	// CommitHash is the full SHA of the commit containing the session metadata.
-	// Empty for commit strategy.
-	CommitHash string
-}
 
 // PendingCheckpoint is one row of `checkpoint list --pending`, which is the
 // resume view of the current branch rather than a single kind of thing. A row is
@@ -241,14 +215,6 @@ type TaskStepContext struct {
 
 	// AgentType is the human-readable agent name (e.g., "Claude Code", "Cursor")
 	AgentType types.AgentType
-}
-
-// TaskCheckpoint contains the checkpoint information written to checkpoint.json
-type TaskCheckpoint struct {
-	SessionID      string `json:"session_id"`
-	ToolUseID      string `json:"tool_use_id"`
-	CheckpointUUID string `json:"checkpoint_uuid"`
-	AgentID        string `json:"agent_id,omitempty"`
 }
 
 // SubagentCheckpoint represents an intermediate checkpoint created during subagent execution.

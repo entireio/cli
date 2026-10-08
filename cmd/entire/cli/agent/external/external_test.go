@@ -117,9 +117,6 @@ case "$1" in
   extract-prompts)
     echo '{"prompts": ["hello", "world"]}'
     ;;
-  extract-summary)
-    echo '{"summary": "test summary", "has_summary": true}'
-    ;;
   *)
     echo "unknown subcommand: $1" >&2
     exit 1
@@ -616,14 +613,6 @@ func TestExternalAgent_TranscriptAnalyzer(t *testing.T) {
 	}
 	if len(prompts) != 2 || prompts[0] != "hello" {
 		t.Errorf("ExtractPrompts() = %v, want [hello world]", prompts)
-	}
-
-	summary, err := ea.ExtractSummary("/path")
-	if err != nil {
-		t.Fatalf("ExtractSummary: %v", err)
-	}
-	if summary != "test summary" {
-		t.Errorf("ExtractSummary() = %q, want 'test summary'", summary)
 	}
 }
 

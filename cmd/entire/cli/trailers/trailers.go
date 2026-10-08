@@ -133,16 +133,6 @@ func ParseAllCheckpoints(commitMessage string) []checkpointID.CheckpointID {
 	return ids
 }
 
-// FormatSourceRef creates a formatted source ref string for the trailer.
-// Format: "<branch>@<commit-hash-prefix>" (hash truncated to ShortIDLength chars)
-func FormatSourceRef(branch, commitHash string) string {
-	shortHash := commitHash
-	if len(shortHash) > checkpointID.ShortIDLength {
-		shortHash = shortHash[:checkpointID.ShortIDLength]
-	}
-	return fmt.Sprintf("%s@%s", branch, shortHash)
-}
-
 // FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.
 // Includes Entire-Metadata, Entire-Session, and Entire-Strategy trailers.
 func FormatShadowCommit(message, metadataDir, sessionID string) string {

@@ -15,37 +15,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// Checkpoint represents a save point within a session.
-type Checkpoint struct {
-	// ID is the unique checkpoint identifier
-	ID string
-
-	// SessionID is the session this checkpoint belongs to
-	SessionID string
-
-	// Timestamp is when this checkpoint was created
-	Timestamp time.Time
-
-	// Type indicates temporary (full state) or committed (metadata only)
-	Type Type
-
-	// Message is a human-readable description of the checkpoint
-	Message string
-}
-
-// Type indicates the storage location and lifecycle of a checkpoint.
-type Type int
-
-const (
-	// Ephemeral checkpoints contain full state (code + metadata) and are stored
-	// on shadow branches (entire/<commit-hash>). Holds pending intra-session state.
-	Ephemeral Type = iota
-
-	// Persistent checkpoints contain metadata + commit reference and are stored
-	// on the entire/checkpoints/v1 branch. They are the permanent record.
-	Persistent
-)
-
 // EphemeralStore provides the production shadow-branch checkpoint surface.
 type EphemeralStore interface {
 	Write(ctx context.Context, req EphemeralWriteRequest) (WriteEphemeralResult, error)
@@ -144,25 +113,6 @@ type EphemeralInfo struct {
 
 	// Timestamp is when the latest checkpoint was created
 	Timestamp time.Time
-}
-
-// Info provides summary information for listing checkpoints.
-// This is the generic checkpoint info type.
-type Info struct {
-	// ID is the checkpoint identifier
-	ID string
-
-	// SessionID identifies the session
-	SessionID string
-
-	// Type indicates temporary or committed
-	Type Type
-
-	// CreatedAt is when the checkpoint was created
-	CreatedAt time.Time
-
-	// Message is a summary description
-	Message string
 }
 
 // WriteEphemeralTaskOptions contains options for writing a task checkpoint.

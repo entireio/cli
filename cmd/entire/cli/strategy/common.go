@@ -356,10 +356,9 @@ func checkpointInfosFromCommitted(committed []checkpoint.CheckpointInfo) []Check
 }
 
 const (
-	entireGitignore    = ".entire/.gitignore"
-	entireDir          = ".entire"
-	gitDir             = ".git"
-	shadowBranchPrefix = "entire/"
+	entireGitignore = ".entire/.gitignore"
+	entireDir       = ".entire"
+	gitDir          = ".git"
 )
 
 // isProtectedPath returns true if relPath is inside a directory that should
@@ -1497,97 +1496,6 @@ func splitLines(content []byte) []string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// getTaskCheckpointFromTree retrieves a task checkpoint from a commit tree.
-// Shared implementation for shadow and linear-shadow strategies.
-func getTaskCheckpointFromTree(ctx context.Context, point PendingCheckpoint) (*TaskCheckpoint, error) {
-	if !point.IsTaskCheckpoint {
-		return nil, ErrNotTaskCheckpoint
-	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	commitHash := plumbing.NewHash(point.ID)
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tree: %w", err)
-	}
-
-	// Read checkpoint.json from the tree
-	checkpointPath := point.MetadataDir + "/checkpoint.json"
-	file, err := tree.File(checkpointPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find checkpoint at %s: %w", checkpointPath, err)
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-
-	var checkpoint TaskCheckpoint
-	if err := json.Unmarshal([]byte(content), &checkpoint); err != nil {
-		return nil, fmt.Errorf("failed to parse checkpoint: %w", err)
-	}
-
-	return &checkpoint, nil
-}
-
-// getTaskTranscriptFromTree retrieves a task transcript from a commit tree.
-// Shared implementation for shadow and linear-shadow strategies.
-func getTaskTranscriptFromTree(ctx context.Context, point PendingCheckpoint) ([]byte, error) {
-	if !point.IsTaskCheckpoint {
-		return nil, ErrNotTaskCheckpoint
-	}
-
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open repository: %w", err)
-	}
-	defer repo.Close()
-
-	commitHash := plumbing.NewHash(point.ID)
-	commit, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tree: %w", err)
-	}
-
-	// MetadataDir format: .entire/metadata/<session>/tasks/<toolUseID>
-	// Session transcript is at: .entire/metadata/<session>/<TranscriptFileName>
-	sessionDir := filepath.Dir(filepath.Dir(point.MetadataDir))
-
-	// Try current format first, then legacy
-	transcriptPath := sessionDir + "/" + paths.TranscriptFileName
-	file, err := tree.File(transcriptPath)
-	if err != nil {
-		transcriptPath = sessionDir + "/" + paths.TranscriptFileNameLegacy
-		file, err = tree.File(transcriptPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find transcript: %w", err)
-		}
-	}
-
-	content, err := file.Contents()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read transcript: %w", err)
-	}
-
-	return []byte(content), nil
 }
 
 // ErrBranchNotFound is returned by DeleteBranchCLI when the branch does not exist.

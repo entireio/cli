@@ -60,12 +60,10 @@ Most persistent checkpoints are written when a commit condenses a session, but s
 
 ### Session Access
 
-`strategy/session.go` keeps the `Session` and `Checkpoint` data types used by
-status/explain formatting. Active session state is read from `.git/entire-sessions/`
-through `session.StateStore`; committed checkpoint/session content is read
-through the checkpoint facade (`checkpoint.Open(ctx, repo, opts)`, which resolves
-the ref topology and wires the blob fetcher) and command-specific strategy
-methods such as `GetSessionInfo`.
+Active session state is read from `.git/entire-sessions/` through
+`session.StateStore`; committed checkpoint/session content is read through the
+checkpoint facade (`checkpoint.Open(ctx, repo, opts)`, which resolves the ref
+topology and wires the blob fetcher).
 
 ### Checkpoint Storage (Low-Level)
 

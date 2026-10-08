@@ -84,12 +84,6 @@ type ExtractPromptsResponse struct {
 	Prompts []string `json:"prompts"`
 }
 
-// ExtractSummaryResponse is the JSON returned by the "extract-summary" subcommand.
-type ExtractSummaryResponse struct {
-	Summary    string `json:"summary"`
-	HasSummary bool   `json:"has_summary"`
-}
-
 // TokenUsageResponse is the JSON returned by token calculation subcommands.
 type TokenUsageResponse struct {
 	InputTokens         int                 `json:"input_tokens"`

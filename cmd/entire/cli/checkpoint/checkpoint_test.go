@@ -35,19 +35,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-func TestCheckpointType_Values(t *testing.T) {
-	// Verify the enum values are distinct
-	if Ephemeral == Persistent {
-		t.Error("Ephemeral and Persistent should have different values")
-	}
-
-	// Verify Ephemeral is the zero value (default for Type)
-	var defaultType Type
-	if defaultType != Ephemeral {
-		t.Errorf("expected zero value of Type to be Ephemeral, got %d", defaultType)
-	}
-}
-
 func TestCopyMetadataDir_RefusesSymlinks(t *testing.T) {
 	// Create a temp directory for the test
 	tempDir := t.TempDir()

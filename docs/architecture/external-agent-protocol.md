@@ -313,19 +313,6 @@ Extracts user prompts from a transcript.
 {"prompts": ["first prompt text", "second prompt text"]}
 ```
 
-#### `extract-summary --session-ref <path>`
-
-Extracts an AI-generated summary from a transcript.
-
-**Arguments:**
-- `--session-ref` — Path to the transcript file
-
-**Output (stdout):** JSON
-
-```json
-{"summary": "Summary text here", "has_summary": true}
-```
-
 ### Capability: `transcript_preparer`
 
 Required when `capabilities.transcript_preparer` is `true`.

@@ -63,38 +63,6 @@ func (s *ManualCommitStrategy) listCheckpoints(ctx context.Context) ([]Checkpoin
 	return checkpointInfosFromCommitted(committed), nil
 }
 
-// getCheckpointLog returns the transcript for a specific checkpoint ID.
-func (s *ManualCommitStrategy) getCheckpointLog(ctx context.Context, checkpointID id.CheckpointID) ([]byte, error) {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	WarnIfMetadataDisconnected(ctx)
-	store, err := s.getPersistentStore(ctx, repo)
-	if err != nil {
-		return nil, err
-	}
-
-	summary, err := cpkg.ReadCheckpoint(ctx, store, checkpointID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	content, err := cpkg.ReadLatestSessionContent(ctx, store, checkpointID, summary)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	if content == nil {
-		return nil, fmt.Errorf("checkpoint not found: %s", checkpointID)
-	}
-	if len(content.Transcript) == 0 {
-		return nil, fmt.Errorf("no transcript found for checkpoint: %s", checkpointID)
-	}
-
-	return content.Transcript, nil
-}
-
 // condenseOpts provides pre-resolved git objects to avoid redundant reads.
 type condenseOpts struct {
 	shadowRef        *plumbing.Reference // Pre-resolved shadow branch ref (nil = resolve from repo)
