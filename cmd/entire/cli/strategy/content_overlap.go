@@ -8,12 +8,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
@@ -340,40 +337,37 @@ func filesWithRemainingAgentChanges(
 	}
 	keepStagedVanished(ctx, logCtx, worktreeRoot, filesTouched, vanished, keep)
 
-	worktreeHashes := make(map[string]plumbing.Hash)
-	if worktreeRoot != "" && len(candidates) > 0 {
-		paths := make([]string, 0, len(candidates))
-		for _, candidate := range candidates {
-			// hash-object follows symlinks and hashes target content, while a Git
-			// symlink blob stores the target path. Compare either side of a mode
-			// mismatch through the confined fallback instead.
-			if worktreedir.HashableEntry(worktreeRoot, candidate.path, candidate.commitMode) {
-				paths = append(paths, candidate.path)
+	// Whether the worktree still differs from what was committed is git
+	// status's answer, not a comparison of `git hash-object` with the commit:
+	// status applies the index-aware line-ending rule `git add` does (a file
+	// committed with CRLF is not normalized by text=auto or core.autocrlf),
+	// hash-object does not, and a hash comparison read every such file as
+	// dirty forever. This runs right after the commit, so HEAD is the commit.
+	// A path status does not report matches the index and HEAD and is done;
+	// anything reported (modified, staged, untracked, or deleted in the
+	// worktree — the pending deletion of a tracked file) keeps its place. If
+	// status fails, every candidate is kept rather than dropped on a guess.
+	var statuses map[string]string
+	var statusErr error
+	if len(candidates) > 0 {
+		if worktreeRoot == "" {
+			statusErr = errors.New("no worktree root")
+		} else {
+			candidatePaths := make([]string, 0, len(candidates))
+			for _, candidate := range candidates {
+				candidatePaths = append(candidatePaths, candidate.path)
 			}
+			statuses, statusErr = gitrepo.PathStatuses(ctx, worktreeRoot, candidatePaths)
 		}
-		var err error
-		worktreeHashes, err = gitrepo.HashWorktreeFiles(ctx, worktreeRoot, paths)
-		if err != nil {
-			logging.Warn(logCtx, "native git could not hash every carry-forward candidate; checking failed paths conservatively without clean filters",
-				slog.String("error", err.Error()),
-			)
+		if statusErr != nil {
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: git status failed for carry-forward candidates, keeping them",
+				slog.String("error", statusErr.Error()))
 		}
 	}
 
 	for _, candidate := range candidates {
-		workingTreeClean := false
-		if worktreeHash, ok := worktreeHashes[candidate.path]; ok {
-			// Equal, not ==: plumbing.Hash carries an object-format field
-			// alongside its bytes, and `==` compares that field too. FromHex
-			// leaves it unset for a 40-char hash while stamping SHA256 on a
-			// 64-char one, so `==` only works while the tree decoder happens to
-			// agree. If it ever stamped "sha1", every candidate would read dirty
-			// and the phantom carry-forward would return with no test failing.
-			workingTreeClean = worktreeHash.Equal(candidate.commitHash)
-		} else if worktreeRoot != "" {
-			workingTreeClean = workingTreeMatchesBlob(worktreeRoot, candidate.path, candidate.commitMode, candidate.commitHash)
-		}
-		if workingTreeClean {
+		code, reported := statuses[candidate.path]
+		if statusErr == nil && !reported {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content differs from recorded but working tree is clean, skipping",
 				slog.String("file", candidate.path),
 				slog.String("commit_hash", candidate.commitHash.String()[:7]),
@@ -383,8 +377,9 @@ func filesWithRemainingAgentChanges(
 		}
 
 		keep[candidate.index] = true
-		logging.Debug(logCtx, "filesWithRemainingAgentChanges: content mismatch with dirty working tree, keeping for carry-forward",
+		logging.Debug(logCtx, "filesWithRemainingAgentChanges: working tree still differs from the commit, keeping for carry-forward",
 			slog.String("file", candidate.path),
+			slog.String("status", code),
 			slog.String("commit_hash", candidate.commitHash.String()[:7]),
 			slog.String("recorded_hash", candidate.recordedHash.String()[:7]),
 		)
@@ -453,7 +448,6 @@ type worktreeCandidate struct {
 	index        int
 	path         string
 	commitHash   plumbing.Hash
-	commitMode   filemode.FileMode
 	recordedHash plumbing.Hash // zero when no hash was recorded
 }
 
@@ -537,7 +531,6 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 	return false, &worktreeCandidate{
 		path:         filePath,
 		commitHash:   commitFile.Hash,
-		commitMode:   commitFile.Mode,
 		recordedHash: recorded,
 	}, false
 }
@@ -561,42 +554,6 @@ func (c remainingClassifier) inCommit(path string) bool {
 // worktreeState probes path in the worktree; see worktreeEntryState.
 func (c remainingClassifier) worktreeState(path string) worktreeEntryState {
 	return probeWorktreeEntry(c.root, c.worktreeRoot, path)
-}
-
-// workingTreeMatchesBlob checks whether the raw file representation hashes to
-// commitHash. It is the filter-unaware fallback for when native Git cannot hash
-// a regular file and the symlink-aware path for Git symlink blobs.
-func workingTreeMatchesBlob(worktreeRoot, filePath string, commitMode filemode.FileMode, commitHash plumbing.Hash) bool {
-	root, err := worktreedir.OpenAt(worktreeRoot)
-	if err != nil {
-		return false
-	}
-	name, err := worktreedir.Name(worktreeRoot, filePath)
-	if err != nil {
-		return false
-	}
-	var diskContent []byte
-	if commitMode == filemode.Symlink {
-		target, readErr := root.Readlink(name)
-		if readErr != nil {
-			return false
-		}
-		diskContent = []byte(target)
-	} else {
-		diskContent, err = osroot.ReadFileNoFollow(root, name)
-		if err != nil {
-			return false
-		}
-	}
-	of := config.SHA1
-	if commitHash.Size() == config.SHA256.Size() {
-		of = config.SHA256
-	}
-	h := plumbing.NewHasher(of, plumbing.BlobObject, int64(len(diskContent)))
-	if _, err := h.Write(diskContent); err != nil {
-		return false
-	}
-	return commitHash.Equal(h.Sum())
 }
 
 // subtractFilesByName returns files from filesTouched that are NOT in committedFiles.

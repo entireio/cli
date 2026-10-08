@@ -125,3 +125,35 @@ func TestLiteralPathspecCommand_IgnoresConflictingPathspecEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestPathStatuses(t *testing.T) {
+	// Not parallel: isolateGitConfig uses t.Setenv.
+	isolateGitConfig(t)
+	dir := initGitlinkRepo(t)
+	for _, name := range []string{"clean.txt", "modified.txt", "deleted.txt", "staged.txt"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(name+"\n"), 0o644))
+	}
+	gitIn(t, dir, "add", ".")
+	gitIn(t, dir, "commit", "-q", "-m", "base")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modified.txt"), []byte("changed\n"), 0o644))
+	require.NoError(t, os.Remove(filepath.Join(dir, "deleted.txt")))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged\n"), 0o644))
+	gitIn(t, dir, "add", "staged.txt")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "new file.txt"), []byte("new\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "*.txt"), []byte("glob\n"), 0o644))
+
+	got, err := PathStatuses(context.Background(), dir,
+		[]string{"clean.txt", "modified.txt", "deleted.txt", "staged.txt", "new file.txt", "missing.txt"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"modified.txt": " M",
+		"deleted.txt":  " D",
+		"staged.txt":   "M ",
+		"new file.txt": "??",
+	}, got, "a clean or unknown path is absent; pathspecs are literal, so *.txt is not matched")
+
+	empty, err := PathStatuses(context.Background(), dir, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}

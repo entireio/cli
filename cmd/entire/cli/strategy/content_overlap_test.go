@@ -12,7 +12,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
@@ -527,23 +526,29 @@ func TestFilesWithRemainingAgentChanges_ComparesWorktreeToCommitNotIndex(t *test
 	assert.Equal(t, []string{"config.go"}, remaining)
 }
 
-func TestWorkingTreeMatchesBlobSymlinkHashesTheTargetPath(t *testing.T) {
+// A committed symlink is judged by git status, which compares the link target
+// with the symlink blob: unchanged after the commit it is done; retargeted it
+// is still pending. Uses t.Chdir — do NOT add t.Parallel().
+func TestFilesWithRemainingAgentChanges_SymlinkJudgedByStatus(t *testing.T) {
 	testutil.SkipWithoutSymlinks(t)
-	t.Parallel()
-
-	dir := t.TempDir()
-	const target = "real.txt"
-	require.NoError(t, os.Symlink(target, filepath.Join(dir, "link.txt")))
-	h := plumbing.NewHasher(config.SHA1, plumbing.BlobObject, int64(len(target)))
-	_, err := h.Write([]byte(target))
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	require.NoError(t, os.Symlink("real.txt", filepath.Join(dir, "link.txt")))
+	testutil.RunGit(t, dir, "add", "link.txt")
+	testutil.RunGit(t, dir, "commit", "-q", "-m", "link")
+	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
+	commit := headCommit(t, dir)
+	committed := map[string]struct{}{"link.txt": {}}
 
-	// Withholding a worktree symlink from hash-object is gitrepo's rule now
-	// (TestHashableWorktreeEntry_WorktreeSymlinkIsWithheld); what stays here is
-	// what this fallback must then answer for one.
-	assert.True(t, workingTreeMatchesBlob(dir, "link.txt", filemode.Symlink, h.Sum()))
-	assert.False(t, workingTreeMatchesBlob(dir, "link.txt", filemode.Regular, h.Sum()),
-		"a symlink must not compare clean against a regular-file commit")
+	assert.Empty(t, filesWithRemainingAgentChanges(t.Context(), repo, nil, commit, []string{"link.txt"}, committed),
+		"an unchanged committed symlink is done")
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "link.txt")))
+	require.NoError(t, os.Symlink("other.txt", filepath.Join(dir, "link.txt")))
+	assert.Equal(t, []string{"link.txt"},
+		filesWithRemainingAgentChanges(t.Context(), repo, nil, commit, []string{"link.txt"}, committed),
+		"a retargeted symlink still differs from the commit")
 }
 
 // TestFilesWithRemainingAgentChanges_NoRecordedHash tests the fallback to

@@ -57,7 +57,11 @@ const touchedFileDeleted = ""
 // regular file, for recording with applyTouchedFileHashes. It runs outside the
 // session lock: it costs one `git hash-object` per batch of paths (see
 // gitrepo.HashWorktreeFiles), which applies clean filters exactly as `git add`
-// would, so a recorded hash is the blob a commit of the unchanged file holds.
+// would, so a recorded hash is usually the blob a commit of the unchanged file
+// holds. Not always: hash-object skips the index-aware line-ending rule (a file
+// committed with CRLF is not normalized by text=auto or core.autocrlf), so
+// carry-forward never treats a mismatch as proof of remaining work and asks
+// git status instead (filesWithRemainingAgentChanges).
 // Symlinks and other non-regular entries are skipped (git hash-object follows a
 // symlink, while a commit stores its target path), as is anything git cannot
 // hash; those paths stay unrecorded and fall back to name matching.
