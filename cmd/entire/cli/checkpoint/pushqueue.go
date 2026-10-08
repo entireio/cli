@@ -362,10 +362,9 @@ func (q *PushQueue) readEntriesLocked(root *os.Root) (entries []PushQueueEntry, 
 			continue
 		}
 		parsed := PushQueueEntry{Ref: plumbing.ReferenceName(entry.Ref)}
-		if len(entry.Hash) > 0 {
-			if !plumbing.IsHash(entry.Hash) {
-				continue
-			}
+		// A corrupt generation keeps the ref, generation-less: dropping the line
+		// would compact it away, and the queue is the only push discovery.
+		if plumbing.IsHash(entry.Hash) {
 			parsed.Hash = plumbing.NewHash(entry.Hash)
 		}
 		if idx, dup := seen[entry.Ref]; dup {

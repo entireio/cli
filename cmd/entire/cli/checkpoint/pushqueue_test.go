@@ -335,3 +335,20 @@ func TestPushQueue_EnqueueRefQueuesAnUnresolvableRef(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []PushQueueEntry{{Ref: missing}}, entries)
 }
+
+// A line whose ref is well formed but whose generation is corrupt keeps the
+// ref: compaction would otherwise erase it, and nothing else rediscovers it.
+func TestPushQueue_CorruptHashKeepsTheRef(t *testing.T) {
+	t.Parallel()
+	q := NewPushQueue(t.TempDir())
+	a := mustRefName(t, "a1b2c3d4e5f6")
+	require.NoError(t, os.WriteFile(filepath.Join(q.dir, pushQueueFileName),
+		[]byte(`{"ref":"`+a.String()+`","hash":"not-a-hash"}`+"\n"), 0o600))
+
+	entries, err := q.DrainEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{{Ref: a}}, entries)
+	entries, err = q.PeekEntries()
+	require.NoError(t, err)
+	assert.Equal(t, []PushQueueEntry{{Ref: a}}, entries, "compaction must not erase the ref")
+}
