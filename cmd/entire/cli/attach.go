@@ -313,7 +313,21 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 	if cp.holdsSession {
 		fmt.Fprintf(w, "Session %s is already in checkpoint %s on commit %s.\n", sessionID, cp.id, target.Hash.String()[:12])
 		// An earlier attach may have written it but failed to push it; for a
-		// pushed commit, make sure it got there.
+		// pushed commit, push it now — after the same confirmation as any
+		// other attach, since that sends the transcript.
+		if plan.remote == "" || checkpointOnRemote(ctx, plan.remote, cp.id) {
+			return nil
+		}
+		warning := []string{
+			fmt.Sprintf("Checkpoint %s, which holds session %s, isn't on %s yet.", cp.id, sessionID, plan.remote),
+			"The checkpoint, including the session transcript, is pushed to " + plan.remote + " now.",
+		}
+		if err := confirmAttach(w, errW, warning, opts.Force); err != nil {
+			if errors.Is(err, errAttachDeclined) {
+				return nil
+			}
+			return err
+		}
 		return redeliverAttachedCheckpoint(ctx, w, errW, plan, cp.id)
 	}
 	checkpointID, isExistingCheckpoint := cp.id, cp.existing
@@ -547,6 +561,14 @@ func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPla
 	return nil
 }
 
+// checkpointOnRemote reports whether remote's push target already has
+// checkpointID as written locally. Anything it can't confirm reads as not
+// there.
+func checkpointOnRemote(ctx context.Context, remote string, checkpointID id.CheckpointID) bool {
+	target, disabled := strategy.CheckpointPushTarget(ctx, remote)
+	return !disabled && confirmCheckpointDelivered(ctx, target, checkpointID) == nil
+}
+
 // redeliverAttachedCheckpoint pushes an existing checkpoint now when its
 // commit is pushed: after a session joins it, or on a rerun, retrying a push
 // an earlier attach couldn't complete. A recorded link exists only in the checkpoint, so
@@ -764,7 +786,15 @@ func remoteContainingCommit(ctx context.Context, target *object.Commit, remotes 
 				continue
 			}
 		}
-		if reachableFromAny(ctx, target, untrackedTips(ctx, tips)) {
+		reachable, err := reachableFromAny(ctx, target, untrackedTips(ctx, tips))
+		if err != nil {
+			// Not knowing is not "pushed": recording a link to a commit the
+			// remote may not have would be wrong, and so would rewriting one it
+			// may have. Treat it like a remote that couldn't be reached.
+			unreachable = append(unreachable, remote)
+			continue
+		}
+		if reachable {
 			return remote, unreachable
 		}
 	}
@@ -785,11 +815,11 @@ func untrackedTips(ctx context.Context, tips []string) []string {
 // reachableFromAny reports whether target is an ancestor of (or is) any of
 // tips, in one walk: the commits reachable from tips but not from target's
 // parents include target exactly when one of tips reaches it, and the walk
-// stops at history older than target. A walk that fails or times out counts as
-// reachable, so a commit that might be shared is never rewritten.
-func reachableFromAny(ctx context.Context, target *object.Commit, tips []string) bool {
+// stops at history older than target. A walk that fails or times out returns
+// an error: the answer is unknown.
+func reachableFromAny(ctx context.Context, target *object.Commit, tips []string) (bool, error) {
 	if len(tips) == 0 {
-		return false
+		return false, nil
 	}
 	var in strings.Builder
 	for _, tip := range tips {
@@ -804,9 +834,9 @@ func reachableFromAny(ctx context.Context, target *object.Commit, tips []string)
 	cmd.Stdin = strings.NewReader(in.String())
 	out, err := cmd.Output()
 	if err != nil {
-		return true
+		return false, fmt.Errorf("walk history from the remote's branches: %w", err)
 	}
-	return slices.Contains(strings.Fields(string(out)), target.Hash.String())
+	return slices.Contains(strings.Fields(string(out)), target.Hash.String()), nil
 }
 
 // branchesWithMissingTips returns the branches whose tip commit isn't in the

@@ -760,6 +760,15 @@ func TestAttachCommit_RerunRetriesAnUndeliveredCheckpoint(t *testing.T) {
 	}
 
 	writeAttachTestSettings(t, `{"enabled": true}`)
+	// Without a terminal or --force the rerun pushes nothing: it sends the
+	// transcript, so it needs the same go-ahead as any attach.
+	var unconfirmed bytes.Buffer
+	if err := runAttach(context.Background(), &unconfirmed, &unconfirmed, "attach-retry-delivery", agent.AgentNameClaudeCode, attachOptions{}); err == nil {
+		t.Fatalf("rerun without confirmation succeeded:\n%s", unconfirmed.String())
+	}
+	if strings.Contains(unconfirmed.String(), "Pushed checkpoint metadata") {
+		t.Fatalf("rerun pushed without confirmation:\n%s", unconfirmed.String())
+	}
 	out, err := attachHeadless(t, "attach-retry-delivery", attachOptions{})
 	if err != nil {
 		t.Fatalf("rerun: %v\n%s", err, out)
@@ -823,5 +832,18 @@ func TestAttachCommit_PushedCommitNeedsConfirmation(t *testing.T) {
 	}
 	if state, err := loadAttachState(t, sessionID); err != nil || state != nil {
 		t.Fatalf("session state written without confirmation: %+v (%v)", state, err)
+	}
+}
+
+// A history walk that can't finish is an unknown answer, not "pushed".
+func TestReachableFromAny_FailedWalkIsAnError(t *testing.T) {
+	setupAttachTestRepo(t)
+	head := headCommitOf(t)
+	if _, err := reachableFromAny(context.Background(), head, []string{strings.Repeat("ab", 20)}); err == nil {
+		t.Fatal("a walk from a missing tip reported an answer")
+	}
+	reachable, err := reachableFromAny(context.Background(), head, []string{head.Hash.String()})
+	if err != nil || !reachable {
+		t.Fatalf("reachableFromAny(HEAD from HEAD) = %v, %v", reachable, err)
 	}
 }
