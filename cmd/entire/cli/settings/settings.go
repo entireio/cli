@@ -780,6 +780,10 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		return nil, fmt.Errorf("merged settings invalid: %w", err)
 	}
 
+	if err := validateStrategyOptions(settings); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
+
 	return settings, nil
 }
 
@@ -2103,17 +2107,44 @@ func (s *EntireSettings) IsFilteredFetchesEnabled() bool {
 // IsPushSessionsDisabled checks if push_sessions is disabled in settings.
 // Returns true if push_sessions is explicitly set to false.
 func (s *EntireSettings) IsPushSessionsDisabled() bool {
+	return s.isStrategyOptionExplicitlyFalse("push_sessions")
+}
+
+// SyncPromptsOptionKey is the strategy_options key that controls whether
+// prompt content (prompts, transcripts, summaries) is written to persistent
+// checkpoints, and therefore synced to the checkpoint remote.
+const SyncPromptsOptionKey = "sync_prompts"
+
+// IsPromptSyncDisabled reports whether strategy_options.sync_prompts is
+// explicitly false. When disabled, persistent checkpoint writes omit all
+// prompt-bearing content; checkpoint metadata, attribution, files touched,
+// and token usage are still recorded. Local shadow-branch capture is
+// unaffected. Defaults to false (prompts are synced).
+func (s *EntireSettings) IsPromptSyncDisabled() bool {
+	return s.isStrategyOptionExplicitlyFalse(SyncPromptsOptionKey)
+}
+
+func (s *EntireSettings) isStrategyOptionExplicitlyFalse(key string) bool {
 	if s.StrategyOptions == nil {
 		return false
 	}
-	val, exists := s.StrategyOptions["push_sessions"]
-	if !exists {
-		return false
+	val, ok := s.StrategyOptions[key].(bool)
+	return ok && !val
+}
+
+// validateStrategyOptions rejects a non-boolean sync_prompts. It is a privacy
+// opt-out, so a value the reader would silently ignore (e.g. the string
+// "false") must fail loudly instead of syncing prompts the user meant to keep.
+func validateStrategyOptions(s *EntireSettings) error {
+	if s.StrategyOptions == nil {
+		return nil
 	}
-	if boolVal, ok := val.(bool); ok {
-		return !boolVal // disabled = !push_sessions
+	if val, exists := s.StrategyOptions[SyncPromptsOptionKey]; exists {
+		if _, ok := val.(bool); !ok {
+			return fmt.Errorf("strategy_options.%s must be a boolean (got %T)", SyncPromptsOptionKey, val)
+		}
 	}
-	return false
+	return nil
 }
 
 // IsExternalAgentsEnabled checks if external agent discovery is enabled in settings.

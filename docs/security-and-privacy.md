@@ -25,6 +25,23 @@ Anyone with access to your repository can read committed checkpoint data: the fu
 
 If your repository is **public**, this data is visible to the entire internet.
 
+### Keeping prompts out of checkpoints
+
+Set `strategy_options.sync_prompts` to `false` to keep prompt content out of committed checkpoints, and therefore off the checkpoint remote:
+
+```json
+{ "strategy_options": { "sync_prompts": false } }
+```
+
+Put it in `.entire/settings.local.json` to opt out for yourself only, or in `.entire/settings.json` for everyone in the repository. The value must be a boolean; any other value fails settings load rather than being ignored.
+
+With it disabled, each committed checkpoint omits `prompt.txt`, `full.jsonl`, `transcript.jsonl` and their image assets, subagent transcripts and task descriptions, AI summaries, review prompts, investigate topics, and skill-event native fields (which can record a slash command's arguments). Checkpoint metadata, attribution, files touched, token usage, and metrics are still recorded and synced. The consequences:
+
+- `entire resume`, `entire checkpoint explain`, and search cannot show the conversation for those checkpoints.
+- Local shadow branches still capture the session while it runs; they are never pushed and are cleaned up at condensation.
+- Checkpoints written before the setting was disabled are not rewritten.
+- `push_sessions: false` is the stronger switch: it stops checkpoint data from being pushed at all.
+
 ### What Entire redacts automatically
 
 Entire automatically scans transcript and metadata content before writing it to a git object. Five always-on secret detection methods plus a configurable scanner layer (pattern matching, method 2 below) run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in ninth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):

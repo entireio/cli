@@ -518,6 +518,7 @@ Personal overrides, gitignored by default:
 | `commit_linking`                          | `always`, `prompt`                           | Link commits to sessions automatically, or ask each time (default `prompt`)        |
 | `sign_checkpoint_commits`                 | `true`, `false`                              | Sign checkpoint commits (default: on). See [checkpoint signing](docs/architecture/checkpoint-signing.md) |
 | `strategy_options.push_sessions`          | `true`, `false`                              | Auto-push checkpoint data on git push (default `true`)                            |
+| `strategy_options.sync_prompts`           | `true`, `false`                              | Store prompts, transcripts, and summaries in checkpoints (default `true`). See [Keeping prompts out of checkpoints](docs/security-and-privacy.md#keeping-prompts-out-of-checkpoints) |
 | `strategy_options.checkpoint_remote`      | `{"provider": "github", "repo": "org/repo"}` | Push checkpoint data to a separate repo (see below)                               |
 | `strategy_options.checkpoint_push_remote` | remote name, e.g. `"upstream"`               | Pin which single remote carries checkpoint data (see below)                       |
 | `strategy_options.filtered_fetches`       | `true`, `false`                              | Use `--filter=blob:none` on checkpoint fetches                                    |
