@@ -702,7 +702,7 @@ func TestCheckpointDelete_ForceRewrittenRemoteV1StaysDiverged(t *testing.T) {
 	// The branches still share history, so only the pair check stops a rebuild.
 	tree := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "rev-parse", "entire/checkpoints/v1^{tree}"))
 	parent := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "rev-parse", "entire/checkpoints/v1^"))
-	rewritten := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "commit-tree", tree, "-p", parent, "-m", "rewritten history"))
+	rewritten := strings.TrimSpace(testutil.RunGit(t, f.bareDir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit-tree", tree, "-p", parent, "-m", "rewritten history"))
 	testutil.RunGit(t, f.bareDir, "update-ref", "refs/heads/entire/checkpoints/v1", rewritten)
 
 	plan, err := PlanCheckpointDelete(t.Context(), cid, CheckpointDeletePlanOptions{})

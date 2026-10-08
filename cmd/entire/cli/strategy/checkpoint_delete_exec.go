@@ -188,7 +188,7 @@ func ExecuteCheckpointDelete(ctx context.Context, plan *CheckpointDeletePlan, op
 		if !adopted && !pushedV1.IsZero() && !localRemoval.IsZero() && slices.Contains(plan.V1PushURLs, target.URL) {
 			adopted = true
 			if err := adoptRemoteV1Removal(ctx, repo, cid, refTip(repo, v1BranchRef), localRemoval, pushedV1); err != nil {
-				logging.Warn(ctx, "checkpoint delete: local v1 left as is; the next push reconciles it",
+				logging.Warn(ctx, "checkpoint delete: local v1 left as is; the next push reconciles it (with OPF on, it refuses until v1 is recovered)",
 					slog.String("checkpoint_id", cid.String()), slog.String("reason", err.Error()))
 			}
 		}
@@ -358,9 +358,14 @@ func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Reposi
 		}
 		deleted = true
 	}
+	// A queue entry left behind is harmless: pre-push drops entries whose
+	// local ref is gone (partitionLocalRefs). So a queue failure is logged and
+	// the delete carries on to the remotes instead of stopping half done.
 	queue, err := checkpoint.PushQueueForRepo(ctx, repo)
 	if err != nil {
-		return deleted, err //nolint:wrapcheck // already names the push queue
+		logging.Warn(ctx, "checkpoint delete: could not open the push queue",
+			slog.String("checkpoint_id", plan.CheckpointID.String()), slog.String("error", err.Error()))
+		return deleted, nil
 	}
 	refs := []plumbing.ReferenceName{}
 	if plan.LocalRef != "" {
@@ -370,7 +375,8 @@ func deleteLocalCheckpointRef(ctx context.Context, root string, repo *git.Reposi
 		refs = append(refs, canonical)
 	}
 	if err := queue.Remove(refs); err != nil {
-		return deleted, fmt.Errorf("remove checkpoint from push queue: %w", err)
+		logging.Warn(ctx, "checkpoint delete: could not remove the checkpoint from the push queue",
+			slog.String("checkpoint_id", plan.CheckpointID.String()), slog.String("error", err.Error()))
 	}
 	return deleted, nil
 }
