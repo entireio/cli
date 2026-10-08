@@ -11,9 +11,7 @@ import (
 // primary store uses: a ULID under the git-refs store, a legacy 12-hex ID
 // otherwise. It is the single place the backend-coupled ID format is decided —
 // generation sites call it instead of id.Generate() so a git-refs checkpoint is
-// always a ULID, which lets reads route by ID kind (ULID ⟹ ref). Import, which
-// derives deterministic IDs instead of minting them, follows the same rule via
-// Stores.PrimaryIsRefs.
+// always a ULID, which lets reads route by ID kind (ULID ⟹ ref).
 //
 // Fail-soft: a missing or malformed checkpoints config resolves to the default
 // hex format rather than blocking ID generation (a bad block already surfaces

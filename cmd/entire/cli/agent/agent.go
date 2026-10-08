@@ -687,9 +687,7 @@ type SubagentAwareExtractor interface {
 	// SubagentTokens across calls: replace the running total with the latest
 	// snapshot, and rescope any window delta by subtracting a previously captured
 	// baseline (see accumulateTokenUsage / resetCheckpointWindow and
-	// session.State.SubagentTokensBaseline in cmd/entire/cli/strategy, and
-	// rescopeSubagentTokensToDeltas in cmd/entire/cli/agentimport for the import
-	// path). An implementation that instead returned per-window deltas would
+	// session.State.SubagentTokensBaseline in cmd/entire/cli/strategy). An implementation that instead returned per-window deltas would
 	// silently break that accounting with no compile-time or test signal.
 	CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, subagentsDir string) (*TokenUsage, error)
 }

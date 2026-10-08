@@ -976,10 +976,8 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 
 // SanitizeTranscriptForAgentType strips non-portable agent state from a transcript
 // about to be stored (see agent.TranscriptSanitizer). It exists for callers that work
-// from a types.AgentType rather than a live agent.Agent: the store itself, as a
-// last-resort safety net, and `entire import`, which reads raw third-party rollouts
-// and calls this before its own redaction pass so the sanitize-before-redact order
-// holds there too.
+// from a types.AgentType rather than a live agent.Agent, such as the store itself,
+// as a last-resort safety net.
 //
 // It dispatches on agent type explicitly rather than resolving via
 // agent.GetByAgentType: the registry is populated by package init, so that lookup
@@ -1031,8 +1029,8 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 		return false, nil, nil
 	}
 
-	// Safety net for in-memory callers that reached the store without sanitizing
-	// (notably `entire import`, which writes raw third-party rollouts). Idempotent,
+	// Safety net for in-memory callers that reached the store without sanitizing.
+	// Idempotent,
 	// so it is a no-op for the paths that already did it — including the fallback
 	// above.
 	transcriptBytes = SanitizeTranscriptForAgentType(opts.Agent, transcriptBytes)

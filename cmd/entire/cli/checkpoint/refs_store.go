@@ -250,8 +250,8 @@ func (s *gitRefsStore) writeSession(ctx context.Context, opts WriteOptions) erro
 	// Parity with the backfill writers above and with GitStore.writeSession: a
 	// canceled ctx means stop doing work, and creating a checkpoint is the most
 	// expensive write there is (tree building plus a commit). Without this a
-	// bulk writer that ignores cancellation — `entire import` was one — keeps
-	// minting checkpoints after Ctrl-C.
+	// bulk writer that ignores cancellation keeps minting checkpoints after
+	// Ctrl-C.
 	if err := ctx.Err(); err != nil {
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}

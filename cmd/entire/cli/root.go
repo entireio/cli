@@ -194,7 +194,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newDoctorCmd(), groupSetup)))         // 'doctor' (group: trace/logs/bundle)
 	cmd.AddCommand(exemptFromEntireDirCheck(newLabsCmd()))                                // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newPluginGroupCmd(), groupSetup)))    // 'plugin' (managed install/list/remove)
-	experimental.Register(cmd, newImportCmd())                                            // 'import' (experimental; import pre-existing agent history)
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newClusterCmd(), groupControlPlane))) // 'cluster' — control-plane cluster catalog
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newOrgCmd(), groupControlPlane)))     // 'org' — control-plane org management
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newProjectCmd(), groupControlPlane))) // 'project' — control-plane project management
