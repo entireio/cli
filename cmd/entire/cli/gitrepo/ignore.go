@@ -13,12 +13,16 @@ import (
 //
 // Tracked paths are never reported (no --no-index): a tracked file that
 // happens to match an ignore pattern can still be committed. An error means
-// git could not answer; callers decide whether to fail open or closed.
+// git could not answer; callers decide whether to fail open or closed. The
+// call is bounded by PathClassificationBudget on top of the caller's context,
+// so a wedged check-ignore cannot consume a hook's whole budget.
 func IgnoredPaths(ctx context.Context, worktreeRoot string, paths []string) (map[string]struct{}, error) {
 	ignored := make(map[string]struct{})
 	if len(paths) == 0 {
 		return ignored, nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, PathClassificationBudget)
+	defer cancel()
 	cmd := worktreeGitCommand(ctx, worktreeRoot, "check-ignore", "-z", "--stdin")
 	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
 	out, err := cmd.Output()

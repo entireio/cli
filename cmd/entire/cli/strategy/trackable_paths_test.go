@@ -106,3 +106,28 @@ func TestFilterTrackableChanges_IgnoreRulesSkipDeletions(t *testing.T) {
 	assert.Equal(t, []string{"new.go"}, added)
 	assert.Equal(t, []string{"tracked.log"}, deleted)
 }
+
+// FilterTrackableChanges asks git about a path once per process: a commit hook
+// filters the transcript files of every session in the worktree, and the
+// answers cannot change within one hook. The test proves the second call is
+// served from the cache by removing the ignore rule between the calls — git
+// would now answer "not ignored" — and checking the first answer still holds.
+// Not parallel: the cache is process-global and the test resets it.
+func TestFilterTrackableChanges_CachesAnswersPerProcess(t *testing.T) {
+	dir := setupGitRepo(t)
+	resetTrackablePathCacheForTesting()
+	t.Cleanup(resetTrackablePathCacheForTesting)
+	testutil.WriteFile(t, dir, ".gitignore", "ignored.env\n")
+	ctx := context.Background()
+
+	kept, _, _ := FilterTrackableChanges(ctx, dir, []string{"ignored.env", "src.go"}, nil, nil)
+	require.Equal(t, []string{"src.go"}, kept)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, ".gitignore")))
+	kept, _, _ = FilterTrackableChanges(ctx, dir, []string{"ignored.env", "src.go"}, nil, nil)
+	assert.Equal(t, []string{"src.go"}, kept, "the second call is answered from the cache without asking git")
+
+	resetTrackablePathCacheForTesting()
+	kept, _, _ = FilterTrackableChanges(ctx, dir, []string{"ignored.env", "src.go"}, nil, nil)
+	assert.Equal(t, []string{"ignored.env", "src.go"}, kept, "after a reset git is asked again")
+}
