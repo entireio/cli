@@ -173,3 +173,30 @@ func TestUninstallShadowBranches_NoneSaysLegacy(t *testing.T) {
 	assert.True(t, uninstallShadowBranches(context.Background(), newUninstallPrinter(&out, &errOut)))
 	assert.Contains(t, out.String(), "No legacy shadow branches to remove")
 }
+
+// Uninstall deletes only the strict entire/<commit>-<worktree> form. A bare
+// entire/<hex> branch may be the user's own branch named like a short SHA, so
+// it is kept and listed by name with a pointer to `entire clean --all`, and the
+// uninstall still succeeds. Not parallel: t.Chdir.
+func TestUninstallShadowBranches_KeepsAndListsBareForm(t *testing.T) {
+	setupStopTestRepo(t)
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	for _, branch := range []string{"entire/1234567-abcdef", "entire/fedcba9"} {
+		testutil.RunGit(t, dir, "branch", branch)
+	}
+	assert.Equal(t, 1, countShadowBranches(context.Background()), "only the strict form is counted for removal")
+
+	var out, errOut bytes.Buffer
+	ok := uninstallShadowBranches(context.Background(), newUninstallPrinter(&out, &errOut))
+	assert.True(t, ok)
+	assert.Contains(t, out.String(), "Removed 1 legacy shadow branch")
+	all := out.String() + errOut.String()
+	assert.Contains(t, all, "entire/fedcba9")
+	assert.Contains(t, all, "entire clean --all")
+
+	branches := localBranchList(t, dir)
+	assert.NotContains(t, branches, "entire/1234567-abcdef")
+	assert.Contains(t, branches, "entire/fedcba9", "the bare form is never deleted by uninstall")
+}

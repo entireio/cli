@@ -1316,7 +1316,9 @@ To completely remove Entire integrations from this repository, use --uninstall:
   - Git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push),
     restoring any hooks Entire backed up
   - Session state files (.git/entire-sessions/)
-  - Shadow branches older versions left behind (entire/<hash>)
+  - Shadow branches older versions left behind (entire/<commit>-<worktree>);
+    bare entire/<commit> branches are listed and kept, since a branch of
+    yours named after a short SHA looks the same (entire clean --all)
   - Agent hooks
 
 An external agent's hooks live inside its plugin, so removing them means asking the
@@ -2996,14 +2998,16 @@ func uninstallEntireDir(ctx context.Context, p *uninstallPrinter, dirExists bool
 }
 
 // uninstallShadowBranches removes the legacy shadow branches older versions
-// left behind, both the entire/<commit>-<worktree> form and the bare
-// entire/<hex> form. The deletion is `git branch -D`, which force-deletes: it
-// does not stop at an unmerged branch, so a user's own branch named like a
-// short SHA under entire/ is deleted too. The only branch git refuses is one
-// checked out in a worktree; like doctor, that one is reported and kept, it
-// does not fail the uninstall, and the deleted count is still shown.
+// left behind in the strict entire/<commit>-<worktree> form, exactly like
+// `entire doctor --force`. The deletion is `git branch -D`, which
+// force-deletes, so the bare entire/<hex> form is never deleted here: a user's
+// own branch named like a short SHA under entire/ matches it. Bare-form
+// branches are listed by name as kept, with a pointer to `entire clean --all`,
+// which removes them behind its own confirmation. A strict-form branch git
+// refuses to delete (checked out in a worktree) is reported and kept too.
+// Neither fails the uninstall, and the deleted count is still shown.
 func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
-	deleted, kept, err := removeAllShadowBranches(ctx)
+	deleted, kept, bare, err := removeAllShadowBranches(ctx)
 	if err != nil {
 		p.stepFailed("Failed to remove legacy shadow branches")
 		p.warnUnder("failed to remove legacy shadow branches: %v", err)
@@ -3012,7 +3016,7 @@ func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 	switch {
 	case deleted > 0:
 		p.step("Removed %s", pluralCount(deleted, "legacy shadow branch", "legacy shadow branches"))
-	case len(kept) == 0:
+	case len(kept) == 0 && len(bare) == 0:
 		p.noop("No legacy shadow branches to remove")
 	}
 	if len(kept) > 0 {
@@ -3020,6 +3024,13 @@ func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 		for _, branch := range kept {
 			p.warnDetail("%s", branch)
 		}
+	}
+	if len(bare) > 0 {
+		p.warn("Kept %s in the oldest entire/<commit> form; it may be yours (a branch named after a short SHA looks the same):", pluralCount(len(bare), "branch", "branches"))
+		for _, branch := range bare {
+			p.warnDetail("%s", branch)
+		}
+		p.warnDetail("Review with `entire clean --all --dry-run`; `entire clean --all` removes them after confirming.")
 	}
 	return true
 }
@@ -3117,9 +3128,10 @@ func countSessionStates(ctx context.Context) int {
 }
 
 // countShadowBranches returns the number of legacy shadow branches older CLI
-// versions left behind.
+// versions left behind that uninstall deletes: the strict
+// entire/<commit>-<worktree> form only (see uninstallShadowBranches).
 func countShadowBranches(ctx context.Context) int {
-	branches, err := strategy.ListLegacyShadowBranches(ctx)
+	branches, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
 		return 0
 	}
@@ -3396,17 +3408,32 @@ func removeEntireDirectory(ctx context.Context) error {
 	return root.RemoveAll(paths.EntireDir) //nolint:wrapcheck // caller names the directory; os error carries operation
 }
 
-// removeAllShadowBranches removes the legacy shadow branches older CLI
-// versions left behind, returning how many were deleted and which ones git
-// refused to delete. Only a failure to list them is an error.
-func removeAllShadowBranches(ctx context.Context) (int, []string, error) {
-	branches, err := strategy.ListLegacyShadowBranches(ctx)
+// removeAllShadowBranches removes the strict entire/<commit>-<worktree>
+// legacy shadow branches older CLI versions left behind, returning how many
+// were deleted, which ones git refused to delete, and the bare entire/<hex>
+// branches it leaves alone (see uninstallShadowBranches). Only a failure to
+// list them is an error.
+func removeAllShadowBranches(ctx context.Context) (deleted int, refused, bare []string, err error) {
+	strict, err := strategy.ListRemovableLegacyShadowBranches(ctx)
 	if err != nil {
-		return 0, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
+		return 0, nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
-	if len(branches) == 0 {
-		return 0, nil, nil
+	all, err := strategy.ListLegacyShadowBranches(ctx)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("failed to list legacy shadow branches: %w", err)
 	}
-	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
-	return len(deleted), failed, nil
+	removable := make(map[string]struct{}, len(strict))
+	for _, branch := range strict {
+		removable[branch] = struct{}{}
+	}
+	for _, branch := range all {
+		if _, ok := removable[branch]; !ok {
+			bare = append(bare, branch)
+		}
+	}
+	if len(strict) == 0 {
+		return 0, nil, bare, nil
+	}
+	deletedBranches, failed := strategy.DeleteLegacyShadowBranches(ctx, strict)
+	return len(deletedBranches), failed, bare, nil
 }
