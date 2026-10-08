@@ -60,6 +60,38 @@ func checkpointRepoSlugs(entries []coreapi.RepoIndexEntry) []string {
 	return slugs
 }
 
+// listCompletionRepoIndex makes at most one request. Completion is invoked on
+// every TAB press, so it must not share the wizard's multi-page/time budget.
+func listCompletionRepoIndex(ctx context.Context, prefix string) ([]coreapi.RepoIndexEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	client, err := newCellCoreClient()
+	if err != nil {
+		return nil, fmt.Errorf("control plane unavailable: %w", err)
+	}
+	params := coreapi.ListReposParams{
+		Sort:           coreapi.NewOptString("last_activity_at"),
+		Order:          coreapi.NewOptListReposOrder(coreapi.ListReposOrderDesc),
+		PageSize:       coreapi.NewOptInt32(100),
+		HasCheckpoints: coreapi.NewOptListReposHasCheckpoints(coreapi.ListReposHasCheckpointsTrue),
+	}
+	// Q searches the index's owner/repo name, not the CLI's forge prefix.
+	query := strings.ToLower(prefix)
+	if strings.HasPrefix(query, "gh/") || strings.HasPrefix(query, "et/") {
+		query = query[3:]
+	}
+	if query != "" {
+		params.Q = coreapi.NewOptString(query)
+	}
+	out, err := client.ListRepos(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("list completion repos: %w", err)
+	}
+	// More pages are deliberately ignored; typing a narrower prefix can
+	// surface less-recent repos without making completion walk the index.
+	return out.Repos, nil
+}
+
 func checkpointRepoSlug(entry coreapi.RepoIndexEntry) string {
 	forge, _ := forgeOfEntry(entry)
 	name := strings.Trim(strings.TrimSpace(entry.FullName), "/")

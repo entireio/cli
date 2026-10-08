@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -63,7 +64,7 @@ func TestResolveRepoFilters_CompletionProviderIsolation(t *testing.T) {
 	}
 }
 
-func TestCheckpointRepoIndex_PagesAndCompletion(t *testing.T) {
+func TestCheckpointRepoIndex_PagesAndTruncation(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -81,7 +82,6 @@ func TestCheckpointRepoIndex_PagesAndCompletion(t *testing.T) {
 	old := newCellCoreClient
 	newCellCoreClient = func() (cellCoreClient, error) { return coreapi.NewWithBearer(srv.URL, "test") }
 	t.Cleanup(func() { newCellCoreClient = old })
-	cmd := &cobra.Command{}
 	dir := t.TempDir()
 	logger, err := logging.New(logging.Config{Root: entiredir.OpenerAt(dir), Dir: logging.LogsName, Level: slog.LevelWarn})
 	if err != nil {
@@ -92,8 +92,11 @@ func TestCheckpointRepoIndex_PagesAndCompletion(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	cmd.SetContext(logging.WithLogger(context.Background(), logger))
-	got, directive := completeRepoFlag(cmd, nil, "")
+	entries, err := listCheckpointRepoIndex(logging.WithLogger(context.Background(), logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := append([]string{"*"}, checkpointRepoSlugs(entries)...)
 	if err := logger.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,8 +107,8 @@ func TestCheckpointRepoIndex_PagesAndCompletion(t *testing.T) {
 	if !strings.Contains(string(content), "repo index truncated") {
 		t.Fatalf("missing truncation warning: %s", content)
 	}
-	if strings.Join(got, ",") != "*,gh/owner/new,et/project/old" || directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Fatalf("completion = %v, %v", got, directive)
+	if strings.Join(got, ",") != "*,gh/owner/new,et/project/old" {
+		t.Fatalf("slugs = %v", got)
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("calls = %d", calls.Load())
@@ -137,6 +140,46 @@ func TestLoadDispatchWizardScope_OneIndexWalk(t *testing.T) {
 	}
 	if strings.Join(scope.reposIn("us"), ",") != "gh/owner/new" || strings.Join(scope.reposIn("eu"), ",") != "et/project/native" {
 		t.Fatalf("scope = %+v", scope)
+	}
+}
+
+func TestCompleteRepoFlag_OnePageAndPrefix(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		q := r.URL.Query()
+		if q.Get("sort") != "last_activity_at" || q.Get("order") != "desc" || q.Get("pageSize") != "100" || q.Get("q") != "project/old" || q.Get("pageToken") != "" {
+			t.Errorf("unexpected query: %s", r.URL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"repos":[{"id":"old","name":"old","cell":"us","clusterSlug":"us","jurisdiction":"us","visibility":"private","full_name":"project/old","provider":"entire","checkpointCount":1,"placements":[]},{"id":"mirror","name":"old","cell":"us","clusterSlug":"us","jurisdiction":"us","visibility":"private","full_name":"project/old","provider":"github","checkpointCount":1,"placements":[]}],"nextPageToken":"more","truncated":true}`)
+	}))
+	defer srv.Close()
+	old := newCellCoreClient
+	newCellCoreClient = func() (cellCoreClient, error) { return coreapi.NewWithBearer(srv.URL, "test") }
+	t.Cleanup(func() { newCellCoreClient = old })
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	got, directive := completeRepoFlag(cmd, nil, "et/project/old")
+	if strings.Join(got, ",") != "*,et/project/old" || directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("completion = %v, %v", got, directive)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("calls = %d", calls.Load())
+	}
+}
+
+func TestCompleteRepoFlag_Timeout(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{blockUntilCtxDone: true})
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	start := time.Now()
+	got, directive := completeRepoFlag(cmd, nil, "")
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("completion exceeded short timeout: %s", elapsed)
+	}
+	if strings.Join(got, ",") != "*" || directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("completion = %v, %v", got, directive)
 	}
 }
 

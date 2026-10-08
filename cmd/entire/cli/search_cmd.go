@@ -356,13 +356,17 @@ func resolveDefaultSearchRepo(ctx context.Context, explicitScope bool) (forge, o
 // regardless of auth state. Errors are swallowed (rather than surfaced via
 // ShellCompDirectiveError) because completion runs on every TAB press and
 // must never pollute the user's prompt with error output.
-func completeRepoFlag(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+func completeRepoFlag(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	suggestions := []string{"*"}
-	repos, err := listCheckpointRepoIndex(cmd.Context())
+	repos, err := listCompletionRepoIndex(cmd.Context(), toComplete)
 	if err != nil {
 		return suggestions, cobra.ShellCompDirectiveNoFileComp
 	}
-	suggestions = append(suggestions, checkpointRepoSlugs(repos)...)
+	for _, slug := range checkpointRepoSlugs(repos) {
+		if strings.HasPrefix(strings.ToLower(slug), strings.ToLower(toComplete)) {
+			suggestions = append(suggestions, slug)
+		}
+	}
 	return suggestions, cobra.ShellCompDirectiveNoFileComp
 }
 
