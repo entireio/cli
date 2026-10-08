@@ -201,8 +201,9 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 }
 
 // untrackedDeletionCandidates returns the paths this session recorded a hash
-// for in an earlier turn that are now absent from both the worktree and HEAD.
-// Such a path was an untracked file the agent created and later removed: git
+// for in an earlier turn that are now absent from the worktree, from HEAD, and
+// from the index. Such a path was an untracked file the agent created and later
+// removed: git
 // status reports no deletion for an untracked file, so no turn-end step
 // recorded one, and left alone the hashed path would stay pending forever and
 // let a later, unrelated file the user creates at that path link the session
@@ -215,6 +216,12 @@ func dropPhantomFilesTouched(worktreeRoot string, state *SessionState, stepPaths
 // links by name unless the agent touches it again, which records a fresh hash.
 // The alternative, keeping every vanished hashed path, is the unbounded
 // mis-linking window this closes.
+//
+// The index check matters: a file the user staged (`git add`) and that then
+// left the worktree is not untracked, and the next commit adds the staged blob
+// as a new file. Recording it as a deletion would stop that commit linking the
+// session even though it holds the agent's exact content, so such a path keeps
+// its hash.
 //
 // Paths the current step names (changed or deleted) are left to the step.
 // Reads session state without the lock; recordUntrackedDeletions re-checks
@@ -257,9 +264,21 @@ func (s *ManualCommitStrategy) untrackedDeletionCandidates(ctx context.Context, 
 			slog.String("error", err.Error()))
 		return nil
 	}
-	candidates := absent[:0]
+	notInHead := make([]string, 0, len(absent))
 	for _, path := range absent {
 		if _, tracked := inHead[path]; !tracked {
+			notInHead = append(notInHead, path)
+		}
+	}
+	inIndex, err := gitrepo.PathsInIndex(ctx, worktreeRoot, notInHead)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"), "could not check the index for vanished touched files; leaving them",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	candidates := notInHead[:0]
+	for _, path := range notInHead {
+		if _, staged := inIndex[path]; !staged {
 			candidates = append(candidates, path)
 		}
 	}

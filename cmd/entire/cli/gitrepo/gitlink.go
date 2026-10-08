@@ -107,6 +107,33 @@ func headIsUnborn(ctx context.Context, repoRoot string) (bool, error) {
 	return false, fmt.Errorf("git rev-parse HEAD: %w", err)
 }
 
+// PathsInIndex returns the subset of paths (relative to repoRoot) that the
+// index has an entry for, staged or merely tracked, from pathspec-limited `git
+// ls-files -z --cached` calls with literal pathspecs. Bounded by
+// PathClassificationBudget on top of the caller's context.
+func PathsInIndex(ctx context.Context, repoRoot string, paths []string) (map[string]struct{}, error) {
+	found := make(map[string]struct{})
+	if len(paths) == 0 {
+		return found, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, PathClassificationBudget)
+	defer cancel()
+
+	for start := 0; start < len(paths); start += pathClassificationChunk {
+		chunk := paths[start:min(start+pathClassificationChunk, len(paths))]
+		out, err := literalPathspecCommand(ctx, repoRoot, chunk, "ls-files", "-z", "--cached").Output()
+		if err != nil {
+			return found, fmt.Errorf("git ls-files: %w", err)
+		}
+		for _, name := range bytes.Split(out, []byte{0}) {
+			if len(name) > 0 {
+				found[string(name)] = struct{}{}
+			}
+		}
+	}
+	return found, nil
+}
+
 // PathsInHEAD returns the subset of paths (relative to repoRoot) that HEAD's
 // tree has, from pathspec-limited `git ls-tree -z --name-only HEAD` calls with
 // literal pathspecs. An unborn HEAD has no paths. Bounded by

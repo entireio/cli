@@ -330,3 +330,35 @@ func TestFilesWithRemainingAgentChanges_RemovedUntrackedFileDropped(t *testing.T
 		[]string{"scratch.txt", "other.txt"}, map[string]struct{}{"other.txt": {}})
 	assert.Empty(t, remaining)
 }
+
+// The agent creates new.go, the user stages it, and the file then leaves the
+// worktree before the next turn end. Committing the staged blob (the agent's
+// exact content) must still link the session.
+func TestStagedThenRemovedFileStillLinks(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	s := &ManualCommitStrategy{}
+	sid := "2026-10-08-staged-then-removed"
+	ctx := context.Background()
+
+	testutil.WriteFile(t, dir, "new.go", "package main\n")
+	saveTestStep(t, s, dir, sid, "new.go")
+	testutil.GitAdd(t, dir, "new.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "new.go")))
+	require.NoError(t, s.RecordVanishedUntrackedFiles(ctx, sid))
+
+	state, err := s.loadSessionState(ctx, sid)
+	require.NoError(t, err)
+	assert.NotEqual(t, touchedFileDeleted, state.TouchedFileHashes["new.go"],
+		"a path still staged in the index is not an untracked file the agent removed")
+
+	testutil.GitCommit(t, dir, "commit staged new.go")
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	assert.True(t, filesOverlapWithContent(ctx, state.TouchedFileHashes, commit, state.FilesTouched),
+		"the commit holds the agent's new.go and should link the session")
+}

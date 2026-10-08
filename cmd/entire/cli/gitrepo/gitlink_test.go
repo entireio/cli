@@ -79,3 +79,25 @@ func TestGitlinkPaths(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }
+
+func TestPathsInIndex(t *testing.T) {
+	// Not parallel: isolateGitConfig uses t.Setenv.
+	isolateGitConfig(t)
+	dir := initGitlinkRepo(t)
+
+	// Unborn HEAD: a staged file is in the index; a removed-from-worktree
+	// staged file still is; an untracked file and a glob-named pathspec are not.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "staged.go"), []byte("a\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "gone.go"), []byte("b\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.go"), []byte("c\n"), 0o644))
+	gitIn(t, dir, "add", "staged.go", "gone.go")
+	require.NoError(t, os.Remove(filepath.Join(dir, "gone.go")))
+
+	found, err := PathsInIndex(context.Background(), dir, []string{"staged.go", "gone.go", "untracked.go", "missing", "*.go"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]struct{}{"staged.go": {}, "gone.go": {}}, found)
+
+	empty, err := PathsInIndex(context.Background(), dir, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
