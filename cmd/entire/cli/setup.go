@@ -1489,8 +1489,12 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		_, pruned, err := installAgentHooks(ctx, ag, opts.ForceHooks)
+		if err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
+		}
+		if pruned {
+			reportPrunedStaleHooks(w, ag)
 		}
 		warnCodexHooksAfterSetup(ctx, w, ag)
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
@@ -1981,13 +1985,40 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	return count, nil
 }
 
+// installAgentHooks installs ag's hooks (setupAgentHooks) and reports whether
+// the install also pruned Entire hooks this version no longer writes (for
+// Claude Code, the retired post-todo hook). The stale check runs before the
+// install, because afterwards there is nothing left to detect. Every enable
+// path reports a prune, so a rewritten config is never called "already
+// installed" or left unmentioned.
+func installAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (installed int, prunedStale bool, err error) {
+	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
+		prunedStale = reporter.HasStaleManagedHooks(ctx)
+	}
+	installed, err = setupAgentHooks(ctx, ag, forceHooks)
+	if err != nil {
+		return 0, false, err
+	}
+	return installed, prunedStale, nil
+}
+
+// reportPrunedStaleHooks tells the user an install removed outdated Entire
+// hooks from ag's config.
+func reportPrunedStaleHooks(w io.Writer, ag agent.Agent) {
+	fmt.Fprintf(w, "  Removed outdated Entire hooks for %s (hooks no longer used by this version)\n", ag.Description())
+}
+
 func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
 	var successful []agent.Agent
 	var errs []error
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, forceHooks); err != nil {
+		_, pruned, err := installAgentHooks(ctx, ag, forceHooks)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 			continue
+		}
+		if pruned {
+			reportPrunedStaleHooks(w, ag)
 		}
 		warnCodexHooksAfterSetup(ctx, w, ag)
 		successful = append(successful, ag)
@@ -2233,14 +2264,10 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
-	// Install agent hooks (agent hooks don't depend on settings). Ask first
-	// whether the install will also prune stale Entire hooks, so the message
-	// below does not call a changed config "already installed".
-	prunedStaleHooks := false
-	if reporter, ok := agent.AsStaleHookReporter(ag); ok {
-		prunedStaleHooks = reporter.HasStaleManagedHooks(ctx)
-	}
-	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+	// Install agent hooks (agent hooks don't depend on settings). The install
+	// reports whether it also pruned stale Entire hooks, so the message below
+	// does not call a changed config "already installed".
+	installedHooks, prunedStaleHooks, err := installAgentHooks(ctx, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
@@ -2348,7 +2375,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	switch {
 	case installedHooks == 0 && prunedStaleHooks:
-		fmt.Fprintf(w, "  Removed outdated Entire hooks for %s (hooks no longer used by this version)\n", ag.Description())
+		reportPrunedStaleHooks(w, ag)
 	case installedHooks == 0:
 		fmt.Fprintf(w, "  Hooks for %s already installed\n", ag.Description())
 	case prunedStaleHooks:
