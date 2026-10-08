@@ -1170,7 +1170,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH=/usr/local/bin/custom-ssh")
 			},
-			want: "/usr/local/bin/custom-ssh -o BatchMode=yes",
+			want: "'/usr/local/bin/custom-ssh' -o BatchMode=yes",
 		},
 		{
 			name: "unrelated substring containing BatchMode-like text does not count as explicit",
@@ -1194,22 +1194,117 @@ func TestWithBatchModeSSH(t *testing.T) {
 			want: "/usr/bin/ssh -i key -o BatchMode=yes -o ConnectTimeout=30",
 		},
 		{
-			name: "non-OpenSSH client gets no ConnectTimeout",
+			name: "plink that already runs -batch is left untouched",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=plink -batch")
 			},
-			want: "plink -batch -o BatchMode=yes",
+			want: "plink -batch",
+		},
+		{
+			name: "plink gets -batch, not -o options it rejects",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=plink.exe -i key.ppk")
+			},
+			want: "plink.exe -i key.ppk -batch",
+		},
+		{
+			name: "single-quoted plink path with spaces is recognized",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH_COMMAND='C:\Program Files\PuTTY\plink.exe'`)
+			},
+			want: `'C:\Program Files\PuTTY\plink.exe' -batch`,
+		},
+		{
+			name: "GIT_SSH plink path with spaces is quoted as one word",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH=C:\Program Files\PuTTY\PLINK.EXE`)
+			},
+			want: `'C:\Program Files\PuTTY\PLINK.EXE' -batch`,
+		},
+		{
+			name: "GIT_SSH TortoisePlink needs nothing: git passes -batch itself",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, `GIT_SSH=C:\TortoiseGit\bin\TortoisePlink.exe`)
+			},
+			want: "",
+		},
+		{
+			name: "GIT_SSH_VARIANT=plink declares a wrapper as plink",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", "GIT_SSH_VARIANT=plink")
+			},
+			want: "my-wrapper -batch",
+		},
+		{
+			name: "GIT_SSH_VARIANT=ssh declares a wrapper as OpenSSH",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", "GIT_SSH_VARIANT=ssh")
+			},
+			want: "my-wrapper -o BatchMode=yes -o ConnectTimeout=30",
+		},
+		{
+			name: "ssh.variant=simple config takes no options",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", rawGitConfigFile(t, "[ssh]\n\tvariant = simple\n"))
+			},
+			want: "my-wrapper",
+		},
+		{
+			name: "GIT_SSH_VARIANT env beats ssh.variant config",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=my-wrapper", "GIT_SSH_VARIANT=plink",
+					rawGitConfigFile(t, "[ssh]\n\tvariant = simple\n"))
+			},
+			want: "my-wrapper -batch",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			out := withBatchModeSSH(context.Background(), tt.in(t))
+			in := tt.in(t)
+			out := withBatchModeSSH(context.Background(), in)
 			got, ok := envToMap(out)["GIT_SSH_COMMAND"]
+			if tt.want == "" {
+				assert.False(t, ok, "GIT_SSH_COMMAND should not be set")
+				assert.Equal(t, in, out, "env should be returned unchanged")
+				return
+			}
 			assert.True(t, ok, "GIT_SSH_COMMAND should be set")
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// rawGitConfigFile writes content as a global gitconfig and returns the
+// GIT_CONFIG_GLOBAL env entry pointing at it.
+func rawGitConfigFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gitconfig")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return "GIT_CONFIG_GLOBAL=" + path
+}
+
+func TestFirstCmdlineWord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{in: "ssh -i key", want: "ssh", ok: true},
+		{in: "  plink", want: "plink", ok: true},
+		{in: `'C:\Program Files\plink.exe' -batch`, want: `C:\Program Files\plink.exe`, ok: true},
+		// As in git's split_cmdline, a backslash escapes outside single quotes.
+		{in: `"C:\Program Files\plink.exe"`, want: `C:Program Filesplink.exe`, ok: true},
+		{in: `/opt/my\ ssh -v`, want: `/opt/my ssh`, ok: true},
+		{in: `'unterminated`, ok: false},
+		{in: "   ", ok: false},
+	}
+	for _, tt := range tests {
+		got, ok := firstCmdlineWord(tt.in)
+		assert.Equal(t, tt.ok, ok, tt.in)
+		assert.Equal(t, tt.want, got, tt.in)
 	}
 }
 

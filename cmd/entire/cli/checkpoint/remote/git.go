@@ -188,22 +188,93 @@ func hasExplicitBatchMode(sshCmd string) bool {
 // same forms batchModeOptionRe accepts.
 var connectTimeoutOptionRe = regexp.MustCompile(`(?i)\bConnectTimeout\s*=\s*\S+`)
 
+// plinkBatchArgRe matches plink's own non-interactive flag as a whole word.
+var plinkBatchArgRe = regexp.MustCompile(`(?i)(^|\s)-batch(\s|$)`)
+
 // nonInteractiveSSHConnectTimeout bounds the TCP connect to an unreachable host,
 // whose kernel default (~75-130s) would otherwise spend most of the pre-push
 // checkpoint budget on one attempt. Generous for any reachable host.
 const nonInteractiveSSHConnectTimeout = "30"
 
-// isOpenSSHCommand reports whether sshCmd runs OpenSSH, by the basename of its
-// first word — the same guess git makes for its ssh variant. Options are only
-// added for OpenSSH: other clients (plink, custom wrappers) may reject -o.
-func isOpenSSHCommand(sshCmd string) bool {
-	fields := strings.Fields(sshCmd)
-	if len(fields) == 0 {
-		return false
+// sshVariant is the kind of ssh client git will run, which decides the options
+// it accepts. Mirrors git's own variants (connect.c, determine_ssh_variant).
+type sshVariant int
+
+const (
+	sshVariantAuto          sshVariant = iota // unrecognized client
+	sshVariantOpenSSH                         // takes -o options
+	sshVariantPlink                           // plink/putty: rejects -o; -batch is its BatchMode
+	sshVariantTortoisePlink                   // git passes -batch itself
+	sshVariantSimple                          // takes no options at all
+)
+
+// overrideSSHVariant maps an explicit GIT_SSH_VARIANT / ssh.variant value the
+// way git does: "auto" defers to detection, unknown values mean OpenSSH.
+func overrideSSHVariant(v string) sshVariant {
+	switch v {
+	case "auto":
+		return sshVariantAuto
+	case "plink", "putty":
+		return sshVariantPlink
+	case "tortoiseplink":
+		return sshVariantTortoisePlink
+	case "simple":
+		return sshVariantSimple
 	}
-	prog := strings.Trim(fields[0], `"'`)
-	base := strings.ToLower(prog[strings.LastIndexAny(prog, `/\`)+1:])
-	return base == "ssh" || base == "ssh.exe"
+	return sshVariantOpenSSH
+}
+
+// sshVariantForProgram detects the variant from a program path's basename,
+// case-insensitively and with either path separator, as git does.
+func sshVariantForProgram(prog string) sshVariant {
+	switch strings.ToLower(prog[strings.LastIndexAny(prog, `/\`)+1:]) {
+	case "ssh", "ssh.exe":
+		return sshVariantOpenSSH
+	case "plink", "plink.exe":
+		return sshVariantPlink
+	case "tortoiseplink", "tortoiseplink.exe":
+		return sshVariantTortoisePlink
+	}
+	return sshVariantAuto
+}
+
+// firstCmdlineWord returns the program of a shell-style command line, unquoted
+// the way git's split_cmdline does it: single and double quotes group, and a
+// backslash outside single quotes escapes the next character. ok is false for
+// an empty or unterminated command line.
+func firstCmdlineWord(cmdline string) (string, bool) {
+	var word strings.Builder
+	var quote rune
+	started, escaped := false, false
+	for _, c := range strings.TrimLeftFunc(cmdline, unicode.IsSpace) {
+		switch {
+		case escaped:
+			word.WriteRune(c)
+			escaped = false
+		case c == '\\' && quote != '\'':
+			escaped, started = true, true
+		case quote == 0 && unicode.IsSpace(c):
+			return word.String(), true
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote, started = c, true
+		case c == quote:
+			quote = 0
+		default:
+			word.WriteRune(c)
+			started = true
+		}
+	}
+	if quote != 0 || escaped || !started {
+		return "", false
+	}
+	return word.String(), true
+}
+
+// shellQuoteSSHProgram single-quotes a GIT_SSH program path for use as
+// GIT_SSH_COMMAND, which git runs through sh: GIT_SSH is a bare path, so one
+// containing spaces ("C:\Program Files\PuTTY\plink.exe") must stay one word.
+func shellQuoteSSHProgram(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 // envLookup returns the value of the last occurrence of key in env (matching
@@ -219,50 +290,110 @@ func envLookup(env []string, key string) (string, bool) {
 	return "", false
 }
 
-// gitConfigSSHCommand looks up core.sshCommand via `git config`, run with env
-// so the lookup honors any HOME/GIT_CONFIG_* overrides present in env (e.g. in
-// tests). Returns "" if unset or the lookup fails.
-func gitConfigSSHCommand(ctx context.Context, env []string) string {
-	cmd := exec.CommandContext(ctx, "git", "config", "--get", "core.sshCommand")
+// gitConfigSSH looks up core.sshCommand and ssh.variant in one `git config`
+// call, run with env so the lookup honors any HOME/GIT_CONFIG_* overrides
+// present in env (e.g. in tests). Unset values, or a failed lookup, are "".
+func gitConfigSSH(ctx context.Context, env []string) (sshCommand, variant string, hasVariant bool) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get-regexp", `^(core\.sshcommand|ssh\.variant)$`)
 	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		return "", "", false
 	}
-	return strings.TrimSpace(string(out))
-}
-
-// effectiveSSHCommand resolves the ssh invocation git itself would use, in
-// git's own precedence order: the GIT_SSH_COMMAND environment variable, then
-// the core.sshCommand git config value, then the GIT_SSH environment
-// variable, falling back to plain "ssh" when none are set.
-func effectiveSSHCommand(ctx context.Context, env []string) string {
-	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
+	// Last value wins, as for git's own single-valued lookups.
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		key, value, _ := strings.Cut(line, " ")
+		switch key {
+		case "core.sshcommand":
+			sshCommand = strings.TrimSpace(value)
+		case "ssh.variant":
+			variant, hasVariant = value, true
 		}
 	}
-	if v := gitConfigSSHCommand(ctx, env); v != "" {
-		return v
-	}
-	if v, ok := envLookup(env, "GIT_SSH"); ok {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return "ssh"
+	return sshCommand, variant, hasVariant
 }
 
-// withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
-// BatchMode=yes and, for OpenSSH, a ConnectTimeout. The base ssh invocation is resolved via effectiveSSHCommand
-// (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
-// ssh command configured via core.sshCommand isn't silently discarded. The
-// flag is only appended when BatchMode isn't already explicitly set — an
-// existing BatchMode=no is a deliberate user choice and is left untouched —
-// so the result is idempotent.
+// resolvedSSH is the ssh client git itself would run for a remote operation.
+type resolvedSSH struct {
+	command string // shell command line (or bare program path when !cmdline)
+	cmdline bool   // false when command came from GIT_SSH, a bare program path
+	variant sshVariant
+}
+
+// resolveSSH resolves the ssh invocation git itself would use, in git's own
+// precedence order: the GIT_SSH_COMMAND environment variable, then the
+// core.sshCommand git config value, then the GIT_SSH environment variable,
+// falling back to plain "ssh" when none are set. The variant comes from
+// GIT_SSH_VARIANT or ssh.variant when set, else from the program's name.
+func resolveSSH(ctx context.Context, env []string) resolvedSSH {
+	configCmd, configVariant, hasConfigVariant := gitConfigSSH(ctx, env)
+	res := resolvedSSH{command: "ssh", cmdline: true}
+	if v, ok := envLookup(env, "GIT_SSH_COMMAND"); ok && strings.TrimSpace(v) != "" {
+		res.command = strings.TrimSpace(v)
+	} else if configCmd != "" {
+		res.command = configCmd
+	} else if v, ok := envLookup(env, "GIT_SSH"); ok && strings.TrimSpace(v) != "" {
+		res.command, res.cmdline = strings.TrimSpace(v), false
+	}
+
+	if v, ok := envLookup(env, "GIT_SSH_VARIANT"); ok {
+		res.variant = overrideSSHVariant(v)
+		return res
+	}
+	if hasConfigVariant {
+		res.variant = overrideSSHVariant(configVariant)
+		return res
+	}
+	prog := res.command
+	if res.cmdline {
+		word, ok := firstCmdlineWord(res.command)
+		if !ok {
+			return res // sshVariantAuto
+		}
+		prog = word
+	}
+	res.variant = sshVariantForProgram(prog)
+	return res
+}
+
+// withBatchModeSSH returns env with GIT_SSH_COMMAND set so the ssh client git
+// runs cannot prompt: OpenSSH and unrecognized clients get BatchMode=yes, plink
+// gets its equivalent -batch, and OpenSSH also gets a ConnectTimeout. The base
+// invocation is resolved via resolveSSH, so a custom ssh command configured via
+// core.sshCommand or GIT_SSH isn't silently discarded. Options a client would
+// reject are never added: plink fails on -o, and TortoisePlink and the
+// "simple" variant need nothing from us. An option already set explicitly is
+// left as the user chose it — an existing BatchMode=no is deliberate — so the
+// result is idempotent. env is returned unchanged when nothing needs adding.
 func withBatchModeSSH(ctx context.Context, env []string) []string {
 	const key = "GIT_SSH_COMMAND="
-	base := effectiveSSHCommand(ctx, env)
+	ssh := resolveSSH(ctx, env)
+	var opts string
+	switch ssh.variant {
+	case sshVariantOpenSSH, sshVariantAuto:
+		if !hasExplicitBatchMode(ssh.command) {
+			opts += " -o BatchMode=yes"
+		}
+		// Command-line -o beats ~/.ssh/config, so a ConnectTimeout set there is
+		// overridden here; one set on the command itself is left alone.
+		// Unrecognized clients get BatchMode only, as before: wrappers that
+		// exec ssh "$@" need it, but a timeout is not ours to impose on them.
+		if ssh.variant == sshVariantOpenSSH && !connectTimeoutOptionRe.MatchString(ssh.command) {
+			opts += " -o ConnectTimeout=" + nonInteractiveSSHConnectTimeout
+		}
+	case sshVariantPlink:
+		if !plinkBatchArgRe.MatchString(ssh.command) {
+			opts += " -batch"
+		}
+	case sshVariantTortoisePlink, sshVariantSimple:
+	}
+	if opts == "" {
+		return env
+	}
+	base := ssh.command
+	if !ssh.cmdline {
+		base = shellQuoteSSHProgram(base)
+	}
 	out := make([]string, 0, len(env)+1)
 	for _, e := range env {
 		if strings.HasPrefix(e, key) {
@@ -270,15 +401,7 @@ func withBatchModeSSH(ctx context.Context, env []string) []string {
 		}
 		out = append(out, e)
 	}
-	if !hasExplicitBatchMode(base) {
-		base += " -o BatchMode=yes"
-	}
-	// Command-line -o beats ~/.ssh/config, so a ConnectTimeout set there is
-	// overridden here; one set on the command itself is left alone.
-	if isOpenSSHCommand(base) && !connectTimeoutOptionRe.MatchString(base) {
-		base += " -o ConnectTimeout=" + nonInteractiveSSHConnectTimeout
-	}
-	return append(out, key+base)
+	return append(out, key+base+opts)
 }
 
 // applyNonInteractiveSSH sets BatchMode SSH on cmd when ctx is marked
