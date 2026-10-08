@@ -121,57 +121,9 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// default. Defer publication until the user's own branch exists there.
 	deferAutomaticCheckpointPush := protectFirstUserBranch && deferCheckpointPushOnEmptyRemote(ctx, ps)
 
-	// OPF pre-push rewrite: if OPF is configured, resolve the user's
-	// decision (env > settings > prompt > non-TTY auto-run), then
-	// re-redact unpushed v1 commits with OPF (producing the OPF-applied,
-	// 9-layer pipeline) before pushing. Skipped entirely when OPF is off,
-	// so the common-case fast path is unchanged.
-	if redact.OPFEnabled() {
-		decision, decisionErr := opfPrePushDecision(ctx)
-		if decisionErr != nil {
-			logging.Warn(ctx, "OPF pre-push decision failed; aborting push",
-				slog.String("error", decisionErr.Error()),
-			)
-			return decisionErr
-		}
-		switch decision {
-		case OPFAbort:
-			return ErrOPFAbortedByUser
-		case OPFSkip:
-			// User opted out for this push (or settings/env say
-			// "never"). Push regex-only (8-layer) content as-is.
-			logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
-		case OPFRun:
-			// The open is its own span: opf_pre_push_rewrite names the rewrite
-			// and nothing else, so its timings stay comparable with every trace
-			// recorded while the repository was opened further up this function.
-			// The open is not free — on a reftable repo gitrepo routes reference
-			// reads back through the git CLI.
-			_, openSpan := perf.Start(ctx, "open_repository")
-			repo, repoErr := OpenRepository(ctx)
-			if repoErr != nil {
-				openSpan.RecordError(repoErr)
-				openSpan.End()
-				logging.Warn(ctx, "OPF pre-push: failed to open repo; aborting push",
-					slog.String("error", repoErr.Error()),
-				)
-				return repoErr
-			}
-			openSpan.End()
-			defer repo.Close()
-			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
-			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
-				opfSpan.RecordError(rewriteErr)
-				opfSpan.End()
-				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
-					slog.String("error", rewriteErr.Error()),
-				)
-				return rewriteErr
-			}
-			opfSpan.End()
-		}
+	if err := opfRewriteV1IfEnabled(ctx, ps); err != nil {
+		return err
 	}
-
 	if deferAutomaticCheckpointPush {
 		// Do this only after OPF has had a chance to rewrite v1: the outer
 		// user push may explicitly include the metadata branch.
@@ -181,31 +133,10 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		return nil
 	}
 
-	// Thread the span's context into the push so the network push and any
-	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
-	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
-	// Capture needs checkpoint data CONFIRMED on this remote, so count what
-	// landed rather than trusting the absence of an error: every ref that was due
-	// has to deliver, and at least one has to actually do so. Delivery must come
-	// from pushRefIfNeeded's delivered return and NOT from err, which is
-	// fail-soft and nil even when the remote refused the ref.
-	deliveredCount, anyFailed := 0, false
-	refs := checkpoint.ResolveRefs(ctx)
-	for _, ref := range refs.Push {
-		delivered, err := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
-		if err != nil {
-			pushCheckpointsSpan.RecordError(err)
-			pushCheckpointsSpan.End()
-			return err
-		}
-		if delivered {
-			deliveredCount++
-		} else {
-			anyFailed = true
-		}
+	deliveredCount, anyFailed, deliverErr := deliverV1Refs(ctx, ps)
+	if deliverErr != nil {
+		return deliverErr
 	}
-	pushCheckpointsSpan.End()
-
 	// Delivered: the election may now follow the push that carried it. A push that
 	// carried nothing — an empty ref set, or a v1 ref that does not exist locally
 	// yet — leaves the election alone. It is safe either way (nothing is stranded
@@ -684,4 +615,138 @@ func cleanupPushedShadowBranches(ctx context.Context) {
 			slog.Int("count", deleted),
 		)
 	}
+}
+
+// opfRewriteV1IfEnabled runs the OPF pre-push rewrite over unpushed v1 commits
+// when OPF is configured, resolving the user's decision first (env > settings >
+// prompt > non-TTY auto-run). A no-op when OPF is off, so the common-case fast
+// path is unchanged.
+//
+// Extracted so the git-branch pre-push hook and the strict
+// PushCheckpointBranch below run the identical gate: a second copy could drift
+// and ship un-OPF'd content on one path only.
+func opfRewriteV1IfEnabled(ctx context.Context, ps pushSettings) error {
+	if redact.OPFEnabled() {
+		decision, decisionErr := opfPrePushDecision(ctx)
+		if decisionErr != nil {
+			logging.Warn(ctx, "OPF pre-push decision failed; aborting push",
+				slog.String("error", decisionErr.Error()),
+			)
+			return decisionErr
+		}
+		switch decision {
+		case OPFAbort:
+			return ErrOPFAbortedByUser
+		case OPFSkip:
+			// User opted out for this push (or settings/env say
+			// "never"). Push regex-only (8-layer) content as-is.
+			logging.Info(ctx, "OPF skipped for this push (user choice or settings)")
+		case OPFRun:
+			// The open is its own span: opf_pre_push_rewrite names the rewrite
+			// and nothing else, so its timings stay comparable with every trace
+			// recorded while the repository was opened further up this function.
+			// The open is not free — on a reftable repo gitrepo routes reference
+			// reads back through the git CLI.
+			_, openSpan := perf.Start(ctx, "open_repository")
+			repo, repoErr := OpenRepository(ctx)
+			if repoErr != nil {
+				openSpan.RecordError(repoErr)
+				openSpan.End()
+				logging.Warn(ctx, "OPF pre-push: failed to open repo; aborting push",
+					slog.String("error", repoErr.Error()),
+				)
+				return repoErr
+			}
+			openSpan.End()
+			defer repo.Close()
+			_, opfSpan := perf.Start(ctx, "opf_pre_push_rewrite")
+			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
+				opfSpan.RecordError(rewriteErr)
+				opfSpan.End()
+				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
+					slog.String("error", rewriteErr.Error()),
+				)
+				return rewriteErr
+			}
+			opfSpan.End()
+		}
+	}
+	return nil
+}
+
+// deliverV1Refs pushes the v1 checkpoint refs and reports what actually
+// landed. Delivery comes from pushRefIfNeeded's delivered return and NOT from
+// err, which is fail-soft and nil even when the remote refused the ref — so a
+// caller that needs to know whether data arrived must read deliveredCount and
+// anyFailed, never the error alone.
+func deliverV1Refs(ctx context.Context, ps pushSettings) (deliveredCount int, anyFailed bool, err error) {
+	// Thread the span's context into the push so the network push and any
+	// fetch+rebase recovery nest beneath it as child steps in the perf trace.
+	pushCtx, pushCheckpointsSpan := perf.Start(ctx, "push_checkpoint_refs")
+	defer pushCheckpointsSpan.End()
+
+	refs := checkpoint.ResolveRefs(ctx)
+	for _, ref := range refs.Push {
+		delivered, pushErr := pushRefIfNeeded(pushCtx, ps.pushTarget(), ref)
+		if pushErr != nil {
+			pushCheckpointsSpan.RecordError(pushErr)
+			return deliveredCount, anyFailed, pushErr
+		}
+		if delivered {
+			deliveredCount++
+		} else {
+			anyFailed = true
+		}
+	}
+	return deliveredCount, anyFailed, nil
+}
+
+// ErrCheckpointBranchNotDelivered reports that the v1 checkpoint branch did not
+// reach the remote. The pre-push hook tolerates this — a user's `git push` must
+// never fail over checkpoint sync — but a foreground caller that is about to
+// tell someone the checkpoint is shareable must not.
+var ErrCheckpointBranchNotDelivered = errors.New("checkpoint branch did not reach the remote")
+
+// PushCheckpointBranch delivers the v1 checkpoint branch and reports what
+// landed, erroring when nothing did. It is the git-branch analogue of
+// PushQueuedCheckpointRefs: same gates, opposite failure posture to the hook.
+//
+// PrePush cannot serve this purpose. It is fail-soft by contract and returns
+// nil when the sync-remote gate skips delivery, when the empty-remote guard
+// defers it, and when every ref is refused — all states in which a caller that
+// trusted the nil would announce a checkpoint that never left the machine.
+//
+// Callers must configure redaction first (EnsureRedactionConfigured); the OPF
+// gate reads process-global config and an unconfigured one reads as "OPF off".
+func PushCheckpointBranch(ctx context.Context, remote string) (delivered int, pushDisabled bool, err error) {
+	ps := resolvePushSettings(ctx, remote)
+	if ps.pushDisabled {
+		return 0, true, nil
+	}
+	// The gate the hook applies silently: a remote checkpoint data may not go
+	// to is a refusal here, not a quiet skip.
+	if !ps.hasCheckpointURL() && !checkpointSyncAllowedForRemote(ctx, ps.remote, "") {
+		return 0, false, fmt.Errorf("%w: checkpoint sync is not enabled for remote %q", ErrCheckpointBranchNotDelivered, ps.remote)
+	}
+	if opfErr := opfRewriteV1IfEnabled(ctx, ps); opfErr != nil {
+		return 0, false, opfErr
+	}
+	deliveredCount, anyFailed, deliverErr := deliverV1Refs(ctx, ps)
+	// Clean up whatever did land, matching the pre-push path, which always runs
+	// cleanup regardless of the flush's outcome.
+	cleanupPushedShadowBranches(ctx)
+	if deliverErr != nil {
+		return deliveredCount, false, deliverErr
+	}
+	if anyFailed || deliveredCount == 0 {
+		return deliveredCount, false, fmt.Errorf("%w: %d of %d ref(s) delivered", ErrCheckpointBranchNotDelivered, deliveredCount, deliveredCount+boolToInt(anyFailed))
+	}
+	return deliveredCount, false, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

@@ -4,6 +4,9 @@ package cli
 // plain strings, so without a name here a rename means finding every `Use:`,
 // alias and hard-coded command path by hand.
 const (
+	// cmdRoot is the binary's own name, used by the root command and by the
+	// hints that print a command for the user to run.
+	cmdRoot       = "entire"
 	cmdAgent      = "agent"
 	cmdCheckpoint = "checkpoint"
 	cmdCreateName = "create <name>"

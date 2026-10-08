@@ -116,6 +116,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"session adopt":   {agentHelpAudienceTaskDriven, false},
 	"session attach":  {agentHelpAudienceTaskDriven, false},
 	"session resume":  {agentHelpAudienceTaskDriven, false}, // switches branch
+	"session share":   {agentHelpAudienceUserOwned, false},  // publishes a transcript to a remote
 	"session stop":    {agentHelpAudienceTaskDriven, false},
 
 	// trail is the highest-traffic family by a wide margin, so its read-only

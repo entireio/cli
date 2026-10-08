@@ -97,7 +97,7 @@ func isShellCompletion(cmd *cobra.Command) bool {
 
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "entire",
+		Use:     cmdRoot,
 		Short:   "Entire CLI",
 		Long:    "The command-line interface for Entire" + gettingStarted + accessibilityHelp,
 		Version: versioninfo.Version,

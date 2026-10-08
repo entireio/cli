@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -74,6 +75,13 @@ Existing local session logs are never overwritten unless --force is given.`,
 }
 
 func runCheckpointResume(ctx context.Context, cmd *cobra.Command, target, checkpointFlag, commitFlag, branchFlag string, force bool) error {
+	// Same reason runResume enables them, and needed on every target shape, not
+	// just the branch one: restoring a session log looks up the agent's
+	// transcript home from the user's shell, where a home the agent reads from
+	// its own settings is invisible to the environment. runResume enables them
+	// again on the branch path below, which is harmless.
+	agent.EnableHomeProbes()
+
 	if branchFlag != "" {
 		return runResume(ctx, cmd, branchFlag, force)
 	}
@@ -203,6 +211,26 @@ func resumeCommitTarget(ctx context.Context, cmd *cobra.Command, lookup *explain
 	return resumeResolvedCheckpoint(ctx, cmd, lookup, cpID, force)
 }
 
+// resumeCommitPathFallback is the canonical path for this resolver's hints
+// when the invoked command is not attached to a root.
+const resumeCommitPathFallback = cmdRoot + " " + cmdCheckpoint + " resume"
+
+// resumeCommandPath names the command the user actually ran, so a hint telling
+// them to run it again somewhere else names that command and not its twin:
+// this resolver is shared by `checkpoint resume` and `session resume`.
+//
+// Falls back to the canonical path for an unattached command. Cobra builds
+// CommandPath() by walking parents, so a command constructed standalone — as
+// the unit tests do, since Execute() on a parented child dispatches from the
+// root and would ignore their args — would otherwise render a bare "resume"
+// that no user can type.
+func resumeCommandPath(cmd *cobra.Command) string {
+	if cmd == nil || cmd.Parent() == nil {
+		return resumeCommitPathFallback
+	}
+	return cmd.CommandPath()
+}
+
 // resumeResolvedCheckpoint resumes one committed checkpoint: checks out the
 // branch containing it (at the branch's current tip) when one exists, points
 // at the owning worktree when that branch is checked out elsewhere, and falls
@@ -216,8 +244,8 @@ func resumeResolvedCheckpoint(ctx context.Context, cmd *cobra.Command, lookup *e
 		return resumeByCheckpointID(ctx, w, cmd.ErrOrStderr(), cpID, force)
 	}
 	if otherPath, ok := branchCheckedOutElsewhere(ctx, branch); ok {
-		fmt.Fprintf(w, "Branch %q is already checked out at %s.\nResume this checkpoint from that worktree:\n\n  cd %s && entire checkpoint resume %s\n",
-			branch, otherPath, shellQuote(otherPath), cpID)
+		fmt.Fprintf(w, "Branch %q is already checked out at %s.\nResume this checkpoint from that worktree:\n\n  cd %s && %s %s\n",
+			branch, otherPath, shellQuote(otherPath), resumeCommandPath(cmd), cpID)
 		return nil
 	}
 	return resumeSessionOnBranch(ctx, cmd, branch, cpID, force)

@@ -32,8 +32,8 @@ func newResumeCmd() *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "resume [branch]",
-		Short: "Resume a stopped session (interactive picker, or by branch)",
+		Use:   "resume [branch | checkpoint-id | commit]",
+		Short: "Resume a stopped session (interactive picker, branch, or checkpoint)",
 		Long: `Resume an agent session.
 
 With no argument, opens an interactive picker of stopped sessions across all
@@ -41,6 +41,17 @@ worktrees so you don't have to remember which branch you left work on. Picking
 a session checks out its branch, restores its checkpoint session log, and asks
 whether Entire should start the agent. If the branch is already checked out in
 another worktree, you'll be pointed there instead.
+
+With an argument, the target may be a branch, a checkpoint ID (or prefix), or a
+commit whose message carries an Entire-Checkpoint trailer. Auto-detection tries
+checkpoint ID first, then local branch, then commit, then remote branch.
+
+A checkpoint ID needs no branch. Sessions that never committed — an
+investigation, a review, a dead end someone shared with you — have a checkpoint
+but no branch of their own, and resume restores their session log in place
+without switching branches. The checkpoint is fetched on demand if it isn't
+local yet, so the ID alone is enough. This is what 'entire session share'
+prints.
 
 With a branch argument, switches to that branch and resumes its session directly:
 1. Checks out the specified branch
@@ -69,7 +80,10 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 				return runResumePicker(cmd.Context(), cmd, force)
 			}
 
-			return runResume(cmd.Context(), cmd, args[0], force)
+			// Shares the one auto-detect ladder with `checkpoint resume` rather
+			// than keeping a branch-only path here: the two commands resolve the
+			// same targets, and a second resolver would drift from it.
+			return runCheckpointResume(cmd.Context(), cmd, args[0], "", "", "", force)
 		},
 	}
 
