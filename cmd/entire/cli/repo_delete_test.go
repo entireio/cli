@@ -333,6 +333,8 @@ func TestReportUnfinishedDelete(t *testing.T) {
 
 func TestRepoCheckCommand(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web"))
-	require.Empty(t, repoCheckCommand(testDeleteULID), "repo view takes only paths")
+	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web", ""))
+	require.Equal(t, "entire repo view /et/acme/web", repoCheckCommand("/et/acme/web", "acme"), "a path wins over the listing")
+	require.Equal(t, "entire repo list --project "+testDeleteULID, repoCheckCommand("web", testDeleteULID), "a bare name with no path falls back to the project listing")
+	require.Empty(t, repoCheckCommand(testDeleteULID, ""), "repo view takes only paths")
 }
