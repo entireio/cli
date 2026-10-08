@@ -8,6 +8,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
 
 // FilterTrackableChanges removes, from repo-relative path lists, the paths
@@ -135,7 +136,13 @@ func (c *trackablePathCache) classifyIgnored(ctx, logCtx context.Context, repoRo
 	if len(query) == 0 {
 		return ignored
 	}
-	answers, refused, err := gitrepo.IgnoredPaths(ctx, repoRoot, query)
+	// The worktree's anchor root lets IgnoredPaths drop paths beneath a
+	// symlinked directory in process; without it git is asked about them.
+	worktree, rootErr := worktreedir.OpenAt(repoRoot)
+	if rootErr != nil {
+		worktree = nil
+	}
+	answers, refused, err := gitrepo.IgnoredPaths(ctx, repoRoot, worktree, query)
 	if err != nil {
 		logging.Warn(logCtx, "could not check ignore rules for touched files; keeping them",
 			slog.String("error", err.Error()))
