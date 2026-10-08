@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"log/slog"
+	pathpkg "path"
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -20,9 +21,18 @@ import (
 //     status is of a tracked path by construction, and `git check-ignore`
 //     reports a path whose deletion is staged (it has left the index), which
 //     would drop the deletion of a tracked file that matches an ignore rule;
-//   - submodule gitlinks (mode 160000 in HEAD or the index), from all three:
-//     a submodule pointer is not a file, the prepare hook would stamp a
-//     trailer for it, and PostCommit could never match it.
+//   - submodule gitlinks (mode 160000 in HEAD or the index), and every path
+//     beneath one, from all three: a submodule pointer is not a file, the
+//     prepare hook would stamp a trailer for it, and PostCommit could never
+//     match it. Edits inside a submodule are not tracked by the superproject's
+//     session at all: they belong to the nested repository, whose own session
+//     records them. Each path's ancestor directories are part of the gitlink
+//     query, so sub/lib.txt is recognized by its gitlink ancestor sub, and
+//     such paths are dropped before the ignore check, where git would refuse
+//     them;
+//   - paths git refuses to ignore-check (gitrepo.IgnoredPaths' refused set),
+//     such as one beneath a symlinked directory: git cannot commit them
+//     through that path either.
 //
 // Either kind would keep the session pending forever: it stays in
 // carry-forward, re-condenses the full transcript on every later commit, and
@@ -45,7 +55,14 @@ func FilterTrackableChanges(ctx context.Context, repoRoot string, modified, adde
 	}
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 
-	ignored, gitlinks := trackablePaths.classify(ctx, logCtx, repoRoot, changed, all)
+	gitlinks := trackablePaths.classifyGitlinks(ctx, logCtx, repoRoot, withAncestorDirs(all))
+	ignoreCandidates := make([]string, 0, len(changed))
+	for _, path := range changed {
+		if !underGitlink(path, gitlinks) {
+			ignoreCandidates = append(ignoreCandidates, path)
+		}
+	}
+	ignored := trackablePaths.classifyIgnored(ctx, logCtx, repoRoot, ignoreCandidates)
 	if len(ignored) == 0 && len(gitlinks) == 0 {
 		return modified, added, deleted
 	}
@@ -54,7 +71,7 @@ func FilterTrackableChanges(ctx context.Context, repoRoot string, modified, adde
 	keep := func(list []string, checkIgnore bool) []string {
 		out := make([]string, 0, len(list))
 		for _, path := range list {
-			if _, isLink := gitlinks[path]; isLink {
+			if underGitlink(path, gitlinks) {
 				dropped++
 				continue
 			}
@@ -67,7 +84,7 @@ func FilterTrackableChanges(ctx context.Context, repoRoot string, modified, adde
 		return out
 	}
 	keptModified, keptAdded, keptDeleted = keep(modified, true), keep(added, true), keep(deleted, false)
-	logging.Debug(logCtx, "dropped gitignored and submodule paths from files touched", slog.Int("count", dropped))
+	logging.Debug(logCtx, "dropped gitignored, submodule, and refused paths from files touched", slog.Int("count", dropped))
 	return keptModified, keptAdded, keptDeleted
 }
 
@@ -107,41 +124,90 @@ func resetTrackablePathCacheForTesting() {
 	trackablePaths.gitlink = nil
 }
 
-// classify returns the ignored paths among ignoreCandidates and the gitlinks
-// among gitlinkCandidates, asking git only about paths without a cached
-// answer. The lock is not held while git runs.
-func (c *trackablePathCache) classify(ctx, logCtx context.Context, repoRoot string, ignoreCandidates, gitlinkCandidates []string) (ignored, gitlinks map[string]struct{}) {
-	ignored = make(map[string]struct{})
-	gitlinks = make(map[string]struct{})
-
+// classifyIgnored returns the paths among candidates that git ignores or
+// refuses to ignore-check (both are dropped; see IgnoredPaths), asking git only
+// about paths without a cached answer. The lock is not held while git runs.
+func (c *trackablePathCache) classifyIgnored(ctx, logCtx context.Context, repoRoot string, candidates []string) map[string]struct{} {
+	ignored := make(map[string]struct{})
 	c.mu.Lock()
-	ignoreQuery := c.lookup(c.ignored, repoRoot, ignoreCandidates, ignored)
-	gitlinkQuery := c.lookup(c.gitlink, repoRoot, gitlinkCandidates, gitlinks)
+	query := c.lookup(c.ignored, repoRoot, candidates, ignored)
 	c.mu.Unlock()
+	if len(query) == 0 {
+		return ignored
+	}
+	answers, refused, err := gitrepo.IgnoredPaths(ctx, repoRoot, query)
+	if err != nil {
+		logging.Warn(logCtx, "could not check ignore rules for touched files; keeping them",
+			slog.String("error", err.Error()))
+		return ignored
+	}
+	if len(refused) > 0 {
+		logging.Debug(logCtx, "git refused to ignore-check some touched files (inside a submodule or beneath a symlinked directory); dropping them",
+			slog.Int("count", len(refused)))
+		for path := range refused {
+			answers[path] = struct{}{}
+		}
+	}
+	c.store(&c.ignored, repoRoot, query, answers, ignored)
+	return ignored
+}
 
-	if len(ignoreQuery) > 0 {
-		answers, err := gitrepo.IgnoredPaths(ctx, repoRoot, ignoreQuery)
-		if err != nil {
-			logging.Warn(logCtx, "could not check ignore rules for touched files; keeping them",
-				slog.String("error", err.Error()))
-		} else {
-			c.store(&c.ignored, repoRoot, ignoreQuery, answers, ignored)
+// classifyGitlinks returns the gitlinks among candidates, asking git only
+// about paths without a cached answer. The lock is not held while git runs.
+func (c *trackablePathCache) classifyGitlinks(ctx, logCtx context.Context, repoRoot string, candidates []string) map[string]struct{} {
+	gitlinks := make(map[string]struct{})
+	c.mu.Lock()
+	query := c.lookup(c.gitlink, repoRoot, candidates, gitlinks)
+	c.mu.Unlock()
+	if len(query) == 0 {
+		return gitlinks
+	}
+	answers, err := gitrepo.GitlinkPaths(ctx, repoRoot, query)
+	if err != nil {
+		// Partial answers are not cached: the next call asks again.
+		logging.Debug(logCtx, "could not check touched files for submodules; keeping them",
+			slog.String("error", err.Error()))
+		for path := range answers {
+			gitlinks[path] = struct{}{}
+		}
+		return gitlinks
+	}
+	c.store(&c.gitlink, repoRoot, query, answers, gitlinks)
+	return gitlinks
+}
+
+// withAncestorDirs returns paths plus every ancestor directory of each
+// ("a/b/c.txt" adds "a" and "a/b"), deduplicated, so a gitlink query also finds
+// the submodule a path lies inside.
+func withAncestorDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	add := func(p string) {
+		if _, dup := seen[p]; !dup {
+			seen[p] = struct{}{}
+			out = append(out, p)
 		}
 	}
-	if len(gitlinkQuery) > 0 {
-		answers, err := gitrepo.GitlinkPaths(ctx, repoRoot, gitlinkQuery)
-		if err != nil {
-			// Partial answers are not cached: the next call asks again.
-			logging.Debug(logCtx, "could not check touched files for submodules; keeping them",
-				slog.String("error", err.Error()))
-			for path := range answers {
-				gitlinks[path] = struct{}{}
-			}
-		} else {
-			c.store(&c.gitlink, repoRoot, gitlinkQuery, answers, gitlinks)
+	for _, path := range paths {
+		add(path)
+		for dir := pathpkg.Dir(path); dir != "." && dir != "/" && dir != ""; dir = pathpkg.Dir(dir) {
+			add(dir)
 		}
 	}
-	return ignored, gitlinks
+	return out
+}
+
+// underGitlink reports whether path is a gitlink or lies beneath one.
+func underGitlink(path string, gitlinks map[string]struct{}) bool {
+	if len(gitlinks) == 0 {
+		return false
+	}
+	for p := path; p != "." && p != "/" && p != ""; p = pathpkg.Dir(p) {
+		if _, ok := gitlinks[p]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // lookup copies cached positive answers for paths into hits and returns the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,56 @@ import (
 // committed, so it would keep the session pending forever.
 // Uses t.Chdir — do NOT add t.Parallel().
 func TestPostCommit_MidTurnCarryForward_DropsIgnoredAndSubmodulePaths(t *testing.T) {
-	dir := setupGitRepo(t)
+	dir, worktreePath := setupIgnoreAndSubmoduleRepo(t)
+	for _, name := range []string{"committed.txt", "pending.txt", "ignored.env"} {
+		testutil.WriteFile(t, dir, name, name+"\n")
+	}
+	s := &ManualCommitStrategy{}
+	sessionID := "test-midturn-untrackable"
+	saveMidTurnSession(t, s, dir, worktreePath, sessionID, "committed.txt", "pending.txt", "ignored.env", "sub")
+
+	testutil.GitAdd(t, dir, "committed.txt")
+	testutil.GitCommit(t, dir, "commit one file\n\n"+trailers.CheckpointTrailerKey+": "+"ef12ab34cd56")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Contains(t, state.FilesTouched, "pending.txt", "fixture: carry-forward ran for the uncommitted file")
+	assert.NotContains(t, state.FilesTouched, "ignored.env")
+	assert.NotContains(t, state.FilesTouched, "sub")
+}
+
+// A path inside a submodule is the nested repository's own work, and git
+// refuses to ignore-check it ("Pathspec is in submodule"), which used to fail
+// the whole check-ignore batch and keep every path in it, gitignored ones
+// included. After the only superproject file is committed, nothing may stay
+// pending. Uses t.Chdir — do NOT add t.Parallel().
+func TestPostCommit_MidTurnCarryForward_DropsPathsInsideSubmodule(t *testing.T) {
+	dir, worktreePath := setupIgnoreAndSubmoduleRepo(t)
+	testutil.WriteFile(t, dir, "agent.txt", "agent\n")
+	testutil.WriteFile(t, dir, "ignored.env", "secret\n")
+	testutil.WriteFile(t, dir, "sub/lib.txt", "v2\n")
+	s := &ManualCommitStrategy{}
+	sessionID := "test-midturn-inside-submodule"
+	saveMidTurnSession(t, s, dir, worktreePath, sessionID, "agent.txt", "ignored.env", "sub/lib.txt")
+
+	testutil.GitAdd(t, dir, "agent.txt")
+	testutil.GitCommit(t, dir, "commit agent file\n\n"+trailers.CheckpointTrailerKey+": "+"ab12cd34ef56")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Empty(t, state.FilesTouched, "neither the gitignored file nor the submodule's file is superproject work")
+}
+
+// setupIgnoreAndSubmoduleRepo creates a repository that ignores ignored.env
+// and has a real submodule at sub, chdirs into it, and returns its directory
+// and worktree root.
+func setupIgnoreAndSubmoduleRepo(t *testing.T) (dir, worktreePath string) {
+	t.Helper()
+	dir = setupGitRepo(t)
 	t.Chdir(dir)
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
@@ -43,29 +93,34 @@ func TestPostCommit_MidTurnCarryForward_DropsIgnoredAndSubmodulePaths(t *testing
 
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
-	for _, name := range []string{"committed.txt", "pending.txt", "ignored.env"} {
-		testutil.WriteFile(t, dir, name, name+"\n")
-	}
+	return dir, worktreePath
+}
+
+// saveMidTurnSession saves an ACTIVE Claude Code session with no turn-end step
+// whose transcript writes each of files, so a commit takes its files from the
+// transcript.
+func saveMidTurnSession(t *testing.T, s *ManualCommitStrategy, dir, worktreePath, sessionID string, files ...string) {
+	t.Helper()
 	writeLine := func(path string) string {
 		return `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` +
 			filepath.Join(worktreePath, path) + `","content":"x"}}]}}` + "\n"
 	}
-	transcript := `{"type":"human","message":{"content":"write files"}}` + "\n" +
-		writeLine("committed.txt") + writeLine("pending.txt") + writeLine("ignored.env") + writeLine("sub")
+	var transcript strings.Builder
+	transcript.WriteString(`{"type":"human","message":{"content":"write files"}}` + "\n")
+	for _, file := range files {
+		transcript.WriteString(writeLine(file))
+	}
 	transcriptPath := filepath.Join(dir, "transcript.jsonl")
-	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript), 0o644))
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcript.String()), 0o644))
 	stale := time.Now().Add(-3 * time.Minute)
 	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
 
-	s := &ManualCommitStrategy{}
 	now := time.Now()
-	head := testutil.GetHeadHash(t, dir)
 	worktreeID, err := paths.GetWorktreeID(worktreePath)
 	require.NoError(t, err)
-	sessionID := "test-midturn-untrackable"
 	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
 		SessionID:           sessionID,
-		BaseCommit:          head,
+		BaseCommit:          testutil.GetHeadHash(t, dir),
 		WorktreePath:        worktreePath,
 		WorktreeID:          worktreeID,
 		StartedAt:           now,
@@ -74,17 +129,23 @@ func TestPostCommit_MidTurnCarryForward_DropsIgnoredAndSubmodulePaths(t *testing
 		AgentType:           agent.AgentTypeClaudeCode,
 		TranscriptPath:      transcriptPath,
 	}))
+}
 
-	testutil.GitAdd(t, dir, "committed.txt")
-	testutil.GitCommit(t, dir, "commit one file\n\n"+trailers.CheckpointTrailerKey+": "+"ef12ab34cd56")
-	require.NoError(t, s.PostCommit(context.Background()))
+// A path beneath a symlinked directory is refused by check-ignore ("beyond a
+// symbolic link") and dropped; the gitignored path in the same batch is still
+// dropped and an ordinary one kept. Uses t.Chdir — do NOT add t.Parallel().
+func TestFilterTrackableChanges_DropsPathBeneathSymlinkedDirectory(t *testing.T) {
+	testutil.SkipWithoutSymlinks(t)
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	testutil.WriteFile(t, dir, ".gitignore", "ignored.env\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real"), 0o755))
+	require.NoError(t, os.Symlink("real", filepath.Join(dir, "linkdir")))
+	testutil.WriteFile(t, dir, "real/x.txt", "x\n")
 
-	state, err := s.loadSessionState(context.Background(), sessionID)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	assert.Contains(t, state.FilesTouched, "pending.txt", "fixture: carry-forward ran for the uncommitted file")
-	assert.NotContains(t, state.FilesTouched, "ignored.env")
-	assert.NotContains(t, state.FilesTouched, "sub")
+	kept, _, _ := FilterTrackableChanges(context.Background(), dir,
+		[]string{"agent.txt", "ignored.env", "linkdir/x.txt"}, nil, nil)
+	assert.Equal(t, []string{"agent.txt"}, kept)
 }
 
 // Deleted paths are never ignore-checked (git check-ignore reports a path
