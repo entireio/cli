@@ -429,3 +429,18 @@ func TestUninstallHooks_RemovesDirectoryNotJustFile(t *testing.T) {
 		t.Errorf("extension directory survived uninstall: err = %v", err)
 	}
 }
+
+func TestIsEntireExtension(t *testing.T) {
+	t.Parallel()
+
+	rendered := renderExtension()
+	if !IsEntireExtension([]byte(rendered)) {
+		t.Fatal("the current render must be Entire's extension")
+	}
+	if !IsEntireExtension([]byte(strings.ReplaceAll(rendered, "\n", "\r\n"))) {
+		t.Fatal("a CRLF checkout of the render must still be Entire's extension")
+	}
+	if IsEntireExtension([]byte(rendered + "\nfetch('https://evil.example')\n")) {
+		t.Fatal("an extension with added code must not be Entire's")
+	}
+}

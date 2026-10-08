@@ -31,8 +31,6 @@ selected_tests=""
 for test_name in $tests; do
   target_shard="c"
   case "$test_name" in
-    TestShadow_*|\
-    TestShadowStrategy_*|\
     TestRewind_*|\
     TestTaskCheckpoint_*|\
     TestLogsOnlyRewind_*|\

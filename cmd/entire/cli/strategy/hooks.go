@@ -732,7 +732,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	}
 
 	if !silent {
-		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
+		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, post-rewrite, pre-push)")
 		fmt.Println("  Hooks delegate to the current strategy at runtime")
 	}
 
@@ -783,9 +783,11 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			}
 			switch action {
 			case backupCreated:
-				fmt.Fprintf(os.Stderr, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
+				fmt.Fprintf(stderrWriter, "[entire] Your %s hook still runs, after Entire's (moved to %s).\n",
+					spec.name, filepath.Join(hooksDir, backupName))
+				logging.Info(ctx, "git hook backed up", slog.String("hook", spec.name))
 			case backupRotated:
-				fmt.Fprintf(os.Stderr, "[entire] %s changed since Entire backed it up. The current version now runs after Entire's; the older copy was kept as %s and no longer runs.\n", spec.name, older)
+				fmt.Fprintf(stderrWriter, "[entire] %s changed since Entire backed it up. The current version now runs after Entire's; the older copy was kept as %s and no longer runs.\n", spec.name, older)
 				logging.Warn(ctx, "git hook backup rotated; the older copy no longer runs", slog.String("hook", spec.name), slog.String("older_copy", older))
 			case backupReplacedSame:
 			}
@@ -842,9 +844,27 @@ func writeHookFile(root *os.Root, name, content string) (bool, error) {
 // If a .pre-entire backup exists, it is restored.
 // Returns the number of hooks removed.
 func RemoveGitHook(ctx context.Context) (int, error) {
+	res, err := RemoveGitHookDetailed(ctx)
+	return res.Removed, err
+}
+
+// GitHookRemoval reports what RemoveGitHookDetailed did.
+type GitHookRemoval struct {
+	// Removed is the number of Entire hooks removed.
+	Removed int
+	// Restored names the hooks whose .pre-entire backup was put back.
+	Restored []string
+	// Older names the rotated copies (<hook>.pre-entire.<timestamp>) left in
+	// place: they no longer run, and uninstall does not delete user files.
+	Older []string
+}
+
+// RemoveGitHookDetailed is RemoveGitHook, also reporting which backups were
+// restored, for the caller to show the user.
+func RemoveGitHookDetailed(ctx context.Context) (GitHookRemoval, error) {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
-		return 0, err
+		return GitHookRemoval{}, err
 	}
 
 	// ForRemoval: uninstall must be able to finish on a repo install refused.
@@ -853,38 +873,38 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 	root, err := hooksRootForRemoval(hooksDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil // no hooks directory, so nothing of ours in it
+			return GitHookRemoval{}, nil // no hooks directory, so nothing of ours in it
 		}
-		return 0, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
+		return GitHookRemoval{}, fmt.Errorf("failed to open hooks directory %s: %w", hooksDir, err)
 	}
 
 	lockRoot, err := userdirs.CacheRoot()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[entire] Warning: cannot open the git hooks lock directory (%v)\n", err)
+		fmt.Fprintf(stderrWriter, "[entire] Warning: cannot open the git hooks lock directory (%v)\n", err)
 		lockRoot = nil // removeHooks goes ahead without the lock
 	}
 	return removeHooks(ctx, lockRoot, root, hooksDir, restoreLegacy)
 }
 
-// removeHooks is RemoveGitHook on an opened hooks root, under the hooks lock.
-// restore is restoreLegacy; tests pass a failing one.
+// removeHooks is RemoveGitHookDetailed on an opened hooks root, under the hooks
+// lock. restore is restoreLegacy; tests pass a failing one.
 //
 // Uninstall is cleanup and must finish, so a lock that cannot be used at all
 // (nil lockRoot, or a lock file that will not open) is warned about and
 // skipped. A lock another Entire process HOLDS still stops it: going ahead
 // would interleave with the moves the lock serializes, and a retry succeeds.
-func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, restore func(*os.Root, string) error) (int, error) {
+func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, restore func(*os.Root, string) error) (GitHookRemoval, error) {
 	release, err := acquireHooksLock(ctx, lockRoot, hooksDir)
 	switch {
 	case err == nil:
 		defer release()
 	case errors.Is(err, errHooksLockUnavailable):
-		fmt.Fprintf(os.Stderr, "[entire] Warning: %v; removing hooks without it\n", err)
+		fmt.Fprintf(stderrWriter, "[entire] Warning: %v; removing hooks without it\n", err)
 	default:
-		return 0, err
+		return GitHookRemoval{}, err
 	}
 
-	removed := 0
+	var res GitHookRemoval
 	var removeErrors []string
 
 	for _, hook := range gitHookNames {
@@ -925,29 +945,31 @@ func removeHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, 
 				removeErrors = append(removeErrors, fmt.Sprintf("%s: %v", hook, err))
 				continue
 			}
-			removed++
+			res.Removed++
 		}
 
 		// Restore .pre-entire backup if it exists
 		if hookFileExists(root, backupName) {
 			if hookExists && !hookIsOurs {
 				// A non-Entire hook is present — don't overwrite it with the backup
-				fmt.Fprintf(os.Stderr, "[entire] Warning: %s was modified since install; backup %s%s left in place\n", hook, hook, backupSuffix)
+				fmt.Fprintf(stderrWriter, "[entire] Warning: %s was modified since install; backup %s%s left in place\n", hook, hook, backupSuffix)
 			} else {
 				if err := root.Rename(backupName, hook); err != nil {
 					removeErrors = append(removeErrors, fmt.Sprintf("restore %s%s: %v", hook, backupSuffix, err))
+				} else {
+					res.Restored = append(res.Restored, hook)
 				}
 			}
 		}
 	}
 
-	if older, err := olderHookCopies(root); err == nil && len(older) > 0 {
-		fmt.Fprintf(os.Stderr, "[entire] Older copies of your hooks were left in place: %s\n", strings.Join(older, ", "))
+	if older, err := olderHookCopies(root); err == nil {
+		res.Older = older
 	}
 	if len(removeErrors) > 0 {
-		return removed, fmt.Errorf("failed to remove hooks: %s", strings.Join(removeErrors, "; "))
+		return res, fmt.Errorf("failed to remove hooks: %s", strings.Join(removeErrors, "; "))
 	}
-	return removed, nil
+	return res, nil
 }
 
 // generateChainedContent appends a chain call to the base hook content,

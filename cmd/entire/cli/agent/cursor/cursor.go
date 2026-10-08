@@ -91,6 +91,18 @@ func (c *CursorAgent) ResolveSessionFile(sessionDir, agentSessionID string) stri
 	return filepath.Join(sessionDir, agentSessionID+".jsonl")
 }
 
+// ResolveSessionFileCandidates returns the nested <id>/<id>.jsonl layout
+// followed by the flat <id>.jsonl layout, so discovery still finds a session
+// whose nested directory exists but holds no transcript.
+func (c *CursorAgent) ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string {
+	return []string{
+		filepath.Join(sessionDir, agentSessionID, agentSessionID+".jsonl"),
+		filepath.Join(sessionDir, agentSessionID+".jsonl"),
+	}
+}
+
+var _ agent.SessionFileCandidatesProvider = (*CursorAgent)(nil)
+
 // ProtectedDirs returns directories that Cursor uses for config/state.
 func (c *CursorAgent) ProtectedDirs() []string { return []string{".cursor"} }
 

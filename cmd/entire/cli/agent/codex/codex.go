@@ -269,7 +269,7 @@ func (c *CodexAgent) rolloutRoots() []string {
 	if err != nil {
 		return []string{sessionDir}
 	}
-	return []string{sessionDir, filepath.Join(codexHome, "archived_sessions")}
+	return append([]string{sessionDir}, codexHomeLayout().StoresUnder(codexHome)[1:]...)
 }
 
 func (c *CodexAgent) loadDirectRollout(ctx context.Context, ref agent.SubagentReference) (loadedRollout, bool) {
@@ -574,13 +574,34 @@ func (c *CodexAgent) GetSessionDir(_ string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(codexHome, "sessions"), nil
+	return codexHomeLayout().StoresUnder(codexHome)[0], nil
 }
+
+// SessionHome returns Codex's home directory: $CODEX_HOME or ~/.codex.
+func (c *CodexAgent) SessionHome() (string, error) {
+	return resolveCodexHome()
+}
+
+// HomeLayout reports that Codex keeps live rollouts under sessions and moves
+// rotated ones to archived_sessions, both in dated subdirectories.
+func (c *CodexAgent) HomeLayout() agent.HomeLayout {
+	return codexHomeLayout()
+}
+
+// codexHomeLayout is the one spelling of Codex's stores: the session
+// directory, then the archives that rollout lookups also search.
+func codexHomeLayout() agent.HomeLayout {
+	return agent.HomeLayout{Stores: []string{"sessions", "archived_sessions"}}
+}
+
+var _ agent.HomeLayoutProvider = (*CodexAgent)(nil)
 
 // ResolveSessionFile returns the path to a Codex session transcript file.
 // Codex provides the transcript path directly in hook payloads as an absolute path.
 // When only a session ID is available, callers recover it from the
-// sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout.
+// sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout. Only sessionDir
+// is searched: an archived rollout lies outside it, where SessionStore refuses
+// the result, so archives are left to ResolveSessionFileCandidates.
 func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	if filepath.IsAbs(agentSessionID) {
 		return agentSessionID
@@ -742,28 +763,61 @@ func (c *CodexAgent) LaunchCmd(ctx context.Context, initialPrompt string) (*exec
 	return cmd, nil
 }
 
-func findRolloutBySessionID(codexHome, agentSessionID string) string {
-	if codexHome == "" || validation.ValidateAgentSessionID(agentSessionID) != nil {
-		return ""
+func findRolloutBySessionID(sessionDir, agentSessionID string) string {
+	if candidates := rolloutsBySessionID(sessionDir, agentSessionID); len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+// ResolveSessionFileCandidates returns every rollout of agentSessionID beneath
+// sessionDir and then the home's other stores, preferred first, followed by
+// the <id>.jsonl path ResolveSessionFile predicts when there is none.
+func (c *CodexAgent) ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string {
+	// The home is sessionDir's parent, not CODEX_HOME: the candidates belong to
+	// the session directory the caller passed. One that is not a home's
+	// sessions store, such as a test override, has no archives.
+	var archives []string
+	if stores := codexHomeLayout().StoresUnder(filepath.Dir(sessionDir)); stores[0] == filepath.Clean(sessionDir) {
+		archives = stores[1:]
+	}
+	candidates := rolloutsBySessionID(sessionDir, agentSessionID, archives...)
+	if sessionDir != "" {
+		candidates = append(candidates, filepath.Join(sessionDir, agentSessionID+".jsonl"))
+	}
+	return candidates
+}
+
+var _ agent.SessionFileCandidatesProvider = (*CodexAgent)(nil)
+
+// rolloutsBySessionID returns the rollouts of agentSessionID beneath sessionDir
+// and then each archive, in each directory flat and then in dated
+// subdirectories. Codex archives a rollout flat, under its original file name.
+// Within each group the lexicographically latest path comes first, so newer
+// dated restores of the same session win.
+func rolloutsBySessionID(sessionDir, agentSessionID string, archives ...string) []string {
+	if sessionDir == "" || validation.ValidateAgentSessionID(agentSessionID) != nil {
+		return nil
 	}
 
-	patterns := []string{
-		filepath.Join(codexHome, "rollout-*-"+agentSessionID+".jsonl"),
-		filepath.Join(codexHome, "*", "*", "*", "rollout-*-"+agentSessionID+".jsonl"),
-		filepath.Join(filepath.Dir(codexHome), "archived_sessions", "*", "*", "*", "rollout-*-"+agentSessionID+".jsonl"),
+	name := "rollout-*-" + agentSessionID + ".jsonl"
+	var patterns []string
+	for _, dir := range append([]string{sessionDir}, archives...) {
+		patterns = append(patterns,
+			filepath.Join(dir, name),
+			filepath.Join(dir, "*", "*", "*", name),
+		)
 	}
+	var candidates []string
 	for _, pattern := range patterns {
 		matches, err := filepath.Glob(pattern)
-		if err != nil || len(matches) == 0 {
+		if err != nil {
 			continue
 		}
-		// Multiple restored rollouts for the same session ID can exist. Return the
-		// lexicographically latest path so newer dated restores win deterministically.
-		sort.Strings(matches)
-		return matches[len(matches)-1]
+		sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+		candidates = append(candidates, matches...)
 	}
-
-	return ""
+	return candidates
 }
 
 // CallerSessionEnvVar names the variable holding the session ID Codex

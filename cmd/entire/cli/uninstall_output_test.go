@@ -2,8 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 // TestUninstallPrinter_MultiLineWarningStaysInItsBlock pins the shape of a
@@ -38,4 +45,57 @@ type multiLineError struct{}
 
 func (multiLineError) Error() string {
 	return "plugin exploded\nstack frame one\nstack frame two\n"
+}
+
+// Uninstall names each hook it put back, so a user whose own hook was moved
+// aside at enable time can see it is live again.
+//
+// Not parallel: uses t.Chdir().
+func TestUninstallGitHooks_ReportsRestoredHook(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	strategy.ClearHooksDirCache()
+	t.Cleanup(strategy.ClearHooksDirCache)
+
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o750))
+	testutil.RunGit(t, dir, "config", "core.hooksPath", hooksDir)
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte("#!/bin/sh\necho mine\n"), 0o700))
+
+	_, err := strategy.InstallGitHook(t.Context(), true, false)
+	require.NoError(t, err)
+
+	var stdout, stderr bytes.Buffer
+	require.True(t, uninstallGitHooks(t.Context(), newUninstallPrinter(&stdout, &stderr)), stderr.String())
+
+	require.Contains(t, stdout.String(), "Restored your original pre-push hook")
+	require.Equal(t, 1, strings.Count(stdout.String(), "Restored your original"), stdout.String())
+}
+
+// Rotated copies no longer run and uninstall does not delete them, so it names
+// them rather than leaving files the user cannot account for.
+func TestUninstallGitHooks_ListsOlderCopies(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	strategy.ClearHooksDirCache()
+	t.Cleanup(strategy.ClearHooksDirCache)
+
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o750))
+	testutil.RunGit(t, dir, "config", "core.hooksPath", hooksDir)
+
+	_, err := strategy.InstallGitHook(t.Context(), true, false)
+	require.NoError(t, err)
+	older := "pre-push.pre-entire.20261001T120000Z"
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, older), []byte("#!/bin/sh\necho old\n"), 0o700))
+
+	var stdout, stderr bytes.Buffer
+	require.True(t, uninstallGitHooks(t.Context(), newUninstallPrinter(&stdout, &stderr)), stderr.String())
+
+	require.Contains(t, stdout.String()+stderr.String(), "Older copies of your hooks were left in place and do not run: "+older)
+	require.FileExists(t, filepath.Join(hooksDir, older))
 }

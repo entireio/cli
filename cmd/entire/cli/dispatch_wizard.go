@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	searchpkg "github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/spf13/cobra"
 )
 
@@ -580,10 +579,11 @@ func discoverRepoSlug(repoRoot string) string {
 	if err != nil || len(remote.Config().URLs) == 0 {
 		return ""
 	}
-	owner, repoName, err := searchpkg.ParseGitHubRemote(remote.Config().URLs[0])
+	// The slug names the origin's forge (gh/ or et/); a checkout on a host
+	// Entire does not serve is not offered.
+	slug, err := dispatchpkg.OriginRepoSlug(remote.Config().URLs[0])
 	if err != nil {
 		return ""
 	}
-	// The origin remote is GitHub by construction; name the forge.
-	return dispatchpkg.GitHubForge + "/" + owner + "/" + repoName
+	return slug
 }

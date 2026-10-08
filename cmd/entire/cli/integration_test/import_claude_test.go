@@ -57,13 +57,13 @@ func TestImportClaudeCode_EndToEnd(t *testing.T) {
 
 	// 3. checkpoint list surfaces imported entries labeled [imported], and does
 	//    NOT duplicate them as [temporary] (regression: the imports were once
-	//    mis-read by the shadow-branch scanner).
+	//    mis-read as temporary checkpoints, a row kind that no longer exists).
 	listOut := env.RunCLI("checkpoint", "list")
 	require.Contains(t, listOut, "[imported]", "checkpoint list should label imported checkpoints; got: %s", listOut)
 	require.NotContains(t, listOut, "[temporary]", "imported checkpoints must not appear as temporary; got: %s", listOut)
 
 	// 4. explain resolves an imported checkpoint by ID (regression: explain once
-	//    only consulted the committed/shadow paths and missed imports).
+	//    only consulted committed checkpoints and missed imports).
 	explainOut := env.RunCLI("checkpoint", "explain", importedID)
 	require.Contains(t, explainOut, "first", "explain should show the imported turn's prompt; got: %s", explainOut)
 

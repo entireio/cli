@@ -67,6 +67,7 @@ func (s *ManualCommitStrategy) inheritReplacedCommitsTrailers(ctx context.Contex
 			}
 		}
 	}
+	inherited = withoutDeletedCheckpoints(ctx, inherited)
 	if len(inherited) == 0 {
 		logging.Debug(logCtx, "prepare-commit-msg: redone commits carry no matching trailers",
 			slog.Int("replaced_commits", len(replaced)), slog.Int("staged", len(staged)))
@@ -116,8 +117,8 @@ func (s *ManualCommitStrategy) withRedoneTrailers(ctx context.Context, repo *git
 // folds in a reset-dropped commit's trailers: `git reset --soft HEAD~1 && git
 // commit --amend` squashes the last two commits, and the amended commit carries
 // the work of both.
-func (s *ManualCommitStrategy) prepareAmendCommitMsg(ctx context.Context, commitMsgFile string) error {
-	if err := s.handleAmendCommitMsg(ctx, commitMsgFile); err != nil {
+func (s *ManualCommitStrategy) prepareAmendCommitMsg(ctx context.Context, commitMsgFile string, strippedDeleted bool) error {
+	if err := s.handleAmendCommitMsg(ctx, commitMsgFile, strippedDeleted); err != nil {
 		return err
 	}
 	repo, err := OpenRepository(ctx)
