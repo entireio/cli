@@ -254,25 +254,14 @@ func prepareTaskTranscriptForStorage(
 // resolveTaskTranscriptPath falls back to the agent-layout convention when a
 // task record has no declared transcript path (e.g. an agent that reports the
 // path only on some events, or a legacy record captured before an agent
-// started reporting one at all). Mirrors cli.ResolveAgentTranscriptPath,
-// which this package cannot call directly — the cli package imports strategy,
-// so the reverse import would cycle — and the logic itself is small enough
-// that duplicating it here beats introducing a new shared package for this
-// one call site (moving the transcript resolver into paths is deliberately
-// out of scope for the durable-records plan this implements).
+// started reporting one at all). The layout lives in
+// paths.ResolveSubagentTranscriptPath, shared with cli.ResolveAgentTranscriptPath
+// (which this package cannot call: the cli package imports strategy).
 func resolveTaskTranscriptPath(state *SessionState, agentID string) string {
 	if agentID == "" || state.TranscriptPath == "" {
 		return ""
 	}
-	transcriptDir := filepath.Dir(state.TranscriptPath)
-	name := paths.AgentTranscriptFileName(agentID)
-	if nested := filepath.Join(paths.SubagentsDir(transcriptDir, state.SessionID), name); fileExists(nested) {
-		return nested
-	}
-	if legacy := filepath.Join(transcriptDir, name); fileExists(legacy) {
-		return legacy
-	}
-	return ""
+	return paths.ResolveSubagentTranscriptPath(filepath.Dir(state.TranscriptPath), state.SessionID, agentID)
 }
 
 // resolveInventoryTaskTranscripts resolves, by agent ID, the transcripts of
@@ -312,7 +301,7 @@ func resolveInventoryTaskTranscripts(ctx context.Context, ag agent.Agent, state 
 	if len(refs) == 0 {
 		return nil
 	}
-	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, nil, 0, refs)
+	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, nil, 0, refs, state.AgentHome)
 	if !ok {
 		return nil
 	}
@@ -451,6 +440,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 			payloads = append(payloads, payload)
 			continue
 		}
+		payload.TokenUsage = condensedTaskTokenUsage(ctx, ag, record, raw)
 
 		redacted, taskAssets, tooLarge, prepErr := prepareTaskTranscriptForStorage(ctx, logCtx, ag, state, transcriptPath, raw)
 		if tooLarge {
@@ -475,6 +465,34 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 	}
 
 	return payloads, assets
+}
+
+// condensedTaskTokenUsage returns the token usage to store for a task: its
+// recorded usage, or, when that usage was computed from the subagent's
+// transcript at completion, the usage of the transcript read now. An agent can
+// stop before it has written its last API calls (Claude Code), and a
+// background agent woken again by a child it launched stops more than once
+// while only its first stop completes the record, so the transcript at
+// condensation is the complete one.
+//
+// Only completed records are recomputed: a live record's usage would be
+// partial, and stored again in full once it completes. External agents are
+// left alone, since their usage is computed from what their binary's
+// read-transcript returns, not from the raw file. The recompute never lowers
+// the recorded call count: the transcript only grows, so a smaller result
+// means a different or unparseable file was read. Usage is computed from the
+// raw bytes, before redaction, like every other token count; redaction could
+// rewrite the message IDs that usage is deduplicated by.
+func condensedTaskTokenUsage(ctx context.Context, ag agent.Agent, record session.TaskRecord, raw []byte) *agent.TokenUsage {
+	recorded := record.TokenUsage
+	if !record.TokenUsageFromTranscript || record.CompletedAt.IsZero() || ag == nil || external.IsExternal(ag) {
+		return recorded
+	}
+	usage := agent.CalculateTokenUsage(ctx, ag, raw, 0, "")
+	if !hasTokenUsageData(usage) || (recorded != nil && usage.APICallCount < recorded.APICallCount) {
+		return recorded
+	}
+	return usage
 }
 
 // readFirstTranscript tries each candidate path in order and returns the bytes

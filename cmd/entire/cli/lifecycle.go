@@ -1380,7 +1380,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 		refs = append(refs, agent.SubagentReference{ObservedTurnIDs: entry.ObservedTurnIDs, AgentID: entry.AgentID, DeclaredTranscriptPath: entry.DeclaredTranscriptPath, ResolvedTranscriptPath: entry.ResolvedTranscriptPath})
 	}
 	version := state.SubagentLedgerVersion
-	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs)
+	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs, state.AgentHome)
 	if !ok {
 		return nil, &version
 	}
@@ -1645,7 +1645,10 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		return recordInFlightTaskLaunch(logCtx, event)
 	}
 
-	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{ensureSessionState: true})
+	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
+		ensureSessionState: true,
+		analyzerFilesOnly:  event.SubagentFilesFromTranscript,
+	})
 }
 
 // recordInFlightTaskLaunch handles a background Task launch. It records an
@@ -1654,6 +1657,12 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 // is the first point that sees the subagent's actual work. Tolerates
 // strategy.ErrStateNotFound the way the completion producers tolerate a launch
 // event arriving before session state exists.
+//
+// A launch replaces an existing record for its ToolUseID unless the event is
+// SubagentLaunchIdempotent: a launch keyed by the subagent itself (Claude
+// Code's SubagentStart for Workflow agents) can repeat, and must not reset a
+// record its SubagentStop already completed while that record is still in
+// session state.
 func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error {
 	logging.Debug(logCtx, "background subagent launch detected; deferring capture to subagent-stop",
 		slog.String("session_id", event.SessionID),
@@ -1662,13 +1671,18 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 	)
 
 	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
-		state.AddTaskRecord(session.TaskRecord{
+		record := session.TaskRecord{
 			ToolUseID:       event.ToolUseID,
 			AgentID:         event.SubagentID,
 			StartedAt:       time.Now(),
 			SubagentType:    event.SubagentType,
 			TaskDescription: event.TaskDescription,
-		})
+		}
+		if event.SubagentLaunchIdempotent {
+			state.EnsureTaskRecord(record)
+			return nil
+		}
+		state.AddTaskRecord(record)
 		return nil
 	})
 	switch {
@@ -1735,10 +1749,10 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// that launched it. Find the launch record by agent ID and adopt its
 	// ToolUseID, which keys the exactly-once completion and the checkpoint's
 	// tasks/<tool_use_id>/ tree.
-	if event.ToolUseID == "" && !event.CompletionWithoutLaunch {
-		if rec := state.FindTaskRecordByAgentID(event.SubagentID); rec != nil {
-			event.ToolUseID = rec.ToolUseID
-		}
+	newExecution := false
+	keyedByAgentID := event.ToolUseID == "" && !event.CompletionWithoutLaunch
+	if keyedByAgentID {
+		event.ToolUseID, newExecution = taskRecordKeyForStop(state, event)
 	}
 
 	marker := state.FindTaskRecord(event.ToolUseID)
@@ -1748,7 +1762,7 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 			slog.String("tool_use_id", event.ToolUseID))
 		return nil
 	}
-	if (marker == nil && !event.CompletionWithoutLaunch) || (marker != nil && !marker.CompletedAt.IsZero()) {
+	if (marker == nil && !event.CompletionWithoutLaunch && !newExecution) || (marker != nil && !marker.CompletedAt.IsZero()) {
 		// No live marker: this ToolUseID was already completed at launch-time
 		// post-task (foreground task), or another Final event for the same
 		// ToolUseID (a duplicate SubagentStop, or a race against the
@@ -1763,7 +1777,9 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		// An event with no ToolUseID that matched no record is expected: a
 		// Claude Code foreground subagent's SubagentStop arrives before the
 		// PostToolUse that captures it, so there is nothing to complete yet.
-		if !event.CompletionWithoutLaunch && event.ToolUseID != "" && (event.SubagentID != "" || event.SubagentTranscriptPath != "") {
+		// So is a stop found only by agent ID whose record is complete: a
+		// background agent stops again each time a child it launched wakes it.
+		if !event.CompletionWithoutLaunch && !keyedByAgentID && event.ToolUseID != "" && (event.SubagentID != "" || event.SubagentTranscriptPath != "") {
 			logging.Warn(logCtx, "no in-flight marker for completed subagent — foreground dedup, a duplicate event, or a misintegrated agent setting Final without launch markers",
 				slog.String("session_id", event.SessionID),
 				slog.String("tool_use_id", event.ToolUseID),
@@ -1772,7 +1788,9 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		}
 		logging.Debug(logCtx, "no live in-flight marker for subagent-stop; skipping duplicate/foreground/racing capture",
 			slog.String("session_id", event.SessionID),
-			slog.String("tool_use_id", event.ToolUseID))
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("agent_id", event.SubagentID),
+			slog.String("agent_type", event.SubagentType))
 		return nil
 	}
 
@@ -1851,6 +1869,41 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	}
 
 	return nil
+}
+
+// taskRecordKeyForStop picks the task record a stop that names its subagent
+// but not its tool call completes, by agent ID; a live record wins.
+//
+// When the adapter named the stop's run (SubagentRunID), an agent ID alone
+// does not identify the execution: Claude Code resumes a Workflow run with its
+// agents' IDs, so a completed record for the ID may hold an earlier run that
+// condensation has not removed yet, and a launch for the later run found that
+// record and added none. Such a stop completes the record already holding its
+// run's transcript (a repeated stop), else a new record: keyed by the agent ID
+// when that key is free, otherwise by agent and run. newExecution reports the
+// new record, which CompleteTaskRecord creates.
+func taskRecordKeyForStop(state *strategy.SessionState, event *agent.Event) (key string, newExecution bool) {
+	rec := state.FindTaskRecordByAgentID(event.SubagentID)
+	if rec != nil && rec.CompletedAt.IsZero() {
+		return rec.ToolUseID, false
+	}
+	if event.SubagentRunID == "" || event.SubagentTranscriptPath == "" || event.SubagentID == "" {
+		if rec == nil {
+			return "", false
+		}
+		return rec.ToolUseID, false
+	}
+	transcript := filepath.Clean(event.SubagentTranscriptPath)
+	for _, existing := range state.TaskRecords {
+		if existing.AgentID == event.SubagentID && existing.DeclaredTranscriptPath != "" &&
+			filepath.Clean(existing.DeclaredTranscriptPath) == transcript {
+			return existing.ToolUseID, false
+		}
+	}
+	if state.FindTaskRecord(event.SubagentID) == nil {
+		return event.SubagentID, true
+	}
+	return event.SubagentID + "-" + event.SubagentRunID, true
 }
 
 // subagentCaptureOptions controls completeSubagentTaskRecord's behavior across
@@ -1934,6 +1987,17 @@ func subagentTranscriptAndFiles(
 		return transcriptPath, modifiedFiles, nil
 	}
 	return transcriptPath, mergeUnique(modifiedFiles, files), nil
+}
+
+// taskUsageRecountable reports whether a completed task's usage was computed
+// from its transcript in a way condensation can repeat on the transcript it
+// stores (session.TaskRecord.TokenUsageFromTranscript). Not for usage the event
+// reported, nor for Codex: a Codex child's usage comes from its rollout
+// inventory, which leaves it nil on purpose for a forked child whose rollout
+// carries the parent's history, and recounting that rollout from its start
+// would add the parent's tokens.
+func taskUsageRecountable(ag agent.Agent, event *agent.Event) bool {
+	return event.TokenUsage == nil && ag.Type() != agent.AgentTypeCodex
 }
 
 // subagentTokenUsage computes a subagent's own token usage from its
@@ -2078,16 +2142,18 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	if tokenUsage == nil {
 		tokenUsage = subagentTokenUsage(logCtx, ag, event, subagentTranscriptPath)
 	}
+	usageFromTranscript := taskUsageRecountable(ag, event)
 	rec := session.TaskRecord{
-		ToolUseID:              event.ToolUseID,
-		AgentID:                event.SubagentID,
-		StartedAt:              time.Now(),
-		SubagentType:           event.SubagentType,
-		TaskDescription:        event.TaskDescription,
-		DeclaredTranscriptPath: subagentTranscriptPath,
-		TranscriptUnavailable:  event.SubagentTranscriptUnavailable,
-		Files:                  files,
-		TokenUsage:             tokenUsage,
+		ToolUseID:                event.ToolUseID,
+		AgentID:                  event.SubagentID,
+		StartedAt:                time.Now(),
+		SubagentType:             event.SubagentType,
+		TaskDescription:          event.TaskDescription,
+		DeclaredTranscriptPath:   subagentTranscriptPath,
+		TranscriptUnavailable:    event.SubagentTranscriptUnavailable,
+		Files:                    files,
+		TokenUsage:               tokenUsage,
+		TokenUsageFromTranscript: usageFromTranscript,
 	}
 	// Exactly-once needs an identity to be "once" about. Copilot CLI's
 	// SubagentEnd carries no correlation ID at all, so every one of its
