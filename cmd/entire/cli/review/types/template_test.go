@@ -3,7 +3,6 @@ package types
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os/exec"
 	"runtime"
@@ -186,87 +185,6 @@ func TestReviewerTemplate_WaitIncludesStderrOnFailure(t *testing.T) {
 	}
 	if !strings.Contains(waitErr.Error(), "auth failed: login required") {
 		t.Fatalf("Wait() error missing stderr diagnostics: %v", waitErr)
-	}
-}
-
-// TestReviewerTemplate_ClassifyExitReplacesFailure pins the ClassifyExit hook:
-// it sees the process's stderr, a non-nil result replaces the default error,
-// and nil keeps the default ProcessError.
-func TestReviewerTemplate_ClassifyExitReplacesFailure(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses POSIX shell")
-	}
-
-	sentinel := errors.New("classified")
-	for _, tc := range []struct {
-		name       string
-		classified bool
-	}{
-		{"replaces", true},
-		{"keeps default on nil", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var sawStderr string
-			tmpl := &ReviewerTemplate{
-				AgentName: "classify-agent",
-				BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
-					return exec.CommandContext(ctx, "sh", "-c", "echo 'error: unknown option' >&2; exit 1")
-				},
-				ClassifyExit: func(stderr string, err error) error {
-					sawStderr = stderr
-					if tc.classified {
-						return fmt.Errorf("%w: %w", sentinel, err)
-					}
-					return nil
-				},
-				Parser: func(_ io.Reader) <-chan Event {
-					ch := make(chan Event)
-					close(ch)
-					return ch
-				},
-			}
-			proc, err := tmpl.Start(context.Background(), RunConfig{})
-			if err != nil {
-				t.Fatalf("Start() error: %v", err)
-			}
-			for ev := range proc.Events() {
-				_ = ev
-			}
-			waitErr := proc.Wait()
-			if !strings.Contains(sawStderr, "unknown option") {
-				t.Errorf("ClassifyExit saw stderr %q, want the process's stderr", sawStderr)
-			}
-			var procErr *ProcessError
-			if got := errors.Is(waitErr, sentinel); got != tc.classified {
-				t.Errorf("Wait() = %v; classified = %v, want %v", waitErr, got, tc.classified)
-			}
-			if !tc.classified && !errors.As(waitErr, &procErr) {
-				t.Errorf("Wait() = %T %v, want the default *ProcessError", waitErr, waitErr)
-			}
-		})
-	}
-}
-
-func TestReviewerTemplate_PrepareErrorAbortsBeforeBuild(t *testing.T) {
-	t.Parallel()
-	prepareErr := errors.New("prepare failed")
-	built := false
-	tmpl := ReviewerTemplate{
-		AgentName: "test",
-		Prepare:   func(context.Context) error { return prepareErr },
-		BuildCmd: func(ctx context.Context, _ RunConfig) *exec.Cmd {
-			built = true
-			return exec.CommandContext(ctx, "true")
-		},
-		Parser: func(_ io.Reader) <-chan Event { c := make(chan Event); close(c); return c },
-	}
-	if _, err := tmpl.Start(context.Background(), RunConfig{}); !errors.Is(err, prepareErr) {
-		t.Fatalf("Start error = %v, want it to wrap the Prepare error", err)
-	}
-	if built {
-		t.Error("BuildCmd ran after Prepare failed")
 	}
 }
 

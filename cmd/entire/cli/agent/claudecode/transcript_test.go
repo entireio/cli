@@ -2,12 +2,17 @@ package claudecode
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseTranscript(t *testing.T) {
@@ -857,4 +862,265 @@ func TestCalculateTotalTokenUsage_CountsSubagentSpawnedBeforeStartLine(t *testin
 		t.Errorf("subagent tokens = input %d output %d, want input 50 output 25",
 			usage.SubagentTokens.InputTokens, usage.SubagentTokens.OutputTokens)
 	}
+}
+
+// makeWorkflowLaunchLines returns the parent-transcript lines of a Workflow
+// call and its async_launched result. Claude Code (2.1.291) names the run in
+// the result text as "Run ID: <runId>"; it names no agent IDs.
+func makeWorkflowLaunchLines(t *testing.T, toolUseID, runID string) []string {
+	t.Helper()
+	use := mustMarshal(t, map[string]interface{}{
+		"type": "assistant", "uuid": "wf-use-" + toolUseID,
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "tool_use", "id": toolUseID, "name": "Workflow", "input": map[string]string{"name": "append-lines"}},
+		}},
+	})
+	result := mustMarshal(t, map[string]interface{}{
+		"type": "user", "uuid": "wf-result-" + toolUseID,
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": toolUseID, "content": "Workflow launched in background. Task ID: w73qhtvvh\nSummary: Three agents\nRun ID: " + runID + "\nTranscript dir: <session>/subagents/workflows/" + runID},
+		}},
+	})
+	return []string{string(use), string(result)}
+}
+
+// TestCalculateTotalTokenUsage_IncludesWorkflowAgents is the #2685 token
+// regression. Workflow agents are launched by a background Workflow tool call
+// whose result names a run but no agent IDs, so the "agentId:" scan never
+// finds them; Claude Code writes their transcripts under
+// <subagentsDir>/workflows/<runId>/agent-<id>.jsonl beside a meta file per
+// agent and a run journal. The layout mirrors a real Claude Code 2.1.291 run.
+func TestCalculateTotalTokenUsage_IncludesWorkflowAgents(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	runDir := filepath.Join(subagentsDir, "workflows", "wf_e5264e60-494")
+	require.NoError(t, os.MkdirAll(filepath.Join(runDir, "nested"), 0o755))
+
+	// The parent launched one direct Agent subagent (found via "agentId:") and
+	// one Workflow, whose tool result carries a run ID but no agent IDs.
+	lines := []string{
+		makeTaskToolUseLine(t, "a1", "toolu_direct"),
+		makeTaskResultLine(t, "u1", "toolu_direct", "direct1"),
+	}
+	lines = append(lines, makeWorkflowLaunchLines(t, "toolu_wf", "wf_e5264e60-494")...)
+	lines = append(lines, `{"type":"assistant","uuid":"a2","message":{"id":"m-main","usage":{"input_tokens":1000,"output_tokens":100}}}`)
+	writeJSONLFile(t, filepath.Join(subagentsDir, "agent-direct1.jsonl"),
+		`{"type":"assistant","uuid":"d1","message":{"id":"m-direct","usage":{"input_tokens":1,"output_tokens":2}}}`)
+
+	// Two workflow agents. The second streams one message as two rows; only
+	// the final row counts.
+	writeJSONLFile(t, filepath.Join(runDir, "agent-ae3d7b8f2930c8787.jsonl"),
+		`{"type":"user","isSidechain":true,"agentId":"ae3d7b8f2930c8787","message":{"role":"user","content":"append a line"}}`,
+		`{"type":"assistant","isSidechain":true,"agentId":"ae3d7b8f2930c8787","message":{"id":"m-w1","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40}}}`)
+	writeJSONLFile(t, filepath.Join(runDir, "agent-ac82c55f48a03882b.jsonl"),
+		`{"type":"assistant","isSidechain":true,"agentId":"ac82c55f48a03882b","message":{"id":"m-w2","usage":{"input_tokens":100,"output_tokens":1}}}`,
+		`{"type":"assistant","isSidechain":true,"agentId":"ac82c55f48a03882b","message":{"id":"m-w2","usage":{"input_tokens":100,"output_tokens":200}}}`)
+
+	// Not agent transcripts: the per-agent meta file, the run journal, a file
+	// one level too deep, a copy of the direct agent's transcript (counted
+	// once, from its own location), and a run this transcript never launched.
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "agent-ae3d7b8f2930c8787.meta.json"),
+		[]byte(`{"agentType":"workflow-subagent","description":"agent 1"}`), 0o600))
+	writeJSONLFile(t, filepath.Join(runDir, "journal.jsonl"),
+		`{"type":"assistant","message":{"id":"m-journal","usage":{"input_tokens":5000,"output_tokens":5000}}}`)
+	writeJSONLFile(t, filepath.Join(runDir, "nested", "agent-deep.jsonl"),
+		`{"type":"assistant","message":{"id":"m-deep","usage":{"input_tokens":7000,"output_tokens":7000}}}`)
+	writeJSONLFile(t, filepath.Join(runDir, "agent-direct1.jsonl"),
+		`{"type":"assistant","message":{"id":"m-direct","usage":{"input_tokens":9000,"output_tokens":9000}}}`)
+	require.NoError(t, os.MkdirAll(filepath.Join(subagentsDir, "workflows", "wf_unlaunched"), 0o755))
+	writeJSONLFile(t, filepath.Join(subagentsDir, "workflows", "wf_unlaunched", "agent-other.jsonl"),
+		`{"type":"assistant","message":{"id":"m-other","usage":{"input_tokens":8000,"output_tokens":8000}}}`)
+
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(lines...), 0, subagentsDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1000, usage.InputTokens, "main usage must not absorb subagent usage")
+	assert.Equal(t, 100, usage.OutputTokens)
+	require.NotNil(t, usage.SubagentTokens, "workflow agents were not counted")
+	assert.Equal(t, agent.TokenUsage{
+		InputTokens:         1 + 10 + 100,
+		CacheCreationTokens: 20,
+		CacheReadTokens:     30,
+		OutputTokens:        2 + 40 + 200,
+		APICallCount:        3,
+	}, *usage.SubagentTokens)
+}
+
+// TestCalculateTotalTokenUsage_WorkflowAgentsFollowTheTranscriptPrefix: a
+// run's agents count only once the transcript has launched the run. Import
+// splits a session into turns and computes each turn's subagent total from
+// the transcript prefix up to that turn, then rescopes consecutive totals into
+// per-turn deltas; counting every run on disk would put every workflow's
+// tokens on the first turn.
+func TestCalculateTotalTokenUsage_WorkflowAgentsFollowTheTranscriptPrefix(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	runDir := filepath.Join(subagentsDir, "workflows", "wf_1")
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+	writeJSONLFile(t, filepath.Join(runDir, "agent-a6d78754c07df829a.jsonl"),
+		`{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":3,"output_tokens":4}}}`)
+
+	before := []string{`{"type":"assistant","uuid":"a1","message":{"id":"m0","usage":{"input_tokens":1,"output_tokens":1}}}`}
+	after := append(append([]string{}, before...), makeWorkflowLaunchLines(t, "toolu_wf", "wf_1")...)
+
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(before...), 0, subagentsDir)
+	require.NoError(t, err)
+	assert.Nil(t, usage.SubagentTokens, "a run the prefix has not launched must not count")
+
+	usage, err = (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(after...), 0, subagentsDir)
+	require.NoError(t, err)
+	require.NotNil(t, usage.SubagentTokens)
+	assert.Equal(t, 3, usage.SubagentTokens.InputTokens)
+	assert.Equal(t, 4, usage.SubagentTokens.OutputTokens)
+	assert.Equal(t, 1, usage.SubagentTokens.APICallCount)
+}
+
+// TestCalculateTotalTokenUsage_AgentIDResultDoesNotHideWorkflowTranscript: an
+// agent ID named by an "agentId:" result whose only transcript is in a
+// launched Workflow run is still counted, from the run directory.
+func TestCalculateTotalTokenUsage_AgentIDResultDoesNotHideWorkflowTranscript(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	runDir := filepath.Join(subagentsDir, "workflows", "wf_1")
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+	writeJSONLFile(t, filepath.Join(runDir, "agent-shared1.jsonl"),
+		`{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":3,"output_tokens":4}}}`)
+
+	lines := []string{
+		makeTaskToolUseLine(t, "a1", "toolu_send"),
+		makeTaskResultLine(t, "u1", "toolu_send", "shared1"),
+	}
+	lines = append(lines, makeWorkflowLaunchLines(t, "toolu_wf", "wf_1")...)
+
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(lines...), 0, subagentsDir)
+	require.NoError(t, err)
+	require.NotNil(t, usage.SubagentTokens, "the workflow transcript was dropped for the absent direct path")
+	assert.Equal(t, 3, usage.SubagentTokens.InputTokens)
+}
+
+// TestCalculateTotalTokenUsage_WorkflowRunFromStructuredResult pins that a
+// Workflow run is found from the launch's structured toolUseResult even when
+// the result text does not use the "Run ID:" wording, so a change in Claude
+// Code's prose cannot silently drop workflow agents' tokens.
+func TestCalculateTotalTokenUsage_WorkflowRunFromStructuredResult(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	runDir := filepath.Join(subagentsDir, "workflows", "wf_e5264e60-494")
+	require.NoError(t, os.MkdirAll(runDir, 0o755))
+	writeJSONLFile(t, filepath.Join(runDir, "agent-ae3d7b8f2930c8787.jsonl"),
+		`{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":5,"output_tokens":6}}}`)
+
+	result := mustMarshal(t, map[string]interface{}{
+		"type": "user", "uuid": "wf-result",
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": "toolu_wf", "content": "Workflow started."},
+		}},
+		"toolUseResult": map[string]interface{}{
+			"status": "async_launched", "taskType": "local_workflow", "runId": "wf_e5264e60-494",
+		},
+	})
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(string(result)), 0, subagentsDir)
+	require.NoError(t, err)
+	require.NotNil(t, usage.SubagentTokens)
+	assert.Equal(t, 5, usage.SubagentTokens.InputTokens)
+	assert.Equal(t, 6, usage.SubagentTokens.OutputTokens)
+}
+
+// TestExtractWorkflowRunIDs_EveryRunInAResult pins that a result naming more
+// than one run (e.g. a resumed run citing its source) yields each of them.
+func TestExtractWorkflowRunIDs_EveryRunInAResult(t *testing.T) {
+	t.Parallel()
+
+	result := mustMarshal(t, map[string]interface{}{
+		"type": "user", "uuid": "wf-result",
+		"message": map[string]interface{}{"content": []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": "toolu_wf", "content": "Run ID: wf_new-1\nResumed from Run ID: wf_old-2\nRun ID: wf_new-1"},
+		}},
+	})
+	parsed, err := transcript.ParseFromBytes(buildJSONL(string(result)))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"wf_new-1", "wf_old-2"}, ExtractWorkflowRunIDs(parsed))
+}
+
+// TestCalculateTotalTokenUsage_SameWorkflowAgentInTwoRunsCountsOnce pins that
+// an agent ID present in two launched runs is counted once, from its newest
+// transcript, not summed or taken from whichever run is read last.
+func TestCalculateTotalTokenUsage_SameWorkflowAgentInTwoRunsCountsOnce(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	const agentID = "ae3d7b8f2930c8787"
+	older := filepath.Join(subagentsDir, "workflows", "wf_2", "agent-"+agentID+".jsonl")
+	newer := filepath.Join(subagentsDir, "workflows", "wf_1", "agent-"+agentID+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(older), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(newer), 0o755))
+	writeJSONLFile(t, older, `{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":1,"output_tokens":1}}}`)
+	writeJSONLFile(t, newer, `{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":7,"output_tokens":8}}}`)
+	base := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(older, base, base))
+	require.NoError(t, os.Chtimes(newer, base.Add(time.Minute), base.Add(time.Minute)))
+
+	lines := append(makeWorkflowLaunchLines(t, "toolu_wf1", "wf_1"), makeWorkflowLaunchLines(t, "toolu_wf2", "wf_2")...)
+	usage, err := (&ClaudeCodeAgent{}).CalculateTotalTokenUsage(buildJSONL(lines...), 0, subagentsDir)
+	require.NoError(t, err)
+	require.NotNil(t, usage.SubagentTokens)
+	assert.Equal(t, 7, usage.SubagentTokens.InputTokens)
+	assert.Equal(t, 8, usage.SubagentTokens.OutputTokens)
+	assert.Equal(t, 1, usage.SubagentTokens.APICallCount)
+}
+
+// forkedSkillResultLine is the parent transcript's tool_result line for a
+// Skill call that ran forked (Claude Code 2.1.291): the text does not name the
+// agent; the structured toolUseResult does.
+func forkedSkillResultLine(toolUseID, agentID string) string {
+	return fmt.Sprintf(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"Skill \"fanout-fork\" launched (forked execution, running in the background)."}]},`+
+		`"toolUseResult":{"success":true,"commandName":"fanout-fork","status":"forked","background":true,"agentId":%q}}`, toolUseID, agentID)
+}
+
+func TestForkedSkillAgentIDs(t *testing.T) {
+	t.Parallel()
+
+	data := buildJSONL(
+		forkedSkillResultLine("toolu_skill", "a80ff32f89f7dadc4"),
+		// An inline skill launched no agent.
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_inline","content":"Launching skill: fanout"}]},"toolUseResult":{"success":true,"commandName":"fanout"}}`,
+		// Not path-safe: dropped.
+		forkedSkillResultLine("toolu_bad", "../escape"),
+		// The same shape on an assistant line is not a tool result.
+		`{"type":"assistant","toolUseResult":{"status":"forked","agentId":"aother"}}`,
+	)
+
+	assert.Equal(t, map[string]string{"a80ff32f89f7dadc4": "toolu_skill"}, forkedSkillAgentIDs(data))
+}
+
+// A forked skill's agent writes its transcript beside an Agent call's, and
+// its tokens and files belong to the parent session just the same.
+func TestForkedSkillAgentCountsTowardSession(t *testing.T) {
+	t.Parallel()
+
+	subagentsDir := filepath.Join(t.TempDir(), "sess", "subagents")
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+	data := buildJSONL(
+		forkedSkillResultLine("toolu_skill", "a80ff32f89f7dadc4"),
+		`{"type":"assistant","uuid":"a2","message":{"id":"m-main","usage":{"input_tokens":1000,"output_tokens":100}}}`,
+	)
+	writeJSONLFile(t, filepath.Join(subagentsDir, "agent-a80ff32f89f7dadc4.jsonl"),
+		makeWriteToolLine(t, "f1", "/repo/c.txt"),
+		`{"type":"assistant","uuid":"f2","message":{"id":"m-fork","usage":{"input_tokens":10,"output_tokens":20}}}`)
+
+	c := &ClaudeCodeAgent{}
+	usage, err := c.CalculateTotalTokenUsage(data, 0, subagentsDir)
+	require.NoError(t, err)
+	assert.Equal(t, 1000, usage.InputTokens, "main usage must not absorb the forked agent's")
+	require.NotNil(t, usage.SubagentTokens, "forked skill agent was not counted")
+	assert.Equal(t, 10, usage.SubagentTokens.InputTokens)
+	assert.Equal(t, 20, usage.SubagentTokens.OutputTokens)
+
+	files, err := c.ExtractAllModifiedFiles(data, 0, subagentsDir)
+	require.NoError(t, err)
+	assert.Contains(t, files, "/repo/c.txt")
 }

@@ -45,7 +45,7 @@ func TestEnableDefault_GitRefsRoundTrip(t *testing.T) {
 		t.Fatalf("stop hook failed: %v", err)
 	}
 	_ = initialHead
-	env.GitCommitWithShadowHooks("Add main", "main.go")
+	env.GitCommitWithHooks("Add main", "main.go")
 
 	refs := gitOutput(t, env.RepoDir, "for-each-ref", "refs/entire/checkpoints")
 	if refs == "" {

@@ -508,3 +508,36 @@ func TestBuildDispatchWizardSummary_Jurisdiction(t *testing.T) {
 		t.Fatalf("local summary must not mention a jurisdiction, got %q", summary)
 	}
 }
+
+// TestDiscoverRepoSlug_NamesItsForge pins that the wizard's on-disk repo
+// discovery offers an Entire-native checkout as et/<project>/<repo> rather
+// than dropping it, while GitHub checkouts (direct or mirrored) stay gh/ and
+// repos on hosts Entire does not serve are skipped.
+func TestDiscoverRepoSlug_NamesItsForge(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		origin string // empty: no origin remote
+		want   string
+	}{
+		{name: "native origin", origin: "entire://aws-us-east-2.entire.io/et/entirehq/entire-api", want: "et/entirehq/entire-api"},
+		{name: "github origin", origin: "https://github.com/acme/thing.git", want: "gh/acme/thing"},
+		{name: "mirror origin", origin: "entire://cell1.entire.io/gh/acme/thing", want: "gh/acme/thing"},
+		{name: "other host is skipped", origin: "https://gitlab.com/acme/thing.git", want: ""},
+		{name: "no origin is skipped", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			if tt.origin != "" {
+				runExpertsGit(t, dir, "remote", "add", "origin", tt.origin)
+			}
+			if got := discoverRepoSlug(dir); got != tt.want {
+				t.Fatalf("discoverRepoSlug() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

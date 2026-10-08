@@ -187,7 +187,7 @@ func (a *PiAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.
 	case HookNameBeforeAgentStart:
 		// Provide the live Pi session file as SessionRef so state.TranscriptPath
 		// is populated before any mid-turn commits. Without this, the
-		// post-commit hook cannot condense when no shadow branch exists yet.
+		// post-commit hook cannot condense before the first turn end.
 		return &agent.Event{
 			Type:        agent.TurnStart,
 			SessionID:   sessionID,

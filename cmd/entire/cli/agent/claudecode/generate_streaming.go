@@ -50,10 +50,16 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 		defer cleanup()
 	}
 
+	workDir, cleanupDir, err := agent.NewTextGenerationDir()
+	if err != nil {
+		return "", err //nolint:wrapcheck // NewTextGenerationDir already names what failed
+	}
+	defer cleanupDir()
+
 	cmd := commandRunner(ctx, "claude", buildStreamingGenerateArgs(model, settingsPath)...)
 
-	cmd.Dir = os.TempDir()
-	cmd.Env = agent.StripGitEnv(os.Environ())
+	cmd.Dir = workDir
+	cmd.Env = agent.TextGenerationEnv(workDir, os.Environ())
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()

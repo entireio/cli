@@ -109,6 +109,14 @@ func TestRunMarkerFallback_WritesMarkerAndPrintsGuidance(t *testing.T) {
 	if m.WorktreePath != "/worktrees/myrepo" {
 		t.Errorf("WorktreePath = %q, want /worktrees/myrepo", m.WorktreePath)
 	}
+	// Agents without a runner are started by hand, so the guardrail every
+	// launched reviewer gets in its system prompt leads the printed prompt.
+	if !strings.HasPrefix(m.Prompt, review.ReviewerGuardrail) {
+		t.Errorf("marker prompt does not start with the reviewer guardrail: %q", m.Prompt)
+	}
+	if !strings.Contains(out, "Use this prompt:\n\n"+review.ReviewerGuardrail) {
+		t.Errorf("printed prompt does not start with the reviewer guardrail: %s", out)
+	}
 }
 
 func TestRunMarkerFallback_DoesNotCallRun(t *testing.T) {

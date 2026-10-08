@@ -14,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-func TestIsShadowBranch(t *testing.T) {
+func TestIsLegacyShadowBranch(t *testing.T) {
 	tests := []struct {
 		name       string
 		branchName string
@@ -53,15 +53,15 @@ func TestIsShadowBranch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsShadowBranch(tt.branchName)
+			got := IsLegacyShadowBranch(tt.branchName)
 			if got != tt.want {
-				t.Errorf("IsShadowBranch(%q) = %v, want %v", tt.branchName, got, tt.want)
+				t.Errorf("IsLegacyShadowBranch(%q) = %v, want %v", tt.branchName, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestListShadowBranches(t *testing.T) {
+func TestListLegacyShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with various branches
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -109,14 +109,14 @@ func TestListShadowBranches(t *testing.T) {
 	}
 
 	// Test ListShadowBranches
-	shadowBranches, err := ListShadowBranches(context.Background())
+	shadowBranches, err := ListLegacyShadowBranches(context.Background())
 	if err != nil {
-		t.Fatalf("ListShadowBranches(context.Background()) error = %v", err)
+		t.Fatalf("ListLegacyShadowBranches(context.Background()) error = %v", err)
 	}
 
 	// Should have exactly 2 shadow branches
 	if len(shadowBranches) != 2 {
-		t.Errorf("ListShadowBranches(context.Background()) returned %d branches, want 2: %v", len(shadowBranches), shadowBranches)
+		t.Errorf("ListLegacyShadowBranches(context.Background()) returned %d branches, want 2: %v", len(shadowBranches), shadowBranches)
 	}
 
 	// Check that the expected branches are present
@@ -126,17 +126,17 @@ func TestListShadowBranches(t *testing.T) {
 	}
 
 	if !shadowSet["entire/abc1234"] {
-		t.Error("ListShadowBranches(context.Background()) missing 'entire/abc1234'")
+		t.Error("ListLegacyShadowBranches(context.Background()) missing 'entire/abc1234'")
 	}
 	if !shadowSet["entire/def5678"] {
-		t.Error("ListShadowBranches(context.Background()) missing 'entire/def5678'")
+		t.Error("ListLegacyShadowBranches(context.Background()) missing 'entire/def5678'")
 	}
 	if shadowSet[paths.MetadataBranchName] {
-		t.Errorf("ListShadowBranches(context.Background()) should not include '%s'", paths.MetadataBranchName)
+		t.Errorf("ListLegacyShadowBranches(context.Background()) should not include '%s'", paths.MetadataBranchName)
 	}
 }
 
-func TestListShadowBranches_Empty(t *testing.T) {
+func TestListLegacyShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo with no shadow branches
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -165,21 +165,21 @@ func TestListShadowBranches_Empty(t *testing.T) {
 	}
 
 	// Test ListShadowBranches returns empty slice (not nil)
-	shadowBranches, err := ListShadowBranches(context.Background())
+	shadowBranches, err := ListLegacyShadowBranches(context.Background())
 	if err != nil {
-		t.Fatalf("ListShadowBranches(context.Background()) error = %v", err)
+		t.Fatalf("ListLegacyShadowBranches(context.Background()) error = %v", err)
 	}
 
 	if shadowBranches == nil {
-		t.Error("ListShadowBranches(context.Background()) returned nil, want empty slice")
+		t.Error("ListLegacyShadowBranches(context.Background()) returned nil, want empty slice")
 	}
 
 	if len(shadowBranches) != 0 {
-		t.Errorf("ListShadowBranches(context.Background()) returned %d branches, want 0", len(shadowBranches))
+		t.Errorf("ListLegacyShadowBranches(context.Background()) returned %d branches, want 0", len(shadowBranches))
 	}
 }
 
-func TestDeleteShadowBranches(t *testing.T) {
+func TestDeleteLegacyShadowBranches(t *testing.T) {
 	// Setup: create a temp git repo with shadow branches
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -217,17 +217,14 @@ func TestDeleteShadowBranches(t *testing.T) {
 	}
 
 	// Delete shadow branches
-	deleted, failed, err := DeleteShadowBranches(context.Background(), shadowBranches)
-	if err != nil {
-		t.Fatalf("DeleteShadowBranches() error = %v", err)
-	}
+	deleted, failed := DeleteLegacyShadowBranches(context.Background(), shadowBranches)
 
 	// All should be deleted successfully
 	if len(deleted) != 2 {
-		t.Errorf("DeleteShadowBranches() deleted %d branches, want 2", len(deleted))
+		t.Errorf("DeleteLegacyShadowBranches() deleted %d branches, want 2", len(deleted))
 	}
 	if len(failed) != 0 {
-		t.Errorf("DeleteShadowBranches() failed %d branches, want 0: %v", len(failed), failed)
+		t.Errorf("DeleteLegacyShadowBranches() failed %d branches, want 0: %v", len(failed), failed)
 	}
 
 	// Verify branches are actually deleted using git CLI
@@ -244,7 +241,7 @@ func TestDeleteShadowBranches(t *testing.T) {
 	}
 }
 
-func TestDeleteShadowBranches_NonExistent(t *testing.T) {
+func TestDeleteLegacyShadowBranches_NonExistent(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -274,21 +271,18 @@ func TestDeleteShadowBranches_NonExistent(t *testing.T) {
 
 	// Try to delete non-existent branches
 	nonExistent := []string{"entire/doesnotexist"}
-	deleted, failed, err := DeleteShadowBranches(context.Background(), nonExistent)
-	if err != nil {
-		t.Fatalf("DeleteShadowBranches() error = %v", err)
-	}
+	deleted, failed := DeleteLegacyShadowBranches(context.Background(), nonExistent)
 
 	// Should have one failed branch
 	if len(deleted) != 0 {
-		t.Errorf("DeleteShadowBranches() deleted %d branches, want 0", len(deleted))
+		t.Errorf("DeleteLegacyShadowBranches() deleted %d branches, want 0", len(deleted))
 	}
 	if len(failed) != 1 {
-		t.Errorf("DeleteShadowBranches() failed %d branches, want 1", len(failed))
+		t.Errorf("DeleteLegacyShadowBranches() failed %d branches, want 1", len(failed))
 	}
 }
 
-func TestDeleteShadowBranches_Empty(t *testing.T) {
+func TestDeleteLegacyShadowBranches_Empty(t *testing.T) {
 	// Setup: create a temp git repo
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -296,12 +290,9 @@ func TestDeleteShadowBranches_Empty(t *testing.T) {
 	t.Chdir(dir)
 
 	// Delete empty list should return empty results
-	deleted, failed, err := DeleteShadowBranches(context.Background(), []string{})
-	if err != nil {
-		t.Fatalf("DeleteShadowBranches() error = %v", err)
-	}
+	deleted, failed := DeleteLegacyShadowBranches(context.Background(), []string{})
 
 	if len(deleted) != 0 || len(failed) != 0 {
-		t.Errorf("DeleteShadowBranches([]) = (%v, %v), want ([], [])", deleted, failed)
+		t.Errorf("DeleteLegacyShadowBranches([]) = (%v, %v), want ([], [])", deleted, failed)
 	}
 }

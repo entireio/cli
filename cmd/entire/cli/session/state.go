@@ -114,16 +114,10 @@ type State struct {
 	// CLIVersion is the version of the CLI that created this session
 	CLIVersion string `json:"cli_version,omitempty"`
 
-	// BaseCommit tracks the current shadow branch base. Initially set to HEAD when the
-	// session starts, but updated on migration (pull/rebase) and after condensation.
-	// Used for shadow branch naming and checkpoint storage — NOT for attribution.
+	// BaseCommit is the commit the session's pending work sits on top of.
+	// Initially set to HEAD when the session starts, then moved to HEAD when it
+	// moves (commit, pull, rebase, reset) and after condensation.
 	BaseCommit string `json:"base_commit"`
-
-	// AttributionBaseCommit is the commit used as the reference point for attribution calculations.
-	// Unlike BaseCommit (which tracks the shadow branch and moves with migration), this field
-	// preserves the original base commit so deferred condensation can correctly calculate
-	// agent vs human line attribution. Updated only after successful condensation.
-	AttributionBaseCommit string `json:"attribution_base_commit,omitempty"`
 
 	// WorktreePath is the absolute path to the worktree root
 	WorktreePath string `json:"worktree_path,omitempty"`
@@ -254,6 +248,21 @@ type State struct {
 	// FilesTouched tracks files modified/created/deleted during this session
 	FilesTouched []string `json:"files_touched,omitempty"`
 
+	// TouchedFileHashes records the content a turn-end step left for each file
+	// it changed: repo-relative path → git blob hash (hex) of the worktree file
+	// at that turn end, with clean filters applied as `git add` would. A path
+	// the step deleted maps to "" (a recorded deletion). A later step
+	// overwrites an earlier one's entry. Entries exist only for paths in
+	// FilesTouched; a FilesTouched path with no entry has no recorded content
+	// (hashing failed, a symlink, or it arrived via a task record or per-tool
+	// hook), and commit-time decisions fall back to its name.
+	//
+	// Commit hooks compare a committed or staged blob hash with this map to
+	// tell "the human committed what the agent wrote" from "the human replaced
+	// it". It replaced the shadow-branch snapshot those decisions used to
+	// read, and records no content.
+	TouchedFileHashes map[string]string `json:"touched_file_hashes,omitempty"`
+
 	// LastCheckpointID is the checkpoint ID from the most recent condensation.
 	// Used to restore the Entire-Checkpoint trailer on amend and to identify
 	// sessions that have been condensed at least once. Cleared on new prompt.
@@ -263,16 +272,9 @@ type State struct {
 	// retry after process death keeps both the intended ID and recovery mode.
 	CondensationAttempt *CondensationAttempt `json:"condensation_attempt,omitempty"`
 
-	// LastCheckpointCommitHash is the exact commit SHA that carried
-	// LastCheckpointID at condensation time. Used by the reconcile path to
-	// distinguish "reset back to the condensed commit" (same SHA) from
-	// "cherry-picked / rebased a commit that happens to preserve the trailer"
-	// (different SHA). Without this guard, a cherry-picked checkpoint would
-	// falsely fire reconcile and drop the pinned AttributionBaseCommit,
-	// corrupting attribution math for uncondensed shadow-branch work.
-	// Empty for legacy state files — reconcile falls back to trailer-only
-	// matching for backward compatibility.
-	LastCheckpointCommitHash string `json:"last_checkpoint_commit_hash,omitempty"`
+	// last_checkpoint_commit_hash, written by older CLIs for a shadow-branch
+	// reconcile path that no longer exists, is an unknown key now: encoding/json
+	// ignores it on load and the next save drops it.
 
 	// FullyCondensed indicates this session has been condensed and has no remaining
 	// carry-forward files. PostCommit skips fully-condensed sessions entirely.
@@ -280,12 +282,6 @@ type State struct {
 	// and the session phase is ENDED. Cleared on session reactivation (ENDED →
 	// ACTIVE via TurnStart, or ENDED → IDLE via SessionStart) by ActionClearEndedAt.
 	FullyCondensed bool `json:"fully_condensed,omitempty"`
-
-	// DivergenceNoticeShown indicates the prepare-commit-msg warning about
-	// attribution divergence has been shown. Set when the warning fires,
-	// cleared when AttributionBaseCommit realigns with BaseCommit (next
-	// successful condensation). Prevents repeated warnings on every commit.
-	DivergenceNoticeShown bool `json:"divergence_notice_shown,omitempty"`
 
 	// AttachedManually indicates this session was imported via
 	// `entire session attach` rather than being captured by hooks during
@@ -411,18 +407,25 @@ type State struct {
 	// TranscriptPath is the path to the live transcript file (for mid-session commit detection)
 	TranscriptPath string `json:"transcript_path,omitempty"`
 
+	// AgentHome is the agent's home directory (for example CLAUDE_CONFIG_DIR or
+	// CODEX_HOME) whose session stores held TranscriptPath when it was last set
+	// at session initialization or turn start, in whichever spelling (as the
+	// environment sets it, or canonical) contains TranscriptPath. A home set by
+	// an earlier turn is kept while its stores still hold TranscriptPath. It is
+	// "" when the agent has no home layout or the transcript lies in none of
+	// the home's stores. It grants no trust: readers pass it to
+	// agent.ResolveTrustedHome before relying on it.
+	AgentHome string `json:"agent_home,omitempty"`
+
 	// LastPrompt is the most recent user prompt for this session (truncated for display).
 	// Updated on every turn start (UserPromptSubmit). JSON tag kept as "first_prompt"
 	// for backward compatibility with existing state files.
 	LastPrompt string `json:"last_prompt,omitempty"`
 
-	// PromptAttributions tracks user and agent line changes at each prompt start.
-	// This enables accurate attribution by capturing user edits between checkpoints.
-	PromptAttributions []PromptAttribution `json:"prompt_attributions,omitempty"`
-
-	// PendingPromptAttribution holds attribution calculated at prompt start (before agent runs).
-	// This is moved to PromptAttributions when SaveStep is called.
-	PendingPromptAttribution *PromptAttribution `json:"pending_prompt_attribution,omitempty"`
+	// Line attribution was removed: state files written by older CLIs may
+	// still carry attribution_base_commit, prompt_attributions,
+	// pending_prompt_attribution, and divergence_notice_shown. encoding/json
+	// ignores those unknown keys on load, and the next save drops them.
 
 	// Owner fingerprints the process that owns this session's agent turn,
 	// captured at each turn start via proclive.ResolveOwner. It lets liveness
@@ -456,8 +459,8 @@ type SubagentInventoryEntry struct {
 
 // TaskRecord is the durable pointer ledger entry for a subagent dispatched by
 // this session: a small session-state record (correlation ID, agent type,
-// description, declared transcript path, files touched, tokens) rather than a
-// shadow-tree write. Condensation is what materializes a record's transcript
+// description, declared transcript path, files touched, tokens). Condensation
+// is what materializes a record's transcript
 // (sanitize → externalize → redact) into the parent session's checkpoint —
 // see docs/superpowers/plans/2026-08-19-subagent-durable-records.md.
 //
@@ -474,7 +477,10 @@ type SubagentInventoryEntry struct {
 // SessionEnd sweep to retry.
 type TaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
-	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
+	// to key TaskMetadataDir. Dedup key for AddTaskRecord. For a Claude Code
+	// Workflow agent it is the agent ID instead: those agents have no tool call
+	// of their own (the Workflow's tool_use_id is shared by every agent in the
+	// run), so the record is keyed by the subagent, and AgentID equals it.
 	ToolUseID string `json:"tool_use_id"`
 
 	// AgentID is the subagent identifier (tool_response.agentId at launch
@@ -513,8 +519,16 @@ type TaskRecord struct {
 	Files []string `json:"files,omitempty"`
 
 	// TokenUsage is this subagent's token usage, when the completing hook
-	// payload provided one. nil when unavailable.
+	// payload provided one or the agent computed it from the subagent's
+	// transcript. nil when unavailable.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// TokenUsageFromTranscript records that TokenUsage was computed from the
+	// subagent's transcript at completion (or would have been, had that read
+	// found usage) rather than reported by the agent. Condensation recomputes
+	// such usage from the transcript it stores, which by then holds API calls
+	// the agent had not yet written when it stopped.
+	TokenUsageFromTranscript bool `json:"token_usage_from_transcript,omitempty"`
 
 	// CompletedAt is when this record was completed (CompleteTaskRecord).
 	// Zero means the record is still in flight. See the type doc comment.
@@ -743,11 +757,28 @@ func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool
 
 // HasTaskContent reports whether this session carries pending subagent task
 // content: any task record — live (transcript-so-far still needs capturing)
-// or completed-unmaterialized (awaiting condensation) — counts. Condensation
-// triggers and session-empty guards key on this, not on shadow-branch
-// existence: task records never touch the shadow branch.
+// or completed-unmaterialized (awaiting condensation) — counts.
 func (s *State) HasTaskContent() bool {
 	return len(s.TaskRecords) > 0
+}
+
+// HasPendingWork reports whether this session holds work no checkpoint has
+// captured yet: a turn-end step since the last condensation (StepCount), files
+// still awaiting a commit (FilesTouched, including carry-forward), or subagent
+// task records.
+//
+// It is the single answer to "is there anything here to condense or lose?" —
+// lifecycle cleanup, doctor, the session sweeper, and condensation all ask it,
+// and must not re-derive it from the parts. (Shadow-branch existence used to
+// stand in for it; nothing writes git objects at turn end anymore.)
+//
+// It deliberately ignores FullyCondensed: a fully condensed session can still
+// carry task records (a background subagent finishing after its session
+// ended). Callers that must leave fully condensed sessions alone — doctor's
+// ENDED classification, the zombie sweep, IsCondensableEndedSession — check
+// FullyCondensed themselves, as they always have.
+func (s *State) HasPendingWork() bool {
+	return s.StepCount > 0 || len(s.FilesTouched) > 0 || s.HasTaskContent()
 }
 
 // LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
@@ -763,38 +794,6 @@ func (s *State) LiveTaskRecords() []TaskRecord {
 		}
 	}
 	return live
-}
-
-// PromptAttribution captures line-level attribution data at the start of each prompt.
-// By recording what changed since the last checkpoint BEFORE the agent works,
-// we can accurately separate user edits from agent contributions.
-type PromptAttribution struct {
-	// CheckpointNumber is which checkpoint this was recorded before (1-indexed)
-	CheckpointNumber int `json:"checkpoint_number"`
-
-	// UserLinesAdded is lines added by user since the last checkpoint
-	UserLinesAdded int `json:"user_lines_added"`
-
-	// UserLinesRemoved is lines removed by user since the last checkpoint
-	UserLinesRemoved int `json:"user_lines_removed"`
-
-	// AgentLinesAdded is total agent lines added so far (base → last checkpoint).
-	// Always 0 for checkpoint 1 since there's no previous checkpoint to measure against.
-	AgentLinesAdded int `json:"agent_lines_added"`
-
-	// AgentLinesRemoved is total agent lines removed so far (base → last checkpoint).
-	// Always 0 for checkpoint 1 since there's no previous checkpoint to measure against.
-	AgentLinesRemoved int `json:"agent_lines_removed"`
-
-	// UserAddedPerFile tracks per-file user additions for accurate modification tracking.
-	// This enables distinguishing user self-modifications from agent modifications.
-	// See docs/architecture/attribution.md for details.
-	UserAddedPerFile map[string]int `json:"user_added_per_file,omitempty"`
-
-	// UserRemovedPerFile tracks per-file user removals for accurate agent deletion attribution.
-	// Without this, global user removals would be subtracted from agent-file-only removals,
-	// incorrectly reducing agent deletion credit when users delete lines in non-agent files.
-	UserRemovedPerFile map[string]int `json:"user_removed_per_file,omitempty"`
 }
 
 // NormalizeAfterLoad applies backward-compatible migrations to state loaded from disk.
@@ -828,20 +827,6 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 	// This is acceptable since CLI upgrades are monotonic and the worst case is
 	// redundant transcript content in a condensation, not data loss.
 	s.ClearLegacyTranscriptOffsets()
-
-	// Backfill AttributionBaseCommit for sessions created before this field existed.
-	// Without this, a mid-turn commit would migrate BaseCommit and the fallback in
-	// calculateSessionAttributions would use the migrated value, producing zero attribution.
-	if s.AttributionBaseCommit == "" && s.BaseCommit != "" {
-		s.AttributionBaseCommit = s.BaseCommit
-	}
-
-	// DivergenceNoticeShown is only meaningful while attribution is actually
-	// diverged. Self-heal any state file where the flag outlived the divergence
-	// — otherwise a future legitimate divergence would be silently suppressed.
-	if s.DivergenceNoticeShown && s.AttributionBaseCommit == s.BaseCommit {
-		s.DivergenceNoticeShown = false
-	}
 
 	// Codex states saved before the authoritative child ledger cannot claim an
 	// exact child aggregate. Keep any exact task-record IDs as discovery hints,
@@ -932,17 +917,6 @@ func (s *State) RebaselineSubagentTokens() {
 	complete := true
 	s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
 	s.SubagentTokensBaselineComplete = &complete
-}
-
-// RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
-// bookkeeping whose meaning depends on attribution being diverged from the
-// shadow-branch base. Call this every time a code path intentionally brings
-// AttributionBaseCommit back in line with BaseCommit (condensation, reconcile,
-// post-commit base advance) so a stale DivergenceNoticeShown cannot suppress
-// the next legitimate divergence warning.
-func (s *State) RealignAttributionBase(newBase string) {
-	s.AttributionBaseCommit = newBase
-	s.DivergenceNoticeShown = false
 }
 
 // IsStale returns true when a session hasn't seen interaction for longer than

@@ -156,6 +156,49 @@ func (s *SessionStore) SessionFile(agentSessionID string) (name, absPath string,
 	return name, resolved, nil
 }
 
+// SessionFileCandidatesProvider is implemented by agents that may keep one
+// session in more than one file, such as Codex and Pi, which write a dated copy
+// of a session on each restore. Callers try the candidates in order.
+type SessionFileCandidatesProvider interface {
+	// ResolveSessionFileCandidates returns the paths agentSessionID may be
+	// stored at, beneath sessionDir or a sibling store, most preferred first.
+	// The paths need not exist.
+	ResolveSessionFileCandidates(sessionDir, agentSessionID string) []string
+}
+
+// SessionFileCandidatesIn returns the absolute paths inside the store that
+// agentSessionID may be stored at, most preferred first, resolved from
+// sessionDir: the agent's SessionFileCandidatesProvider candidates when it
+// implements that interface, otherwise its ResolveSessionFile path. sessionDir
+// must be the store or lie inside it. Candidates outside the store are
+// dropped, and the rest need not exist.
+func (s *SessionStore) SessionFileCandidatesIn(sessionDir, agentSessionID string) ([]string, error) {
+	if err := validation.ValidateSessionID(agentSessionID); err != nil {
+		return nil, fmt.Errorf("resolve session file candidates: %w: %w", ErrUnsafeSessionName, err)
+	}
+	if sessionDir != s.dir {
+		if _, err := s.Name(sessionDir); err != nil {
+			return nil, err
+		}
+	}
+	var resolved []string
+	if provider, ok := s.agent.(SessionFileCandidatesProvider); ok {
+		resolved = provider.ResolveSessionFileCandidates(sessionDir, agentSessionID)
+	} else {
+		resolved = []string{s.agent.ResolveSessionFile(sessionDir, agentSessionID)}
+	}
+	candidates := make([]string, 0, len(resolved))
+	for _, path := range resolved {
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		if _, err := s.Name(path); err == nil {
+			candidates = append(candidates, path)
+		}
+	}
+	return candidates, nil
+}
+
 // Name converts a path into a name inside the store, reporting
 // ErrOutsideSessionStore for one that is not. A path already relative to the
 // store is accepted as-is.

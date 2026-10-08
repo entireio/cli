@@ -136,6 +136,29 @@ type Event struct {
 	// and the lifecycle falls back to tool_input.run_in_background.
 	SubagentLaunch SubagentLaunchMode
 
+	// SubagentLaunchIdempotent, on a launch-time background SubagentEnd, keeps
+	// an existing task record for ToolUseID instead of replacing it. Set when
+	// the launch signal is keyed by the subagent itself rather than by a fresh
+	// tool call (Claude Code's SubagentStart for Workflow agents), so a
+	// repeated or late launch signal cannot reset a record still held in
+	// session state (one condensation has not yet materialized and removed).
+	SubagentLaunchIdempotent bool
+
+	// SubagentFilesFromTranscript, on a launch-time foreground SubagentEnd,
+	// takes the task's files from its transcript only. Set when no pre-task
+	// baseline was captured at launch (Claude Code's Skill call, which has no
+	// PreToolUse hook), so a worktree diff would credit the task with every
+	// uncommitted change in the worktree.
+	SubagentFilesFromTranscript bool
+
+	// SubagentRunID, on a Final SubagentEnd, names the run this execution of
+	// SubagentID belonged to, for agents that reuse a subagent ID across runs
+	// (Claude Code resumes a Workflow run with its agents' IDs). The adapter
+	// sets it only together with a SubagentTranscriptPath it verified is that
+	// run's transcript for this agent. The lifecycle uses it to tell a later
+	// run's stop from a repeated stop of a run it already completed.
+	SubagentRunID string
+
 	// CompletionWithoutLaunch marks a true completion whose stable identity was
 	// learned at completion time rather than from a correlated start hook.
 	// Shared lifecycle may create the task record only when the parent session

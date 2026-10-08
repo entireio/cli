@@ -130,7 +130,7 @@ func TestOpenCodeSubagentTaskRecord(t *testing.T) {
 	// commits (TTY shape, as in opencode_hooks_test.go).
 	parent.CreateOpenCodeTranscript("use a subagent to create docs/red.md", nil)
 	require.NoError(t, env.SimulateOpenCodeTurnEnd(parent.ID, parent.TranscriptPath))
-	env.GitCommitWithShadowHooks("Add red.md via subagent", "docs/red.md", "docs/blue.md")
+	env.GitCommitWithHooks("Add red.md via subagent", "docs/red.md", "docs/blue.md")
 
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID)
@@ -196,7 +196,7 @@ func TestOpenCodeSubagentResumedChildRecordsEachCall(t *testing.T) {
 
 	parent.CreateOpenCodeTranscript("red, then blue, with one subagent", nil)
 	require.NoError(t, env.SimulateOpenCodeTurnEnd(parent.ID, parent.TranscriptPath))
-	env.GitCommitWithShadowHooks("Add red and blue", "docs/red.md", "docs/blue.md")
+	env.GitCommitWithHooks("Add red and blue", "docs/red.md", "docs/blue.md")
 	checkpointID := env.TryGetLatestCheckpointID()
 	require.NotEmpty(t, checkpointID)
 

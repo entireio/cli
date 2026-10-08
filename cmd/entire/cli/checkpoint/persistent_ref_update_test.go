@@ -201,7 +201,7 @@ func TestRetryPersistentRefLockContention_RetriesOnlyLockErrors(t *testing.T) {
 		})
 
 		require.ErrorIs(t, err, gitrepo.ErrRefLocked)
-		require.Equal(t, shadowRefMaxRetries, attempts)
+		require.Equal(t, refCASMaxRetries, attempts)
 	})
 }
 
@@ -328,7 +328,7 @@ func TestUpdatePersistentRef_DoesNotRetryDirectoryAtRefPath(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	require.NotErrorIs(t, err, ErrShadowRefBusy)
+	require.NotErrorIs(t, err, ErrRefBusy)
 	require.NotErrorIs(t, err, gitrepo.ErrRefCASConflict)
 	require.Equal(t, 1, builds, "a directory cannot be repaired by rebuilding checkpoint commits")
 	info, statErr := os.Stat(refPath)
