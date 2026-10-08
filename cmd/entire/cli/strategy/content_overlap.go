@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 
@@ -324,15 +325,20 @@ func filesWithRemainingAgentChanges(
 	classify := remainingClassifier{logCtx: logCtx, commitTree: commitTree, root: root, worktreeRoot: worktreeRoot}
 	keep := make([]bool, len(filesTouched))
 	var candidates []worktreeCandidate
+	var vanished []int
 	for i, filePath := range filesTouched {
 		_, wasCommitted := committedFiles[filePath]
-		kept, candidate := classify.file(filePath, wasCommitted, hashes)
+		kept, candidate, gone := classify.file(filePath, wasCommitted, hashes)
 		keep[i] = kept
 		if candidate != nil {
 			candidate.index = i
 			candidates = append(candidates, *candidate)
 		}
+		if gone {
+			vanished = append(vanished, i)
+		}
 	}
+	keepStagedVanished(ctx, logCtx, worktreeRoot, filesTouched, vanished, keep)
 
 	worktreeHashes := make(map[string]plumbing.Hash)
 	if worktreeRoot != "" && len(candidates) > 0 {
@@ -400,6 +406,47 @@ func filesWithRemainingAgentChanges(
 	return remaining
 }
 
+// keepStagedVanished keeps, among the vanished paths (hashed, uncommitted, and
+// absent from both the worktree and the commit tree), those the index still
+// has an entry for. The user staged such a file before it left the worktree,
+// so the next commit adds the staged blob, which is the agent's content;
+// dropping it would stop that commit linking the session. The rest were
+// untracked files the agent removed and drop. When the index cannot be read,
+// every vanished path is kept rather than dropped on a guess.
+func keepStagedVanished(ctx, logCtx context.Context, worktreeRoot string, filesTouched []string, vanished []int, keep []bool) {
+	if len(vanished) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(vanished))
+	for _, i := range vanished {
+		paths = append(paths, filesTouched[i])
+	}
+	var inIndex map[string]struct{}
+	var err error
+	if worktreeRoot == "" {
+		err = errors.New("no worktree root")
+	} else {
+		inIndex, err = gitrepo.PathsInIndex(ctx, worktreeRoot, paths)
+	}
+	for _, i := range vanished {
+		filePath := filesTouched[i]
+		_, staged := inIndex[filePath]
+		switch {
+		case err != nil:
+			keep[i] = true
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: could not check the index for a file missing from the worktree, keeping",
+				slog.String("file", filePath), slog.String("error", err.Error()))
+		case staged:
+			keep[i] = true
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file missing from the worktree is still staged, keeping",
+				slog.String("file", filePath))
+		default:
+			logging.Debug(logCtx, "filesWithRemainingAgentChanges: untracked file removed from the worktree, skipping",
+				slog.String("file", filePath))
+		}
+	}
+}
+
 // worktreeCandidate is a committed path whose fate depends on whether the
 // working tree still differs from the committed blob.
 type worktreeCandidate struct {
@@ -423,18 +470,22 @@ type remainingClassifier struct {
 // path that stays in FilesTouched outright; a non-nil candidate defers the
 // decision to the worktree-versus-commit comparison. See
 // filesWithRemainingAgentChanges for the rules.
-func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map[string]string) (keep bool, candidate *worktreeCandidate) {
+//
+// vanished reports a hashed, uncommitted path absent from both the worktree and
+// the commit tree. It is dropped unless the index still has it, which the
+// caller checks for all such paths at once (keepStagedVanished).
+func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map[string]string) (keep bool, candidate *worktreeCandidate, vanished bool) {
 	recorded, hasHash, deleted := recordedFileHash(hashes, filePath)
 	switch {
 	case deleted:
 		if c.deletionPending(filePath) {
 			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: recorded deletion not yet committed, keeping",
 				slog.String("file", filePath))
-			return true, nil
+			return true, nil, false
 		}
 		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: recorded deletion committed or path re-created, skipping",
 			slog.String("file", filePath))
-		return false, nil
+		return false, nil, false
 	case !wasCommitted && !hasHash:
 		// Phantom guard: a path the agent never actually produced is absent
 		// from both the commit and the worktree. A path the commit still has
@@ -443,23 +494,22 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 		if c.worktreeState(filePath) == worktreeEntryAbsent && !c.inCommit(filePath) {
 			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file without recorded hash missing from commit and worktree, skipping",
 				slog.String("file", filePath))
-			return false, nil
+			return false, nil, false
 		}
-		return true, nil
+		return true, nil, false
 	case !wasCommitted:
 		// A hashed file absent from both the worktree and the commit tree was
 		// an untracked file the agent created and then removed (git status
 		// reports no deletion for it); nothing of it is left to carry
 		// forward. See untrackedDeletionCandidates for the `git stash -u`
-		// trade-off.
+		// trade-off. One the index still has was staged by the user and the
+		// next commit adds its blob; keepStagedVanished keeps that one.
 		if c.worktreeState(filePath) == worktreeEntryAbsent && !c.inCommit(filePath) {
-			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: untracked file removed from the worktree, skipping",
-				slog.String("file", filePath))
-			return false, nil
+			return false, nil, true
 		}
 		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
 			slog.String("file", filePath))
-		return true, nil
+		return true, nil, false
 	}
 
 	commitFile, err := c.commitTree.File(filePath)
@@ -471,16 +521,16 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 		if c.worktreeState(filePath) != worktreeEntryAbsent {
 			logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: file not in commit tree but may still be in the worktree, keeping",
 				slog.String("file", filePath))
-			return true, nil
+			return true, nil, false
 		}
 		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: commit removed the file and the worktree lacks it, skipping",
 			slog.String("file", filePath))
-		return false, nil
+		return false, nil, false
 	}
 	if hasHash && commitFile.Hash.Equal(recorded) {
 		logging.Debug(c.logCtx, "filesWithRemainingAgentChanges: content fully committed",
 			slog.String("file", filePath))
-		return false, nil
+		return false, nil, false
 	}
 	// Without a recorded hash there is no shortcut: keep the path while the
 	// worktree still differs from what was committed (a partial commit).
@@ -489,7 +539,7 @@ func (c remainingClassifier) file(filePath string, wasCommitted bool, hashes map
 		commitHash:   commitFile.Hash,
 		commitMode:   commitFile.Mode,
 		recordedHash: recorded,
-	}
+	}, false
 }
 
 // deletionPending reports whether a recorded agent deletion of path has not
