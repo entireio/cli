@@ -167,7 +167,11 @@ func dispatchWizardPlacements(entries []coreapi.RepoIndexEntry) map[string][]str
 	out := make(map[string][]string, len(entries))
 	for _, entry := range entries {
 		if slug := checkpointRepoSlug(entry); slug != "" {
-			out[strings.ToLower(slug)] = readyPlacementJurisdictions(entry.Placements)
+			key := strings.ToLower(slug)
+			jurisdictions := out[key]
+			jurisdictions = append(jurisdictions, readyPlacementJurisdictions(entry.Placements)...)
+			slices.Sort(jurisdictions)
+			out[key] = slices.Compact(jurisdictions)
 		}
 	}
 	return out

@@ -621,12 +621,12 @@ func searchAllCells(ctx context.Context, opts codeSearchOpts) (resp *codesearch.
 // Old index entries with no forge signal retain their legacy GitHub spelling
 // (or their explicit three-component forge prefix).
 func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoIDs []string, matched []coreapi.RepoIndexEntry) {
-	byName := make(map[string]coreapi.RepoIndexEntry, len(repos))
-	bySlug := make(map[string]coreapi.RepoIndexEntry, len(repos))
+	byName := make(map[string][]coreapi.RepoIndexEntry, len(repos))
+	bySlug := make(map[string][]coreapi.RepoIndexEntry, len(repos))
 	byID := make(map[string]coreapi.RepoIndexEntry, len(repos))
 	for _, r := range repos {
 		name := strings.ToLower(strings.Trim(strings.TrimSpace(r.FullName), "/"))
-		byName[name] = r
+		byName[name] = append(byName[name], r)
 		byID[r.ID] = r
 		slug := checkpointRepoSlug(r)
 		if forge, _ := forgeOfEntry(r); forge == "" && !r.Provider.IsSet() {
@@ -639,26 +639,29 @@ func resolveRepoFilters(filters []string, repos []coreapi.RepoIndexEntry) (repoI
 			}
 		}
 		if slug != "" {
-			bySlug[strings.ToLower(slug)] = r
+			key := strings.ToLower(slug)
+			bySlug[key] = append(bySlug[key], r)
 		}
 	}
 	seen := make(map[string]bool) // dedup by ID
 	for _, f := range filters {
-		name := strings.ToLower(strings.Trim(strings.TrimSpace(f), "/"))
+		filter := strings.TrimSpace(f)
+		name := strings.ToLower(strings.Trim(filter, "/"))
 		qualified := strings.Count(name, "/") == 2 && (strings.HasPrefix(name, "gh/") || strings.HasPrefix(name, "et/"))
-		var r coreapi.RepoIndexEntry
-		var ok bool
-		if r, ok = byID[f]; !ok {
-			if qualified {
-				r, ok = bySlug[name]
-			} else {
-				r, ok = byName[name]
-			}
+		var candidates []coreapi.RepoIndexEntry
+		if r, ok := byID[filter]; ok {
+			candidates = []coreapi.RepoIndexEntry{r}
+		} else if qualified {
+			candidates = bySlug[name]
+		} else {
+			candidates = byName[name]
 		}
-		if ok && !seen[r.ID] {
-			repoIDs = append(repoIDs, r.ID)
-			matched = append(matched, r)
-			seen[r.ID] = true
+		for _, r := range candidates {
+			if !seen[r.ID] {
+				repoIDs = append(repoIDs, r.ID)
+				matched = append(matched, r)
+				seen[r.ID] = true
+			}
 		}
 	}
 	return repoIDs, matched

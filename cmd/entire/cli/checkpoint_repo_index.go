@@ -49,12 +49,17 @@ func listCheckpointRepoIndex(ctx context.Context) ([]coreapi.RepoIndexEntry, err
 // checkpointRepoSlugs preserves server order and excludes empty repositories.
 func checkpointRepoSlugs(entries []coreapi.RepoIndexEntry) []string {
 	slugs := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		if entry.CheckpointCount.Or(0) <= 0 {
 			continue
 		}
 		if slug := checkpointRepoSlug(entry); slug != "" {
-			slugs = append(slugs, slug)
+			key := strings.ToLower(slug)
+			if !seen[key] {
+				slugs = append(slugs, slug)
+				seen[key] = true
+			}
 		}
 	}
 	return slugs

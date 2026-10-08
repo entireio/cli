@@ -42,7 +42,11 @@ placement jurisdictions from the same walk and retains its local-repo fallback;
 completion silently falls back to `*` on errors. Code-search filters resolve these qualified
 slugs against the entry's provider, accepting bare or already-qualified index
 names without crossing forge namespaces. Two-component names whose owner/project
-is `gh` or `et` retain that segment. Do not use the removed BFF
+is `gh` or `et` retain that segment. ID filters trim surrounding whitespace and
+retain precedence over name matching. Duplicate normalized slugs preserve all
+matching search entries (deduplicated by ID); wizard jurisdictions are merged
+and picker suggestions deduplicated, preserving the first spelling/order.
+Do not use the removed BFF
 `GET /api/v1/repositories` route. Dispatch generation still uses the BFF.
 
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)

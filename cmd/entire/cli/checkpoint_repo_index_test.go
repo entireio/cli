@@ -20,6 +20,47 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestResolveRepoFilters_WhitespaceIDTakesPrecedence(t *testing.T) {
+	t.Parallel()
+	const id = "01JXYZ123ABC"
+	repos := []coreapi.RepoIndexEntry{{ID: id, FullName: "owner/repo"}, {ID: "other", FullName: id}}
+	ids, matched := resolveRepoFilters([]string{" \t" + id + "\n", id}, repos)
+	if len(ids) != 1 || ids[0] != id || len(matched) != 1 {
+		t.Fatalf("ID resolution = %v, %v", ids, matched)
+	}
+}
+
+func TestDuplicateRepoSlugs_PreserveSearchAndJurisdictions(t *testing.T) {
+	t.Parallel()
+	repos := []coreapi.RepoIndexEntry{
+		{ID: "one", FullName: "Owner/Repo", Provider: coreapi.NewOptString("github"), CheckpointCount: coreapi.NewOptInt64(1), Placements: []coreapi.RepoPlacement{
+			{Jurisdiction: "us", Status: coreapi.RepoPlacementStatusReady},
+			{Jurisdiction: "eu", Status: coreapi.RepoPlacementStatusReady},
+		}},
+		{ID: "two", FullName: "gh/owner/repo", Provider: coreapi.NewOptString("github"), CheckpointCount: coreapi.NewOptInt64(1), Placements: []coreapi.RepoPlacement{
+			{Jurisdiction: "au", Status: coreapi.RepoPlacementStatusReady},
+			{Jurisdiction: "us", Status: coreapi.RepoPlacementStatusReady},
+			{Jurisdiction: "ca", Status: coreapi.RepoPlacementStatusProcessing},
+		}},
+		{ID: "native", FullName: "owner/repo", Provider: coreapi.NewOptString("entire")},
+	}
+	ids, matched := resolveRepoFilters([]string{"gh/owner/repo", "one", "GH/OWNER/REPO"}, repos)
+	if strings.Join(ids, ",") != "one,two" || len(matched) != 2 {
+		t.Fatalf("duplicate slug resolution = %v, %v", ids, matched)
+	}
+	placements := dispatchWizardPlacements(repos)
+	if got := strings.Join(placements["gh/owner/repo"], ","); got != "au,eu,us" {
+		t.Fatalf("merged jurisdictions = %q", got)
+	}
+	if got := strings.Join(checkpointRepoSlugs(repos), ","); got != "gh/Owner/Repo" {
+		t.Fatalf("picker duplicates = %q", got)
+	}
+	ids, _ = resolveRepoFilters([]string{"owner/repo"}, []coreapi.RepoIndexEntry{repos[0], repos[2]})
+	if strings.Join(ids, ",") != "one,native" {
+		t.Fatalf("bare name lost matching entry: %v", ids)
+	}
+}
+
 func TestCheckpointRepoSlug_ForgeNamedOwners(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ provider, name, want string }{
