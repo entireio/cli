@@ -6,18 +6,18 @@ import (
 	"path/filepath"
 	"testing"
 
-	git "github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 )
 
 // TestSeam_GitRefsPrimaryWithGitBranchMirror drives the branch->refs rollout
 // topology through checkpoint.Open: a git-refs primary with a git-branch mirror.
-// It writes all five WriteRequest variants and asserts reads resolve from the
+// It writes all WriteRequest variants and asserts reads resolve from the
 // git-refs primary while the git-branch mirror (the v1 branch) independently
 // received every write.
 //
@@ -34,8 +34,9 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(body), 0o644))
 	t.Chdir(dir)
 
-	repo, err := git.PlainOpen(dir)
+	repo, err := gitrepo.OpenPath(dir)
 	require.NoError(t, err)
+	defer repo.Close()
 	stores, err := Open(context.Background(), repo, OpenOptions{})
 	require.NoError(t, err)
 
@@ -65,6 +66,10 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 	}))
 	require.NoError(t, stores.Persistent.Write(ctx, CheckpointAttribution{
 		CheckpointID: cid, Attribution: &Attribution{AgentLines: 7, AgentPercentage: 70},
+	}))
+
+	require.NoError(t, stores.Persistent.Write(ctx, CheckpointCommitLinks{
+		CheckpointID: cid, Links: []LinkedCommit{{SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
 	}))
 
 	// Reads resolve from the git-refs primary.
@@ -99,6 +104,7 @@ func assertSeamVariants(t *testing.T, store PersistentStore, cid, reservedCID id
 	require.Len(t, summary.Sessions, 1)
 	require.NotNil(t, summary.CombinedAttribution)
 	assert.Equal(t, 7, summary.CombinedAttribution.AgentLines)
+	assert.Equal(t, []LinkedCommit{{SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}, summary.LinkedCommits)
 
 	content, err := store.ReadSessionContent(ctx, cid, 0)
 	require.NoError(t, err)

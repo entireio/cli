@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
@@ -136,8 +138,10 @@ type attributionResolver struct {
 	store       attributionCheckpointReader
 	fetchOnMiss bool
 
-	commitCache     map[string]*object.Commit
-	checkpointCache map[string]attributionCheckpointContext
+	commitCache       map[string]*object.Commit
+	checkpointCache   map[string]attributionCheckpointContext
+	linkedCheckpoints checkpoint.CommitLinkIndex
+	linksLoaded       bool
 }
 
 func newBlameCmd() *cobra.Command {
@@ -379,6 +383,21 @@ func (r *attributionResolver) Close() {
 	}
 }
 
+func (r *attributionResolver) checkpointsForCommit(commit *object.Commit) []id.CheckpointID {
+	if !r.linksLoaded {
+		r.linksLoaded = true
+		if lister, ok := r.store.(checkpoint.CheckpointReader); ok {
+			infos, err := lister.List(r.ctx)
+			if err != nil {
+				logging.Debug(r.ctx, "attribution: could not list commit links", slog.String("error", err.Error()))
+			} else {
+				r.linkedCheckpoints = checkpoint.NewCommitLinkIndex(infos)
+			}
+		}
+	}
+	return r.linkedCheckpoints.Resolve(commit.Hash.String(), trailers.ParseAllCheckpoints(commit.Message))
+}
+
 func (r *attributionResolver) resolveLine(raw rawBlameLine, file string) attributionLine {
 	line := attributionLine{
 		LineNumber: raw.LineNumber,
@@ -404,7 +423,7 @@ func (r *attributionResolver) resolveLine(raw rawBlameLine, file string) attribu
 		return line
 	}
 
-	cpIDs := trailers.ParseAllCheckpoints(commit.Message)
+	cpIDs := r.checkpointsForCommit(commit)
 	if len(cpIDs) == 0 {
 		line.Authorship = attributionHuman
 		line.Tag = attributionTag(line.Authorship)

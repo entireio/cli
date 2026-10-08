@@ -259,6 +259,30 @@ it. Folding with `git reset --soft HEAD~1 && git commit --amend` inherits the
 folded commit's trailers too. Inherited trailers are links, exactly as for a
 squash, and are recorded so post-commit never condenses into one.
 
+**Amends with replacement messages** (`git commit --amend -m` / `-F`) report
+source `message` to prepare-commit-msg, indistinguishable from ordinary commits.
+After Git completes the amend, `post-rewrite amend` supplies the old/new SHA pair.
+The hook adds checkpoint-side `linked_commits: [{sha, repo}]` associations for
+checkpoints named by the replaced commit but missing from the new commit's
+trailers. Git's trailer parser excludes checkpoint-shaped lines in subjects or
+bodies. Links from earlier amends also follow the rewrite, so repeated message
+replacement does not lose them. The hook never rewrites the code commit,
+re-condenses old session data, or creates a missing checkpoint. `repo` is an
+optional forge-qualified repository hint, resolved from the elected sync remote.
+
+These links are attributing associations, unlike import's `commit_sha` anchor.
+CLI explain/list and blame/why union them with trailers: an amend with fresh
+agent work can carry a new checkpoint trailer and retain links to earlier
+checkpoints at the same time. Root-summary updates preserve the links across
+session, transcript, summary, and attribution writes. Hosted visibility requires
+server support for the field and verification of the association; writing it
+alone does not make an older server recognize the amended commit. Older CLIs
+may drop the field when rewriting root metadata.
+
+[Manual before/after verification](../development/images/amend-checkpoint-links.jpg)
+shows replacement-message amends against a synthetic checkpoint with real Git
+hooks, including unchanged transcript data and trailerless commit messages.
+
 **Worktree matching** (always computed; the sole mechanism for commits with
 no recorded agent in their ancestry — human commits, detached runners): exact
 `WorktreePath` match first, then sessions from a sibling worktree of the same

@@ -353,6 +353,8 @@ func backfillTarget(req WriteRequest) (id.CheckpointID, bool) {
 		return r.CheckpointID, true
 	case CheckpointAttribution:
 		return r.CheckpointID, true
+	case CheckpointCommitLinks:
+		return r.CheckpointID, true
 	default:
 		return id.EmptyCheckpointID, false
 	}
