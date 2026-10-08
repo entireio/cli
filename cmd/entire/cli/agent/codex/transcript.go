@@ -704,6 +704,18 @@ func exactUsageFromSnapshot(usage *exactTokenUsageData) *agent.TokenUsage {
 	return &agent.TokenUsage{InputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output}
 }
 
+// ExtractWithSubagentInventoryUnderHome is ExtractWithSubagentInventory with
+// child rollouts looked up in the live and archived session stores beneath
+// home, replacing any RolloutRoots override. home must have passed
+// agent.ResolveTrustedHome.
+func (c *CodexAgent) ExtractWithSubagentInventoryUnderHome(ctx context.Context, parent []byte, fromOffset int, refs []agent.SubagentReference, home string) (agent.InventoryExtraction, error) {
+	scoped := *c // a shallow copy: CodexAgent holds no locks
+	scoped.RolloutRoots = codexHomeLayout().StoresUnder(home)
+	return scoped.ExtractWithSubagentInventory(ctx, parent, fromOffset, refs)
+}
+
+var _ agent.HomeScopedInventoryExtractor = (*CodexAgent)(nil)
+
 // ExtractWithSubagentInventory gathers evidence only for refs supplied by the
 // caller's authoritative ledger. It never discovers children from transcript
 // text, filenames, timestamps, or token-count events.

@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -4285,6 +4286,25 @@ func TestRunExplainCommit_WithCheckpointTrailer(t *testing.T) {
 	// Error should mention checkpoint not found
 	if !strings.Contains(err.Error(), "checkpoint not found") && !strings.Contains(err.Error(), "abc123def456") {
 		t.Errorf("expected error about checkpoint not found, got: %v", err)
+	}
+	// Only a checkpoint this clone deleted is called deleted.
+	if strings.Contains(err.Error(), "deleted") {
+		t.Errorf("a checkpoint that was never deleted must not be called deleted, got: %v", err)
+	}
+
+	// A trailer can outlive its checkpoint (`entire checkpoint delete`): once
+	// the ID is on the deleted list the miss says so.
+	gitdir.ClearCache()
+	commonDir, err := gitdir.CommonDir(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, checkpoint.NewDeletedCheckpoints(commonDir).Record(id.MustCheckpointID(checkpointID)))
+	err = runExplainCommit(context.Background(), &buf, &buf, hash.String()[:7], false, false, false, false, false, false, false, 0)
+	require.Error(t, err)
+	if !strings.Contains(err.Error(), "checkpoint not found (deleted with `entire checkpoint delete`)") {
+		t.Errorf("expected the deleted hint, got: %v", err)
+	}
+	if !errors.Is(err, checkpoint.ErrCheckpointNotFound) {
+		t.Errorf("error must still match checkpoint.ErrCheckpointNotFound: %v", err)
 	}
 }
 

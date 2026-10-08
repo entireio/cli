@@ -5057,7 +5057,8 @@ type CreatedRepo struct {
 	ProvisionAttempts OptInt64                `json:"provisionAttempts"`
 	ProvisionReason   OptString               `json:"provisionReason"`
 	RepoGroupId       OptString               `json:"repoGroupId"`
-	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.
+	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes. A
+	// native primary reports deleting while a cascade delete removes its native mirrors; poll until 404.
 	State           OptString `json:"state"`
 	Visibility      OptString `json:"visibility"`
 	AdditionalProps CreatedRepoAdditional
@@ -5535,6 +5536,11 @@ func (s *DeleteProjectNoContent) SetXEntireCommitToken(val OptString) {
 	s.XEntireCommitToken = val
 }
 
+// DeleteRepoAccepted is response for DeleteRepo operation.
+type DeleteRepoAccepted struct{}
+
+func (*DeleteRepoAccepted) deleteRepoRes() {}
+
 // DeleteRepoCIWebhookNoContent is response for DeleteRepoCIWebhook operation.
 type DeleteRepoCIWebhookNoContent struct{}
 
@@ -5552,6 +5558,8 @@ func (s *DeleteRepoNoContent) GetXEntireCommitToken() OptString {
 func (s *DeleteRepoNoContent) SetXEntireCommitToken(val OptString) {
 	s.XEntireCommitToken = val
 }
+
+func (*DeleteRepoNoContent) deleteRepoRes() {}
 
 // DeleteServiceAccountNoContent is response for DeleteServiceAccount operation.
 type DeleteServiceAccountNoContent struct{}
@@ -18817,7 +18825,8 @@ type Repo struct {
 	ProvisionAttempts OptInt64            `json:"provisionAttempts"`
 	ProvisionReason   OptString           `json:"provisionReason"`
 	RepoGroupId       OptString           `json:"repoGroupId"`
-	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes.
+	// Provisioning lifecycle. A mirror is active from creation, before its initial clone completes. A
+	// native primary reports deleting while a cascade delete removes its native mirrors; poll until 404.
 	State           OptString `json:"state"`
 	Visibility      OptString `json:"visibility"`
 	AdditionalProps RepoAdditional

@@ -36,17 +36,6 @@ type ReviewerTemplate struct {
 	// The command MUST NOT have started yet; the template will call Start.
 	BuildCmd func(ctx context.Context, cfg RunConfig) *exec.Cmd
 
-	// Prepare, when set, runs before BuildCmd; an error aborts the run before
-	// anything is spawned. For setup the command depends on, such as a file
-	// its argv names.
-	Prepare func(ctx context.Context) error
-
-	// ClassifyExit, when set, may replace the error Wait returns for a
-	// non-zero exit, given the agent's bounded stderr. Returning nil keeps the
-	// default ProcessError. For failures the agent reports only as text, such
-	// as a CLI too old for a flag the adapter depends on.
-	ClassifyExit func(stderr string, err error) error
-
 	// Parser converts the agent's stdout stream into a sequence of Events.
 	// The returned channel must close when stdout closes. Implementations
 	// must emit Started first, Finished{Success: ...} or RunError last,
@@ -78,11 +67,6 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 	if t.Parser == nil {
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (nil Parser for agent %q)", ErrTemplateMisconfigured, t.AgentName)
 	}
-	if t.Prepare != nil {
-		if err := t.Prepare(ctx); err != nil {
-			return nil, fmt.Errorf("%s: prepare: %w", t.AgentName, err)
-		}
-	}
 	cmd := t.BuildCmd(ctx, cfg)
 	if cmd == nil {
 		return nil, fmt.Errorf("ReviewerTemplate.Start: %w (BuildCmd returned nil for agent %q)", ErrTemplateMisconfigured, t.AgentName)
@@ -103,13 +87,12 @@ func (t *ReviewerTemplate) Start(ctx context.Context, cfg RunConfig) (Process, e
 		return nil, fmt.Errorf("%s: start: %w", t.AgentName, err)
 	}
 	p := &templateProcess{
-		ctx:          ctx,
-		agentName:    t.AgentName,
-		cmd:          cmd,
-		events:       make(chan Event, 32),
-		stderr:       &boundedStderrBuffer{limit: maxProcessStderrBytes},
-		stderrDone:   make(chan struct{}),
-		classifyExit: t.ClassifyExit,
+		ctx:        ctx,
+		agentName:  t.AgentName,
+		cmd:        cmd,
+		events:     make(chan Event, 32),
+		stderr:     &boundedStderrBuffer{limit: maxProcessStderrBytes},
+		stderrDone: make(chan struct{}),
 	}
 	go p.run(stdout, t.Parser)
 	go p.captureStderr(stderr)
@@ -125,13 +108,12 @@ var ErrTemplateMisconfigured = errors.New("ReviewerTemplate misconfigured")
 
 // templateProcess is the shared Process implementation for ReviewerTemplate.
 type templateProcess struct {
-	ctx          context.Context
-	agentName    string
-	cmd          *exec.Cmd
-	events       chan Event
-	stderr       *boundedStderrBuffer
-	stderrDone   chan struct{}
-	classifyExit func(stderr string, err error) error
+	ctx        context.Context
+	agentName  string
+	cmd        *exec.Cmd
+	events     chan Event
+	stderr     *boundedStderrBuffer
+	stderrDone chan struct{}
 }
 
 // Events returns the channel that streams parsed events from the agent process.
@@ -152,13 +134,7 @@ func (p *templateProcess) Wait() error {
 		return p.ctx.Err() //nolint:wrapcheck // preserve Process cancellation contract
 	}
 	if err != nil {
-		stderr := p.stderr.String()
-		if p.classifyExit != nil {
-			if classified := p.classifyExit(stderr, err); classified != nil {
-				return classified
-			}
-		}
-		if stderr != "" {
+		if stderr := p.stderr.String(); stderr != "" {
 			return &ProcessError{AgentName: p.agentName, Err: err, Stderr: stderr}
 		}
 	}

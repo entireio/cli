@@ -834,6 +834,74 @@ are for human readability in `git log` only. The CLI always reads from the tree 
 
 The checkpoint ID creates a **bidirectional link**: user commits can find their metadata, and metadata can find the commits that reference it.
 
+### Deleting a Checkpoint
+
+`entire checkpoint delete <id>` removes one checkpoint from this clone and from
+every checkpoint remote that holds it (`--remote` narrows that, `--local-only`
+skips remotes without contacting them, `--dry-run` only reports). The summary
+names every holder a narrowed delete left alone. Mechanics are in the
+[ref backend](ref-checkpoint-backend.md#non-force-fast-forward-only) reference.
+What it means for the domain model:
+
+- **Sessions and checkpoints are many-to-many, and each checkpoint carries the
+  session's full compacted transcript.** Deleting one checkpoint removes almost
+  none of a long session's content: any remaining checkpoint of that session
+  can rebuild it. The command lists other local checkpoints of the same
+  sessions (a local, capped scan) and deletes none of them; the session stays
+  visible on entire.io while any remain.
+- **Token totals.** Each session entry stores the token delta since the previous
+  condensation, so removing a checkpoint subtracts its delta from server-side
+  session sums. Local `SessionState` token offsets, usage and baselines are
+  never touched: resetting any of them would make the next checkpoint
+  re-count tokens surviving checkpoints already carry.
+- **Session state.** States holding the ID lose `LastCheckpointID` (and its
+  commit hash), a matching `CondensationAttempt`, and the ID in
+  `TurnCheckpointIDs`, so an amend cannot restore the trailer and a pending
+  condensation cannot re-create the checkpoint. Clearing `LastCheckpointID`
+  makes an ended state eligible for cleanup. A session that has not ended
+  blocks the delete unless `--force` is passed.
+- **Commits keep their trailers.** `explain` on such a commit reports
+  "checkpoint not found (deleted with `entire checkpoint delete`)" when the ID
+  is on this clone's deleted-checkpoints list, and a plain not-found otherwise.
+  Every `prepare-commit-msg` outside a rebase, cherry-pick or revert (not only
+  an amend) drops every whole `Entire-Checkpoint` line after the subject whose
+  ID is on that list (wherever git would see a trailer), an amend never
+  preserves a deleted ID, and squash/redo inheritance skips those IDs; new
+  agent work in an amend gets a fresh ID.
+- **The `v1` branch keeps history.** A checkpoint (of any ID kind; a git-branch
+  mirror stores ULIDs there too) is removed from the branch tip; its content
+  stays in the branch history on every remote.
+- **On the git-branch primary, a delete must not leave a v1 push destination
+  holding the copy.** The local removal is a `v1` commit, and the next
+  pre-push fast-forwards every destination (each pushurl of the sync remote,
+  or the dedicated `checkpoint_remote` URL derived from any remote) to it,
+  deleting those copies too. `--local-only` probes only those destinations; a
+  delete whose selection leaves one out is refused before anything is written
+  when that destination holds a `v1` copy (remedy: also delete there, or use
+  the git-refs backend) or cannot be reached (remedy: retry once reachable).
+  Known limitations: a push to a not-yet-elected remote can elect it on the
+  spot (capture) and send `v1` there; such a remote is not checked. A
+  dedicated `checkpoint_remote` URL derived from a remote spelling this clone
+  cannot authenticate to probes as unreachable, so the refusal ("retry when
+  reachable") persists until that spelling works. With
+  `push_sessions` disabled nothing is pushed, but re-enabling it later carries
+  the removal to the sync remote.
+- **Local and remote `v1` stay in one line.** After the removal is pushed to
+  a `v1` push destination, local `v1` is rebuilt on that pushed commit (local
+  unpushed checkpoints replayed on top), so the next push is a fast-forward and
+  the OPF pre-push rewrite does not see a diverged branch. This happens only
+  when the two removal commits are the whole difference: a remote that was
+  ahead or rewritten before the delete is left for pre-push to reconcile (or
+  for OPF to refuse), and with several pushurls only the first destination is
+  adopted, so the others can still diverge.
+- **`--local-only` copies can come back into view.** On git-refs, a read
+  (explain, backfill) that misses locally fetches the remote copy and recreates
+  the local ref. On git-branch, reads do not refetch a deleted local copy.
+  Remote-tracking `v1` refs that hold the checkpoint are listed in the plan;
+  they move only when that remote's copy is deleted.
+- **Server side.** The CLI deletes the git data; removing indexed rows on
+  entire.io is the backend's job when it observes the ref delete.
+
 ### Package Structure
 
 ```

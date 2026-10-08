@@ -572,3 +572,36 @@ func TestMigrateBranchToRefs_NoBranchIsNoop(t *testing.T) {
 	assert.Equal(t, 0, result.Total)
 	assert.Empty(t, result.Migrated)
 }
+
+// A checkpoint `entire checkpoint delete` removed must not be re-created by a
+// migration that still sees it on the v1 branch (e.g. through a stale
+// remote-tracking ref the delete could not reach).
+func TestMigrateBranchToRefs_SkipsDeletedCheckpoints(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	ctx := context.Background()
+	branch := NewGitStore(repo, DefaultV1Refs())
+	deleted := id.MustCheckpointID("a1b2c3d4e5f6")
+	kept := id.MustCheckpointID("b2c3d4e5f6a1")
+	seedBranchCheckpoint(t, branch, deleted, "s1")
+	seedBranchCheckpoint(t, branch, kept, "s2")
+
+	list, err := DeletedCheckpointsForRepo(repo)
+	require.NoError(t, err)
+	require.NoError(t, list.Record(deleted))
+
+	result, err := MigrateBranchToRefs(ctx, repo, false)
+	require.NoError(t, err)
+	assert.Equal(t, []id.CheckpointID{kept}, result.Migrated)
+
+	refName, err := RefName(deleted)
+	require.NoError(t, err)
+	_, err = repo.Reference(refName, true)
+	require.ErrorIs(t, err, plumbing.ErrReferenceNotFound, "a deleted checkpoint must not get a ref")
+
+	queue, err := PushQueueForRepo(ctx, repo)
+	require.NoError(t, err)
+	queued, err := queue.Drain()
+	require.NoError(t, err)
+	assert.NotContains(t, queued, refName, "a deleted checkpoint must not be queued for push")
+}

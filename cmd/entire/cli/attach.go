@@ -725,6 +725,11 @@ func saveAttachSessionState(ctx context.Context, repo *git.Repository, existingS
 
 	state.CLIVersion = versioninfo.Version
 	state.AttachedManually = true
+	if state.AgentType != agentType || state.TranscriptPath != transcriptPath {
+		// The home belonged to the previous transcript; the next turn start
+		// records the right one.
+		state.AgentHome = ""
+	}
 	state.AgentType = agentType
 	state.TranscriptPath = transcriptPath
 	state.LastCheckpointID = checkpointID

@@ -19,11 +19,14 @@ func TestReviewTargetChildArgsUsesParsedCommandFlags(t *testing.T) {
 	cmd.Flags().Bool("cleanup-worktree", false, "")
 	cmd.Flags().String("base", "", "")
 	cmd.Flags().String("prompt", "", "")
-	if err := cmd.Flags().Parse([]string{"--target=feature/x", "--cleanup-worktree", "--base=main", "--prompt=focus here"}); err != nil {
+	cmd.Flags().String("trust-target", "", "")
+	cmd.Flags().Bool("show-config", false, "")
+	if err := cmd.Flags().Parse([]string{"--target=feature/x", "--cleanup-worktree", "--base=main", "--prompt=focus here", "--trust-target=abc1234"}); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
-	want := []string{"review", "general", "--base=main", "--prompt=focus here"}
-	if got := reviewTargetChildArgs(cmd, []string{"general"}); !reflect.DeepEqual(got, want) {
+	head := strings.Repeat("a", 40)
+	want := []string{"review", "general", "--base=main", "--prompt=focus here", "--trust-target=" + head}
+	if got := reviewTargetChildArgs(cmd, []string{"general"}, head, ""); !reflect.DeepEqual(got, want) {
 		t.Fatalf("reviewTargetChildArgs() = %q, want %q", got, want)
 	}
 }

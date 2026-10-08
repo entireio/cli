@@ -194,7 +194,7 @@ type Invoker interface {
 	// Delete repository.
 	//
 	// DELETE /repos/{repoId}
-	DeleteRepo(ctx context.Context, params DeleteRepoParams) (*DeleteRepoNoContent, error)
+	DeleteRepo(ctx context.Context, params DeleteRepoParams) (DeleteRepoRes, error)
 	// DeleteRepoCIWebhook invokes deleteRepoCIWebhook operation.
 	//
 	// Deletes the subscription and clears this repo's own enrolment marker. This does NOT immediately
@@ -3605,12 +3605,12 @@ func (c *Client) sendDeleteProject(ctx context.Context, params DeleteProjectPara
 // Delete repository.
 //
 // DELETE /repos/{repoId}
-func (c *Client) DeleteRepo(ctx context.Context, params DeleteRepoParams) (*DeleteRepoNoContent, error) {
+func (c *Client) DeleteRepo(ctx context.Context, params DeleteRepoParams) (DeleteRepoRes, error) {
 	res, err := c.sendDeleteRepo(ctx, params)
 	return res, err
 }
 
-func (c *Client) sendDeleteRepo(ctx context.Context, params DeleteRepoParams) (res *DeleteRepoNoContent, err error) {
+func (c *Client) sendDeleteRepo(ctx context.Context, params DeleteRepoParams) (res DeleteRepoRes, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [2]string
@@ -3634,6 +3634,26 @@ func (c *Client) sendDeleteRepo(ctx context.Context, params DeleteRepoParams) (r
 		pathParts[1] = encoded
 	}
 	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "cascade" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "cascade",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Cascade.Get(); ok {
+				return e.EncodeValue(conv.BoolToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
 
 	r, err := ht.NewRequest(ctx, "DELETE", u)
 	if err != nil {

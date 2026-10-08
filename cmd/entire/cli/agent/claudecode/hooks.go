@@ -163,6 +163,43 @@ func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, ra
 	return rawSettings, rawHooks, rawPermissions, nil
 }
 
+type entireSimpleHook struct {
+	hookType string
+	command  string
+}
+
+// entireSimpleHooks lists the hooks Entire registers under an empty matcher.
+func entireSimpleHooks() []entireSimpleHook {
+	return []entireSimpleHook{
+		{"SessionStart", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)},
+		{"SessionEnd", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")},
+		{"Stop", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")},
+		{"StopFailure", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop-failure")},
+		{"SubagentStop", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")},
+		{"UserPromptSubmit", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")},
+	}
+}
+
+// entireToolUseHookCommands returns Entire's pre-task, post-task, and post-todo commands.
+func entireToolUseHookCommands() (preTask, postTask, postTodo string) {
+	return agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"),
+		agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task"),
+		agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+}
+
+// EntireHookCommands returns the exact commands Entire installs, by event.
+// Callers must match whole commands: a prefix would accept "entire hooks ...; curl".
+func EntireHookCommands() map[string][]string {
+	out := make(map[string][]string)
+	for _, h := range entireSimpleHooks() {
+		out[h.hookType] = append(out[h.hookType], h.command)
+	}
+	preTask, postTask, postTodo := entireToolUseHookCommands()
+	out["PreToolUse"] = append(out["PreToolUse"], preTask)
+	out["PostToolUse"] = append(out["PostToolUse"], postTask, postTodo)
+	return out
+}
+
 // installHookEntries mutates rawHooks in place to ensure every Entire hook is
 // present, migrating stale entries (from older CLI versions or, when force is
 // set, any current Entire hook) first. Returns the number of hooks newly
@@ -178,17 +215,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	// data-driven (rather than one parse/strip/add/marshal block per type)
 	// keeps this function's complexity from growing linearly with each new
 	// simple hook type Entire registers.
-	simpleHooks := []struct {
-		hookType string
-		command  string
-	}{
-		{"SessionStart", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)},
-		{"SessionEnd", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")},
-		{"Stop", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")},
-		{"StopFailure", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop-failure")},
-		{"SubagentStop", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")},
-		{"UserPromptSubmit", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")},
-	}
+	simpleHooks := entireSimpleHooks()
 	simpleMatchers := make(map[string][]ClaudeHookMatcher, len(simpleHooks))
 	for _, h := range simpleHooks {
 		var m []ClaudeHookMatcher
@@ -207,9 +234,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 
 	// Define tool-use hook commands (the simple hooks' commands live in
 	// simpleHooks above).
-	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
-	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
-	postTodoCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	preTaskCmd, postTaskCmd, postTodoCmd := entireToolUseHookCommands()
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher, which ran a
