@@ -2989,10 +2989,12 @@ func uninstallEntireDir(ctx context.Context, p *uninstallPrinter, dirExists bool
 }
 
 // uninstallShadowBranches removes the legacy shadow branches older versions
-// left behind. Like doctor, a branch git refuses to delete (checked out in a
-// worktree, or a user's own branch in the bare entire/<hex> form that it will
-// not force-delete) is reported and kept: it does not fail the uninstall, and
-// the deleted count is still shown.
+// left behind, both the entire/<commit>-<worktree> form and the bare
+// entire/<hex> form. The deletion is `git branch -D`, which force-deletes: it
+// does not stop at an unmerged branch, so a user's own branch named like a
+// short SHA under entire/ is deleted too. The only branch git refuses is one
+// checked out in a worktree; like doctor, that one is reported and kept, it
+// does not fail the uninstall, and the deleted count is still shown.
 func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 	deleted, kept, err := removeAllShadowBranches(ctx)
 	if err != nil {
@@ -3002,7 +3004,7 @@ func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 	}
 	switch {
 	case deleted > 0:
-		p.step("Removed %d legacy shadow branches", deleted)
+		p.step("Removed %s", pluralCount(deleted, "legacy shadow branch", "legacy shadow branches"))
 	case len(kept) == 0:
 		p.noop("No legacy shadow branches to remove")
 	}

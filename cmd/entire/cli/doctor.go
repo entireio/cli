@@ -683,8 +683,9 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 // --force (or a confirmed prompt) doctor deletes the branches through
 // `git branch -D`, which
 // refuses a branch checked out in any worktree; such a branch is reported and
-// kept. The bare entire/<hex> form is not reported here, because a human
-// short-SHA branch looks the same; `entire clean --all` lists it for review.
+// kept. The bare entire/<hex> form is counted and pointed at
+// `entire clean --all --dry-run` but never deleted here, because a human
+// short-SHA branch looks the same.
 func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
@@ -693,15 +694,18 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	if err != nil {
 		return fmt.Errorf("list legacy shadow branches: %w", err)
 	}
+	// The bare entire/<hex> form is never deleted here (a human short-SHA
+	// branch looks the same), but it is always surfaced, alongside the strict
+	// form or on its own: saying "none" while `entire clean --all` lists some
+	// would mislead.
+	bareCount := 0
+	if all, allErr := strategy.ListLegacyShadowBranches(ctx); allErr == nil {
+		bareCount = max(len(all)-len(branches), 0)
+	}
 	if len(branches) == 0 {
-		// The bare entire/<hex> form is never deleted here (a human short-SHA
-		// branch looks the same), but it is still worth surfacing: saying
-		// "none" while `entire clean --all` lists some would mislead.
-		all, allErr := strategy.ListLegacyShadowBranches(ctx)
-		if allErr == nil && len(all) > 0 {
-			fmt.Fprintf(w, "Legacy shadow branches: %d in the oldest entire/<commit> form\n", len(all))
-			fmt.Fprintln(w, "  These may be yours (a branch named after a short SHA looks the same), so doctor")
-			fmt.Fprintln(w, "  does not delete them. Review them with `entire clean --all --dry-run`.")
+		if bareCount > 0 {
+			fmt.Fprintf(w, "Legacy shadow branches: %d in the oldest entire/<commit> form\n", bareCount)
+			printBareLegacyBranchNote(w)
 			return nil
 		}
 		fmt.Fprintln(w, "✓ Legacy shadow branches: none")
@@ -712,17 +716,20 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	fmt.Fprintln(w, "  Older versions wrote these at every turn; nothing reads them now, and they")
 	fmt.Fprintln(w, "  hold full snapshots of your working tree.")
 	printCappedList(w, branches, func(name string) string { return name })
-	fmt.Fprintln(w, "  Fix: run `entire doctor --force` to delete them (only the branches; pending")
-	fmt.Fprintln(w, "  agent work in session state is kept), then `git gc --prune=now` to reclaim the")
-	fmt.Fprintln(w, "  space: deleting the refs alone frees nothing, and plain `git gc` keeps")
-	fmt.Fprintln(w, "  unreachable objects for two weeks.")
+	if bareCount > 0 {
+		fmt.Fprintf(w, "  Also %s in the oldest entire/<commit> form.\n", pluralCount(bareCount, "branch", "branches"))
+		printBareLegacyBranchNote(w)
+	}
 
 	if !force {
 		if !interactive.CanPromptInteractively() {
-			fmt.Fprintln(w, "  Run `entire doctor --force` to delete them here.")
+			fmt.Fprintln(w, "  Fix: run `entire doctor --force` to delete them (only the branches; pending")
+			fmt.Fprintln(w, "  agent work in session state is kept), then `git gc --prune=now` to reclaim the")
+			fmt.Fprintln(w, "  space: deleting the refs alone frees nothing, and plain `git gc` keeps")
+			fmt.Fprintln(w, "  unreachable objects for two weeks.")
 			return nil
 		}
-		proceed, promptErr := confirmDoctorFix(ctx, w, "Delete these legacy shadow branches?")
+		proceed, promptErr := confirmDoctorFix(ctx, w, "Delete these legacy shadow branches? (Only the branches; pending agent work in session state is kept.)")
 		if promptErr != nil {
 			return promptErr
 		}
@@ -733,14 +740,22 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 
 	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
 	if len(deleted) > 0 {
-		fmt.Fprintf(w, "  ✓ Fixed: deleted %d legacy shadow branch(es)\n", len(deleted))
-		fmt.Fprintln(w, "  Their objects still take space until git prunes them; run `git gc --prune=now` to reclaim it.")
+		fmt.Fprintf(w, "  ✓ Fixed: deleted %s\n", pluralCount(len(deleted), "legacy shadow branch", "legacy shadow branches"))
+		fmt.Fprintln(w, "  Their objects still take space until git prunes them: run `git gc --prune=now`")
+		fmt.Fprintln(w, "  to reclaim it (plain `git gc` keeps unreachable objects for two weeks).")
 	}
 	if len(failed) > 0 {
 		fmt.Fprintf(w, "  Kept %d branch(es) git refused to delete (checked out in a worktree?):\n", len(failed))
 		printCappedList(w, failed, func(name string) string { return name })
 	}
 	return nil
+}
+
+// printBareLegacyBranchNote explains why doctor leaves the bare entire/<hex>
+// legacy shadow branches alone and where to review them.
+func printBareLegacyBranchNote(w io.Writer) {
+	fmt.Fprintln(w, "  These may be yours (a branch named after a short SHA looks the same), so doctor")
+	fmt.Fprintln(w, "  does not delete them. Review them with `entire clean --all --dry-run`.")
 }
 
 // symlinkReportLimit bounds the list checkEntireDirSymlinks prints. A repo with

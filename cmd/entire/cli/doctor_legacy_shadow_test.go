@@ -38,7 +38,8 @@ func localBranchList(t *testing.T, dir string) []string {
 
 // Doctor reports strict-shape legacy shadow branches with `entire clean` as
 // the remedy and, without --force and without a terminal, changes nothing.
-// The bare entire/<hex> form is not reported. Not parallel: t.Chdir.
+// The bare entire/<hex> form is counted and pointed at, never listed for
+// deletion. The fix advice is printed once. Not parallel: t.Chdir.
 func TestCheckLegacyShadowBranches_ReportsWithoutForce(t *testing.T) {
 	setupStopTestRepo(t)
 	dir, err := os.Getwd()
@@ -52,7 +53,9 @@ func TestCheckLegacyShadowBranches_ReportsWithoutForce(t *testing.T) {
 	assert.Contains(t, out, "Legacy shadow branches: 1 FOUND")
 	assert.Contains(t, out, "entire/1234567-abcdef")
 	assert.NotContains(t, out, "entire/fedcba9")
-	assert.Contains(t, out, "entire doctor --force")
+	assert.Contains(t, out, "Also 1 branch in the oldest entire/<commit> form")
+	assert.Contains(t, out, "entire clean --all --dry-run")
+	assert.Equal(t, 1, strings.Count(out, "entire doctor --force"), "the fix advice is printed once:\n%s", out)
 	assert.Contains(t, localBranchList(t, dir), "entire/1234567-abcdef", "nothing is deleted without --force")
 }
 
@@ -70,7 +73,7 @@ func TestCheckLegacyShadowBranches_ForceDeletesButKeepsCheckedOut(t *testing.T) 
 	testutil.RunGit(t, dir, "worktree", "add", "-q", linked, "entire/89abcde0-123456")
 
 	out := runLegacyShadowCheck(t, true)
-	assert.Contains(t, out, "deleted 1 legacy shadow branch(es)")
+	assert.Contains(t, out, "deleted 1 legacy shadow branch\n")
 	assert.Contains(t, out, "Kept 1 branch(es)")
 
 	branches := localBranchList(t, dir)
@@ -126,7 +129,7 @@ func TestRunStatus_WarnsAboutLegacyShadowBranches(t *testing.T) {
 
 	var stdout bytes.Buffer
 	require.NoError(t, runStatus(context.Background(), &stdout, false, false))
-	assert.Contains(t, stdout.String(), "1 legacy shadow branches")
+	assert.Contains(t, stdout.String(), "1 legacy shadow branch ")
 	assert.Contains(t, stdout.String(), "run 'entire doctor'")
 
 	stdout.Reset()
@@ -153,7 +156,7 @@ func TestUninstallShadowBranches_KeepsRefusedBranchWithoutFailing(t *testing.T) 
 	var out, errOut bytes.Buffer
 	ok := uninstallShadowBranches(context.Background(), newUninstallPrinter(&out, &errOut))
 	assert.True(t, ok, "a refused delete must not fail the uninstall")
-	assert.Contains(t, out.String(), "Removed 1 legacy shadow branches")
+	assert.Contains(t, out.String(), "Removed 1 legacy shadow branch")
 	assert.Contains(t, errOut.String(), "Kept 1 legacy shadow branch(es)")
 	assert.Contains(t, errOut.String(), "entire/89abcde0-123456")
 	assert.Contains(t, localBranchList(t, dir), "entire/89abcde0-123456")

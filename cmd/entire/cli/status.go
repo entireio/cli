@@ -260,7 +260,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		// they are not pushed or kept by accident.
 		if n := legacyShadowBranchCount(ctx); n > 0 {
 			b.WriteString("\n")
-			b.WriteString(sty.render(sty.yellow, fmt.Sprintf("  ! %d legacy shadow branches", n)))
+			b.WriteString(sty.render(sty.yellow, "  ! "+pluralCount(n, "legacy shadow branch", "legacy shadow branches")))
 			b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
 		}
 	}
