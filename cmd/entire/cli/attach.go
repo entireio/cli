@@ -577,7 +577,7 @@ func refreshCheckpoint(ctx context.Context, checkpointID id.CheckpointID, stored
 //
 // For a branch-stored checkpoint the data lives in the v1 branch tree, and the
 // store would bootstrap a missing local branch from origin's remote-tracking ref
-// (PrimaryAsRead makes reads origin-bootstrappable). Counting that would let a
+// (a Read == Primary topology is origin-bootstrappable). Counting that would let a
 // WriteCommitted create a fresh orphan local branch and clobber the remote on
 // push, so gate on the local Primary ref existing first. A ref-stored checkpoint
 // lives at its own ref (the v1 branch is irrelevant) and the store
