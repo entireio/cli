@@ -78,17 +78,21 @@ func discoverTranscript(ctx context.Context, sessionID string, ag agentpkg.Agent
 			// home's other stores are not.
 			logging.Debug(ctx, "agent home unavailable, searching only the session directory",
 				"agent", string(ag.Name()), "error", homeErr)
-		} else if _, ok := layout.StoreContaining(home, sessionDir); ok {
+		} else if layout.Holds(home, sessionDir) {
 			if store, err = agentpkg.OpenSessionStoreAt(ag, home); err != nil {
 				return "", fmt.Errorf("failed to open agent home: %w", err)
 			}
-			inStore = func(path string) bool {
-				_, ok := layout.StoreContaining(home, path)
-				return ok
-			}
+			inStore = func(path string) bool { return layout.Holds(home, path) }
 		}
 	}
 
+	return firstTranscriptCandidate(store, sessionDir, sessionID, inStore)
+}
+
+// firstTranscriptCandidate returns the first of sessionID's candidate files in
+// sessionDir, a directory in store, that inStore accepts and that is a regular
+// file, following symbolic links. It returns "" and no error when none is.
+func firstTranscriptCandidate(store *agentpkg.SessionStore, sessionDir, sessionID string, inStore func(string) bool) (string, error) {
 	candidates, err := store.SessionFileCandidatesIn(sessionDir, sessionID)
 	if err != nil {
 		return "", fmt.Errorf("resolve transcript path: %w", err)
@@ -102,6 +106,84 @@ func discoverTranscript(ctx context.Context, sessionID string, ag agentpkg.Agent
 		}
 	}
 	return "", nil
+}
+
+// searchRecordedHomes looks for sessionID's transcript under the agent's homes
+// recorded in the per-user registry, most recently used first, leaving out the
+// active home when the active-home search already covered it. The registry's
+// homes are trusted: only homes resolved from the user's own environment are
+// recorded. It returns a zero foundTranscript when no recorded home holds the
+// transcript, and an error only when the registry cannot be read.
+//
+// An agent with per-project session directories has each store of a home
+// searched one level deep, where it keeps a session's own transcript. Any
+// other agent's candidates are resolved as discoverTranscript resolves them in
+// the active home: from the home's first store, accepting a candidate in any
+// of its stores (such as Codex's archived_sessions).
+func searchRecordedHomes(ctx context.Context, sessionID string, ag agentpkg.Agent) (foundTranscript, error) {
+	provider, ok := agentpkg.AsHomeLayoutProvider(ag)
+	if !ok {
+		return foundTranscript{}, nil
+	}
+	homes, err := agentpkg.KnownAgentHomesExcept(ag.Type(), activeHomeSearched(ctx, ag, provider))
+	if err != nil {
+		return foundTranscript{}, fmt.Errorf("search the agent's other recorded homes: %w", err)
+	}
+	_, walksProjects := agentpkg.AsSessionBaseDirProvider(ag)
+	layout := provider.HomeLayout()
+	for _, home := range homes {
+		if walksProjects {
+			for _, store := range layout.StoresUnder(home) {
+				if found := searchSessionBaseDir(ag, store, sessionID, 0); found != "" {
+					return foundTranscript{Path: found, RecordedHome: home}, nil
+				}
+			}
+			continue
+		}
+		stores := layout.StoresUnder(home)
+		if len(stores) == 0 {
+			continue
+		}
+		store, err := agentpkg.OpenSessionStoreAt(ag, home)
+		if err != nil {
+			logging.Debug(ctx, "recorded agent home skipped", "home", home, "error", err)
+			continue
+		}
+		inStore := func(path string) bool { return layout.Holds(home, path) }
+		found, err := firstTranscriptCandidate(store, stores[0], sessionID, inStore)
+		if err != nil {
+			logging.Debug(ctx, "recorded agent home skipped", "home", home, "error", err)
+			continue
+		}
+		if found != "" {
+			return foundTranscript{Path: found, RecordedHome: home}, nil
+		}
+	}
+	return foundTranscript{}, nil
+}
+
+// activeHomeSearched returns the agent's active home when the active-home
+// search (discoverTranscript, then searchTranscriptInProjectDirs) covered its
+// stores, so searchRecordedHomes need not search it again, or "" when it did
+// not, such as for a Pi session store relocated outside the home.
+func activeHomeSearched(ctx context.Context, ag agentpkg.Agent, provider agentpkg.HomeLayoutProvider) string {
+	active, err := provider.SessionHome()
+	if err != nil {
+		return ""
+	}
+	var searched string
+	if base, ok := agentpkg.AsSessionBaseDirProvider(ag); ok {
+		searched, err = base.GetSessionBaseDir()
+	} else {
+		var repoRoot string
+		if repoRoot, err = paths.WorktreeRoot(ctx); err == nil {
+			searched, err = ag.GetSessionDir(repoRoot)
+		}
+	}
+	if err != nil || !provider.HomeLayout().Holds(filepath.Clean(active), filepath.Clean(searched)) {
+		return ""
+	}
+	return active
 }
 
 // searchTranscriptInProjectDirs searches for a session transcript across an agent's
@@ -123,13 +205,22 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 	if err != nil {
 		return "", fmt.Errorf("failed to get base directory: %w", err)
 	}
-
 	// Walk subdirectories with a max depth of 3 (baseDir/project/subdir/file)
 	// to avoid scanning unrelated project trees.
-	const maxExtraDepth = 3
+	if found := searchSessionBaseDir(ag, baseDir, sessionID, 3); found != "" {
+		return found, nil
+	}
+	return "", errors.New("transcript not found in any project directory")
+}
 
+// searchSessionBaseDir looks for sessionID's transcript in baseDir and the
+// directories beneath it, and returns "" when none holds it. maxDepth counts
+// the separators in a directory's path relative to baseDir, so 0 searches
+// baseDir and its immediate subdirectories.
+func searchSessionBaseDir(ag agentpkg.Agent, baseDir, sessionID string, maxDepth int) string {
 	var found string
-	walkErr := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
+	//nolint:errcheck // WalkDir returns only the callback's result, which is nil, SkipDir or SkipAll, none of which it reports
+	_ = filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // skip inaccessible dirs
 		}
@@ -142,7 +233,7 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 			return filepath.SkipDir
 		}
 		depth := strings.Count(rel, string(filepath.Separator))
-		if depth > maxExtraDepth {
+		if depth > maxDepth {
 			return filepath.SkipDir
 		}
 		// Each candidate project directory is its own store: the search is
@@ -170,13 +261,7 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 		}
 		return nil
 	})
-	if walkErr != nil {
-		return "", fmt.Errorf("failed to search project directories: %w", walkErr)
-	}
-	if found != "" {
-		return found, nil
-	}
-	return "", errors.New("transcript not found in any project directory")
+	return found
 }
 
 // isTranscriptFileInStore reports whether name, the store's name for path, is a
