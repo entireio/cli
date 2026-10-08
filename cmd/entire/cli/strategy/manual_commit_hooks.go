@@ -764,6 +764,11 @@ func (s *ManualCommitStrategy) handleAmendCommitMsg(ctx context.Context, commitM
 		if state.LastCheckpointID.IsEmpty() {
 			continue
 		}
+		// A delete lists the ID before clearing it from session state, so an
+		// amend racing that window must not restore it.
+		if len(withoutDeletedCheckpoints(ctx, []id.CheckpointID{state.LastCheckpointID})) == 0 {
+			continue
+		}
 		cpID := state.LastCheckpointID
 		source := "LastCheckpointID"
 

@@ -176,3 +176,28 @@ func TestPrepareCommitMsg_AmendIgnoresDeletedIDWhenPreserving(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, trailers.ParseAllCheckpoints(string(content)), live, "the live checkpoint is restored:\n%s", content)
 }
+
+// A delete records the ID before it clears LastCheckpointID from session
+// state, so an amend racing that window must not restore the deleted ID.
+func TestPrepareCommitMsg_AmendDoesNotRestoreDeletedLastCheckpoint(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	dead := id.MustCheckpointID("abc123def456")
+	recordDeleted(t, dead)
+
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.InitializeSession(context.Background(), "sess-amend-dead", agent.AgentTypeClaudeCode, "", "", ""))
+	require.NoError(t, MutateSessionState(context.Background(), "sess-amend-dead", func(state *SessionState) error {
+		state.LastCheckpointID = dead
+		return nil
+	}))
+
+	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("subject\n"), 0o644))
+
+	require.NoError(t, s.PrepareCommitMsg(context.Background(), commitMsgFile, "commit"))
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.NotContains(t, trailers.ParseAllCheckpoints(string(content)), dead, "a deleted checkpoint is not restored:\n%s", content)
+}
