@@ -732,15 +732,50 @@ func unusableLockRoot(t *testing.T) *os.Root {
 }
 
 // A lock file that cannot be opened is not another Entire process at work.
-func TestInstallHooks_UnusableLockIsNotReportedAsContention(t *testing.T) {
+func TestAcquireHooksLock_UnusableLockIsNotReportedAsContention(t *testing.T) {
 	t.Parallel()
 	f := newHooksFixture(t)
-	_, err := installHooks(context.Background(), unusableLockRoot(t), f.root, f.dir, []hookSpec{specFor(t, "pre-push")}, backupClock)
-	if err == nil {
-		t.Fatal("install succeeded without its lock")
+	_, err := acquireHooksLock(context.Background(), unusableLockRoot(t), f.dir)
+	if !errors.Is(err, errHooksLockUnavailable) {
+		t.Fatalf("err = %v, want errHooksLockUnavailable", err)
 	}
 	if strings.Contains(err.Error(), "another Entire process") {
 		t.Errorf("err = %v, reported as contention", err)
+	}
+}
+
+// Install runs at every agent turn and on enable, and before the lock existed
+// it needed no per-user directory. A lock it cannot use at all is warned about
+// and skipped, exactly as uninstall does, rather than failing the install.
+func TestInstallHooks_ProceedsWithoutAUsableLock(t *testing.T) {
+	t.Parallel()
+	for name, lockRoot := range map[string]func(*testing.T) *os.Root{
+		"unusable lock file": unusableLockRoot,
+		"no lock directory":  func(*testing.T) *os.Root { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newHooksFixture(t)
+			spec := specFor(t, "pre-push")
+			if _, err := installHooks(context.Background(), lockRoot(t), f.root, f.dir, []hookSpec{spec}, backupClock); err != nil {
+				t.Fatalf("installHooks: %v", err)
+			}
+			assertHooks(t, f, map[string]string{"pre-push": spec.content})
+		})
+	}
+}
+
+// Another Entire process mid-move still stops install.
+func TestInstallHooks_HeldLockStillStops(t *testing.T) {
+	t.Parallel()
+	f := newHooksFixture(t)
+	release, err := acquireHooksLock(context.Background(), f.lockRoot, f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := installHooks(context.Background(), f.lockRoot, f.root, f.dir, []hookSpec{specFor(t, "pre-push")}, backupClock); err == nil {
+		t.Error("installHooks ran while another process held the hooks lock")
 	}
 }
 

@@ -723,7 +723,8 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	}
 	lockRoot, err := userdirs.CacheRoot()
 	if err != nil {
-		return 0, fmt.Errorf("open the git hooks lock directory: %w", err)
+		fmt.Fprintf(stderrWriter, "[entire] Warning: cannot open the git hooks lock directory (%v)\n", err)
+		lockRoot = nil // installHooks goes ahead without the lock
 	}
 
 	installedCount, err := installHooks(ctx, lockRoot, root, hooksDir, buildHookSpecs(cmdPrefix), time.Now())
@@ -741,12 +742,21 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 
 // installHooks writes specs into root, holding the hooks lock in lockRoot so
 // concurrent installs and removals never interleave their moves.
+//
+// Install runs on enable and at every agent turn, and needed no per-user
+// directory before the lock existed, so a lock that cannot be used at all (nil
+// lockRoot, or a lock file that will not open) is warned about and skipped, as
+// in removeHooks. A lock another Entire process HOLDS still stops it.
 func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string, specs []hookSpec, now time.Time) (int, error) {
 	release, err := acquireHooksLock(ctx, lockRoot, hooksDir)
-	if err != nil {
+	switch {
+	case err == nil:
+		defer release()
+	case errors.Is(err, errHooksLockUnavailable):
+		fmt.Fprintf(stderrWriter, "[entire] Warning: %v; installing hooks without it\n", err)
+	default:
 		return 0, err
 	}
-	defer release()
 
 	if err := removeLeftoverTemps(root); err != nil {
 		return 0, err
@@ -760,7 +770,7 @@ func installHooks(ctx context.Context, lockRoot, root *os.Root, hooksDir string,
 			return installedCount, fmt.Errorf("failed to take %s back from pre-commit: %w", spec.name, err)
 		}
 		if reclaimed {
-			fmt.Fprintf(os.Stderr, "[entire] pre-commit had moved Entire's %s hook to %s%s; Entire's hook is back and runs pre-commit's after it.\n", spec.name, spec.name, legacySuffix)
+			fmt.Fprintf(stderrWriter, "[entire] pre-commit had moved Entire's %s hook to %s%s; Entire's hook is back and runs pre-commit's after it.\n", spec.name, spec.name, legacySuffix)
 			logging.Info(ctx, "git hook reclaimed from pre-commit", slog.String("hook", spec.name))
 		}
 
