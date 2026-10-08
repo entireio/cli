@@ -27,10 +27,14 @@ type fetchingAgent struct {
 	content string
 	err     error
 	fetched []string
+	// deadlines records the deadline of each fetch's context.
+	deadlines []time.Time
 }
 
-func (f *fetchingAgent) FetchSubagentTranscript(_ context.Context, agentID, _ string, _, _ time.Time) (string, error) {
+func (f *fetchingAgent) FetchSubagentTranscript(ctx context.Context, agentID, _ string, _, _ time.Time) (string, error) {
 	f.fetched = append(f.fetched, agentID)
+	deadline, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, deadline)
 	if f.err != nil {
 		return "", f.err
 	}
@@ -194,9 +198,33 @@ func TestLiveTaskFilesInCommit_FetchesInFlightTranscript(t *testing.T) {
 					{ToolUseID: "call_1", AgentID: "ses_child", StartedAt: time.Now()},
 				},
 			}
-			got := liveTaskFilesInCommitFor(context.Background(), ag, state, committed)
+			got := liveTaskFilesInCommitFor(context.Background(), ag, state, committed, time.Now().Add(liveTaskFetchTimeout))
 			require.Equal(t, tt.want, got)
 			require.Equal(t, []string{"ses_child"}, ag.fetched, "the in-flight record must be fetched")
 		})
+	}
+}
+
+// TestLiveTaskFilesInCommit_SessionsShareOneDeadline pins that the re-export
+// budget is per commit, not per session: post-commit checks sessions one after
+// another inside the user's `git commit`, so a fresh timeout per session would
+// let N slow exports block the commit for N times the budget.
+func TestLiveTaskFilesInCommit_SessionsShareOneDeadline(t *testing.T) {
+	t.Parallel()
+	committed := map[string]struct{}{"docs/red.md": {}}
+	deadline := time.Now().Add(liveTaskFetchTimeout)
+
+	for _, child := range []string{"ses_child_a", "ses_child_b"} {
+		dir := t.TempDir()
+		ag := &analyzingFetchingAgent{fetchingAgent{dir: dir, content: "docs/blue.md"}}
+		state := &SessionState{
+			SessionID:    "ses_parent_" + child,
+			WorktreePath: dir,
+			TaskRecords:  []session.TaskRecord{{ToolUseID: "call_" + child, AgentID: child, StartedAt: time.Now()}},
+		}
+		time.Sleep(5 * time.Millisecond) // a later session must not get a later deadline
+		require.False(t, liveTaskFilesInCommitFor(context.Background(), ag, state, committed, deadline))
+		require.Len(t, ag.deadlines, 1)
+		require.True(t, ag.deadlines[0].Equal(deadline), "session %s fetched with deadline %v, want the commit's %v", child, ag.deadlines[0], deadline)
 	}
 }

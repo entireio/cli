@@ -1309,6 +1309,10 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 	// pre-loop snapshot would warn about sessions this commit just condensed.
 	staleEnded := 0
 
+	// One re-export budget for the whole commit, shared by every session's
+	// co-authorship check (see liveTaskFilesInCommit).
+	liveTaskFetchDeadline := time.Now().Add(liveTaskFetchTimeout)
+
 	loopCtx, processSessionsLoop := perf.StartLoop(ctx, "process_sessions")
 	for _, sess := range sessions {
 		if sess.FullyCondensed && sess.Phase == session.PhaseEnded {
@@ -1322,7 +1326,7 @@ func (s *ManualCommitStrategy) PostCommit(ctx context.Context) error {
 			var condensed bool
 			newSkillEvents, condensedSignal, condensed = s.postCommitProcessSessionLocked(iterCtx, repo, state, &transitionCtx, checkpointID,
 				head, commit, newHead, worktreePath, headTree, parentTree,
-				committedFileSet, sessionsWithCommittedFiles, condensedTelemetry)
+				committedFileSet, sessionsWithCommittedFiles, condensedTelemetry, liveTaskFetchDeadline)
 			trailerOwned = trailerOwned || condensed
 			if IsCondensableEndedSession(state) {
 				staleEnded++
@@ -1426,27 +1430,30 @@ func logUnclaimedCheckpointTrailer(logCtx context.Context, checkpointID id.Check
 // materializeTaskRecords resolves it (readTaskTranscript): the declared path,
 // then the agent-layout fallback, then the agent's own re-export — an
 // in-flight OpenCode record has no transcript on disk until its stop hook
-// runs. The re-export runs inside the user's `git commit`, so it gets
-// liveTaskFetchTimeout rather than the agent's own command timeout; a fetch
-// that fails or times out is no evidence, as before.
-func (s *ManualCommitStrategy) liveTaskFilesInCommit(ctx context.Context, state *SessionState, committedFileSet map[string]struct{}) bool {
+// runs. The re-export runs inside the user's `git commit`, so it is bounded by
+// fetchDeadline, which PostCommit sets once for every session in the commit,
+// rather than by the agent's own command timeout; a fetch that fails or times
+// out is no evidence, as before. Transcripts already on disk are still read
+// once the deadline has passed.
+func (s *ManualCommitStrategy) liveTaskFilesInCommit(ctx context.Context, state *SessionState, committedFileSet map[string]struct{}, fetchDeadline time.Time) bool {
 	ag, err := agent.GetByAgentType(state.AgentType)
 	if err != nil {
 		return false
 	}
-	return liveTaskFilesInCommitFor(ctx, ag, state, committedFileSet)
+	return liveTaskFilesInCommitFor(ctx, ag, state, committedFileSet, fetchDeadline)
 }
 
-// liveTaskFetchTimeout bounds the transcript re-export liveTaskFilesInCommit
-// may run from a post-commit hook.
+// liveTaskFetchTimeout bounds the transcript re-exports liveTaskFilesInCommit
+// may run from one post-commit hook, across all of the commit's sessions:
+// they are checked one after another, so a budget per session would add up.
 const liveTaskFetchTimeout = 10 * time.Second
 
-func liveTaskFilesInCommitFor(ctx context.Context, ag agent.Agent, state *SessionState, committedFileSet map[string]struct{}) bool {
+func liveTaskFilesInCommitFor(ctx context.Context, ag agent.Agent, state *SessionState, committedFileSet map[string]struct{}, fetchDeadline time.Time) bool {
 	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
 	if !ok {
 		return false
 	}
-	fetchCtx, cancel := context.WithTimeout(ctx, liveTaskFetchTimeout)
+	fetchCtx, cancel := context.WithDeadline(ctx, fetchDeadline)
 	defer cancel()
 	for _, record := range state.LiveTaskRecords() {
 		if record.AgentID == "" || validation.ValidateAgentID(record.AgentID) != nil {
@@ -1544,6 +1551,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 	committedFileSet map[string]struct{},
 	sessionsWithCommittedFiles int,
 	condensedTelemetry *commitCondensedEmitter,
+	liveTaskFetchDeadline time.Time,
 ) (newSkillEvents []agent.SkillEvent, condensedSignal *commitCondensedSignal, condensed bool) {
 	logCtx := logging.WithComponent(ctx, "checkpoint")
 	reservedCheckpointID := state.PendingCondensationID()
@@ -1629,7 +1637,7 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 		// Memoized: the gate can be consulted more than once per commit, and
 		// each consultation may re-export a running subagent.
 		liveTaskClaimsCommit: sync.OnceValue(func() bool {
-			return s.liveTaskFilesInCommit(ctx, state, committedFileSet)
+			return s.liveTaskFilesInCommit(ctx, state, committedFileSet, liveTaskFetchDeadline)
 		}),
 		condensedTelemetry: condensedTelemetry,
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -143,7 +144,7 @@ func TestPostCommitProcessSessionLocked_PreservesDifferentReservedAttempt(t *tes
 
 	_, _, condensed := (&ManualCommitStrategy{}).postCommitProcessSessionLocked(
 		context.Background(), nil, state, nil, commitID, nil, nil, "", "",
-		nil, nil, nil, 0, nil,
+		nil, nil, nil, 0, nil, time.Time{},
 	)
 
 	require.False(t, condensed)
