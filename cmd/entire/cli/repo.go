@@ -615,7 +615,7 @@ const projectFlagName = "project"
 // wrong project was accepted in silence; warnRedundantProjectFlag is what ends
 // that.
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, projectFlagName, "", "Owning project (name or ULID); required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path or a ULID")
+	cmd.Flags().StringVar(project, projectFlagName, "", "Owning project; required when <repo> is a bare name, redundant with a /"+nativeCloneForge+"/<project>/<repo> path")
 	warnRedundantProjectFlag(cmd, project)
 }
 

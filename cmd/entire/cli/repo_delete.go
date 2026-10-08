@@ -29,11 +29,11 @@ func newRepoDeleteCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "delete <repo>",
-		Short: "Delete a repository by /et/<project>/<repo> path, name, or ULID",
+		Short: "Delete a repository by /et/<project>/<repo> path or name",
 		Long: "Delete a repository.\n\n" +
-			"A native repo with copies on other clusters (see `entire repo mirror add`) " +
-			"is refused until the copies are removed. Pass --cascade to delete the repo " +
-			"and every copy in one command: the server removes the copies first, and " +
+			"A repo with mirrors on other clusters (see `entire repo mirror add`) " +
+			"is refused until its mirrors are removed. Pass --cascade to delete the repo " +
+			"and every mirror in one command: the server removes the mirrors first, and " +
 			"the command waits until the repo is gone. --no-wait returns as soon as the " +
 			"server accepts the request.",
 		Example: "  entire repo delete /et/acme/web\n" +
@@ -55,7 +55,7 @@ func newRepoDeleteCmd() *cobra.Command {
 	}
 	bindRepoProjectFlag(cmd, &project)
 	addForceFlag(cmd)
-	cmd.Flags().BoolVar(&opts.cascade, "cascade", false, "Also delete the repo's copies on other clusters")
+	cmd.Flags().BoolVar(&opts.cascade, "cascade", false, "Also delete the repo's mirrors on other clusters")
 	cmd.Flags().BoolVar(&opts.noWait, "no-wait", false, "Return once the server accepts a cascade delete")
 	cmd.Flags().DurationVar(&opts.waitTimeout, "wait-timeout", 10*time.Minute, "Time limit for a cascade delete to finish")
 	return cmd
@@ -72,12 +72,13 @@ func runRepoDelete(cmd *cobra.Command, ref, project string, opts repoDeleteOptio
 		if err != nil {
 			return err
 		}
-		label := "repo " + resolvedRefLabel(ref, resolved)
-		copies := ""
+		name := repoDeleteName(ref, resolved)
+		label := "repo " + name
+		mirrors := ""
 		if opts.cascade {
-			copies = copiesSuffix(ctx, c, resolved.ID)
+			mirrors = mirrorsSuffix(ctx, c, resolved.ID)
 		}
-		proceed, err := confirmControlPlaneDeletion(ctx, out, label+copies, force, interactive.CanPromptInteractively())
+		proceed, err := confirmControlPlaneDeletion(ctx, out, label+mirrors, force, interactive.CanPromptInteractively())
 		if err != nil || !proceed {
 			return err
 		}
@@ -90,55 +91,69 @@ func runRepoDelete(cmd *cobra.Command, ref, project string, opts repoDeleteOptio
 		case isCoreNotFound(err):
 			fmt.Fprintf(out, "%s not found; nothing to delete\n", label)
 			return nil
-		case err != nil && opts.cascade:
-			return err
 		case err != nil:
-			return hintCascadeOnMirrorConflict(err)
+			return explainMirrorConflict(err, label, opts.cascade)
 		}
 		if _, accepted := res.(*coreapi.DeleteRepoAccepted); !accepted {
 			fmt.Fprintf(out, "✓ Deleted %s\n", label)
 			return nil
 		}
 		if opts.noWait {
-			fmt.Fprintf(out, "Deleting %s%s in the background.\n", label, copies)
+			fmt.Fprintf(out, "Deleting %s%s in the background.\n", label, mirrors)
 			return nil
 		}
-		fmt.Fprintf(out, "Deleting %s%s…\n", label, copies)
+		fmt.Fprintf(out, "Deleting %s%s…\n", label, mirrors)
 		waitCtx, cancel := context.WithTimeout(ctx, opts.waitTimeout)
 		defer cancel()
 		if err := awaitRepoDeleted(waitCtx, c, resolved.ID); err != nil {
-			return reportUnfinishedDelete(cmd.ErrOrStderr(), label+copies, repoCheckCommand(ref, resolved.ID), opts.waitTimeout, err)
+			return reportUnfinishedDelete(cmd.ErrOrStderr(), label+mirrors, repoCheckCommand(name), opts.waitTimeout, err)
 		}
 		fmt.Fprintf(out, "✓ Deleted %s\n", label)
 		return nil
 	})
 }
 
-// reportUnfinishedDelete explains a wait that ended early.
+// repoDeleteName is how `repo delete` names the repo: the path the server
+// resolved, else the ref as typed. Unlike resolvedRefLabel it never appends
+// the ULID; a repo is addressed publicly by its path.
+func repoDeleteName(ref string, r resolvedRef) string {
+	if r.Name != "" {
+		return r.Name
+	}
+	return strings.TrimSpace(ref)
+}
+
+// reportUnfinishedDelete explains a wait that ended early. check is empty
+// when there is no command to suggest.
 func reportUnfinishedDelete(w io.Writer, what, check string, timeout time.Duration, err error) error {
-	fmt.Fprintf(w, "The server is still deleting %s.\nCheck with: %s\n", what, check)
+	fmt.Fprintf(w, "The server is still deleting %s.\n", what)
+	if check != "" {
+		fmt.Fprintf(w, "Check with: %s\n", check)
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("stopped waiting after %s (--wait-timeout)", timeout)
 	}
 	return err
 }
 
-// repoCheckCommand: `repo view` takes only paths.
-func repoCheckCommand(ref, repoID string) string {
-	if strings.HasPrefix(strings.TrimSpace(ref), "/"+nativeCloneForge+"/") {
-		return "entire repo view " + strings.TrimSpace(ref)
+// repoCheckCommand suggests `repo view`, which takes only /et/<project>/<repo>
+// paths. name is the server-resolved path whenever the ref was a path or a
+// name, so only a repo addressed by ULID gets no suggestion.
+func repoCheckCommand(name string) string {
+	if !strings.HasPrefix(name, "/"+nativeCloneForge+"/") {
+		return ""
 	}
-	return "entire api /api/v1/repos/" + repoID
+	return "entire repo view " + name
 }
 
-// copiesSuffix names the copies a cascade removes, for the prompt and the
+// mirrorsSuffix names the mirrors a cascade removes, for the prompt and the
 // progress line. Best-effort: the server decides what the cascade removes,
 // so a failed count degrades the wording rather than the command.
-// Copies already being removed are not counted.
-func copiesSuffix(ctx context.Context, c *coreapi.Client, repoID string) string {
+// Mirrors already being removed are not counted.
+func mirrorsSuffix(ctx context.Context, c *coreapi.Client, repoID string) string {
 	mirrors, err := listNativeMirrors(ctx, c, repoID)
 	if err != nil {
-		return " and any copies"
+		return " and any mirrors"
 	}
 	n := 0
 	for _, m := range mirrors {
@@ -150,32 +165,37 @@ func copiesSuffix(ctx context.Context, c *coreapi.Client, repoID string) string 
 	case 0:
 		return ""
 	case 1:
-		return " and its copy"
+		return " and its mirror"
 	default:
-		return fmt.Sprintf(" and its %d copies", n)
+		return fmt.Sprintf(" and its %d mirrors", n)
 	}
 }
 
-// hintCascadeOnMirrorConflict adds the --cascade hint to the one refusal
-// whose remedy is a flag of this command: the server declines to delete a
-// native primary while its copies exist. The hint rides on a plain error.
-// renderCoreError replaces a wrapped *ErrorModelStatusCode with the server's
-// detail alone, which would drop the hint (see renderNativeMirrorCreateError).
-func hintCascadeOnMirrorConflict(err error) error {
+// explainMirrorConflict rewords the one refusal whose remedy is a flag of this
+// command: the server declines to delete a repo while its mirrors exist. The
+// server's detail speaks of native mirrors and primaries, so the CLI says it
+// in its own words. Under --cascade the same refusal means the server did not
+// take the cascade (one deployed before it existed answers this way).
+// The message rides on a plain error: renderCoreError replaces a wrapped
+// *ErrorModelStatusCode with the server's detail alone, which would drop it
+// (see renderNativeMirrorCreateError).
+func explainMirrorConflict(err error, label string, cascade bool) error {
 	var problem *coreapi.ErrorModelStatusCode
 	if !errors.As(err, &problem) || problem.StatusCode != http.StatusConflict {
 		return err
 	}
-	detail := coreapi.APIError(err)
-	if !strings.Contains(strings.ToLower(detail), "native mirror") {
+	if !strings.Contains(strings.ToLower(coreapi.APIError(err)), "native mirror") {
 		return err
 	}
-	return fmt.Errorf("%s; add --cascade to delete its copies too", detail)
+	if cascade {
+		return fmt.Errorf("%s has mirrors on other clusters and the server did not delete them with --cascade; remove them with `entire repo mirror remove`, then delete the repo", label)
+	}
+	return fmt.Errorf("%s has mirrors on other clusters; add --cascade to delete them too", label)
 }
 
 // awaitRepoDeleted polls until the repo read answers 404. A 202 hands
 // completion to the server, so every 200 keeps the wait going whatever
-// state it reports: the server removes the row once the last copy is gone.
+// state it reports: the server removes the row once the last mirror is gone.
 // A stale read costs one more poll.
 func awaitRepoDeleted(ctx context.Context, c repoLifecycleGetter, repoID string) error {
 	ticker := time.NewTicker(mirrorPollInterval)

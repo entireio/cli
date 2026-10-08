@@ -1013,6 +1013,6 @@ func TestRepoDelete_GitSuffixResolvesToTheSuffixFreeRepo(t *testing.T) {
 	require.Equal(t, victimName, askedName, "the suffix must be dropped before the server is asked")
 	require.Equal(t, victimID, deletedID, "the ULID deleted must be the suffix-free repo's")
 	require.Contains(t, stdout, victimPath, "the confirmation names what the server resolved")
-	require.Contains(t, stdout, victimID)
+	require.NotContains(t, stdout, victimID, "the path names the repo; its ULID stays internal")
 	require.NotContains(t, stdout, strangerID)
 }
