@@ -36,7 +36,10 @@ The dispatch wizard and `search --repo` completion use the control plane's
 truncation logs a warning and keeps the partial catalogue. Both omit repos with
 no checkpoints and qualify names by provider. The wizard derives READY placement
 jurisdictions from the same walk and retains its local-repo fallback; completion
-silently falls back to `*` on errors. Do not use the removed BFF
+silently falls back to `*` on errors. Code-search filters resolve these qualified
+slugs against the entry's provider, accepting bare or already-qualified index
+names without crossing forge namespaces. Two-component names whose owner/project
+is `gh` or `et` retain that segment. Do not use the removed BFF
 `GET /api/v1/repositories` route. Dispatch generation still uses the BFF.
 
 ### Entire-API Cell Routing (which cell does a data-plane request go to?)

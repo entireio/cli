@@ -66,6 +66,10 @@ func checkpointRepoSlug(entry coreapi.RepoIndexEntry) string {
 	if forge == "" || name == "" {
 		return ""
 	}
-	// Native entries can already carry their forge in full_name.
-	return forge + "/" + strings.TrimPrefix(name, forge+"/")
+	// A two-component name can have an owner/project named after its forge.
+	// Only a three-component name can already be forge-qualified.
+	if strings.Count(name, "/") == 2 && strings.HasPrefix(name, forge+"/") {
+		return name
+	}
+	return forge + "/" + name
 }

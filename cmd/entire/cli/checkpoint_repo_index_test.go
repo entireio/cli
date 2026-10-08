@@ -19,6 +19,50 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestCheckpointRepoSlug_ForgeNamedOwners(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ provider, name, want string }{
+		{"github", "gh/widget", "gh/gh/widget"},
+		{"entire", "et/widget", "et/et/widget"},
+		{"github", "gh/gh/widget", "gh/gh/widget"},
+		{"entire", "/et/et/widget/", "et/et/widget"},
+	} {
+		t.Run(tc.provider+"/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			entry := coreapi.RepoIndexEntry{FullName: tc.name, Provider: coreapi.NewOptString(tc.provider)}
+			if got := checkpointRepoSlug(entry); got != tc.want {
+				t.Fatalf("slug = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveRepoFilters_CompletionProviderIsolation(t *testing.T) {
+	t.Parallel()
+	for _, nativeName := range []string{"project/native", "et/project/native"} {
+		t.Run(nativeName, func(t *testing.T) {
+			t.Parallel()
+			native := coreapi.RepoIndexEntry{ID: "native", FullName: nativeName, Provider: coreapi.NewOptString("entire"), CheckpointCount: coreapi.NewOptInt64(1)}
+			github := coreapi.RepoIndexEntry{ID: "github", FullName: "project/native", Provider: coreapi.NewOptString("github"), CheckpointCount: coreapi.NewOptInt64(1)}
+			for _, entries := range [][]coreapi.RepoIndexEntry{{native, github}, {github, native}} {
+				for _, entry := range entries {
+					suggestions := checkpointRepoSlugs([]coreapi.RepoIndexEntry{entry})
+					ids, matched := resolveRepoFilters(suggestions, entries)
+					if len(ids) != 1 || ids[0] != entry.ID || len(matched) != 1 {
+						t.Fatalf("%v resolved to %v, want %s", suggestions, ids, entry.ID)
+					}
+				}
+			}
+			if ids, _ := resolveRepoFilters([]string{"et/project/native"}, []coreapi.RepoIndexEntry{github}); len(ids) != 0 {
+				t.Fatalf("native filter matched GitHub: %v", ids)
+			}
+			if ids, _ := resolveRepoFilters([]string{"gh/project/native"}, []coreapi.RepoIndexEntry{native}); len(ids) != 0 {
+				t.Fatalf("GitHub filter matched native: %v", ids)
+			}
+		})
+	}
+}
+
 func TestCheckpointRepoIndex_PagesAndCompletion(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -30,7 +74,7 @@ func TestCheckpointRepoIndex_PagesAndCompletion(t *testing.T) {
 		if r.URL.Query().Get("pageToken") == "" {
 			fmt.Fprint(w, `{"repos":[{"id":"new","name":"new","cell":"us","clusterSlug":"us","jurisdiction":"us","visibility":"private","full_name":"owner/new","provider":"github","checkpointCount":3,"placements":[]},{"id":"empty","name":"empty","cell":"us","clusterSlug":"us","jurisdiction":"us","visibility":"private","full_name":"owner/empty","provider":"github","checkpointCount":0,"placements":[]}],"nextPageToken":"next","truncated":true}`)
 		} else {
-			fmt.Fprint(w, `{"repos":[{"id":"old","name":"old","cell":"us","clusterSlug":"us","jurisdiction":"us","visibility":"private","full_name":"et/project/old","provider":"entire","checkpointCount":1,"placements":[]}],"truncated":true}`)
+			fmt.Fprint(w, `{"repos":[{"id":"old","name":"old","cell":"us","clusterSlug":"us","jurisdiction":"us","visibility":"private","full_name":"project/old","provider":"entire","checkpointCount":1,"placements":[]}],"truncated":true}`)
 		}
 	}))
 	defer srv.Close()
@@ -65,6 +109,13 @@ func TestCheckpointRepoIndex_PagesAndCompletion(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("calls = %d", calls.Load())
+	}
+	ids, _ := resolveRepoFilters(got[2:], []coreapi.RepoIndexEntry{
+		{ID: "old", FullName: "project/old", Provider: coreapi.NewOptString("entire")},
+		{ID: "mirror", FullName: "project/old", Provider: coreapi.NewOptString("github")},
+	})
+	if len(ids) != 1 || ids[0] != "old" {
+		t.Fatalf("native completion resolved to %v", ids)
 	}
 }
 
