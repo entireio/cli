@@ -32,8 +32,9 @@ jobs:
           go-version-file: go.mod
 
       # GoReleaser refuses to run untagged. The tag is local to the
-      # runner, never pushed, and deliberately not stamped into the
-      # binary (see the ldflags note in .goreleaser.nonprod.yaml).
+      # runner and never pushed. The binary's Version is stamped as
+      # 0.0.0+<sha> by the ldflags in .goreleaser.nonprod.yaml, so the
+      # tag never reaches the User-Agent.
       - name: Make a throwaway tag
         run: git tag --force v0.0.0
 
