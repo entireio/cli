@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
+	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -545,6 +546,8 @@ var ErrNoCellForJurisdiction = errors.New("no entire-api cell configured for jur
 // so auth cannot import coreapi without a cycle — the repo-scoped path avoids
 // this by resolving the cell in the cli layer (see resolveRepoCellTarget).
 func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction string, httpClient *http.Client) (string, error) {
+	// Guard the request boundary, including clients supplied by discovery or tests.
+	httpClient = httpclient.WithSecureRedirects(httpClient)
 	coreURL = strings.TrimRight(coreURL, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, coreURL+clustersAPIPath, nil)
 	if err != nil {

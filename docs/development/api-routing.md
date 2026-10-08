@@ -4,6 +4,30 @@ Control-plane precedence and jurisdictional data-plane routing. Read before chan
 
 Repository paths in code spans are relative to the repository root unless stated otherwise.
 
+### Credential-bearing redirects and replicas
+
+The API client, cloud dispatch client, cell catalog resolver, and git remote
+helper apply `internal/entireclient/httpclient.CheckSecureRedirect`: redirects
+must never leave HTTPS once reached, including HTTP → HTTPS → HTTP chains and
+HTTPS → loopback HTTP. This floor supplements, rather than replaces, each
+client's host policy. `WithSecureRedirects` copies injected clients and preserves
+their transport, timeout, cookie jar, and stricter redirect callbacks.
+
+The API client's bearer transport reattaches Authorization on each hop, so its
+cross-host guard must remain. Absolute API paths cannot downgrade an HTTPS base
+either. OAuth request protection lives separately in auth-go; using that library
+for token exchange does not protect these CLI-owned HTTP clients.
+
+Remote-helper replica URLs are validated at cache/header/Location ingress and
+again before requests: HTTPS plus the existing cluster trust boundary. HTTP is
+allowed only for loopback replicas of an explicitly HTTP loopback entry, and
+never after that proxy reaches HTTPS, even during manual failover. `SkipTLS`
+does not authorize plaintext transport.
+
+Flow-level downgrade tests use recording transports with identical hosts and
+ports (only the scheme changes), asserting the rejected destination receives no
+request. Keep these tests at the client wiring boundaries when refactoring.
+
 ### Control-Plane Core Resolution (which core am I talking to?)
 
 Control-plane commands dial one of three cores: the active context's
