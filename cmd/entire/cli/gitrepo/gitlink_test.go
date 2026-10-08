@@ -101,3 +101,27 @@ func TestPathsInIndex(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }
+
+// A conflicting pathspec-magic variable in the caller's environment must not
+// make the literal-pathspec classifiers fail: git refuses GIT_LITERAL_PATHSPECS
+// combined with GIT_GLOB_PATHSPECS, GIT_NOGLOB_PATHSPECS or GIT_ICASE_PATHSPECS.
+func TestLiteralPathspecCommand_IgnoresConflictingPathspecEnv(t *testing.T) {
+	// Not parallel: t.Setenv.
+	isolateGitConfig(t)
+	dir := initGitlinkRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644))
+	gitIn(t, dir, "add", "a.txt")
+	gitIn(t, dir, "commit", "-q", "-m", "a")
+
+	for _, name := range []string{"GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "1")
+			inHead, err := PathsInHEAD(context.Background(), dir, []string{"a.txt"})
+			require.NoError(t, err)
+			assert.Contains(t, inHead, "a.txt")
+			inIndex, err := PathsInIndex(context.Background(), dir, []string{"a.txt"})
+			require.NoError(t, err)
+			assert.Contains(t, inIndex, "a.txt")
+		})
+	}
+}

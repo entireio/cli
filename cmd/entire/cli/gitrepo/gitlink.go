@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -76,8 +77,26 @@ func literalPathspecCommand(ctx context.Context, repoRoot string, pathspecs []st
 	full = append(full, "--")
 	full = append(full, pathspecs...)
 	cmd := worktreeGitCommand(ctx, repoRoot, full...)
-	cmd.Env = append(cmd.Env, "GIT_LITERAL_PATHSPECS=1")
+	cmd.Env = append(withoutPathspecMagicEnv(cmd.Env), "GIT_LITERAL_PATHSPECS=1")
 	return cmd
+}
+
+// conflictingPathspecEnv are the pathspec-magic variables git refuses to
+// combine with GIT_LITERAL_PATHSPECS (or that would change what a literal
+// pathspec matches). Inherited from a user's shell, they would make every
+// literal-pathspec classifier fail, and the callers fail open.
+var conflictingPathspecEnv = []string{"GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"}
+
+// withoutPathspecMagicEnv returns env minus every conflictingPathspecEnv entry.
+func withoutPathspecMagicEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if !slices.ContainsFunc(conflictingPathspecEnv, func(v string) bool { return strings.EqualFold(v, name) }) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // collectGitlinks adds the path of every NUL-terminated "<mode> ...\t<path>"
