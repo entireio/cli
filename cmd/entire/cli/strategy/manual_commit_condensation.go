@@ -286,25 +286,14 @@ func prepareTaskTranscriptForStorage(
 // resolveTaskTranscriptPath falls back to the agent-layout convention when a
 // task record has no declared transcript path (e.g. an agent that reports the
 // path only on some events, or a legacy record captured before an agent
-// started reporting one at all). Mirrors cli.ResolveAgentTranscriptPath,
-// which this package cannot call directly — the cli package imports strategy,
-// so the reverse import would cycle — and the logic itself is small enough
-// that duplicating it here beats introducing a new shared package for this
-// one call site (moving the transcript resolver into paths is deliberately
-// out of scope for the durable-records plan this implements).
+// started reporting one at all). The layout lives in
+// paths.ResolveSubagentTranscriptPath, shared with cli.ResolveAgentTranscriptPath
+// (which this package cannot call: the cli package imports strategy).
 func resolveTaskTranscriptPath(state *SessionState, agentID string) string {
 	if agentID == "" || state.TranscriptPath == "" {
 		return ""
 	}
-	transcriptDir := filepath.Dir(state.TranscriptPath)
-	name := paths.AgentTranscriptFileName(agentID)
-	if nested := filepath.Join(paths.SubagentsDir(transcriptDir, state.SessionID), name); fileExists(nested) {
-		return nested
-	}
-	if legacy := filepath.Join(transcriptDir, name); fileExists(legacy) {
-		return legacy
-	}
-	return ""
+	return paths.ResolveSubagentTranscriptPath(filepath.Dir(state.TranscriptPath), state.SessionID, agentID)
 }
 
 // resolveInventoryTaskTranscripts resolves, by agent ID, the transcripts of
