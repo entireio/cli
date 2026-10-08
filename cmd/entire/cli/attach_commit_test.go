@@ -748,6 +748,27 @@ func TestAttachCommit_FailsWhenTheCheckpointIsNotDelivered(t *testing.T) {
 	}
 }
 
+// Rerunning attach after a push that didn't land retries it rather than
+// reporting the session as already done.
+func TestAttachCommit_RerunRetriesAnUndeliveredCheckpoint(t *testing.T) {
+	setupAttachTestRepo(t)
+	commitAt(t, "work.txt")
+	pushToOrigin(t)
+	writeAttachTestSettings(t, `{"enabled": true, "strategy_options": {"push_sessions": false}}`)
+	if out, err := attachHeadless(t, "attach-retry-delivery", attachOptions{}); err == nil {
+		t.Fatalf("first attach should fail to deliver:\n%s", out)
+	}
+
+	writeAttachTestSettings(t, `{"enabled": true}`)
+	out, err := attachHeadless(t, "attach-retry-delivery", attachOptions{})
+	if err != nil {
+		t.Fatalf("rerun: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "is already in checkpoint") || !strings.Contains(out, "Pushed checkpoint metadata to origin") {
+		t.Fatalf("rerun should push the checkpoint it already holds:\n%s", out)
+	}
+}
+
 func writeAttachTestSettings(t *testing.T, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(mustGetwd(t), ".entire", "settings.json"), []byte(content), 0o600); err != nil {

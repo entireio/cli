@@ -311,8 +311,10 @@ func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentNa
 		return err
 	}
 	if cp.holdsSession {
-		fmt.Fprintf(w, "Session %s is already in checkpoint %s on commit %s; nothing to do.\n", sessionID, cp.id, target.Hash.String()[:12])
-		return nil
+		fmt.Fprintf(w, "Session %s is already in checkpoint %s on commit %s.\n", sessionID, cp.id, target.Hash.String()[:12])
+		// An earlier attach may have written it but failed to push it; for a
+		// pushed commit, make sure it got there.
+		return redeliverAttachedCheckpoint(ctx, w, errW, plan, cp.id)
 	}
 	checkpointID, isExistingCheckpoint := cp.id, cp.existing
 	if window.start > 0 && meta.TurnCount == 0 {
@@ -532,18 +534,7 @@ func attachWarning(ctx context.Context, plan attachLinkPlan, sessionID string, c
 func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID, isExistingCheckpoint bool) error {
 	if isExistingCheckpoint {
 		fmt.Fprintf(w, "  Added to existing checkpoint %s\n", checkpointID)
-		switch {
-		case plan.remote == "":
-			return nil
-		case plan.mode == attachRecordLink:
-			return pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
-		}
-		// The commit's trailer already links it, so a failed push loses no
-		// link; the checkpoint still goes out with a later git push.
-		if err := pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID); err != nil {
-			fmt.Fprintf(errW, "warning: %v\n", err)
-		}
-		return nil
+		return redeliverAttachedCheckpoint(ctx, w, errW, plan, checkpointID)
 	}
 	fmt.Fprintf(w, "  Created checkpoint %s\n", checkpointID)
 	if plan.mode == attachRecordLink {
@@ -554,6 +545,23 @@ func finishAttachLink(ctx context.Context, w, errW io.Writer, plan attachLinkPla
 			checkpointID, plan.target.Hash.String()[:12], err, checkpointID)
 	}
 	return nil
+}
+
+// redeliverAttachedCheckpoint pushes an existing checkpoint now when its
+// commit is pushed: after a session joins it, or on a rerun, retrying a push
+// an earlier attach couldn't complete. A recorded link exists only in the checkpoint, so
+// failing to deliver it is an error; a trailer-linked one goes out with a
+// later push, so that is only a warning.
+func redeliverAttachedCheckpoint(ctx context.Context, w, errW io.Writer, plan attachLinkPlan, checkpointID id.CheckpointID) error {
+	if plan.remote == "" {
+		return nil
+	}
+	err := pushAttachedCheckpoint(ctx, w, plan.remote, checkpointID)
+	if err != nil && plan.mode != attachRecordLink {
+		fmt.Fprintf(errW, "warning: %v\n", err)
+		return nil
+	}
+	return err
 }
 
 // attachLinkMode is how attach links a checkpoint to its target commit. It
