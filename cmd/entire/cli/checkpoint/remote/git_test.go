@@ -1119,35 +1119,35 @@ func TestWithBatchModeSSH(t *testing.T) {
 		{
 			name: "no existing GIT_SSH_COMMAND or config defaults to ssh",
 			in:   func(t *testing.T) []string { return isolatedSSHEnv(t) },
-			want: "ssh -o BatchMode=yes",
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=30",
 		},
 		{
 			name: "preserves and extends a custom ssh command",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/id")
 			},
-			want: "ssh -i /home/me/.ssh/id -o BatchMode=yes",
+			want: "ssh -i /home/me/.ssh/id -o BatchMode=yes -o ConnectTimeout=30",
 		},
 		{
 			name: "GIT_SSH_COMMAND with explicit BatchMode=yes is left untouched",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
 			},
-			want: "ssh -o BatchMode=yes",
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=30",
 		},
 		{
 			name: "GIT_SSH_COMMAND with explicit BatchMode=no is respected, not overridden",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o BatchMode=no")
 			},
-			want: "ssh -o BatchMode=no",
+			want: "ssh -o BatchMode=no -o ConnectTimeout=30",
 		},
 		{
 			name: "blank GIT_SSH_COMMAND falls back to ssh",
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=   ")
 			},
-			want: "ssh -o BatchMode=yes",
+			want: "ssh -o BatchMode=yes -o ConnectTimeout=30",
 		},
 		{
 			name: "core.sshCommand git config is used as the base when env is unset",
@@ -1155,7 +1155,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
 				return isolatedSSHEnv(t, cfg)
 			},
-			want: "ssh -i /home/me/.ssh/work_key -o BatchMode=yes",
+			want: "ssh -i /home/me/.ssh/work_key -o BatchMode=yes -o ConnectTimeout=30",
 		},
 		{
 			name: "GIT_SSH_COMMAND env takes precedence over core.sshCommand config",
@@ -1163,7 +1163,7 @@ func TestWithBatchModeSSH(t *testing.T) {
 				cfg := gitConfigFile(t, "ssh -i /home/me/.ssh/work_key")
 				return isolatedSSHEnv(t, cfg, "GIT_SSH_COMMAND=ssh -i /home/me/.ssh/personal_key")
 			},
-			want: "ssh -i /home/me/.ssh/personal_key -o BatchMode=yes",
+			want: "ssh -i /home/me/.ssh/personal_key -o BatchMode=yes -o ConnectTimeout=30",
 		},
 		{
 			name: "GIT_SSH is used only when neither env GIT_SSH_COMMAND nor config are set",
@@ -1177,7 +1177,28 @@ func TestWithBatchModeSSH(t *testing.T) {
 			in: func(t *testing.T) []string {
 				return isolatedSSHEnv(t, `GIT_SSH_COMMAND=ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither"`)
 			},
-			want: `ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither" -o BatchMode=yes`,
+			want: `ssh -o ProxyCommand="connect -H proxy NoBatchModeHereEither" -o BatchMode=yes -o ConnectTimeout=30`,
+		},
+		{
+			name: "explicit ConnectTimeout is left untouched",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=ssh -o ConnectTimeout=5")
+			},
+			want: "ssh -o ConnectTimeout=5 -o BatchMode=yes",
+		},
+		{
+			name: "absolute OpenSSH path gets ConnectTimeout",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=/usr/bin/ssh -i key")
+			},
+			want: "/usr/bin/ssh -i key -o BatchMode=yes -o ConnectTimeout=30",
+		},
+		{
+			name: "non-OpenSSH client gets no ConnectTimeout",
+			in: func(t *testing.T) []string {
+				return isolatedSSHEnv(t, "GIT_SSH_COMMAND=plink -batch")
+			},
+			want: "plink -batch -o BatchMode=yes",
 		},
 	}
 
@@ -1187,6 +1208,77 @@ func TestWithBatchModeSSH(t *testing.T) {
 			out := withBatchModeSSH(context.Background(), tt.in(t))
 			got, ok := envToMap(out)["GIT_SSH_COMMAND"]
 			assert.True(t, ok, "GIT_SSH_COMMAND should be set")
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestUnreachableRemoteLine(t *testing.T) {
+	t.Parallel()
+	pushErr := func(output string) error {
+		return fmt.Errorf("push 2 checkpoint refs: %w", &PushError{cause: errors.New("exit status 128"), detail: output, output: output})
+	}
+	tests := []struct {
+		name string
+		err  error
+		want string
+		ok   bool
+	}{
+		{
+			name: "ssh connect refused",
+			err: pushErr("ssh: connect to host github.com port 22: Connection refused\n" +
+				"fatal: Could not read from remote repository."),
+			want: "ssh: connect to host github.com port 22: Connection refused",
+			ok:   true,
+		},
+		{
+			name: "ssh unresolvable host",
+			err:  pushErr("ssh: Could not resolve hostname github.invalid: nodename nor servname provided"),
+			want: "ssh: Could not resolve hostname github.invalid: nodename nor servname provided",
+			ok:   true,
+		},
+		{
+			name: "https unresolvable host, credentials redacted",
+			err:  pushErr("fatal: unable to access 'https://bob:hunter2@git.example.com/x.git/': Could not resolve host: git.example.com"),
+			want: "unable to access 'https://git.example.com/x.git/': Could not resolve host: git.example.com",
+			ok:   true,
+		},
+		{
+			name: "https connect failure",
+			err:  pushErr("fatal: unable to access 'https://github.com/o/r.git/': Failed to connect to github.com port 443 after 75003 ms: Couldn't connect to server"),
+			want: "unable to access 'https://github.com/o/r.git/': Failed to connect to github.com port 443 after 75003 ms: Couldn't connect to server",
+			ok:   true,
+		},
+		{
+			name: "plain error without PushError",
+			err:  errors.New("git push: exit status 128 (ssh: connect to host h port 22: Operation timed out)"),
+			want: "git push: exit status 128 (ssh: connect to host h port 22: Operation timed out)",
+			ok:   true,
+		},
+		{
+			name: "remote's own hook failing to resolve a host means the remote was reached",
+			err:  pushErr("remote: curl: (6) Could not resolve host: ci.internal\n ! [remote rejected] refs/x -> refs/x (pre-receive hook declined)"),
+		},
+		{
+			name: "mid-upload curl timeout means the remote was reached",
+			err:  pushErr("error: RPC failed; curl 28 Operation timed out after 300000 milliseconds with 0 bytes received\nsend-pack: unexpected disconnect while reading sideband packet"),
+		},
+		{
+			name: "auth failure is not unreachability",
+			err: pushErr("git@github.com: Permission denied (publickey).\n" +
+				"fatal: Could not read from remote repository."),
+		},
+		{
+			name: "non-fast-forward rejection",
+			err:  pushErr(" ! [rejected]        refs/x -> refs/x (non-fast-forward)\nerror: failed to push some refs"),
+		},
+		{name: "nil", err: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := UnreachableRemoteLine(tt.err)
+			assert.Equal(t, tt.ok, ok)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -1209,7 +1301,7 @@ func TestWithBatchModeSSH_PreservesOtherVarsWithoutDuplicating(t *testing.T) {
 
 	m := envToMap(out)
 	assert.Equal(t, "value", m["SOME_OTHER_VAR"])
-	assert.Equal(t, "ssh -o BatchMode=yes", m["GIT_SSH_COMMAND"])
+	assert.Equal(t, "ssh -o BatchMode=yes -o ConnectTimeout=30", m["GIT_SSH_COMMAND"])
 }
 
 // TestNewCommand_NonInteractiveSSH verifies that a checkpoint git command built

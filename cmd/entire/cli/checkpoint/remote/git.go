@@ -14,7 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -104,6 +106,71 @@ func LooksLikeSSHAuthFailure(errText string) bool {
 	return false
 }
 
+// unreachableRemoteNeedles are connect-phase failures printed by ssh and curl
+// themselves, so they are not translated by git's locale. Deliberately absent:
+// bare strerror text ("Connection refused", "Connection timed out") — curl's
+// trailing strerror is localized, and a timeout or reset mid-upload means the
+// host was reachable — and git's own "Could not read from remote repository"
+// epilogue, which is translated and also follows auth failures.
+var unreachableRemoteNeedles = []string{
+	"ssh: connect to host ",
+	"ssh: could not resolve hostname",
+	"could not resolve host:",
+	"could not resolve proxy:",
+	"failed to connect to ",
+	"couldn't connect to server",
+	"resolving timed out",
+}
+
+// maxUnreachableLineRunes caps the cause line printed inside the user's push.
+const maxUnreachableLineRunes = 200
+
+// UnreachableRemoteLine reports whether err shows the remote could not be
+// reached at all (name resolution or TCP connect failed), and returns the line
+// that said so, credentials redacted and capped, for display. Lines relayed
+// from the remote ("remote: ...") and push porcelain are skipped: a remote that
+// printed them was reachable, even when its own hook failed to resolve a host.
+func UnreachableRemoteLine(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	text := err.Error()
+	var pushErr *PushError
+	if errors.As(err, &pushErr) {
+		text = pushErr.Output() // Line breaks preserved, unlike Error().
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "remote:") || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "=") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for _, n := range unreachableRemoteNeedles {
+			if strings.Contains(lower, n) {
+				return displayGitLine(line), true
+			}
+		}
+	}
+	return "", false
+}
+
+// displayGitLine makes one line of git output safe to print: no "fatal: "
+// prefix, no URL credentials, no control bytes, at most maxUnreachableLineRunes.
+func displayGitLine(line string) string {
+	line = strings.TrimPrefix(line, "fatal: ")
+	line = gitremote.RedactCredentialsInText(line)
+	line = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, line)
+	if r := []rune(line); len(r) > maxUnreachableLineRunes {
+		line = string(r[:maxUnreachableLineRunes]) + "…"
+	}
+	return line
+}
+
 // batchModeOptionRe matches an explicit BatchMode ssh option (e.g.
 // "-o BatchMode=yes" or "BatchMode=no"), case-insensitively. Anchored with \b
 // so it doesn't false-positive on unrelated text that merely contains
@@ -115,6 +182,28 @@ var batchModeOptionRe = regexp.MustCompile(`(?i)\bBatchMode\s*=\s*\S+`)
 // be respected, not silently overridden to yes.
 func hasExplicitBatchMode(sshCmd string) bool {
 	return batchModeOptionRe.MatchString(sshCmd)
+}
+
+// connectTimeoutOptionRe matches an explicit ConnectTimeout ssh option, in the
+// same forms batchModeOptionRe accepts.
+var connectTimeoutOptionRe = regexp.MustCompile(`(?i)\bConnectTimeout\s*=\s*\S+`)
+
+// nonInteractiveSSHConnectTimeout bounds the TCP connect to an unreachable host,
+// whose kernel default (~75-130s) would otherwise spend most of the pre-push
+// checkpoint budget on one attempt. Generous for any reachable host.
+const nonInteractiveSSHConnectTimeout = "30"
+
+// isOpenSSHCommand reports whether sshCmd runs OpenSSH, by the basename of its
+// first word — the same guess git makes for its ssh variant. Options are only
+// added for OpenSSH: other clients (plink, custom wrappers) may reject -o.
+func isOpenSSHCommand(sshCmd string) bool {
+	fields := strings.Fields(sshCmd)
+	if len(fields) == 0 {
+		return false
+	}
+	prog := strings.Trim(fields[0], `"'`)
+	base := strings.ToLower(prog[strings.LastIndexAny(prog, `/\`)+1:])
+	return base == "ssh" || base == "ssh.exe"
 }
 
 // envLookup returns the value of the last occurrence of key in env (matching
@@ -165,7 +254,7 @@ func effectiveSSHCommand(ctx context.Context, env []string) string {
 }
 
 // withBatchModeSSH returns env with GIT_SSH_COMMAND set so ssh runs with
-// BatchMode=yes. The base ssh invocation is resolved via effectiveSSHCommand
+// BatchMode=yes and, for OpenSSH, a ConnectTimeout. The base ssh invocation is resolved via effectiveSSHCommand
 // (env GIT_SSH_COMMAND > core.sshCommand > GIT_SSH > plain "ssh") so a custom
 // ssh command configured via core.sshCommand isn't silently discarded. The
 // flag is only appended when BatchMode isn't already explicitly set — an
@@ -183,6 +272,11 @@ func withBatchModeSSH(ctx context.Context, env []string) []string {
 	}
 	if !hasExplicitBatchMode(base) {
 		base += " -o BatchMode=yes"
+	}
+	// Command-line -o beats ~/.ssh/config, so a ConnectTimeout set there is
+	// overridden here; one set on the command itself is left alone.
+	if isOpenSSHCommand(base) && !connectTimeoutOptionRe.MatchString(base) {
+		base += " -o ConnectTimeout=" + nonInteractiveSSHConnectTimeout
 	}
 	return append(out, key+base)
 }
