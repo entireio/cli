@@ -149,7 +149,7 @@ func nextCheckpointRowJSON(p strategy.NextCheckpointPreview) pendingCheckpointJS
 	for _, rec := range p.TaskRecords {
 		status := "running"
 		if rec.Completed {
-			status = "completed"
+			status = statusCompleted
 		}
 		records = append(records, nextCheckpointTaskRecordJSON{
 			ToolUseID:    rec.ToolUseID,

@@ -649,7 +649,7 @@ func describeMergeabilityBlockers(number int, m *api.TrailMergeabilityResponse) 
 		var failed, running int
 		for _, r := range m.Checks.Runs {
 			switch {
-			case r.Status != "completed":
+			case r.Status != statusCompleted:
 				running++
 			case r.Conclusion != nil && trailFailedCheckConclusions[*r.Conclusion]:
 				failed++
