@@ -211,6 +211,43 @@ func TestPushCheckpointRefWithRecovery_MergesDivergedRef(t *testing.T) {
 	assert.Contains(t, files, "c.txt", "local-only change must be replayed on top")
 }
 
+// A stale local ref whose commits the remote already contains is delivered,
+// even when another clone (OPF off) advanced the remote with untrailered
+// commits: the trailer check covers only what this push would ship, and after
+// recovery nothing is left to ship.
+func TestPushCheckpointRefWithRecovery_RemoteAlreadyContainsLocalIsDelivered(t *testing.T) {
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	ctx := context.Background()
+	ref := refs[0]
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	runGit := func(args ...string) string {
+		return strings.TrimSpace(testutil.RunGit(t, workDir, args...))
+	}
+	tree := runGit("rev-parse", "HEAD^{tree}")
+	local := plumbing.NewHash(runGit("commit-tree", tree, "-p", "HEAD",
+		"-m", trailers.AppendOPFAppliedTrailer("local checkpoint")))
+	remoteTip := plumbing.NewHash(runGit("commit-tree", tree, "-p", local.String(), "-m", "written with OPF off"))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, remoteTip)))
+	require.NoError(t, batchPushRefs(ctx, bareDir, []plumbing.ReferenceName{ref}))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, local)))
+	queue := enqueueRefs(t, repo, []plumbing.ReferenceName{ref})
+
+	restore := captureStderr(t)
+	pushed, withheld, pushErr := flushCheckpointRefsQueue(ctx, repo, pushSettings{remote: bareDir}, true)
+	restore()
+
+	require.NoError(t, pushErr, "the remote already holds the local commit; nothing is left to verify")
+	assert.Equal(t, 1, pushed)
+	assert.Zero(t, withheld)
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "the delivered ref must leave the queue")
+	assert.Equal(t, remoteTip.String(), remoteRefHash(t, bareDir, ref), "the remote must not move")
+}
+
 func TestPushCheckpointRefWithRecovery_PreservesConcurrentGenerationOnCASConflict(t *testing.T) {
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
 	t.Chdir(workDir)

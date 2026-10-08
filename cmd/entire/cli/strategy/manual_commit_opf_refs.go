@@ -11,9 +11,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
 	"github.com/go-git/go-git/v6"
@@ -52,12 +54,18 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		return fmt.Errorf("resolve push queue: %w", err)
 	}
 	// Peek, not Drain: flushCheckpointRefsQueue owns draining and pruning.
-	queued, err := queue.Peek()
+	queuedEntries, err := queue.PeekEntries()
 	if err != nil {
 		return fmt.Errorf("peek push queue: %w", err)
 	}
-	if len(queued) == 0 {
+	if len(queuedEntries) == 0 {
 		return nil
+	}
+	queued := make([]plumbing.ReferenceName, 0, len(queuedEntries))
+	entryByRef := make(map[plumbing.ReferenceName]checkpoint.PushQueueEntry, len(queuedEntries))
+	for _, entry := range queuedEntries {
+		queued = append(queued, entry.Ref)
+		entryByRef[entry.Ref] = entry
 	}
 
 	// Both up-front fail-closed gates, in the same order as the v1 rewrite, so
@@ -113,6 +121,15 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 		var runtimeErr *OPFRuntimeFailedError
 		if errors.As(rewriteErr, &runtimeErr) {
 			firstErr = rewriteErr // takes precedence, as for the breaker above
+			// Queue order is stable across pushes, so a ref whose content
+			// breaks the runtime would otherwise be hit first every time and
+			// withhold every ref behind it. Moving it to the back lets the next
+			// push reach those refs first. Best-effort: a lost rotation only
+			// keeps today's order.
+			if rotateErr := queue.Rotate([]checkpoint.PushQueueEntry{entryByRef[refName]}); rotateErr != nil {
+				logging.Warn(ctx, "opf: could not move failed checkpoint ref to the back of the push queue",
+					slog.String("ref", refName.String()), slog.String("error", rotateErr.Error()))
+			}
 			break
 		}
 		if firstErr == nil {

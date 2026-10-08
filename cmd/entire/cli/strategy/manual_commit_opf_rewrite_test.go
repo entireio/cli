@@ -1252,6 +1252,28 @@ func TestRewriteQueuedCheckpointRefsWithOPF_RuntimeFailureOutranksEarlierCapErro
 	assert.Equal(t, before, refHashes(t, repo, refs), "neither ref may move")
 }
 
+// Queue order is stable across pushes, so a ref whose OPF call fails at
+// runtime moves to the back of the queue: the next push reaches the refs
+// behind it first instead of stopping on the same ref every time.
+func TestRewriteQueuedCheckpointRefsWithOPF_RuntimeFailureRotatesTheFailedRef(t *testing.T) {
+	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
+	require.NoError(t, err)
+	before, err := queue.Peek()
+	require.NoError(t, err)
+	require.Equal(t, refs, before)
+
+	err = RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+
+	var runtimeErr *OPFRuntimeFailedError
+	require.ErrorAs(t, err, &runtimeErr)
+	after, err := queue.Peek()
+	require.NoError(t, err)
+	assert.Equal(t, []plumbing.ReferenceName{refs[1], refs[0]}, after,
+		"the ref that failed must move behind the ref it was withholding")
+}
+
 // Per-ref cap scoping: the leaf-byte cap is enforced per ref, not across the
 // whole flush, so one oversized ref no longer poisons the rewrite of every ref
 // queued alongside it. The ref that fits is redacted, tagged, and moved; the

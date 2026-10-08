@@ -121,13 +121,16 @@ func (q *PushQueue) EnqueueEntry(entry PushQueueEntry) error {
 	return nil
 }
 
-// EnqueueRef records the ref's current observed generation.
+// EnqueueRef records the ref's current observed generation. When the ref
+// cannot be resolved it still queues the ref, with no generation: a ref that
+// misses the queue is never pushed, while a generation-less entry is the legacy
+// form delivery already re-resolves (and prunes if the ref is gone).
 func (q *PushQueue) EnqueueRef(repo *git.Repository, refName plumbing.ReferenceName) error {
-	ref, err := repo.Reference(refName, true)
-	if err != nil {
-		return fmt.Errorf("resolve ref %s for push queue: %w", refName, err)
+	entry := PushQueueEntry{Ref: refName}
+	if ref, err := repo.Reference(refName, true); err == nil {
+		entry.Hash = ref.Hash()
 	}
-	return q.EnqueueEntry(PushQueueEntry{Ref: refName, Hash: ref.Hash()})
+	return q.EnqueueEntry(entry)
 }
 
 // Drain returns the de-duplicated refs currently queued, in first-seen order. It
