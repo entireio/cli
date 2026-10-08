@@ -180,7 +180,12 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 			}
 			switch env.Type {
 			case envelopeTypeAssistant:
-				for _, block := range env.Message.Content {
+				var msg claudeMessage
+				if err := json.Unmarshal(env.Message, &msg); err != nil {
+					out <- reviewtypes.RunError{Err: fmt.Errorf("claude stream-json assistant message: %w", err)}
+					continue
+				}
+				for _, block := range msg.Content {
 					switch block.Type {
 					case "text":
 						if block.Text != "" {
@@ -200,12 +205,12 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 				// (see the parser doc). Emitting the running sum keeps
 				// mid-run values on the cumulative Tokens contract; the
 				// true {In, Out} tally comes from `result` below.
-				in := env.Message.Usage.InputTokens +
-					env.Message.Usage.CacheReadInputTokens +
-					env.Message.Usage.CacheCreationInputTokens
-				if in > 0 && env.Message.ID != "" {
-					if _, seen := seenMsgIDs[env.Message.ID]; !seen {
-						seenMsgIDs[env.Message.ID] = struct{}{}
+				in := msg.Usage.InputTokens +
+					msg.Usage.CacheReadInputTokens +
+					msg.Usage.CacheCreationInputTokens
+				if in > 0 && msg.ID != "" {
+					if _, seen := seenMsgIDs[msg.ID]; !seen {
+						seenMsgIDs[msg.ID] = struct{}{}
 						cumInputTokens += in
 						out <- reviewtypes.Tokens{In: cumInputTokens, Out: 0}
 					}
@@ -239,9 +244,12 @@ func parseClaudeOutputBuf(r io.Reader, maxBuf int) <-chan reviewtypes.Event {
 }
 
 type claudeEnvelope struct {
-	Type    string        `json:"type"`
-	Message claudeMessage `json:"message"`
-	IsError bool          `json:"is_error"`
+	Type string `json:"type"`
+	// Message is decoded only for assistant envelopes. Other event types may
+	// carry a different shape under the same key (some system events send a
+	// plain string), which must not fail the review.
+	Message json.RawMessage `json:"message"`
+	IsError bool            `json:"is_error"`
 	// Usage reuses the package-local messageUsage type (declared in types.go)
 	// rather than a duplicate ad-hoc struct, so the two consumers of the
 	// Claude API usage shape (transcript parsing + stream-json review parser)

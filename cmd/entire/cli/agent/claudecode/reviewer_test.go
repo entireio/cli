@@ -596,3 +596,32 @@ func TestClassifyReviewExit_TooOldForIsolation(t *testing.T) {
 		}
 	}
 }
+
+// Claude Code can emit system events whose "message" is a plain string. That
+// used to fail the whole reviewer even though the review itself completed.
+func TestParseClaudeOutput_IgnoresNonObjectMessageOnOtherEvents(t *testing.T) {
+	t.Parallel()
+	input := `{"type":"system","subtype":"init"}` + "\n" +
+		`{"type":"system","subtype":"notice","message":"Retrying after a rate limit"}` + "\n" +
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"approve"}]}}` + "\n" +
+		`{"type":"result","is_error":false,"usage":{"input_tokens":10,"output_tokens":2}}` + "\n"
+
+	var text string
+	var finished *reviewtypes.Finished
+	for ev := range parseClaudeOutput(strings.NewReader(input)) {
+		switch e := ev.(type) {
+		case reviewtypes.RunError:
+			t.Fatalf("unexpected RunError: %v", e.Err)
+		case reviewtypes.AssistantText:
+			text += e.Text
+		case reviewtypes.Finished:
+			finished = &e
+		}
+	}
+	if text != "approve" {
+		t.Errorf("text = %q, want approve", text)
+	}
+	if finished == nil || !finished.Success {
+		t.Fatalf("Finished = %+v, want success", finished)
+	}
+}
