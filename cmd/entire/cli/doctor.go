@@ -77,8 +77,10 @@ Checks performed:
   7. Legacy shadow branches: report entire/<commit>-<worktree> branches older
      versions wrote at every turn. They hold full snapshots of the working
      tree and nothing reads them anymore. Fix with 'entire doctor --force',
-     which deletes only the branches (then 'git gc --prune=now' frees the
-     space; plain 'git gc' keeps unreachable objects for two weeks); a branch
+     which deletes only the branches; a later 'git gc' frees the space once
+     the unreachable objects are two weeks old ('git gc --prune=now' frees it
+     at once but drops every unreachable object, so run it only when no other
+     git process is active); a branch
      checked out in a worktree is left alone. Bare entire/<commit> branches
      are only pointed at ('entire clean --all --dry-run'), never deleted.
 
@@ -724,9 +726,8 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	if !force {
 		if !interactive.CanPromptInteractively() {
 			fmt.Fprintln(w, "  Fix: run `entire doctor --force` to delete them (only the branches; pending")
-			fmt.Fprintln(w, "  agent work in session state is kept), then `git gc --prune=now` to reclaim the")
-			fmt.Fprintln(w, "  space: deleting the refs alone frees nothing, and plain `git gc` keeps")
-			fmt.Fprintln(w, "  unreachable objects for two weeks.")
+			fmt.Fprintln(w, "  agent work in session state is kept).")
+			printLegacyBranchSpaceNote(w)
 			return nil
 		}
 		proceed, promptErr := confirmDoctorFix(ctx, w, "Delete these legacy shadow branches? (Only the branches; pending agent work in session state is kept.)")
@@ -741,14 +742,25 @@ func checkLegacyShadowBranches(cmd *cobra.Command, force bool) error {
 	deleted, failed := strategy.DeleteLegacyShadowBranches(ctx, branches)
 	if len(deleted) > 0 {
 		fmt.Fprintf(w, "  ✓ Fixed: deleted %s\n", pluralCount(len(deleted), "legacy shadow branch", "legacy shadow branches"))
-		fmt.Fprintln(w, "  Their objects still take space until git prunes them: run `git gc --prune=now`")
-		fmt.Fprintln(w, "  to reclaim it (plain `git gc` keeps unreachable objects for two weeks).")
+		printLegacyBranchSpaceNote(w)
 	}
 	if len(failed) > 0 {
 		fmt.Fprintf(w, "  Kept %d branch(es) git refused to delete (checked out in a worktree?):\n", len(failed))
 		printCappedList(w, failed, func(name string) string { return name })
 	}
 	return nil
+}
+
+// printLegacyBranchSpaceNote explains when deleting legacy shadow branches
+// actually frees their space. Plain `git gc` is the advice: it prunes the
+// unreachable objects once they are older than gc.pruneExpire (two weeks by
+// default). `--prune=now` is only mentioned with its caveat, because it drops
+// every unreachable object at once (recently dropped stashes included) and
+// can corrupt the repository if another git process is writing.
+func printLegacyBranchSpaceNote(w io.Writer) {
+	fmt.Fprintln(w, "  Deleting the branches frees no space by itself: `git gc` reclaims it once their")
+	fmt.Fprintln(w, "  objects are two weeks old. `git gc --prune=now` frees it at once but drops every")
+	fmt.Fprintln(w, "  unreachable object (recent stashes too); run it only when no other git process is active.")
 }
 
 // printBareLegacyBranchNote explains why doctor leaves the bare entire/<hex>
