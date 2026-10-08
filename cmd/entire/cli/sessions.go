@@ -484,6 +484,9 @@ and files touched. Works for both active and ended sessions.
 Output modes:
   Default       Human-readable summary.
   --json        Metadata-only JSON envelope (no transcript bytes).
+                "pending_turns" counts turns not yet condensed into a
+                checkpoint. "checkpoints" is a deprecated alias with the
+                same value and will be removed in the next release.
   --transcript  Stream the live raw agent transcript bytes to stdout in
                 the agent's native format (e.g. JSONL for
                 Claude/Cursor/Codex). Snapshot is bounded to the file size
@@ -574,20 +577,24 @@ func writeSessionTranscript(ctx context.Context, cmd *cobra.Command, state *stra
 
 // sessionInfoJSON is the JSON output structure for sessions info --json.
 type sessionInfoJSON struct {
-	SessionID      string         `json:"session_id"`
-	Agent          string         `json:"agent"`
-	Model          string         `json:"model,omitempty"`
-	Status         string         `json:"status"`
-	Kind           string         `json:"kind,omitempty"`
-	ReadOnly       bool           `json:"read_only,omitempty"`
-	Branch         string         `json:"branch,omitempty"`
-	WorktreeID     string         `json:"worktree_id,omitempty"`
-	WorktreePath   string         `json:"worktree_path,omitempty"`
-	StartedAt      time.Time      `json:"started_at"`
-	EndedAt        *time.Time     `json:"ended_at,omitempty"`
-	LastActive     *time.Time     `json:"last_active,omitempty"`
-	Turns          int            `json:"turns"`
-	PendingTurns   int            `json:"pending_turns"`
+	SessionID    string     `json:"session_id"`
+	Agent        string     `json:"agent"`
+	Model        string     `json:"model,omitempty"`
+	Status       string     `json:"status"`
+	Kind         string     `json:"kind,omitempty"`
+	ReadOnly     bool       `json:"read_only,omitempty"`
+	Branch       string     `json:"branch,omitempty"`
+	WorktreeID   string     `json:"worktree_id,omitempty"`
+	WorktreePath string     `json:"worktree_path,omitempty"`
+	StartedAt    time.Time  `json:"started_at"`
+	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	LastActive   *time.Time `json:"last_active,omitempty"`
+	Turns        int        `json:"turns"`
+	PendingTurns int        `json:"pending_turns"`
+	// Checkpoints is the deprecated name of PendingTurns, kept for one release
+	// so scripts reading `checkpoints` keep working. Remove it in the release
+	// after the one that introduced pending_turns.
+	Checkpoints    int            `json:"checkpoints"`
 	LastCheckpoint string         `json:"last_checkpoint_id,omitempty"`
 	Tokens         *tokenInfoJSON `json:"tokens,omitempty"`
 	LastPrompt     string         `json:"last_prompt,omitempty"`
@@ -635,6 +642,7 @@ func buildSessionInfoJSON(state *strategy.SessionState, status string) sessionIn
 		LastActive:     state.LastInteractionTime,
 		Turns:          state.SessionTurnCount,
 		PendingTurns:   state.StepCount,
+		Checkpoints:    state.StepCount,
 		LastCheckpoint: string(state.LastCheckpointID),
 		LastPrompt:     state.LastPrompt,
 		FilesTouched:   state.FilesTouched,
