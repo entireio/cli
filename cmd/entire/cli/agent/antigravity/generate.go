@@ -52,7 +52,12 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 		return "", fmt.Errorf("antigravity text generation failed: %w", err)
 	}
 	defer cleanup()
-	env, err := isolatedHomeEnv(home)
+	auth := a.textGenerationAuth
+	if auth == nil {
+		resolved := resolveTextGenerationAuth()
+		auth = &resolved
+	}
+	env, err := isolatedHomeEnv(home, *auth)
 	if err != nil {
 		return "", fmt.Errorf("antigravity text generation failed: %w", err)
 	}
@@ -68,6 +73,29 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 		}
 	}
 	return result, nil
+}
+
+// textGenerationAuth names the authentication sources for one generation run.
+// Paths come only from the user's home/config resolvers in production, or
+// temporary fixtures in tests. Preparing an isolated home never discovers
+// additional sources from the ambient process environment.
+type textGenerationAuth struct {
+	userHome       string
+	configDir      string
+	adcCredentials string
+}
+
+func resolveTextGenerationAuth() textGenerationAuth {
+	// Missing sources remain empty so agy can report a missing sign-in, as it
+	// did before; they must not become cwd-relative credential paths.
+	auth := textGenerationAuth{adcCredentials: os.Getenv(adcCredentialsEnvVar)}
+	if home, err := os.UserHomeDir(); err == nil {
+		auth.userHome = home
+	}
+	if configDir, err := agyConfigDir(); err == nil {
+		auth.configDir = configDir
+	}
+	return auth
 }
 
 // isolatedHomeEnv returns the environment overrides that point agy at home
@@ -98,16 +126,16 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 //
 // The file locations were observed on agy 1.3.1 by tracing which paths it
 // opens under an empty home.
-func isolatedHomeEnv(home string) ([]string, error) {
+func isolatedHomeEnv(home string, auth textGenerationAuth) ([]string, error) {
 	if runtime.GOOS == "darwin" {
-		if err := linkLoginKeychain(home); err != nil {
+		if err := linkLoginKeychain(home, auth.userHome); err != nil {
 			return nil, err
 		}
 	}
-	if err := linkFileToken(home); err != nil {
+	if err := linkFileToken(home, auth.configDir); err != nil {
 		return nil, err
 	}
-	if err := carryAPIKeyMode(home); err != nil {
+	if err := carryAPIKeyMode(home, auth.configDir); err != nil {
 		return nil, err
 	}
 	env := []string{
@@ -120,7 +148,7 @@ func isolatedHomeEnv(home string) ([]string, error) {
 	if runtime.GOOS == "windows" {
 		env = append(env, "USERPROFILE="+home)
 	}
-	return append(env, adcCredentialsEnv()...), nil
+	return append(env, adcCredentialsEnv(auth)...), nil
 }
 
 // agyFileTokenName is the file agy stores its sign-in in, inside its config
@@ -135,8 +163,11 @@ const agyFileTokenName = "antigravity-oauth-token" //nolint:gosec // a file name
 // title command, is not reachable through it. Where a symlink cannot be made
 // (Windows without the privilege), the token is copied instead; the isolated
 // home is removed when the run ends.
-func linkFileToken(home string) error {
-	root, err := openAgyConfigRoot(false)
+func linkFileToken(home, configDir string) error {
+	if configDir == "" {
+		return nil
+	}
+	root, err := openAgyConfigRootAt(configDir, false)
 	if err != nil {
 		return nil // no agy config directory: no file token to carry
 	}
@@ -144,10 +175,6 @@ func linkFileToken(home string) error {
 	info, err := root.Lstat(agyFileTokenName)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil // absent, or not a regular file: agy reports the missing sign-in
-	}
-	configDir, err := agyConfigDir()
-	if err != nil {
-		return nil // the root above resolved it; nothing to link if it no longer does
 	}
 	dir := filepath.Join(home, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -178,21 +205,22 @@ var adcCredentialsFile = filepath.Join(".config", "gcloud", "application_default
 
 // adcCredentialsEnv points GOOGLE_APPLICATION_CREDENTIALS at the user's
 // application-default credentials, which agy would otherwise look for under
-// the isolated home. A variable the user already set is inherited as it is,
-// and Windows needs nothing because agy finds the file through %APPDATA%.
-func adcCredentialsEnv() []string {
-	if runtime.GOOS == "windows" || os.Getenv(adcCredentialsEnvVar) != "" {
-		return nil
+// the isolated home. A variable captured during source resolution is preserved.
+// With no selected file it explicitly clears any ambient value inherited by
+// the subprocess. Windows still finds default credentials through %APPDATA%.
+func adcCredentialsEnv(auth textGenerationAuth) []string {
+	if auth.adcCredentials != "" {
+		return []string{adcCredentialsEnvVar + "=" + auth.adcCredentials}
 	}
-	realHome, err := os.UserHomeDir()
-	if err != nil {
-		return nil
+	if runtime.GOOS != "windows" && auth.userHome != "" {
+		path := filepath.Join(auth.userHome, adcCredentialsFile)
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return []string{adcCredentialsEnvVar + "=" + path}
+		}
 	}
-	path := filepath.Join(realHome, adcCredentialsFile)
-	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
-		return nil
-	}
-	return []string{adcCredentialsEnvVar + "=" + path}
+	// RunIsolatedTextGeneratorCLI appends overrides to os.Environ. Omitting
+	// this entry would let an ambient credential escape the source snapshot.
+	return []string{adcCredentialsEnvVar + "="}
 }
 
 // linkLoginKeychain links home/Library/Keychains/login.keychain-db to the
@@ -202,10 +230,9 @@ func adcCredentialsEnv() []string {
 // encrypted and every read goes through securityd, as it does when agy runs
 // normally. A user without a resolvable home or login keychain gets no link,
 // and agy reports that it is not signed in.
-func linkLoginKeychain(home string) error {
-	realHome, err := os.UserHomeDir()
-	if err != nil {
-		return nil //nolint:nilerr // no home to link from: agy reports the missing sign-in
+func linkLoginKeychain(home, realHome string) error {
+	if realHome == "" {
+		return nil // no home to link from: agy reports the missing sign-in
 	}
 	keychain := filepath.Join(realHome, "Library", "Keychains", "login.keychain-db")
 	if _, err := os.Stat(keychain); err != nil {
@@ -234,8 +261,8 @@ const apiKeyModelProvider = "gemini"
 // same file names the window-title command agy executes. The value is matched
 // against the one documented provider rather than copied, and an unreadable
 // or malformed file selects nothing, leaving agy to report the missing sign-in.
-func carryAPIKeyMode(home string) error {
-	if !userSelectsAPIKeyMode() {
+func carryAPIKeyMode(home, configDir string) error {
+	if !userSelectsAPIKeyMode(configDir) {
 		return nil
 	}
 	dir := filepath.Join(home, ".gemini", "antigravity-cli")
@@ -251,8 +278,11 @@ func carryAPIKeyMode(home string) error {
 // userSelectsAPIKeyMode reports whether the user's agy settings.json selects
 // the Gemini API-key provider, read the way the title installer reads it (a
 // symlinked file is refused, not read through).
-func userSelectsAPIKeyMode() bool {
-	settings, err := readAgySettings()
+func userSelectsAPIKeyMode(configDir string) bool {
+	if configDir == "" {
+		return false
+	}
+	settings, err := readAgySettingsAt(configDir)
 	if err != nil {
 		return false
 	}
